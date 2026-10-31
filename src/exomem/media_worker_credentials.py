@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import time
@@ -27,7 +28,8 @@ SCHEMA = """
         expires_at REAL NOT NULL,
         max_leases INTEGER NOT NULL,
         revoked_at REAL,
-        last_seen_at REAL
+        last_seen_at REAL,
+        capabilities_json TEXT
     )
 """
 
@@ -54,6 +56,8 @@ class WorkerCredential:
     max_leases: int
     revoked_at: float | None = None
     last_seen_at: float | None = None
+    #: What the worker declared at its last claim, as the claim carried it (`media_types` and `engines`).
+    capabilities: dict[str, object] | None = None
 
     def status(self, now: float) -> str:
         if self.revoked_at is not None:
@@ -66,11 +70,13 @@ def _digest(token: str) -> str:
 
 
 def _record(row) -> WorkerCredential:
+    capabilities = None if row["capabilities_json"] is None else json.loads(row["capabilities_json"])
     return WorkerCredential(
         id=str(row["id"]), name=str(row["name"]), created_at=float(row["created_at"]),
         expires_at=float(row["expires_at"]), max_leases=int(row["max_leases"]),
         revoked_at=None if row["revoked_at"] is None else float(row["revoked_at"]),
         last_seen_at=None if row["last_seen_at"] is None else float(row["last_seen_at"]),
+        capabilities=capabilities,
     )
 
 
@@ -129,22 +135,37 @@ def authenticate(store: MediaJobStore, token: str) -> WorkerCredential | None:
     return found
 
 
-def touch(store: MediaJobStore, credential_id: str) -> None:
-    """Record that the worker was heard from now."""
+def touch(store: MediaJobStore, credential_id: str, capabilities: dict[str, object] | None = None) -> None:
+    """Record that the worker was heard from now.
+
+    A claim declares what the worker can run, and that replaces the last declaration. A heartbeat declares
+    nothing and keeps it, so the worker stays present for what it last declared.
+    """
     conn = store._connect()
     try:
         with conn:
-            conn.execute(
-                "UPDATE media_worker_credentials SET last_seen_at = ? WHERE id = ?", (time.time(), credential_id)
-            )
+            if capabilities is None:
+                conn.execute(
+                    "UPDATE media_worker_credentials SET last_seen_at = ? WHERE id = ?", (time.time(), credential_id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE media_worker_credentials SET last_seen_at = ?, capabilities_json = ? WHERE id = ?",
+                    (time.time(), json.dumps(capabilities, sort_keys=True), credential_id),
+                )
     finally:
         conn.close()
+
+
+def read_all(conn) -> list[WorkerCredential]:
+    """Every credential on an open ledger connection, oldest first."""
+    return [_record(row) for row in conn.execute("SELECT * FROM media_worker_credentials ORDER BY created_at, id")]
 
 
 def list_credentials(store: MediaJobStore) -> list[WorkerCredential]:
     conn = store._connect(readonly=True)
     try:
-        return [_record(row) for row in conn.execute("SELECT * FROM media_worker_credentials ORDER BY created_at, id")]
+        return read_all(conn)
     finally:
         conn.close()
 

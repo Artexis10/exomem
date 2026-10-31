@@ -104,6 +104,9 @@ OVER_BUDGET = "over_budget"
 #: The original exceeds the whole hydration capacity of the store policy; only a larger
 #: capacity and a retry clear it (`media_store.HYDRATION_TOO_LARGE_CODE`).
 HYDRATION_TOO_LARGE = "hydration_too_large"
+#: A hydration-too-large block caused by a remote worker's own space, not the store policy. The release
+#: records it in `blocked_context`, so status says which one without reading the error text.
+WORKER_SPACE_CAUSE = "worker_space"
 #: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
 _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 #: Reasons whose rows return by themselves, as a SQL list of these constants.
@@ -661,9 +664,29 @@ def _extraction_stage(media_types: Collection[str]) -> tuple[str, tuple[str, ...
     return f"(do_ocr = 1 AND media_type IN ({','.join('?' * len(media_types))}))", tuple(media_types)
 
 
+# What a remote worker may lease: an extraction stage and no offload, which needs the store credential that
+# only the vault owner holds. A claim for a worker, the local skip of routed kinds and the eligibility pass share it.
+_REMOTE_LEASABLE = "do_ocr = 1 AND do_offload = 0"
+# `jobs.remote_eligible` holds the grant's verdict on a pending job: NULL until judged, 1 when a remote claim may
+# take it, 0 when none can. A change to the job's input clears it, so the next judgement reads the new input.
+
+
+def _routed_exclusion(media_types: Collection[str]) -> tuple[str, tuple[str, ...]]:
+    """SQL and parameters that leave out the jobs of these media types that remote workers take.
+
+    A job that the grant refused (see `judge_remote_eligibility`) stays in: no remote worker can take it,
+    so the local worker is its only executor whatever the routing says. A job not judged yet stays out.
+    """
+    return (
+        f" AND NOT ({_REMOTE_LEASABLE} AND media_type IN ({','.join('?' * len(media_types))}) "
+        "AND remote_eligible IS NOT 0)",
+        tuple(media_types),
+    )
+
+
 def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, migrated: bool = True,
-                      skip_media_types: Collection[str] = (), remote: bool = False,
-                      exclude: Collection[int] = ()) -> sqlite3.Row | None:
+                      skip_media_types: Collection[str] = (), routed_media_types: Collection[str] = (),
+                      remote: bool = False, exclude: Collection[int] = ()) -> sqlite3.Row | None:
     """The job to claim next, in the order of D3 (M4).
 
     Offload jobs come first. Then come jobs whose original is on the volume, then jobs
@@ -675,23 +698,30 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
 
     `skip_media_types` leaves out the extraction stage of those media types in every group, so the
     caller can pass over work whose engine cannot run now without holding back the jobs queued behind it.
-    `remote` selects what a remote worker may lease: an extraction stage and no offload, which needs the
-    store credential that only the vault owner holds. `exclude` leaves out jobs by ID.
+    `routed_media_types` leaves out what remote workers take of those media types: not a job that no remote
+    worker can take (see `_routed_exclusion`). `remote` selects what a remote worker may lease (see
+    `_REMOTE_LEASABLE`), except a job that the grant refused. `exclude` leaves out jobs by ID.
     """
-    skip, skipped = "", ()
+    skip, skipped, routed = "", (), ()
     if skip_media_types:
         clause, skipped = _extraction_stage(skip_media_types)
         skip = f" AND NOT {clause}"
+    # A ledger from before the verdict column has no job that the grant refused, and nothing is routed on it.
+    if routed_media_types and migrated:
+        exclusion, routed = _routed_exclusion(routed_media_types)
+        skip += exclusion
     if remote:
-        skip += " AND do_offload = 0 AND do_ocr = 1"
+        skip += f" AND {_REMOTE_LEASABLE} AND remote_eligible IS NOT 0"
     if exclude:
         skip += f" AND id NOT IN ({','.join('?' * len(exclude))})"
     # A ledger from before this order's columns keeps the earlier order until the next write adds them.
     if not migrated:
         claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], (*skipped, *exclude)
     else:
-        # Placeholders bind in text order: the retry time in `_CLAIMABLE`, the skipped media types, the excluded IDs.
-        claimable, needs_hydration, parameters = _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped, *exclude)
+        # Placeholders bind in text order: the retry time in `_CLAIMABLE`, the skipped and routed media types, the excluded IDs.
+        claimable, needs_hydration, parameters = (
+            _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped, *routed, *exclude)
+        )
         groups = ["do_offload = 1", f"NOT {_NEEDS_HYDRATION} AND {_FRESH}", f"NOT {_NEEDS_HYDRATION}"]
         if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
             groups += [_FRESH, "1"]
@@ -855,6 +885,7 @@ class MediaJobStore:
                 self._migrate_blocked_reasons(conn)
                 self._migrate_reprocess(conn)
                 self._migrate_language_mode(conn)
+                self._migrate_remote_eligible(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS media_job_results (
@@ -1084,6 +1115,12 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN language_mode TEXT")
 
     @staticmethod
+    def _migrate_remote_eligible(conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "remote_eligible" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN remote_eligible INTEGER")
+
+    @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
         columns = {
             str(row["name"])
@@ -1208,7 +1245,7 @@ class MediaJobStore:
                         do_reembed = MAX(jobs.do_reembed, excluded.do_reembed),
                         do_offload = MAX(jobs.do_offload, excluded.do_offload),
                         offload_generation = jobs.offload_generation + excluded.do_offload,
-                        updated_at = excluded.updated_at
+                        remote_eligible = NULL, updated_at = excluded.updated_at
                     """,
                     (
                         key,
@@ -1350,7 +1387,7 @@ class MediaJobStore:
                     UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
                         state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
                         blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
-                        memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
+                        memory_soft_stops = 0, timeout_stops = 0, remote_eligible = NULL, updated_at = ?
                     WHERE id = ?
                     """,
                     (int(reprocess), language, language_mode, now, row_id),
@@ -1364,13 +1401,16 @@ class MediaJobStore:
             conn.close()
 
     def claim_next(
-        self, admit: Any = None, *, skip_media_types: Collection[str] = (), lease: LeaseRequest | None = None
+        self, admit: Any = None, *, skip_media_types: Collection[str] = (),
+        routed_media_types: Collection[str] = (), lease: LeaseRequest | None = None,
     ) -> MediaJob | None:
         """Claim the oldest pending job.
 
         `admit`, when given, sees that job before the claim and may refuse it, so a
         job the memory brakes do not admit stays pending and unclaimed.
         `skip_media_types` passes over the extraction stage of those media types (see `_next_pending_row`).
+        `routed_media_types` passes over the jobs of those media types that remote workers take, which the
+        local worker sets while a worker is present or local fallback is off.
         `lease` claims for a remote worker: the claim then takes the first job whose `lease.snapshot` the
         caller grants and records the lease in the same transaction, unless the worker holds
         `lease.max_leases` already. Callers use `claim_lease`.
@@ -1388,7 +1428,10 @@ class MediaJobStore:
                     conn, lease, max_hydrations=max_hydrations, skip_media_types=skip_media_types
                 )
             else:
-                row = _next_pending_row(conn, max_hydrations=max_hydrations, skip_media_types=skip_media_types)
+                row = _next_pending_row(
+                    conn, max_hydrations=max_hydrations, skip_media_types=skip_media_types,
+                    routed_media_types=routed_media_types,
+                )
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
@@ -1472,6 +1515,8 @@ class MediaJobStore:
                 ):
                     raise ValueError("a lease snapshot must hold SHA-256 digests and a validated binary identity")
                 return row, snapshot
+            # No remote claim can take this job now, so the local worker must be free to: record it.
+            conn.execute("UPDATE jobs SET remote_eligible = 0 WHERE id = ?", (row["id"],))
             refused.append(int(row["id"]))
         return None, None
 
@@ -1485,6 +1530,44 @@ class MediaJobStore:
         """
         job = self.claim_next(skip_media_types=skip_media_types, lease=request)
         return None if job is None or job.id is None else self.get_lease(job.id)
+
+    def judge_remote_eligibility(
+        self, grantable: Callable[[MediaJob], bool], media_types: Collection[str], *, limit: int = _LEASE_SCAN_LIMIT
+    ) -> int:
+        """Record whether a remote claim can take each pending job of `media_types` that no claim has judged.
+
+        A remote claim records its refusals as it meets them, but only a worker's claim meets a job. This
+        judges the rest in claim order, so a job that no remote worker can take has the local worker as its
+        executor in every configuration, with no worker present too. `grantable` is the claim's grant read.
+        It runs outside any write, and a job that changed meanwhile keeps no verdict from the old input.
+        Returns the number of jobs judged.
+        """
+        if not media_types:
+            return 0
+        conn = self._connect(readonly=True)
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE state = 'pending' AND {_REMOTE_LEASABLE} AND remote_eligible IS NULL "
+                f"AND media_type IN ({','.join('?' * len(media_types))}) ORDER BY id LIMIT ?",
+                (*media_types, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        verdicts = [(int(grantable(self._row_to_job(row))), row["id"], row["updated_at"]) for row in rows]
+        if not verdicts:
+            return 0
+        conn = self._connect()
+        try:
+            with conn:
+                return sum(
+                    conn.execute(
+                        "UPDATE jobs SET remote_eligible = ? WHERE id = ? AND updated_at = ? AND state = 'pending' "
+                        "AND remote_eligible IS NULL", verdict,
+                    ).rowcount
+                    for verdict in verdicts
+                )
+        finally:
+            conn.close()
 
     def get_lease(self, job_id: int) -> MediaLease | None:
         """The lease on a job, or None when no remote worker holds it."""
@@ -1549,21 +1632,38 @@ class MediaJobStore:
             conn.close()
 
     def release_lease(
-        self, job_id: int, claim_revision: int, worker: str, reason: str, *, error: str | None = None
+        self, job_id: int, claim_revision: int, worker: str, reason: str, *, error: str | None = None,
+        blocked_context: str | None = None,
     ) -> bool:
         """Take a job back from the worker that holds its lease, for a reason that worker gives.
 
         The hand-back follows `defer` with `return_reason`: the job keeps its pin, frees its hydration slot,
         counts a return and waits a retry time, and status shows `reason`. A worker that cannot hold the
-        original at all gives `HYDRATION_TOO_LARGE`, which blocks the job instead, with `error` as its text.
+        original at all gives `HYDRATION_TOO_LARGE`, which blocks the job instead, with `error` as its text and
+        `blocked_context` as the record of the cause (see `worker_space_context`).
         Returns False when this worker does not hold the lease under this revision.
         """
         lease = self.held_lease(job_id, claim_revision, worker)
         if lease is None:
             return False
         if reason == HYDRATION_TOO_LARGE:
-            return self.mark(lease.job, BLOCKED, error or reason, blocked_reason=HYDRATION_TOO_LARGE)
+            return self.mark(
+                lease.job, BLOCKED, error or reason, blocked_reason=HYDRATION_TOO_LARGE,
+                blocked_context=blocked_context,
+            )
         return self.defer(lease.job, free_hydration_slot=True, return_reason=reason)
+
+    def _any_due(self, table: str, column: str, cutoff: float) -> bool:
+        """Whether a row of a lease table is due at `cutoff`, read without a write lock.
+
+        The sweeps run on a timer in every media supervisor, so a vault with nothing due pays one read.
+        `table` and `column` are the callers' literals.
+        """
+        conn = self._connect(readonly=True)
+        try:
+            return conn.execute(f"SELECT 1 FROM {table} WHERE {column} <= ? LIMIT 1", (cutoff,)).fetchone() is not None
+        finally:
+            conn.close()
 
     def expire_leases(self, *, stop_limit: int, context: str) -> list[tuple[MediaJob, str]]:
         """Return the jobs whose lease expired to pending, in one write per sweep.
@@ -1573,6 +1673,8 @@ class MediaJobStore:
         losing its worker is over budget after `stop_limit` of them (see `record_timeout_stop`). A job whose
         result is in is left to the parent. Returns each job with `PENDING` or the reason that blocked it.
         """
+        if not self._any_due("media_leases", "expires_at", time.time()):
+            return []
         assignments, params = self._timeout_stop(stop_limit, context)
         conn = self._connect()
         try:
@@ -1685,6 +1787,8 @@ class MediaJobStore:
 
     def prune_outcomes(self, retention_seconds: float) -> int:
         """Forget the outcomes older than `retention_seconds` and return how many."""
+        if not self._any_due("media_lease_outcomes", "recorded_at", time.time() - retention_seconds):
+            return 0
         conn = self._connect()
         try:
             with conn:
@@ -2206,8 +2310,10 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def next_pending(self, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
-        """The job `claim_next` would claim now with the same `skip_media_types`, without claiming it."""
+    def next_pending(
+        self, *, skip_media_types: Collection[str] = (), routed_media_types: Collection[str] = ()
+    ) -> MediaJob | None:
+        """The job `claim_next` would claim now with the same skips, without claiming it."""
         max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect(readonly=True)
         try:
@@ -2215,9 +2321,9 @@ class MediaJobStore:
             # that this module's migrations add. PRAGMA rows are (cid, name, ...), read by position.
             jobs = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
             cache = {str(row[1]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
-            migrated = "evicted" in cache and {"do_offload", "pinned", "hydrated", "retry_at"} <= jobs
+            migrated = "evicted" in cache and {"do_offload", "pinned", "hydrated", "retry_at", "remote_eligible"} <= jobs
             row = _next_pending_row(conn, max_hydrations=max_hydrations, migrated=migrated,
-                                    skip_media_types=skip_media_types)
+                                    skip_media_types=skip_media_types, routed_media_types=routed_media_types)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -2974,8 +3080,12 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def needs_worker(self) -> bool:
+    def needs_worker(self, routed_media_types: Collection[str] = ()) -> bool:
         """Whether work exists without another live child already owning the vault.
+
+        Work that remote workers take (`routed_media_types`) is no work for a child: it would start,
+        find nothing to claim and exit, and the supervisor would start the next one. While any kind is routed,
+        a job on a lapsed lease is the supervisor's sweep to return (see `expire_leases`), not a child's.
 
         One connection answers every arm.  The stale-blocked rescue used to run
         on a second `_connect()` after this one had closed, which made the
@@ -2989,12 +3099,14 @@ class MediaJobStore:
             now = time.time()
             # A returned job is no work before its retry time; the supervisor's forced
             # recheck finds it within a minute after. A job on a live remote lease is no child's work.
+            routed, routed_params = _routed_exclusion(routed_media_types) if routed_media_types else ("", ())
+            live = "" if routed_media_types else " AND expires_at > ?"
             work = conn.execute(
                 "SELECT 1 FROM jobs WHERE ((state = 'running' AND NOT EXISTS (SELECT 1 FROM media_leases "
-                "WHERE media_leases.job_id = jobs.id AND expires_at > ?)) OR " + _CLAIMABLE + ") "
+                "WHERE media_leases.job_id = jobs.id" + live + ")) OR (" + _CLAIMABLE + routed + ")) "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id) LIMIT 1",
-                (now, now),
+                (*(() if routed_media_types else (now,)), now, *routed_params),
             ).fetchone()
             if work is None:
                 candidates = conn.execute(
@@ -3184,6 +3296,10 @@ def _read_status_rows(
     # A retained store from before the column existed has no typed reasons.
     reason = "blocked_reason" if "blocked_reason" in columns else "NULL AS blocked_reason"
     reprocess = "reprocess" if "reprocess" in columns else "0 AS reprocess"
+    # A retained store from before these columns has no hand-backs and no recorded cause for a block.
+    returns = "returns" if "returns" in columns else "NULL AS returns"
+    retry_at = "retry_at" if "retry_at" in columns else "NULL AS retry_at"
+    context = "blocked_context" if "blocked_context" in columns else "NULL AS blocked_context"
     rows = conn.execute(
         f"SELECT state, count(*) AS n, {reason} FROM jobs{selector} GROUP BY state, blocked_reason",
         parameters
@@ -3201,7 +3317,7 @@ def _read_status_rows(
     ).fetchall()
     jobs = conn.execute(
         f"SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error, {reason}, "
-        f"{reprocess} FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
+        f"{reprocess}, {returns}, {retry_at}, {context} FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
         (*parameters, STATUS_JOB_LIMIT),
     ).fetchall()
     reconciliation_required_count = sum(
@@ -3257,6 +3373,59 @@ def _pending_speech_count(conn: sqlite3.Connection, selector: str = "", paramete
     )
 
 
+def _read_remote_facts(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
+    """The leases that remote workers hold and the worker credentials, as stored.
+
+    A store from before the lease tables reads as having none. A lease whose credential was removed
+    keeps the credential id as its worker name.
+    """
+    try:
+        leases = conn.execute(
+            "SELECT l.job_id, l.granted_at, l.expires_at, jobs.binary_rel, jobs.media_type, "
+            "COALESCE(c.name, l.worker) AS worker FROM media_leases AS l JOIN jobs ON jobs.id = l.job_id "
+            f"LEFT JOIN media_worker_credentials AS c ON c.id = l.worker{selector} ORDER BY l.granted_at, l.job_id",
+            parameters,
+        ).fetchall()
+        credentials = media_worker_credentials.read_all(conn)
+    except sqlite3.OperationalError:
+        return {"leases": [], "credentials": []}
+    return {"leases": leases, "credentials": credentials}
+
+
+def _remote_leases(leases: list[Any], now: float) -> list[dict[str, Any]]:
+    return [
+        {
+            "job_id": int(lease["job_id"]),
+            "path": str(lease["binary_rel"]),
+            "media_type": str(lease["media_type"]),
+            "worker": str(lease["worker"]),
+            "age_seconds": max(0.0, now - float(lease["granted_at"])),
+            "expires_at": _utc(lease["expires_at"]),
+        }
+        for lease in leases
+    ]
+
+
+def _remote_workers(
+    credentials: list[media_worker_credentials.WorkerCredential], vault_root: Path, now: float
+) -> list[dict[str, Any]]:
+    """Each worker credential with the kinds it is present for under the vault's routing."""
+    from . import media_remote_routing
+
+    routing = media_remote_routing.remote_workers(vault_root)
+    return [
+        {
+            "name": credential.name,
+            "last_seen": _utc(credential.last_seen_at) if credential.last_seen_at is not None else None,
+            "present_for": sorted(media_remote_routing.present_kinds(routing, [credential], now))
+            if routing is not None else [],
+            "expires_at": _utc(credential.expires_at),
+            "revoked": credential.revoked_at is not None,
+        }
+        for credential in credentials
+    ]
+
+
 def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
     """The facts of `status` that jobs do not show: a busy GPU, the preflight, hidden CUDA, repeated child deaths."""
     wait = _read_meta_json(conn, GPU_WAIT_KEY)
@@ -3265,6 +3434,7 @@ def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tup
     hidden = _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY)
     crashes = _read_meta_json(conn, CHILD_CRASHES_KEY)
     return {
+        "remote": _read_remote_facts(conn, selector, parameters),
         "waiting_count": waiting,
         "wait": None
         if wait is None or not waiting
@@ -3379,6 +3549,8 @@ def status(
         "gpu_preflight": None,
         "serving_worker_cuda_hidden": None,
         "child_crashes": None,
+        "remote_leases": [],
+        "remote_workers": [],
         "jobs": [],
         "errors": [],
         "hydration_policy_problem": None,
@@ -3402,6 +3574,7 @@ def status(
                 rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count, facts = _read_status_rows(conn, binary_rel=path)
             finally:
                 conn.close()
+        now = time.time()
         counts = {state: 0 for state in STATES}
         reasons = {MEMORY_BLOCKED: 0, OVER_BUDGET: 0, ENGINE_DISABLED: 0}
         for row in rows:
@@ -3434,6 +3607,9 @@ def status(
             "gpu_preflight": facts["preflight"],
             "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
             "child_crashes": facts["child_crashes"],
+            # Read at this call: a lease's age and a worker's presence are as of now.
+            "remote_leases": _remote_leases(facts["remote"]["leases"], now),
+            "remote_workers": _remote_workers(facts["remote"]["credentials"], Path(vault_root), now),
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
             "hydration_policy_problem": empty["hydration_policy_problem"],
@@ -3446,11 +3622,13 @@ def status(
 #: the per-reason counts are operator detail: a memory reason belongs on operator
 #: surfaces such as doctor, and a job row already shows waiting work as pending.
 TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
-#: Facts about the machine's GPU and media processes. On a personal install the caller owns the machine and
-#: a pending job gives no other sign of them, so the tool shows them. A Cloud cell's tenant does not own the
-#: node, so there they stay in doctor like the memory reasons (see the cloud-media runbook).
+#: Facts about the machine's GPU and media processes, and the remote workers that lease its jobs. On a
+#: personal install the caller owns the machine and a pending job gives no other sign of them, so the tool
+#: shows them. A Cloud cell's tenant does not own the node, so there they stay in doctor like the memory
+#: reasons (see the cloud-media runbook).
 MACHINE_STATUS_FIELDS = (
     "gpu_waiting_count", "gpu_wait", "gpu_preflight", "serving_worker_cuda_hidden", "child_crashes",
+    "remote_leases", "remote_workers",
 )
 
 
@@ -3515,10 +3693,32 @@ def tool_job_state(vault_root: Path, state: str, job_id: int | None) -> str:
     return state
 
 
-def _hydration_too_large_action() -> str:
-    """A Cloud tenant cannot change the store policy, so a Cloud cell names the operator."""
+def worker_space_context(worker_name: str) -> str:
+    """The `blocked_context` of a job that a remote worker released for lack of space."""
+    return _canonical_json({"cause": WORKER_SPACE_CAUSE, "worker": worker_name})
+
+
+def _space_worker(blocked_context: object) -> str | None:
+    """The name of the worker whose own space blocked the job, or None when the store policy did."""
+    try:
+        recorded = json.loads(blocked_context) if isinstance(blocked_context, str) else None
+    except ValueError:
+        return None
+    if isinstance(recorded, dict) and recorded.get("cause") == WORKER_SPACE_CAUSE:
+        return str(recorded.get("worker", ""))
+    return None
+
+
+def _hydration_too_large_action(blocked_context: object = None) -> str:
+    """What to do about a hydration-too-large block, by the cause that the release recorded.
+
+    A Cloud tenant cannot change the store policy, so a Cloud cell names the operator.
+    """
     from . import cloud_cell
 
+    worker = _space_worker(blocked_context)
+    if worker is not None:
+        return f"free space on the media worker {worker!r}, then retry"
     if cloud_cell.cloud_mode_enabled():
         return "wait until the operator raises this deployment's hydration capacity, then retry"
     return "raise the hydration capacity (max_temporary_bytes in the media store policy) above the file's size, then retry"
@@ -3573,7 +3773,7 @@ def _status_job(row: Any) -> dict[str, Any]:
     if reason == OVER_BUDGET:
         actions[BLOCKED] = OVER_BUDGET_ACTION
     elif reason == HYDRATION_TOO_LARGE:
-        actions[BLOCKED] = _hydration_too_large_action()
+        actions[BLOCKED] = _hydration_too_large_action(row["blocked_context"] if "blocked_context" in row.keys() else None)
     # A stopped reprocess leaves the completed transcript as it was, and a retry would
     # find that transcript complete, so only a new request runs it again.
     reprocess_stopped = (
@@ -3619,6 +3819,10 @@ def _status_job(row: Any) -> dict[str, Any]:
         ),
         "next_action": actions[state],
     }
+    if state == PENDING and "returns" in row.keys() and row["returns"]:
+        # A worker or a failed hydration handed the job back; it waits for its retry time (see `defer`).
+        result["return_reason"] = error
+        result["retry_at"] = _utc(row["retry_at"])
     failure = _classify_batch_write_failure(error)
     if failure is None:
         return result

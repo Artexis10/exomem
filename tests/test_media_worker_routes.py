@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -80,9 +81,11 @@ def _route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vault: Path, entry: 
     monkeypatch.setenv(originals.CONFIG_ENV, str(config))
 
 
-def _serve(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, media_types=("audio",)) -> TestClient:
+def _serve(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, media_types=("audio",), **block
+) -> TestClient:
     """The real app with audio routed to remote workers, and the other credentials of the service set."""
-    _route(tmp_path, monkeypatch, vault, {"remote_workers": {"media_types": list(media_types)}})
+    _route(tmp_path, monkeypatch, vault, {"remote_workers": {"media_types": list(media_types), **block}})
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", UPLOAD_TOKEN)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", REST_KEY)
@@ -971,3 +974,205 @@ def test_a_malformed_diarization_block_gets_400_and_records_nothing(vault, tmp_p
     assert refused.status_code == 400
     assert "0.8123456789" not in refused.text
     assert media_jobs.MediaJobStore(vault).get_lease(lease["job_id"]).result_recorded is False
+
+
+# ---- local routing, presence and the supervisor ---------------------------------------------------
+
+
+def _image(vault: Path, name: str = "receipt.png") -> None:
+    """A preserved photo with its pending job: a kind that is never routed to remote workers."""
+    stub = preserve.preserve_bytes(vault, scope="Rental", category="photos", filename=name, data=b"\x89PNG fake")
+    media_processing.reconcile_media(vault, vault / stub.path, explicit=False)
+
+
+def _local_child(vault: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Run the local media child until it goes idle, with a stub engine; the files it took, in order."""
+    taken: list[str] = []
+    original = media_worker.MediaWorker._process
+
+    def process(worker, job):
+        taken.append(job.binary_path.name)
+        return original(worker, job)
+
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(media_worker.MediaWorker, "_process", process)
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda path, **_kw: extract.ExtractResult(text="a transcript", media_type=extract.media_type_for(path), engine="test"),
+    )
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    return taken
+
+
+def _without_digest(sidecar: Path) -> None:
+    """Take the recorded digest of the original out of its sidecar."""
+    lines = sidecar.read_text(encoding="utf-8").split("\n")
+    sidecar.write_text("\n".join(line for line in lines if not line.startswith("binary_sha256:")), encoding="utf-8")
+
+
+def _supervise(vault: Path, monkeypatch: pytest.MonkeyPatch, clock: list[float], seconds: float = 60.0) -> list[float]:
+    """Run the media supervisor on a fake clock with no real child, and return when it launched one."""
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _ExitedChild:
+        pid = 2_147_483_645
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    def launch():
+        launches.append(now[0])
+        return _ExitedChild()
+
+    def poll(_timeout):
+        now[0] += 5.0
+        clock[0] += 5.0
+        if now[0] >= 1000.0 + seconds:
+            worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: None)  # ask the store at every pass
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+    return launches
+
+
+def test_a_present_worker_makes_the_local_child_leave_the_routed_kind_to_it(vault, tmp_path, monkeypatch) -> None:
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    assert _claim(client).status_code == 204  # the worker is heard from, with nothing to take yet
+    _audio(vault)
+    _image(vault)
+
+    assert _local_child(vault, monkeypatch) == ["receipt.png"]
+
+    assert _row(vault, 1)["state"] == "pending"
+
+
+def test_an_absent_worker_with_local_fallback_on_lets_the_local_child_take_the_job(
+    vault, tmp_path, monkeypatch, clock
+) -> None:
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    assert _claim(client).status_code == 204
+    clock[0] += 91  # past the 90 seconds that a worker stays present after its last contact
+    _audio(vault)
+
+    assert _local_child(vault, monkeypatch) == ["talk.mp3"]
+
+
+def test_local_fallback_off_with_no_worker_leaves_the_routed_job_pending_while_other_kinds_proceed(
+    vault, tmp_path, monkeypatch
+) -> None:
+    _serve(vault, tmp_path, monkeypatch, local_fallback=False)
+    _audio(vault)
+    _image(vault)
+
+    assert _local_child(vault, monkeypatch) == ["receipt.png"]
+
+    assert _row(vault, 1)["state"] == "pending"
+
+
+@pytest.mark.parametrize("cause", ["withheld", "no_digest"])
+def test_an_original_that_no_remote_claim_can_take_is_processed_locally_even_with_local_fallback_off(
+    vault, tmp_path, monkeypatch, cause
+) -> None:
+    client = _serve(vault, tmp_path, monkeypatch, local_fallback=False)
+    _credential(vault)
+    _binary, sidecar = _audio(vault)
+    if cause == "withheld":
+        rules = vault / "Knowledge Base/_Governance/rules"
+        rules.mkdir(parents=True)
+        # A governance rule that cannot be read withholds every original from every audience.
+        (rules / "unreadable.yaml").write_text("governance_version: 1\nid: not-an-id\n", encoding="utf-8")
+    else:
+        _without_digest(sidecar)
+    assert _claim(client).status_code == 204  # a present worker, whose claim finds nothing it may take
+
+    assert _local_child(vault, monkeypatch) == ["talk.mp3"]
+
+
+def test_the_supervisor_starts_a_local_child_for_an_original_no_worker_can_take_though_none_connects(
+    vault, tmp_path, monkeypatch, clock
+) -> None:
+    _serve(vault, tmp_path, monkeypatch, local_fallback=False)
+    _binary, sidecar = _audio(vault)
+    _without_digest(sidecar)
+
+    assert _supervise(vault, monkeypatch, clock, seconds=30.0) != []
+
+
+def test_the_supervisor_returns_an_expired_leases_job_with_no_local_child_and_no_claim(
+    vault, tmp_path, monkeypatch, clock
+) -> None:
+    client = _serve(vault, tmp_path, monkeypatch, local_fallback=False, lease_seconds=20)
+    _credential(vault)
+    _audio(vault)
+    lease = _lease(client)  # the worker then goes silent
+
+    launches = _supervise(vault, monkeypatch, clock, seconds=60.0)
+
+    row = _row(vault, lease["job_id"])
+    assert (row["state"], row["pinned"]) == ("pending", 0)
+    assert media_jobs.MediaJobStore(vault).get_lease(lease["job_id"]) is None
+    assert launches == []  # the job is routed and no worker is there, so a child would find nothing
+
+
+def test_the_supervisor_prunes_old_result_outcomes_with_no_claim(vault, tmp_path, monkeypatch, clock) -> None:
+    _published(vault, tmp_path, monkeypatch)
+    clock[0] += 24 * 3600 + 1
+
+    _supervise(vault, monkeypatch, clock, seconds=20.0)
+
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as connection:
+        assert connection.execute("SELECT count(*) FROM media_lease_outcomes").fetchone() == (0,)
+
+
+def test_status_shows_each_lease_each_workers_presence_and_the_reason_a_job_came_back(
+    vault, tmp_path, monkeypatch, clock
+) -> None:
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    _credential(vault, OTHER_TOKEN, name="worker-two")
+    _credential(vault, "mw1_token-of-the-third-worker", name="worker-three")  # never connects
+    _audio(vault, "first.mp3", b"first-recording")
+    first = _lease(client)
+    assert _post(client, first, "release", reason="device_busy").status_code == 200
+    _audio(vault, "second.mp3", b"second-recording")
+    clock[0] += 10
+    held = _lease(client, OTHER_TOKEN)
+    clock[0] += 20
+
+    status = media_jobs.tool_status(vault)
+
+    (lease,) = status["remote_leases"]
+    assert (lease["worker"], lease["job_id"], lease["age_seconds"]) == ("worker-two", held["job_id"], 20)
+    assert lease["path"].endswith("second.mp3") and lease["expires_at"]
+    workers = {worker["name"]: worker for worker in status["remote_workers"]}
+    assert (workers["worker-one"]["present_for"], workers["worker-two"]["present_for"]) == (["audio"], ["audio"])
+    assert (workers["worker-three"]["present_for"], workers["worker-three"]["last_seen"]) == ([], None)
+    assert workers["worker-one"]["revoked"] is False and workers["worker-one"]["expires_at"]
+    (returned,) = [job for job in status["jobs"] if job["path"].endswith("first.mp3")]
+    assert "device_busy" in returned["return_reason"]
+
+
+def test_a_hydration_block_from_a_workers_own_space_names_the_worker_not_the_store_policy(
+    vault, tmp_path, monkeypatch
+) -> None:
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    _audio(vault)
+    lease = _lease(client)
+
+    assert _post(client, lease, "release", reason="insufficient_space").status_code == 200
+
+    (job,) = media_jobs.tool_status(vault)["jobs"]
+    assert job["state"] == "blocked"
+    assert "worker-one" in job["next_action"]
+    assert "max_temporary_bytes" not in job["next_action"]

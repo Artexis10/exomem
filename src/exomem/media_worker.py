@@ -43,6 +43,7 @@ from . import (
     media_brakes,
     media_engines,
     media_jobs,
+    media_remote_routing,
     media_slot_client,
     preserve,
     prior_extraction,
@@ -180,6 +181,10 @@ _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 _SUPERVISE_POLL_SECONDS = 0.5
 #: How often the supervisor checks the eviction target between jobs (D3, M3).
 _EVICTION_INTERVAL_SECONDS = 60.0
+#: How often the supervisor takes back the jobs of lapsed remote leases, forgets old result outcomes and
+#: judges the routed jobs that no claim has judged. A dead worker's job waits at most this long past its
+#: lease; a worker that appears or lapses changes what the local child skips within the same time.
+_REMOTE_SWEEP_SECONDS = 15.0
 #: Backstop for the writes a signature comparison cannot separate from its own.
 #: Two of them: a foreign worker pid dying without writing anything at all, and
 #: a commit that lands between `needs_worker()`'s read and the signature taken
@@ -517,6 +522,8 @@ class MediaWorker:
         # The last pressure reading was high; the supervisor then reads it every pass
         # so the memory-blocked retry backs off only while pressure lasts.
         self._pressure_high = False
+        #: The media kinds that the last remote sweep found the local child leaving to remote workers.
+        self._routed_skip: frozenset[str] = frozenset()
 
     def start(self) -> None:
         with self._lock:
@@ -1862,6 +1869,7 @@ class MediaWorker:
         idle_signature: tuple[object, ...] | None = None
         forced_recheck_at = 0.0
         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+        remote_sweep_at = _clock() + _REMOTE_SWEEP_SECONDS
         brakes = media_brakes.enabled()
         #: A GPU wait is recorded that no idle pass has re-checked yet; a restart can keep one for waiting jobs.
         gpu_wait_recorded = bool(
@@ -1884,6 +1892,16 @@ class MediaWorker:
                                                     name="exomem-media-eviction", daemon=True)
                         eviction.start()
                     eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
+                if _clock() >= remote_sweep_at:
+                    # Whether or not a child runs: a vault that only remote workers serve still has leases to
+                    # take back. A sweep that changes nothing leaves the idle signature as it found it.
+                    # A GPU wait keeps its signature: a lease the sweep returns to pending is work to look for.
+                    remote_sweep_at = _clock() + _REMOTE_SWEEP_SECONDS
+                    before = _job_store_signature(self._store)
+                    if self._sweep_remote():
+                        idle_signature = None
+                    elif idle_signature is not None and idle_signature == before:
+                        idle_signature = _job_store_signature(self._store)
                 child = self._child
                 running = child is not None and child.poll() is None
                 if brakes and (running or self._pressure_high):
@@ -2036,7 +2054,9 @@ class MediaWorker:
                     if parent_work:
                         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                         self._drain_parent_results()
-                    elif not settled and self._store.needs_worker():
+                    elif not settled and self._store.needs_worker(
+                        media_remote_routing.local_skip(self._vault_root, self._store)
+                    ):
                         idle_signature = None
                         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                         refusal = _probe_writer_authority()
@@ -2107,6 +2127,37 @@ class MediaWorker:
             self._child = None
             self._release_slot()
 
+    def _sweep_remote(self) -> bool:
+        """Take back the jobs of lapsed leases, forget old outcomes and judge routed jobs; whether anything changed.
+
+        Anything changed includes the media kinds that the local child leaves to remote workers: a worker that
+        appeared or lapsed since the last sweep changes whether a child has work, with no write to say so.
+        """
+        assert self._store is not None
+        routing = media_remote_routing.remote_workers(self._vault_root)
+        if routing is None:
+            # Nothing routes here, so the sweep opens no store: an idle supervisor keeps its quiet store.
+            return False
+        try:
+            changed = media_remote_routing.sweep_leases(self._store, self._vault_root) > 0
+            if routing.media_types:
+                changed |= self._store.judge_remote_eligibility(self._grantable, routing.media_types) > 0
+            skip = media_remote_routing.local_skip(self._vault_root, self._store)
+        except Exception:  # noqa: BLE001 - the sweep retries at the next interval and must not stop the supervisor
+            log.warning("media worker: remote lease sweep deferred", exc_info=True)
+            return False
+        changed |= skip != self._routed_skip
+        self._routed_skip = skip
+        return changed
+
+    def _grantable(self, job: media_jobs.MediaJob) -> bool:
+        """Whether a remote claim can take this job. A job the grant cannot read stays with the local worker."""
+        try:
+            return lease_grant(self._vault_root, job) is not None
+        except Exception:  # noqa: BLE001 - see above
+            log.warning("media worker: could not read job %s for remote eligibility", job.id, exc_info=True)
+            return False
+
     def _ask_slot(self) -> bool:
         """Whether the node lease holds a slot for the job the next child will claim.
 
@@ -2116,7 +2167,9 @@ class MediaWorker:
         """
         assert self._store is not None and self._slot is not None
         config = media_brakes.settings(cell=media_brakes.read_cell())
-        job = self._store.next_pending()
+        job = self._store.next_pending(
+            routed_media_types=media_remote_routing.local_skip(self._vault_root, self._store)
+        )
         budget = config.default_budget if job is None else _budget_for(job, config)
         # The names only reach the service log; the bytes and the timeout are what it grants.
         engines = "-".join(
@@ -2745,6 +2798,7 @@ def run_child(
                 else store.claim_next(
                     admit if brakes else None,
                     skip_media_types=media_engines.SPEECH_KINDS if gpu_busy else (),
+                    routed_media_types=media_remote_routing.local_skip(vault_root, store),
                 )
             )
             if refusal:

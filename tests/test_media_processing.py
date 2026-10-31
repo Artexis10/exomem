@@ -1987,6 +1987,8 @@ def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) ->
         "gpu_preflight",
         "serving_worker_cuda_hidden",
         "child_crashes",
+        "remote_leases",
+        "remote_workers",
         "jobs",
         "errors",
         "index_refresh",

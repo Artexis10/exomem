@@ -563,7 +563,7 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
         def set_worker(self, *_args) -> None:
             events.append(("worker", None))
 
-        def claim_next(self, admit=None, *, skip_media_types=()):
+        def claim_next(self, admit=None, *, skip_media_types=(), routed_media_types=()):
             return job
 
         def defer(self, job_id: int) -> None:

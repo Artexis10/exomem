@@ -472,3 +472,62 @@ def test_a_job_on_a_live_lease_is_no_work_for_a_local_child_until_the_lease_expi
 
     clock[0] += 61
     assert store.needs_worker()  # the child's recovery returns the expired lease's job
+
+
+# ---- the verdict of the grant: what the local claim leaves to remote workers ------------------------
+
+
+@pytest.mark.parametrize("change", ["enqueue", "request_extraction"])
+def test_the_mark_of_a_job_no_claim_can_take_clears_when_its_input_changes(vault: Path, change: str) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job_id = _enqueue(vault)
+    assert store.claim_lease(_request(snapshot=lambda job: None), skip_media_types=()) is None
+    assert _row(vault, job_id)["remote_eligible"] == 0  # the claim marked it: none can take it now
+    assert store.claim_lease(_request(), skip_media_types=()) is None  # and the mark holds for the next claim
+
+    if change == "enqueue":
+        _enqueue(vault)
+    else:
+        job = media_jobs.MediaJob(vault / "talk.mp3", vault / "talk.mp3.md", "audio")
+        assert store.request_extraction(job, None, None, reprocess=False) == job_id
+
+    assert _row(vault, job_id)["remote_eligible"] is None
+    assert store.claim_lease(_request(), skip_media_types=()).job.id == job_id  # judged afresh
+
+
+def test_the_local_claim_leaves_a_routed_job_to_remote_workers_unless_no_claim_can_take_it(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    _enqueue(vault, "refused.mp3")
+    _enqueue(vault, "granted.mp3")
+    _enqueue(vault, "film.mp4", "video")  # not a routed kind
+    assert store.claim_next(routed_media_types=("audio",)).binary_path.name == "film.mp4"
+    store.recover_interrupted()
+    assert store.claim_next(routed_media_types=("audio",)).binary_path.name == "film.mp4"  # unjudged audio waits
+
+    store.judge_remote_eligibility(lambda job: job.binary_path.name != "refused.mp3", ["audio"])
+
+    store.recover_interrupted()
+    taken = [store.claim_next(routed_media_types=("audio",)).binary_path.name for _ in range(2)]
+    assert taken == ["refused.mp3", "film.mp4"]  # the refused one first, by claim order; granted.mp3 stays
+    assert store.claim_next(routed_media_types=("audio",)) is None
+
+
+def test_a_routed_job_with_an_offload_stage_stays_with_the_local_claim(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job_id = _enqueue(vault, do_offload=True)  # no remote worker can run it, so routing must not strand it
+
+    assert store.claim_next(routed_media_types=("audio",)).id == job_id
+
+
+def test_a_verdict_read_from_an_input_that_changed_meanwhile_is_not_recorded(vault: Path, clock) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job_id = _enqueue(vault)
+
+    def grantable(job: media_jobs.MediaJob) -> bool:
+        clock[0] += 1
+        _enqueue(vault)  # the input changes while the grant is read
+        return False
+
+    assert store.judge_remote_eligibility(grantable, ["audio"]) == 0
+
+    assert _row(vault, job_id)["remote_eligible"] is None

@@ -28,7 +28,6 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from . import (
     extract,
     media_brakes,
-    media_engines,
     media_jobs,
     media_models,
     media_remote_routing,
@@ -278,14 +277,12 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
         return credential, job_id, body
 
     def try_claim(
-        credential: media_worker_credentials.WorkerCredential, kinds: set[str], engines: set[str], slots: int
+        credential: media_worker_credentials.WorkerCredential, declared: dict[str, object], slots: int
     ) -> dict[str, object] | None:
         routing = media_remote_routing.remote_workers(vault_root)
         if routing is None:
             return None
-        allowed = {
-            kind for kind in routing.media_types if kind in kinds and media_engines.engine_for(kind) in engines
-        }
+        allowed = routing.media_types & media_remote_routing.covered_kinds(declared)
         if not allowed:
             return None
         config = media_brakes.settings()
@@ -360,11 +357,13 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
             for names in (kinds, engines)
         ):
             return _bad("capabilities.media_types and capabilities.engines must be lists of names")
-        await run_in_threadpool(media_worker_credentials.touch, get_store(), credential.id)
+        # The declaration is what the worker is present for, so a claim records it with the time it was heard.
+        declared = {"media_types": kinds, "engines": engines}
+        await run_in_threadpool(media_worker_credentials.touch, get_store(), credential.id, declared)
         await run_in_threadpool(_sweep)
         deadline = time.monotonic() + CLAIM_WAIT_SECONDS
         while True:
-            granted = await run_in_threadpool(try_claim, credential, set(kinds), set(engines), slots)
+            granted = await run_in_threadpool(try_claim, credential, declared, slots)
             if granted is not None:
                 return JSONResponse(granted, headers=_NO_STORE)
             remaining = deadline - time.monotonic()
@@ -373,13 +372,8 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
             await asyncio.sleep(min(CLAIM_POLL_SECONDS, remaining))
 
     def _sweep() -> None:
-        """Return the jobs whose lease expired, so that this claim can take them, and forget old result outcomes."""
-        config = media_brakes.settings()
-        get_store().expire_leases(stop_limit=config.stop_limit, context=media_brakes.timeout_context(config))
-        routing = media_remote_routing.remote_workers(vault_root)
-        get_store().prune_outcomes(
-            routing.outcome_seconds if routing is not None else media_jobs.DEFAULT_OUTCOME_SECONDS
-        )
+        """Return the jobs whose lease expired, so that this claim can take them. The media supervisor does it too."""
+        media_remote_routing.sweep_leases(get_store(), vault_root)
 
     @mcp_app.custom_route("/media-worker/v1/leases/{job}/heartbeat", methods=["POST"])
     async def heartbeat(request: Request) -> Response:
@@ -411,6 +405,7 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
             released = await run_in_threadpool(
                 get_store().release_lease, job_id, body["claim_revision"], credential.id,
                 media_jobs.HYDRATION_TOO_LARGE, error="the worker has too little space for the original",
+                blocked_context=media_jobs.worker_space_context(credential.name),
             )
         else:
             released = await run_in_threadpool(

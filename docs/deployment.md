@@ -168,6 +168,48 @@ telemetry can still show short named `background_media_clip_commit` and
 `background_media_scene_frame_commit` holders while CLIP vectors or persisted
 scene frames commit. Those are the measured residual paths, not a stuck scan.
 
+### Remote media workers (optional)
+
+A second machine with a GPU can run the speech engine for jobs that the service would
+otherwise run itself. The default routes nothing: a vault without a `remote_workers` block
+runs every job locally, as before. A block that does not parse routes nothing too, and the
+service logs the problem once.
+
+Add the block to the vault's entry in the media configuration file (the file that
+`EXOMEM_MEDIA_STORE_CONFIG` names). The entry may hold only this block.
+
+```json
+{"vaults": {"/srv/vault": {"remote_workers": {"media_types": ["audio", "video"], "local_fallback": true}}}}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `media_types` | `[]` | The kinds that remote workers may lease: `audio`, `video`. Empty routes nothing. |
+| `local_fallback` | `true` | When no worker is present for a kind, the local worker runs it. When `false`, such a job stays pending until a worker comes. |
+| `lease_seconds` | `120` | How long a worker holds a job without a heartbeat before the job returns to the queue. |
+| `heartbeat_seconds` | `lease_seconds / 4` | How often a worker extends its lease. Must be below `lease_seconds`. |
+| `presence_seconds` | `90` | How long after its last contact a worker still counts as present. |
+| `outcome_seconds` | `86400` | How long the service keeps the record that makes a repeated result post safe. |
+
+A worker is present for a kind while its credential is live, it made contact within
+`presence_seconds`, and its last claim declared that kind and its engine. While a worker is
+present for a kind, the local worker skips that kind. A file whose original the service
+withholds, or whose sidecar has no recorded digest, no remote worker can take, so the local
+worker runs it in every configuration.
+
+Issue one credential for each worker. The token goes to the file you name, and the service
+stores only its hash.
+
+```bash
+exomem media-worker credential issue --name gpu-box --out ~/gpu-box.token
+exomem media-worker credential list
+exomem media-worker credential revoke --name gpu-box
+```
+
+`issue` takes `--days` (default 90) and `--max-leases` (default 1, the most jobs the worker
+holds at once). `process_media` status lists each held lease, each credential with the kinds
+it is present for, and the reason a job last came back.
+
 ## 2. Set up a public HTTPS URL
 
 You need a hostname for step 3. Pick **one**:

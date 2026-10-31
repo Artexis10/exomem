@@ -4925,9 +4925,9 @@ def _record_store_checks(monkeypatch: pytest.MonkeyPatch, worker) -> list[float]
     checks: list[float] = []
     original = worker._store.needs_worker
 
-    def needs_worker():
+    def needs_worker(*routed):
         checks.append(media_worker._clock())
-        return original()
+        return original(*routed)
 
     monkeypatch.setattr(worker._store, "needs_worker", needs_worker)
     return checks

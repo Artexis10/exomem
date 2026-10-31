@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import functools
 import logging
+import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_engines, media_jobs, originals
+from . import media_brakes, media_engines, media_jobs, media_worker_credentials, originals
 
 log = logging.getLogger(__name__)
 
@@ -95,3 +97,65 @@ def remote_workers(vault: Path) -> RemoteWorkers | None:
 def _warn_once(problem: str) -> None:
     # Every claim reads the block, so the cache keeps one warning per problem in each process.
     log.warning("remote media workers are off: %s", problem)
+
+
+def covered_kinds(capabilities: object) -> frozenset[str]:
+    """The media kinds that a worker's declared capabilities cover: the kinds whose engine it declared."""
+    if not isinstance(capabilities, dict):
+        return frozenset()
+    kinds, engines = capabilities.get("media_types"), capabilities.get("engines")
+    if not isinstance(kinds, list) or not isinstance(engines, list):
+        return frozenset()
+    covered = set()
+    for kind in kinds:
+        engine = media_engines.engine_for(kind) if isinstance(kind, str) else None
+        if engine is not None and engine in engines:
+            covered.add(kind)
+    return frozenset(covered)
+
+
+def present_kinds(
+    routing: RemoteWorkers, credentials: Iterable[media_worker_credentials.WorkerCredential], now: float
+) -> frozenset[str]:
+    """The routed kinds that a present worker covers.
+
+    A worker is present while its credential is live and was heard from within the presence duration, and it
+    covers what it declared at its last claim. A worker that never declared anything covers nothing.
+    """
+    covered: set[str] = set()
+    for credential in credentials:
+        if (
+            credential.status(now) == "active"
+            and credential.last_seen_at is not None
+            and now - credential.last_seen_at <= routing.presence_seconds
+        ):
+            covered |= covered_kinds(credential.capabilities)
+    return routing.media_types & covered
+
+
+def local_skip(vault: Path, store: media_jobs.MediaJobStore) -> frozenset[str]:
+    """The media kinds that the local worker leaves to remote workers now.
+
+    A kind is left while a present worker covers it, and always when local fallback is off. A job that no
+    remote worker can take is the exception, which the claim makes with `routed_media_types`.
+    """
+    routing = remote_workers(vault)
+    if routing is None or not routing.media_types:
+        return frozenset()
+    if not routing.local_fallback:
+        return routing.media_types
+    return present_kinds(routing, media_worker_credentials.list_credentials(store), time.time())
+
+
+def sweep_leases(store: media_jobs.MediaJobStore, vault: Path) -> int:
+    """Return the jobs of lapsed leases to the queue and forget old result outcomes; the number of rows changed.
+
+    A claim runs it, and so does the media supervisor, so a vault that no worker calls still takes its
+    jobs back.
+    """
+    config = media_brakes.settings()
+    returned = len(store.expire_leases(stop_limit=config.stop_limit, context=media_brakes.timeout_context(config)))
+    routing = remote_workers(vault)
+    return returned + store.prune_outcomes(
+        routing.outcome_seconds if routing is not None else media_jobs.DEFAULT_OUTCOME_SECONDS
+    )
