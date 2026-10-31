@@ -2038,12 +2038,12 @@ def test_at_the_cap_the_worker_claims_no_job_that_needs_a_hydration_and_still_cl
     assert ledger.claim_next().binary_path == hydrated[2]
 
 
-def test_a_speech_job_that_waits_for_a_busy_gpu_holds_no_hydration_slot_and_does_not_pin_its_original(
+def test_a_speech_job_that_waits_for_a_busy_gpu_keeps_its_original_and_gives_up_its_hydration_slot(
         vault: Path, selected_store, monkeypatch):
-    """Catches a GPU wait that keeps the hydration slot and the pin of its original, so every image whose original
-    is in the store waits for the GPU too, and the recording stays on the volume for the whole wait. Also catches
-    a claim that skips speech work only among local originals, so a child that knows the GPU is busy still
-    downloads the next recording from the store for nothing."""
+    """Catches a GPU wait that keeps the hydration slot, so every image whose original is in the store waits for
+    the GPU too, or that drops the pin, so on a full volume each GPU recheck downloads the recording again. Also
+    catches a claim that skips speech work only among local originals, so a child that knows the GPU is busy
+    still downloads the next recording from the store for nothing."""
     import os
 
     from exomem import (
@@ -2058,7 +2058,7 @@ def test_a_speech_job_that_waits_for_a_busy_gpu_holds_no_hydration_slot_and_does
 
     _configure(selected_store, vault, max_hydrations=1)
     # Only a transcribed original goes to the store, so the jobs that hydrate one are requests to process it again.
-    speech, later = (preserve.preserve_bytes(vault, scope="Test", category="audio", filename=name, data=b"FAKEBYTES",
+    speech, later = (preserve.preserve_bytes(vault, scope="Test", category="audio", filename=name, data=name.encode(),
                                              text="[0:00] earlier words") for name in ("meeting.m4a", "call.m4a"))
     image = preserve.preserve_bytes(vault, scope="Test", category="photos", filename="receipt.png",
                                     data=b"\x89PNG fake", text="RECEIPT 41")
@@ -2067,25 +2067,37 @@ def test_a_speech_job_that_waits_for_a_busy_gpu_holds_no_hydration_slot_and_does
         media_processing.reprocess_media(vault, captured.path)
         # A queued job that no worker claimed yet does not keep its original on the volume.
         assert media_store.evict(vault, vault / captured.path)
-    ledger = media_jobs.MediaJobStore(vault)
+    stored = {captured.path: originals.original_state(vault, vault / captured.path).reference.object
+              for captured in (speech, later, image)}
+    downloads = []
+    store_open = media_store.FilesystemStore.open
+
+    def counted_open(self, name, version):
+        downloads.append(name)
+        return store_open(self, name, version)
 
     def extract_text(path, **_kwargs):
         if extract.media_type_for(Path(path)) == "image":
             return extract.ExtractResult(text="RECEIPT 42", media_type="image", engine="tesseract")
         raise asr_runtime.ASRGpuBusy("the GPU has 512 MiB free, 2048 MiB needed")
 
+    monkeypatch.setattr(media_store.FilesystemStore, "open", counted_open)
     monkeypatch.setattr(extract, "extract_text", extract_text)
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    # The volume stays above the eviction target, so each timer pass evicts every original that no job pins.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 8_000))
 
-    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == media_worker._GPU_BUSY_EXIT_CODE
-    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    for _recheck in range(3):  # the supervisor starts a child for each GPU recheck, and it has not seen the busy GPU
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == media_worker._GPU_BUSY_EXIT_CODE
+        media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+        media_store.evict_to_target(vault)
 
     assert "RECEIPT 42" in (vault / image.sidecar_path).read_text(encoding="utf-8")
-    waiting = ledger.get_by_binary(vault / speech.path)
+    assert [downloads.count(stored[captured.path]) for captured in (speech, later)] == [1, 0]
+    assert originals.original_state(vault, vault / speech.path).state == "cached"
+    waiting = media_jobs.MediaJobStore(vault).get_by_binary(vault / speech.path)
     assert (waiting.state, waiting.attempts) == (media_jobs.PENDING, 0)
-    assert media_store.evict(vault, vault / speech.path)
-    assert originals.original_state(vault, vault / later.path).state == "evicted"
 
 
 @pytest.mark.parametrize(("cause", "code"), [("transport", "MEDIA_STORE_UNAVAILABLE"), ("capacity", "MEDIA_STORE_BUSY")])
