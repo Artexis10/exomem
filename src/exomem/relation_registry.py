@@ -289,6 +289,15 @@ def display_label(registry: RelationRegistry, key: str) -> str:
     return label
 
 
+def spelling_label(registry: RelationRegistry, spelling: str) -> str:
+    """The display label of the entry an authored spelling (key or alias) resolves to.
+
+    A relation candidate carries the spelling its bullet would author, so it reads
+    as what that spelling means under the page's registry.
+    """
+    return display_label(registry, registry.resolve(spelling).canonical or spelling)
+
+
 def traversable_resolution_status(status: str | None) -> bool:
     """Whether a selected relation resolution supplies an authored graph fact."""
     # Deprecated facts remain traversable; unregistered and out-of-scope ones do not.

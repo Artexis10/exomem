@@ -40,6 +40,12 @@ function label(value) {
   return String(value || "unknown").replaceAll("_", " ");
 }
 
+// How a relation reads to a person: the server's registry label, else its key.
+// Display only: requests send the key or the candidate ref, never this text.
+function relationName(entry, fallback) {
+  return entry.relation_label || entry.relation_type || fallback;
+}
+
 function errorMessage(error) {
   if (!(error instanceof ApiError)) return "Unexpected Studio error.";
   return error.remediation ? `${error.message} ${error.remediation}` : error.message;
@@ -304,7 +310,7 @@ function renderGraph(section = {}) {
   }
   for (const edge of section.edges || []) {
     const source = edge.source_ref ? ` · ${edge.source_ref}` : "";
-    rows.push(element("li", `${edge.src_key} — ${edge.relation_type || edge.raw_relation || "related"} → ${edge.dst_key}${source}`));
+    rows.push(element("li", `${edge.src_key} — ${relationName(edge, edge.raw_relation || "related")} → ${edge.dst_key}${source}`));
   }
   const note = stateNote({...section, items: rows, truncated: section.truncated_edges || section.truncated_nodes}, "No recorded graph neighborhood.");
   replaceChildren(byId("graph"), [note, rows.length ? list(rows) : null].filter(Boolean));
@@ -447,7 +453,7 @@ async function prepareRelationProposal() {
   select.name = "candidate";
   candidates.forEach((candidate, index) => {
     const modelLabel = candidate.method === "model" ? " · model-backed proposal" : "";
-    select.append(new Option(`${candidate.relation_type || "relates_to"} → ${candidate.to}${modelLabel}`, String(index)));
+    select.append(new Option(`${relationName(candidate, "relates_to")} → ${candidate.to}${modelLabel}`, String(index)));
   });
   wrapper.append(select);
   const warnings = (proposal.warnings || []).map((warning) => element("p", String(warning), "section-note"));
@@ -570,6 +576,7 @@ async function submitRelation() {
     why: data.get("why"),
     heading: "Relations",
     section_position: "append",
+    // The bullet carries the key; a display label would author a different relation.
     new_string: `- ${candidate.relation_type || "relates_to"} [[${String(candidate.to || "").replace(/\.md$/, "")}]]`,
     expected_hash: context.target.content_hash,
   }));
@@ -705,7 +712,8 @@ function renderRelationCandidate(item, group) {
   li.dataset.ref = item.ref;
   const summary = element("div", "", "relation-summary");
   const destination = String(item.to || "").replace(/\.md$/, "");
-  summary.append(element("strong", `${item.relation_type || "relates_to"} → ${destination}`));
+  const relation = relationName(item, "relates_to");
+  summary.append(element("strong", `${relation} → ${destination}`));
   summary.append(element("span", `method: ${label(item.method)}`, "tag"));
   summary.append(element("span", `source: ${item.source_path}`, "path"));
   li.append(summary);
@@ -714,19 +722,19 @@ function renderRelationCandidate(item, group) {
   accept.type = "button";
   accept.dataset.relationRef = item.ref;
   accept.dataset.relationAction = "accept";
-  accept.setAttribute("aria-label", `Accept ${item.relation_type || "relates_to"} → ${destination} from ${item.source_path}`);
+  accept.setAttribute("aria-label", `Accept ${relation} → ${destination} from ${item.source_path}`);
   accept.addEventListener("click", () => openRelationAccept(item, group));
   const dismiss = element("button", "Dismiss");
   dismiss.type = "button";
   dismiss.dataset.relationRef = item.ref;
   dismiss.dataset.relationAction = "dismiss";
-  dismiss.setAttribute("aria-label", `Dismiss ${item.relation_type || "relates_to"} → ${destination} from ${item.source_path}`);
+  dismiss.setAttribute("aria-label", `Dismiss ${relation} → ${destination} from ${item.source_path}`);
   dismiss.addEventListener("click", () => openRelationTriage(item, "dismiss"));
   const snooze = element("button", "Snooze");
   snooze.type = "button";
   snooze.dataset.relationRef = item.ref;
   snooze.dataset.relationAction = "snooze";
-  snooze.setAttribute("aria-label", `Snooze ${item.relation_type || "relates_to"} → ${destination} from ${item.source_path}`);
+  snooze.setAttribute("aria-label", `Snooze ${relation} → ${destination} from ${item.source_path}`);
   snooze.addEventListener("click", () => openRelationTriage(item, "snooze"));
   actions.append(accept, dismiss, snooze);
   li.append(actions);
@@ -739,7 +747,7 @@ function openRelationAccept(item, group) {
   const destination = String(item.to || "").replace(/\.md$/, "");
   byId("dialog-kicker").textContent = "Governed accept";
   byId("dialog-title").textContent = "Accept this relation?";
-  byId("dialog-description").textContent = `${group.title || group.path} · ${item.relation_type || "relates_to"} → ${destination}`;
+  byId("dialog-description").textContent = `${group.title || group.path} · ${relationName(item, "relates_to")} → ${destination}`;
   replaceChildren(byId("dialog-fields"), [inputField("Audit reason", "why", "Accepted reviewed relation", {required: true})]);
   byId("dialog-error").hidden = true;
   byId("dialog-confirm").disabled = false;
@@ -753,7 +761,7 @@ function openRelationTriage(item, action) {
   const destination = String(item.to || "").replace(/\.md$/, "");
   byId("dialog-kicker").textContent = "Governed triage";
   byId("dialog-title").textContent = `${label(action)} this relation candidate?`;
-  byId("dialog-description").textContent = `${item.relation_type || "relates_to"} → ${destination}`;
+  byId("dialog-description").textContent = `${relationName(item, "relates_to")} → ${destination}`;
   const fields = [];
   if (action === "snooze") {
     const labelNode = element("label", "Snooze through");

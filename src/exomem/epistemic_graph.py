@@ -8999,6 +8999,9 @@ class EpistemicGraphIndex:
                     "from": source,
                     "to": target,
                     "relation_type": relation_type,
+                    "relation_label": relation_registry.spelling_label(
+                        selected_registries[source], relation_type
+                    ),
                     "method": candidate["method"],
                     "evidence": candidate.get("evidence") or {},
                     "bullet": relation_queue._bullet(candidate),
@@ -9889,6 +9892,8 @@ def suggest_relations(
     """Return proposed relation candidates without mutating files or sidecars."""
     candidates: list[dict[str, Any]] = []
     warnings: list[str] = []
+    # A draft has no page instance yet; its wikilink candidates read as core meanings.
+    registry = relation_registry.core_registry()
     if path:
         rel = _page_rel(path)
         page = (
@@ -9897,6 +9902,7 @@ def suggest_relations(
             else None
         )
         if page is not None:
+            registry = relation_registry.load_for_page(vault_root, rel, page.frontmatter)
             # Structural candidates go FIRST, ahead of the unbounded wikilink
             # generator. The truncation below is at `limit` (10 by default in
             # the acceptance queue), so ordering is a budget, not a cosmetic:
@@ -9927,7 +9933,15 @@ def suggest_relations(
     if include_model_suggestions:
         warnings.append("model-backed graph relation suggestions unavailable")
     return {
-        "candidates": _dedupe_candidates(candidates)[: max(0, limit)],
+        "candidates": [
+            {
+                **candidate,
+                "relation_label": relation_registry.spelling_label(
+                    registry, str(candidate.get("relation_type") or "")
+                ),
+            }
+            for candidate in _dedupe_candidates(candidates)[: max(0, limit)]
+        ],
         "warnings": warnings,
         "model_suggestions_available": False,
         "mutated": False,
