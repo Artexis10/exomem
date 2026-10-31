@@ -195,6 +195,24 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
+# True only inside ``progress_check``: a check that need not ask the coordinator itself.
+_PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+
+
+@contextmanager
+def progress_check() -> Iterator[None]:
+    """Run an authority check that need not ask the coordinator itself.
+
+    Inside it, ``LeaseManager.validate_fencing_token`` trusts a fresh local grant instead of
+    reading coordinator status. It suits a check that precedes no store transaction or vault name
+    change, or one that repeats a check asking the coordinator before the same effect. Every such
+    effect still follows a check outside it, so none lands after a lost lease.
+    """
+    reset = _PROGRESS_CHECK.set(True)
+    try:
+        yield
+    finally:
+        _PROGRESS_CHECK.reset(reset)
 
 _FAST_ACK_DEADLINE_SECONDS = 2.0
 
@@ -4576,7 +4594,8 @@ class LeaseManager:
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
-        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock.
+        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock;
+        # None after a renewal fails, until the next grant.
         self._granted_monotonic: float | None = None
         self._capture_queue = _FairCaptureQueue()
         self._lock = threading.RLock()
@@ -4885,6 +4904,23 @@ class LeaseManager:
         self._expires_at = expires_at
         self._granted_monotonic = time.monotonic()
 
+    def _note_renewal_failed(self) -> None:
+        """With the lock held: a renewal that failed leaves no fresh grant until the next one arrives."""
+        self._granted_monotonic = None
+
+    def _grant_fresh(self) -> bool:
+        """With the lock held: whether the held grant will outlast the next renewal.
+
+        Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen it.
+        A failed renewal ends it until the next grant; a refused one clears the token.
+        """
+        return (
+            self._expires_at is not None
+            and self._granted_monotonic is not None
+            and time.monotonic() - self._granted_monotonic
+            < self.config.ttl_seconds - self._renew_interval_seconds()
+        )
+
     def _reusable_operation_grant(self) -> LeaseRecord | None:
         """With the lock held: the grant this operation's outer guard holds, or None when the guard must acquire.
 
@@ -4903,11 +4939,7 @@ class LeaseManager:
             or self._active_mutations <= 0
             # Only a real acquire derives the file-store marker from the acquisition record.
             or (self._serves_collection_store and self._collection_store is None)
-            or self._expires_at is None
-            or self._granted_monotonic is None
-            # Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen the reuse.
-            or time.monotonic() - self._granted_monotonic
-            >= self.config.ttl_seconds - self._renew_interval_seconds()
+            or not self._grant_fresh()
         ):
             return None
         self._record_lease_op("acquire", "reused")
@@ -6846,10 +6878,16 @@ class LeaseManager:
         return None
 
     def validate_fencing_token(self, fencing_token: int) -> None:
-        """Fail closed unless the command's token is still locally and remotely current."""
+        """Fail closed unless the command's token is still locally and remotely current.
+
+        A progress check (``progress_check``) trusts a fresh local grant: an effect that follows
+        it validates again here outside one, and a fence change revokes the token at the coordinator.
+        """
         with self._lock:
             if self._fencing_token != fencing_token:
                 self._raise_fenced(fencing_token)
+            if _PROGRESS_CHECK.get() and self._grant_fresh():
+                return
         assert self.client is not None
         record = self.client.status()
         with self._lock:
@@ -7017,11 +7055,16 @@ class LeaseManager:
                         and time.monotonic() - self._last_renew_monotonic
                         < self._renew_interval_seconds()):
                     return
-            head = self._collection_store.report_head(token)
-            record = self.client.renew(
-                token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
-                collection_store_head=head,
-            )
+            try:
+                head = self._collection_store.report_head(token)
+                record = self.client.renew(
+                    token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
+                    collection_store_head=head,
+                )
+            except Exception:
+                with self._lock:
+                    self._note_renewal_failed()
+                raise
             with self._lock:
                 if self._fencing_token != token:
                     self._raise_fenced(token)
@@ -7351,6 +7394,8 @@ class LeaseManager:
                         self._log_lease_event("lease_renew_rejected")
             except OpError as error:
                 # Mutations still revalidate synchronously and fail closed.
+                with self._lock:
+                    self._note_renewal_failed()
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("renew", "error")
                 continue
