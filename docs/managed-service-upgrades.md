@@ -221,16 +221,18 @@ runtime directory have a 104-byte limit.
 6. Copy the live vault state directory into the state leaf with the state copy command below.
 7. Set `vault_identity` in `/tmp/xr/state/KEY/.state-migration.json` to `KEY` with a JSON editor.
 8. Write `/tmp/xr/rehearsal.env` with mode 600 from the template below.
-9. Pick a free loopback port as `PORT`.
-10. Start the transient unit with the `systemd-run` command below.
-11. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
-12. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
-13. Note the time, then switch with the `service_upgrade` command below.
-14. Read `last_transition.handoff` in the printed result.
-15. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
-16. While a repair runs, send one MCP read and one MCP write to `http://127.0.0.1:PORT/mcp`.
-17. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
-18. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
+9. Pick two free loopback ports as `PORT` and `LOCAL_PORT`.
+10. Load the environment file, then issue a local session: `exomem auth issue-local --client rehearsal --output /tmp/xr/home/local-token`.
+11. Start the transient unit with the `systemd-run` command below.
+12. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
+13. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
+14. Start the probe loop below for 46 minutes.
+15. Note the time, then switch with the `service_upgrade` command below.
+16. Read `last_transition.handoff` in the printed result.
+17. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
+18. Read the call log; expect no failed read or write.
+19. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
+20. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
 
 Expect all four checks to pass in the 45 minutes after the noted time.
 
@@ -299,7 +301,35 @@ HF_HOME=LIVE_VALUE
 EXOMEM_PRELOAD_MODELS=LIVE_VALUE
 EXOMEM_STANDBY_WARM_SECONDS=LIVE_VALUE
 EXOMEM_COLD_START_SECONDS=LIVE_VALUE
+EXOMEM_LOCAL_PORT=LOCAL_PORT
+EXOMEM_GITHUB_USER_ID=LIVE_VALUE
+EXOMEM_GITHUB_USERNAME=LIVE_VALUE
+EXOMEM_JWT_SIGNING_KEY=NEW_RANDOM_VALUE
 ```
+
+The last four lines let the copy's own local session call MCP tools on
+`LOCAL_PORT`, so the read and write checks run as the owner. The signing key is
+new, so no live token is valid on the copy.
+
+The probe loop sends one MCP read and one MCP write every 30 seconds and writes
+one JSON line per round. Each write creates a disposable note in the copy:
+
+```sh
+TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 2760 )); N=0
+while [ "$(date +%s)" -lt "$END" ]; do
+  N=$((N + 1))
+  for CALL in '{"name":"search_memory","arguments":{"query":"rehearsal probe"}}' "{\"name\":\"create_note\",\"arguments\":{\"title\":\"Rehearsal probe $N\",\"content\":\"Disposable rehearsal write.\",\"note_type\":\"insight\"}}"; do
+    curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
+      -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":$N,\"method\":\"tools/call\",\"params\":$CALL}" \
+      | tr -d '\n' | sed "s/^/$(date -u +%H:%M:%S) /" >> /tmp/xr/calls.log; echo >> /tmp/xr/calls.log
+  done
+  sleep 30
+done
+```
+
+A round fails when its line holds `"isError":true`, `MUTATION_BUSY`,
+`VAULT_LOCK_TIMEOUT`, or no JSON-RPC result.
 
 The worker also inherits the user manager's environment. Run `systemctl --user
 show-environment` first, and add `-p UnsetEnvironment=NAME` to the unit for each
