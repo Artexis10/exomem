@@ -245,9 +245,12 @@ class RelationFit:
         )
 
 
-#: What the agent does when the queue will not write the generic relation for a pair a specific one fits.
+#: What the agent does when the queue will not write the generic relation for a pair a specific one
+#: fits. Naming a relation here takes a recorded vocabulary choice, so the steps run in this order.
 RELATION_CHOICE_REMEDIATION = (
-    "Choose a specific relation, or dismiss the candidate. "
+    "Choose one of the offered relations. Ask a vocabulary question for this candidate, "
+    "record a reuse decision that names the relation, then accept again with requested_relation, "
+    "vocabulary_ref and vocabulary_fingerprint. Or dismiss the candidate. "
     "A generic edge with a reason can be authored on the page."
 )
 
@@ -259,11 +262,13 @@ def require_relation_choice(
     *,
     page: Any | None = None,
     fit: RelationFit | None = None,
+    remediation: str = RELATION_CHOICE_REMEDIATION,
 ) -> None:
     """Refuse to accept the generic relation where a specific one fits; the agent chooses.
 
     Naming no relation takes the candidate's own, so a generic candidate is refused. Naming
-    the generic relation is refused too. Any other registered relation passes.
+    the generic relation is refused too. Any other registered relation passes. `remediation`
+    lets a caller whose door takes other fields name its own next step.
     """
     page = page or _page_for(vault_root, str(candidate.get("from") or ""))
     if page is None:
@@ -279,7 +284,7 @@ def require_relation_choice(
         raise OpError(
             "RELATION_CHOICE_REQUIRED",
             "a specific relation fits these two pages, so the generic relation is not chosen for you",
-            RELATION_CHOICE_REMEDIATION,
+            remediation,
             details={"options": options, "mutated": False},
         )
 

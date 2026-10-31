@@ -1465,6 +1465,10 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 resolved.candidate,
                 args.get("requested_relation"),
                 page=resolved.source_page,
+                remediation=(
+                    "Set requested_relation on the step to one of the offered relations, "
+                    "or dismiss the candidate. A generic edge with a reason can be authored on the page."
+                ),
             )
             prepared = {"candidate": dict(resolved.candidate)}
             after_hash = None
@@ -2594,8 +2598,9 @@ def _dispatch_step(
     if kind == "create-entity":
         return commands.op_connect_memory(vault_root, operation="create-entity", **args)
     if kind == "accept-relation":
-        # The sealed plan binds the chosen relation. The leaf's vocabulary binding belongs to a
-        # reviewed vocabulary decision, which a curation step does not carry.
+        # The sealed plan and its explicit apply bind the chosen relation, which `_prepare_step`
+        # checked against the registry. The public door's vocabulary binding is a recorded choice,
+        # and the lease's curation binding covers entity-instance choices only, so a step has none.
         token = commands._legacy_selected_relation.set("requested_relation" in args)
         try:
             return commands.op_connect_memory(vault_root, operation="accept-relation", **args)

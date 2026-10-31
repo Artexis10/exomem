@@ -2,30 +2,30 @@
 
 Where a specific relation fits both pages, a relation candidate carries those relations and
 queue acceptance needs the agent to name one. Where none fits, acceptance works as before.
-Cases go through the public MCP tools over an initialized vault; the success path calls the
-queue's `accept` directly because the public door also needs a vocabulary review binding that
-is no part of this behaviour.
+Cases go through the public MCP tools over an initialized vault. Naming a relation there takes
+the agent's recorded vocabulary choice: a meaning question, a reuse decision, then the accept.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastmcp import Client
 from test_curation_execution import _apply, _propose
-from test_relation_endpoints import _entity, _served
+from test_relation_endpoints import _entity, _extension, _save_extension, _served
 
 from exomem import (
+    command_surface,
     commands,
     curation,
     epistemic_graph,
     find,
     freshness,
-    relation_queue,
     semantic_contract,
 )
-from exomem import edit as edit_module
 
 NOTES = "Knowledge Base/Notes/Insights"
 
@@ -131,29 +131,128 @@ def test_accepting_without_naming_a_relation_is_refused_and_writes_nothing(
     assert (vault / person).read_bytes() == before
 
 
-def test_accepting_with_an_offered_relation_writes_that_relation(
+def _decided_choice(
+    call, group: dict[str, Any], item: dict[str, Any], relation: str
+) -> dict[str, str]:
+    """The agent's recorded choice of `relation` for the candidate, as the accept route needs it.
+
+    Returns the `vocabulary_ref` and `vocabulary_fingerprint` of the decided meaning question.
+    """
+    asked = call(
+        "triage_memory",
+        {
+            "operation": {
+                "kind": "question",
+                "path": group["path"],
+                "query": f"Which relation fits {item['from']} and {item['to']}?",
+                "family": "relation-type/v1",
+                "ref": item["ref"],
+            }
+        },
+    )
+    reviewed = asked["item"]
+    decided = call(
+        "triage_memory",
+        {
+            "operation": {
+                "kind": "decision",
+                "ref": reviewed["ref"],
+                "action": "decide-vocabulary",
+                "decision": {
+                    "item_ref": reviewed["ref"],
+                    "fingerprint": reviewed["fingerprint"],
+                    "family": reviewed["family"],
+                    "registry_hashes": reviewed["registry_hashes"],
+                    "target_versions": reviewed["target_versions"],
+                    "outcome": "reuse",
+                    "choice": {"canonical": relation},
+                    "rationale": "The offered relation states what the source says.",
+                },
+            }
+        },
+    )
+    assert decided["state"] == "proposed", decided
+    return {
+        "vocabulary_ref": reviewed["ref"],
+        "vocabulary_fingerprint": reviewed["fingerprint"],
+    }
+
+
+def _accept_as(
+    call, group: dict[str, Any], item: dict[str, Any], relation: str, binding: dict[str, str]
+) -> dict[str, Any]:
+    """Accept with a chosen relation. A vocabulary-bound write needs an explicit idempotency key."""
+    arguments = {
+        "operation": {
+            "kind": "accept-relation",
+            "ref": item["ref"],
+            "path": group["path"],
+            "expected_hash": group["content_hash"],
+            "expected_fingerprint": item["fingerprint"],
+            "why": "Reviewed the shared source.",
+            "requested_relation": relation,
+            **binding,
+        }
+    }
+
+    async def keyed() -> dict[str, Any]:
+        async with Client(call.mcp) as client:
+            result = await client.call_tool(
+                "change_connections",
+                arguments,
+                raise_on_error=False,
+                meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "accept-owns-1"},
+            )
+        content = result.structured_content
+        return content["result"] if set(content) == {"result"} else content
+
+    return asyncio.run(keyed())
+
+
+def test_an_offered_relation_the_agent_decided_is_written_as_one_typed_edge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
     group, item = _shared_source_item(call, person, organization)
+    binding = _decided_choice(call, group, item, "owns")
 
-    def edit_memory(vault_root: Path, **kw: Any) -> dict:
-        return edit_module.edit(vault_root, create_missing_section=True, **kw).as_dict()
+    accepted = _accept_as(call, group, item, "owns", binding)
 
-    accepted = relation_queue.accept(
-        vault,
-        ref=item["ref"],
-        expected_hash=group["content_hash"],
-        why="Reviewed the shared source.",
-        expected_fingerprint=item["fingerprint"],
-        requested_relation="owns",
-        edit_memory=edit_memory,
-    )
+    assert "error" not in accepted, accepted
+    relations = [
+        line
+        for line in (vault / person).read_text(encoding="utf-8").splitlines()
+        if f"[[{organization.removesuffix('.md')}]]" in line
+    ]
+    assert relations == [f"- owns [[{organization.removesuffix('.md')}]]"]
 
-    assert accepted["relation_type"] == "owns"
-    assert f"- owns [[{organization.removesuffix('.md')}]]" in (vault / person).read_text(
-        encoding="utf-8"
-    )
+
+def test_a_choice_recorded_before_the_registry_changed_is_refused_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
+    group, item = _shared_source_item(call, person, organization)
+    binding = _decided_choice(call, group, item, "owns")
+    before = (vault / person).read_bytes()
+    _save_extension(call, "vault.keeps", _extension("owns"))
+
+    refused = _accept_as(call, group, item, "owns", binding)
+
+    assert refused["error"]["code"] == "VOCABULARY_DECISION_STALE", refused
+    assert (vault / person).read_bytes() == before
+
+
+def test_a_chosen_relation_without_a_recorded_choice_is_refused_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
+    group, item = _shared_source_item(call, person, organization)
+    before = (vault / person).read_bytes()
+
+    refused = _accept_as(call, group, item, "owns", {})
+
+    assert refused["error"]["code"] == "VOCABULARY_APPLICATION_INVALID", refused
+    assert (vault / person).read_bytes() == before
 
 
 def test_suggest_relations_carries_the_fitting_relations_for_the_pair(
