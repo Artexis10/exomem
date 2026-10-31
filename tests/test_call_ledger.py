@@ -265,6 +265,7 @@ def _fake_mcp_client(monkeypatch, *, name: str, version: str) -> None:
             )
         ),
         session_id="sess-1234",
+        transport="stdio",
     )
     monkeypatch.setattr(dependencies, "get_context", lambda: context)
     monkeypatch.setattr(dependencies, "get_http_headers", lambda **_kw: {})

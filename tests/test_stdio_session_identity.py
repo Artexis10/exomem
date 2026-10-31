@@ -100,4 +100,5 @@ def test_a_notice_one_stdio_connection_created_is_told_to_the_next_connection_no
     assert "recent_promotions" not in creator, "the creating connection never counts its own entry"
     assert second.get("recent_promotions") == 1, "the next connection is told"
     sessions = [row["session_id"] for row in _ledger_rows(tmp_path)]
-    assert sessions[0] == sessions[1] != sessions[2], "two connections are two sessions"
+    # A warming retry adds creator rows, so compare the creator's rows as a set.
+    assert set(sessions[:-1]) == {sessions[0]} != {sessions[-1]}, "two connections are two sessions"

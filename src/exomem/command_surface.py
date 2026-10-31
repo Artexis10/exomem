@@ -1085,13 +1085,19 @@ def mcp_session_id() -> str | None:
     """The conversation session of the active MCP call, or None outside one.
 
     HTTP keeps FastMCP's `session_id` unchanged. stdio returns the process-wide
-    `_STDIO_SESSION_ID`, so every call on one connection shares one session.
+    `_STDIO_SESSION_ID`, so every call on one connection shares one session. The
+    shared id needs both FastMCP's explicit stdio transport (set only by the stdio
+    runner) and no request headers; any other combination keeps the per-call id, so
+    an unexpected transport shares nothing.
     """
     try:
         from fastmcp.server.dependencies import get_context, get_http_headers
 
         context = get_context()
-        if _mcp_transport(get_http_headers(include_all=True)) == "stdio":
+        if (
+            getattr(context, "transport", None) == "stdio"
+            and _mcp_transport(get_http_headers(include_all=True)) == "stdio"
+        ):
             return _STDIO_SESSION_ID
         return str(context.session_id)
     except (AttributeError, ImportError, LookupError, RuntimeError, ValueError):

@@ -870,7 +870,7 @@ def test_mcp_retry_scope_on_stdio_ignores_the_per_call_session_id(monkeypatch) -
     for per_call_id in ("call-1", "call-2"):
         monkeypatch.setattr(
             "fastmcp.server.dependencies.get_context",
-            lambda per_call_id=per_call_id: SimpleNamespace(session_id=per_call_id),
+            lambda per_call_id=per_call_id: SimpleNamespace(session_id=per_call_id, transport="stdio"),
         )
         scopes.append(command_surface.mcp_retry_scope())
     assert scopes[0] == scopes[1] and scopes[0].startswith("session:")
@@ -1922,3 +1922,13 @@ def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monke
     assert result["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
     assert bound(value=7) == {"value": 7}
     assert runs == 1
+
+
+def test_an_http_call_whose_request_is_not_bound_never_gets_the_stdio_session(monkeypatch) -> None:
+    """If FastMCP stopped binding the request, HTTP callers must not share one session."""
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_context",
+        lambda: SimpleNamespace(session_id="http-session-2", transport="streamable-http"),
+    )
+    assert command_surface.mcp_session_id() == "http-session-2"
