@@ -1727,6 +1727,67 @@ class RecallProjectionAdmission:
         return bool(self.lagging_scopes)
 
 
+def _published_catalog_admission(
+    root: Path,
+    *,
+    require_live_projection: bool = False,
+) -> RecallProjectionAdmission | None:
+    """Admit the catalog's own published projection per scope, with no repair.
+
+    The fallback half of :func:`runtime_retrieval_catalog_admission`: every
+    scope needs a well-formed published projection whose policy version and
+    access fingerprint still equal this vault's current identity, and whose
+    semantic catalog identity still matches. A scope whose live projection
+    differs from the published one is reported in ``lagging_scopes``.
+
+    ``require_live_projection`` additionally refuses a scope with no live
+    projection. The request path serves from the published projection then;
+    health does not report that as a lag, because the projection is lost.
+    """
+    from . import freshness as freshness_module
+    from . import recall_policy
+
+    store = get_store(root)
+    identity = recall_policy.recall_policy_identity(root)
+    checkpoints: dict[str, object] = {}
+    lagging: list[str] = []
+    for scope in ("kb", "vault"):
+        published = store.published_recall_checkpoint(scope)
+        if published is None or published.triple is None:
+            return None
+        if (published.policy_version, published.access_policy_fingerprint) != identity:
+            # The projection was published under an access identity this
+            # process no longer has; serving it could disclose pages the
+            # current policy hides. Refuse until republication.
+            return None
+        live = freshness_module.live_recall_checkpoint(root, scope)
+        if require_live_projection and live is None:
+            return None
+        if live is not None and live == published:
+            checkpoints[scope] = live
+            continue
+        checkpoints[scope] = published
+        lagging.append(scope)
+    return RecallProjectionAdmission(checkpoints, tuple(lagging))
+
+
+def served_catalog_lag(vault_root: Path) -> RecallProjectionAdmission | None:
+    """The lag per-request recall can serve, for health to report; else None.
+
+    Called after the strict proof has already failed, so it takes only the
+    published-projection half and schedules no repair. It answers None unless
+    both scopes still have a live projection and a published catalog under an
+    unchanged identity, and at least one scope trails its live projection.
+    """
+    if not maintained_content_index_enabled():
+        # No maintained catalog is served, so nothing trails a projection.
+        return None
+    admission = _published_catalog_admission(Path(vault_root), require_live_projection=True)
+    if admission is None or not admission.lagging_scopes:
+        return None
+    return admission
+
+
 def runtime_retrieval_catalog_admission(
     vault_root: Path,
     *,
@@ -1750,9 +1811,6 @@ def runtime_retrieval_catalog_admission(
     under which those rows still describe what this process may serve. Anything
     else returns None and the caller refuses as before.
     """
-    from . import freshness as freshness_module
-    from . import recall_policy
-
     # Call shape matters, not just the result: the request path has always
     # proved with the vault root alone, and that seam is pinned by callers who
     # substitute their own proof. Only the side-effect-free probe passes the
@@ -1766,29 +1824,11 @@ def runtime_retrieval_catalog_admission(
         return RecallProjectionAdmission(dict(strict), ())
 
     root = Path(vault_root)
-    store = get_store(root)
-    identity = recall_policy.recall_policy_identity(root)
-    checkpoints: dict[str, object] = {}
-    lagging: list[str] = []
-    for scope in ("kb", "vault"):
-        published = store.published_recall_checkpoint(scope)
-        if published is None or published.triple is None:
-            return None
-        if (published.policy_version, published.access_policy_fingerprint) != identity:
-            # The projection was published under an access identity this
-            # process no longer has; serving it could disclose pages the
-            # current policy hides. Refuse until republication.
-            return None
-        live = freshness_module.live_recall_checkpoint(root, scope)
-        if live is not None and live == published:
-            checkpoints[scope] = live
-            continue
-        checkpoints[scope] = published
-        lagging.append(scope)
-    if schedule_repair:
+    admission = _published_catalog_admission(root)
+    if admission is not None and schedule_repair:
         # Serving stale is a bridge, not a resting state: keep converging.
         _schedule_runtime_catalog_repair(root, lag_only=True)
-    return RecallProjectionAdmission(checkpoints, tuple(lagging))
+    return admission
 
 
 def runtime_retrieval_catalog_current(

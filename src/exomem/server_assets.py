@@ -230,6 +230,15 @@ def register_health_routes(
     def _reusable(snapshot: object) -> bool:
         if not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
             return False
+        # A served catalogue lag is a state the process can lose without
+        # moving any generation the token watches (the live projection can go
+        # at any moment), and its age field moves on every probe.
+        retrieval = snapshot.get("retrieval")
+        if (
+            isinstance(retrieval, dict)
+            and retrieval.get("state") == runtime_readiness_module.RETRIEVAL_STATE_LAGGING
+        ):
+            return False
         # A standby is polled every 0.1 s for its `cutover` block, which moves
         # while its serving status stays ready.
         cutover = snapshot.get("cutover")
@@ -342,7 +351,8 @@ def register_health_routes(
 
         A ready proof answers later probes for up to
         `READINESS_SUCCESS_TTL_SECONDS`, and `proof_age_seconds` says how old the
-        answer is. A not-ready proof is never reused."""
+        answer is. A not-ready proof, or one reporting a catalogue lag, is never
+        reused."""
         traffic = _record_health_probe()
         digest = getattr(mcp_app, "_exomem_tool_surface_sha256", None)
         if digest is None:

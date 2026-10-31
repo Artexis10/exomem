@@ -68,6 +68,32 @@ def test_committed_mutation_is_journaled_with_timing(
     assert record["targets"]
 
 
+def test_wide_command_journals_its_own_hold_not_a_later_housekeeping_hold(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    """A wide command's hold is what blocks every other caller, so the journal must
+    report it, not the short hold that post-terminal housekeeping takes afterwards."""
+    import time
+
+    from exomem import writer_lease
+
+    manager = _standalone_manager(tmp_path / "state")
+
+    def housekeeping() -> None:
+        with manager.mutation_guard("standalone", operation="housekeeping", holder_kind="background"):
+            pass
+
+    def leaf() -> str:
+        assert writer_lease.defer_housekeeping_until_terminal_persisted(housekeeping)
+        time.sleep(0.3)
+        return "ok"
+
+    assert manager.invoke(_command(writes=True, leaf=leaf), (), {}, mutation_request_id="req-wide") == "ok"
+
+    (record,) = _read_journal(_journal_log_dir)
+    assert record["boundary_hold_ms"] >= 300
+
+
 def test_failed_mutation_is_journaled_with_error_code(
     tmp_path: Path, _journal_log_dir: Path
 ) -> None:

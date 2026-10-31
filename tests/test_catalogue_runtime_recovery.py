@@ -121,15 +121,26 @@ def test_readiness_only_traffic_recovers_a_failed_catalogue_publication(
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app.http_app()), base_url="http://cell.test"
             ) as client:
-                assert (await client.get("/health/ready")).status_code == 503
+                lagging = await client.get("/health/ready")
+                if during_startup:
+                    # Never proved: a replacement still waits for a strict proof.
+                    assert lagging.status_code == 503
+                else:
+                    # Proved, then lagging: routable while repair converges.
+                    assert lagging.status_code == 200, lagging.json()
+                    assert lagging.json()["retrieval"]["state"] == "lagging"
                 allow_publication.set()
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
                     response = await client.get("/health/ready")
-                    if response.status_code == 200:
+                    if (
+                        response.status_code == 200
+                        and response.json()["retrieval"]["state"] == "ready"
+                    ):
                         break
                     await asyncio.sleep(0.01)
                 assert response.status_code == 200, response.json()
+                assert response.json()["retrieval"]["state"] == "ready", response.json()
                 assert await asyncio.to_thread(admitted.wait, 3)
                 assert await asyncio.to_thread(lexstore.await_repairs_idle, vault, 3)
                 assert len(publication_attempts) == 2
