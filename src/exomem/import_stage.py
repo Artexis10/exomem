@@ -8,7 +8,8 @@ none, so nothing in them is consumable.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import private_state, state_migration, state_paths, vault
@@ -20,27 +21,72 @@ LOCAL_RECORDS = "local-imports"
 CLOUD_PROOF = "cloud-receipt"
 LOCAL_PROOF = "local-record"
 MEMBERS_KEY = "members"
+IDENTITY_KEY = "identity"
 
 
-def member(path: str, size: int, sha256: str) -> dict:
-    """One manifest entry: the file's path relative to `_Imports/<import_id>/`, its size and SHA-256."""
-    return {"path": path, "size": size, "sha256": sha256}
+@dataclass(frozen=True, slots=True)
+class Identity:
+    """What a staged file's stat says about it, without the device number.
+
+    Each pod can see one volume under another device number, so the device is never part of it.
+    A backup restore gives a file another inode and cannot set its change time, which is how a
+    mismatch shows that the file may hold other bytes.
+    """
+
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    @classmethod
+    def of(cls, info: os.stat_result) -> Identity:
+        return cls(info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def record(self) -> dict:
+        return {"inode": self.inode, "size": self.size, "mtime_ns": self.mtime_ns, "ctime_ns": self.ctime_ns}
+
+
+def member(path: str, size: int, sha256: str, identity: Identity | None = None) -> dict:
+    """One manifest entry: the file's path relative to `_Imports/<import_id>/`, its size and SHA-256.
+
+    A Job that staged the file also records its `identity`, read after it set the file's time.
+    """
+    entry = {"path": path, "size": size, "sha256": sha256}
+    if identity is not None:
+        entry[IDENTITY_KEY] = identity.record()
+    return entry
 
 
 @dataclass(frozen=True, slots=True)
 class Stage:
-    """A stage with a manifest: `members` maps each listed path to its (size, SHA-256)."""
+    """A stage with a manifest: `members` maps each listed path to its (size, SHA-256).
+
+    `identities` holds the identity of each member that has a well-formed one; a member without
+    one is hashed before adoption trusts it.
+    """
 
     import_id: str
     proof: str
     members: dict[str, tuple[int, str]]
+    identities: dict[str, Identity] = field(default_factory=dict)
 
 
-def _read_members(entries: object) -> dict[str, tuple[int, str]] | None:
-    """The manifest as a map, or None when it is malformed: a manifest that cannot be trusted lists nothing."""
+def _read_identity(value: object) -> Identity | None:
+    """An entry's identity, or None when it has none or a malformed one (both mean: hash the file)."""
+    if not isinstance(value, dict):
+        return None
+    fields = [value.get(key) for key in ("inode", "size", "mtime_ns", "ctime_ns")]
+    if any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in fields):
+        return None
+    return Identity(*fields)
+
+
+def _read_members(entries: object) -> tuple[dict[str, tuple[int, str]], dict[str, Identity]] | None:
+    """The manifest as maps, or None when it is malformed: a manifest that cannot be trusted lists nothing."""
     if not isinstance(entries, list):
         return None
     members: dict[str, tuple[int, str]] = {}
+    identities: dict[str, Identity] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             return None
@@ -49,7 +95,10 @@ def _read_members(entries: object) -> dict[str, tuple[int, str]] | None:
                 or not isinstance(size, int) or isinstance(size, bool) or size < 0):
             return None
         members[path] = (size, digest)
-    return members
+        identity = _read_identity(entry.get(IDENTITY_KEY))
+        if identity is not None:
+            identities[path] = identity
+    return members, identities
 
 
 def _load(path: Path) -> dict | None:
@@ -74,14 +123,14 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
         return None
     receipt = _load(state / CLOUD_RECEIPTS / f"{import_id}.json")
     if receipt is not None and (receipt.get("request") or {}).get("kind") == "adopt":
-        members = _read_members(receipt.get(MEMBERS_KEY))
-        if members is not None:
-            return Stage(import_id, CLOUD_PROOF, members)
+        manifest = _read_members(receipt.get(MEMBERS_KEY))
+        if manifest is not None:
+            return Stage(import_id, CLOUD_PROOF, *manifest)
     record = _load(state / LOCAL_RECORDS / f"{import_id}.json")
     if record is not None:
-        members = _read_members(record.get(MEMBERS_KEY))
-        if members is not None:
-            return Stage(import_id, LOCAL_PROOF, members)
+        manifest = _read_members(record.get(MEMBERS_KEY))
+        if manifest is not None:
+            return Stage(import_id, LOCAL_PROOF, *manifest)
     return None
 
 

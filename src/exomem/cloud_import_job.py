@@ -163,6 +163,14 @@ def run_import(
         errors: list[BaseException] = []
         # An adopt import lists the staged files in its receipt, hashed as they are unpacked.
         members: list[dict] = []
+
+        def record_member(path: str, size: int, digest: str) -> None:
+            # `unpack_stream` has set the file's time by now, and the directory rename below keeps the
+            # file's inode, size and times. A retry that keeps an earlier stage keeps its files, so
+            # those identities differ and adoption then hashes the files.
+            staged = import_stage.Identity.of((staging / path).stat())
+            members.append(import_stage.member(path, size, digest, staged))
+
         process = subprocess.Popen(
             ["age", "-d", "-i", str(identity)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -186,10 +194,7 @@ def run_import(
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
                         max_members=int(os.environ.get("EXOMEM_IMPORT_MAX_MEMBERS", DEFAULT_MAX_MEMBERS)),
                         reserve_bytes=reserve_bytes_from_env(),
-                        on_file=(
-                            (lambda path, size, digest: members.append(import_stage.member(path, size, digest)))
-                            if request.kind == "adopt" else None
-                        ),
+                        on_file=record_member if request.kind == "adopt" else None,
                     )
             except ArchiveRefused:
                 # age can close its output before it exits, so one poll races a wrong key. Its output is

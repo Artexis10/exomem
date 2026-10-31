@@ -407,3 +407,16 @@ def test_discard_removes_the_manifest_with_the_stage_and_keep_adoption_keeps_bot
     assert not (vault / "_Imports" / discarded).exists()
     receipt = _receipt(vault, discarded)
     assert "members" not in receipt and receipt["request"]["import_id"] == discarded
+
+
+def test_adopt_receipt_records_each_staged_files_identity_as_the_job_left_it(vault, tmp_path, monkeypatch):
+    """Catches an identity read before the Job sets the file's time, or one that carries the device number."""
+    import_id = _adopt_import(vault, tmp_path, monkeypatch, {
+        "notes/alpha.md": b"Invented alpha note\n", "scans/deep/beta.pdf": b"%PDF invented bytes"})
+    staged = vault / "_Imports" / import_id
+    members = _receipt(vault, import_id)["members"]
+    assert len(members) == 2
+    for entry in members:
+        info = (staged / entry["path"]).stat()
+        assert entry["identity"] == {
+            "inode": info.st_ino, "size": info.st_size, "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}
