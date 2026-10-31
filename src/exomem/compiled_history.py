@@ -148,6 +148,10 @@ def plan_entry(
         "prior": {"source": preflight.exact_before_source},
         "binding": metadata.payload,
     }
+    # The release that planned the transition, taken from the token so an exact
+    # retry re-plans identical bytes; a token minted before this field lacks it.
+    if "exomem_version" in token:
+        entry["exomem_version"] = token["exomem_version"]
     guard = vault.PathGuard.capture(root, path.relative_to(root).as_posix(), leaf_policy="absent")
     return vault.PlannedWrite(
         path,
