@@ -30,7 +30,6 @@ import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
-from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
@@ -192,8 +191,6 @@ from .vault import (
 from .viewer_map import op_viewer_map
 
 log = logging.getLogger(__name__)
-
-_legacy_selected_relation = ContextVar("legacy_selected_relation", default=False)
 
 _link_summary = link_summary_module.link_summary
 _QueryFilters = _public_filter_annotation()
@@ -1171,12 +1168,13 @@ def op_bootstrap(
         "extension_count": len(relation_registry.extensions),
         "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
-            "Resolve truthfully: specific, relates_to or no edge. Propose durable recurring "
-            "meaning, never automatically from questions. Hash-guard saves. New meaning uses a "
-            "new canonical key; deprecate replaced key."
+            "Resolve truthfully: a specific relation first; relates_to only for a real generic "
+            "link, with a reason when it joins an entity where a specific one fits; else no edge. "
+            "Propose durable recurring meaning, never automatically from questions. Hash-guard "
+            "saves. New meaning uses a new canonical key; deprecate replaced key."
             if profile == "compact" else
             (
-                "resolve: specific truthful, relates_to generic/no edge. "
+                "resolve: specific truthful first; relates_to generic (reason on an entity edge where a specific fits)/no edge. "
                 "propose-relation only for durable recurring meaning; explicit question is "
                 "consideration, never automatic type. Hash guard save-relations; new canonical "
                 "key deprecates old"
@@ -2014,6 +2012,13 @@ def op_bootstrap(
                     "relation_review_hash, and an explicit bounded relation_review_reason; "
                     "never fabricate a none decision or infer review from missing relations"
                 ),
+                "generic": (
+                    "a new generic edge to an entity, where a specific relation fits, is refused "
+                    "with GENERIC_RELATION_NEEDS_REASON and up to four options: write one, or "
+                    'commit with relation_disposition="generic", the returned '
+                    "relation_review_hash and a bounded relation_review_reason; a create-entity "
+                    "relations item takes reason"
+                ),
                 "adoption_handoff": (
                     f"{call_text('adopt_vault', {'mode': 'compile-selected'})} returns a proposal only; review "
                     "it, then call create_note() so normal semantic precommit still applies"
@@ -2024,7 +2029,8 @@ def op_bootstrap(
                     "rule": (
                         "validate the exact edit; retain transition_token and "
                         "relation_review_hash; commit that edit unchanged with an explicit "
-                        "reviewed_none reason only when no truthful relation applies"
+                        "reviewed_none reason only when no truthful relation applies, or "
+                        "relation_disposition generic with a reason for a generic entity edge"
                     )
                 }
                 if profile == "compact"
@@ -2063,7 +2069,8 @@ def op_bootstrap(
                     "rule": (
                         "retain semantic.transition_token and "
                         "semantic.relation_review_hash from validation; commit the "
-                        "identical proposed edit with a bounded reason"
+                        "identical proposed edit with a bounded reason: reviewed_none, or "
+                        "generic for a generic entity edge"
                     ),
                 }
             ),
@@ -10441,7 +10448,7 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
-        if requested_relation is not None and not _legacy_selected_relation.get() and (
+        if requested_relation is not None and (
             vocabulary_ref is None or vocabulary_fingerprint is None
         ):
             raise ValueError(
