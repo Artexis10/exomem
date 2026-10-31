@@ -715,6 +715,19 @@ def test_apply_persists_verify_block_and_status_reuses_recorded_counts(
     assert finished["finish"]["verified_total"] == 3
 
 
+def test_a_repeat_apply_counts_an_original_deleted_since_the_first_apply_as_changed(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    run_id = adoption_run.start(vault, today=TODAY)["run_id"]
+    _select_all(vault, run_id)
+    plan_id = adoption_run.plan(vault, run_id=run_id, today=TODAY)["plan"]["plan_id"]
+    adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    (vault / "Old Notes/quarterly-planning.md").unlink()
+
+    again = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+
+    assert (again["verified_unchanged"], again["verified_total"]) == (2, 3)
+
+
 def test_verify_counts_absent_before_any_apply(tmp_path: Path) -> None:
     """Never fabricate: a run with no applied outcomes carries no verify fields."""
     vault = _legacy_vault(tmp_path)

@@ -3350,6 +3350,26 @@ class EpistemicGraphIndex:
         return True, title or None
 
     @staticmethod
+    def _live_resolver_entry(
+        resolver: vault_module.WikilinkResolver, rel: str
+    ) -> tuple[bool, str | None]:
+        """A page's entry in `resolver`, comparable with `_stored_resolver_entry`."""
+        return rel.removesuffix(".md") in resolver.full_paths, resolver.title_key_for_path(rel)
+
+    @staticmethod
+    def _resolver_before(
+        resolver: vault_module.WikilinkResolver,
+        stored_entries: dict[str, tuple[bool, str | None]],
+    ) -> vault_module.WikilinkResolver:
+        """A fork of `resolver` with each page put back to its stored entry."""
+        before = resolver.fork()
+        before.on_entries_changed(
+            [(rel, title) for rel, (present, title) in stored_entries.items() if present],
+            [rel for rel, (present, _title) in stored_entries.items() if not present],
+        )
+        return before
+
+    @staticmethod
     def _read_topology_carry(
         conn: sqlite3.Connection,
     ) -> dict[str, tuple[bool, str | None]] | None:
@@ -3433,11 +3453,7 @@ class EpistemicGraphIndex:
         differing = {
             rel
             for rel, entry in rows.items()
-            if entry
-            != (
-                rel.removesuffix(".md") in resolver.full_paths,
-                resolver.title_key_for_path(rel),
-            )
+            if entry != self._live_resolver_entry(resolver, rel)
         }
         kb = self.vault_root / kb_dirname()
         prefix = kb_prefix()
@@ -3504,10 +3520,9 @@ class EpistemicGraphIndex:
         """
         entries = {rel: self._stored_resolver_entry(conn, rel) for rel in residue}
         for rel, entry in (carry or {}).items():
-            if rel not in residue and self._stored_resolver_entry(conn, rel) != (
-                rel.removesuffix(".md") in resolver.full_paths,
-                resolver.title_key_for_path(rel),
-            ):
+            if rel not in residue and self._stored_resolver_entry(
+                conn, rel
+            ) != self._live_resolver_entry(resolver, rel):
                 return False
             entries[rel] = entry
         present = [(rel, title) for rel, (exists, title) in sorted(entries.items()) if exists]
@@ -5973,15 +5988,25 @@ class EpistemicGraphIndex:
             # guess, and a missed one publishes a stale edge as available.
             if not self._dependency_index_complete(conn):
                 return None
-            sources = self._dependency_sources_for_keys(
-                conn, _dependency_changed_keys(rels, resolver)
-            )
+            return self._fragment_sources(conn, rels, resolver)
         except sqlite3.Error:
             return None
         finally:
             if conn is not None:
                 conn.rollback()
                 conn.close()
+
+    @classmethod
+    def _fragment_sources(
+        cls, conn: sqlite3.Connection, rels: set[str], resolver: vault_module.WikilinkResolver
+    ) -> set[str]:
+        """Pages whose persisted raw targets name `rels` with a `#` fragment.
+
+        A fragment lands on a unit that the target's own bytes decide. These
+        pages re-derive whenever `rels` changed, even when no title or existence
+        moved.
+        """
+        sources = cls._dependency_sources_for_keys(conn, _dependency_changed_keys(rels, resolver))
         return {source for source, raw_target in sources if "#" in raw_target} - rels
 
     def _resolver_affected_sources(
@@ -6637,11 +6662,7 @@ class EpistemicGraphIndex:
             self._mark_unavailable()
             return fallback("resolver_snapshot_unavailable")
         topology_changed = any(
-            (
-                rel.removesuffix(".md") in resolver.full_paths,
-                resolver.title_key_for_path(rel),
-            )
-            != old_entry
+            self._live_resolver_entry(resolver, rel) != old_entry
             for rel, old_entry in stored_entries.items()
         )
         delta_rels = {
@@ -6666,15 +6687,7 @@ class EpistemicGraphIndex:
                 self._mark_unavailable()
                 return fallback("stored_topology_unreadable")
             indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
-            old_resolver = resolver.fork()
-            old_resolver.on_entries_changed(
-                [
-                    (rel, title)
-                    for rel, (present, title) in stored_entries.items()
-                    if present
-                ],
-                [rel for rel, (present, _title) in stored_entries.items() if not present],
-            )
+            old_resolver = self._resolver_before(resolver, stored_entries)
             if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
                 self._mark_unavailable()
                 return fallback("stored_topology_fingerprint_mismatch")
@@ -7021,8 +7034,27 @@ class EpistemicGraphIndex:
         rels: set[str],
         *,
         resolver: vault_module.WikilinkResolver,
+        owns_topology: bool = False,
     ) -> set[str] | None:
-        """Find topology dependants from complete persisted raw dependencies."""
+        """Find topology dependants from complete persisted raw dependencies.
+
+        A linker's rows read its target through three things only: how the
+        resolver resolves the name, whether the target exists (`_target_kind`),
+        and where a `#` fragment lands (`_relation_destination`). The
+        incremental refresh already widens on that model (`_refresh_paths_locked`
+        re-derives `_fragment_dependants` alone while no stored entry moved).
+
+        `owns_topology` is `_drain_owns_topology` for these `rels`: every
+        difference between the resolver and the stored topology is then a queued
+        page, so a queued page whose existence and title the stored row already
+        records moved no resolution or existence. Only the pages that moved
+        widen to every linker by key; the others widen to their fragment
+        dependants. A queued page with no row counts as moved: no row says
+        whether it existed, and a linker's edge to a Records page that exists
+        is suppressed, so the page's later deletion moves that edge. Without
+        `owns_topology` any difference may be outside `rels`, and every queued
+        page widens by key.
+        """
         opened_snapshot = not conn.in_transaction
         if opened_snapshot:
             conn.execute("BEGIN")
@@ -7030,20 +7062,19 @@ class EpistemicGraphIndex:
             if opened_snapshot:
                 conn.rollback()
             return None
-        appeared: set[str] = set()
+        unindexed: set[str] = set()
         vanished: set[str] = set()
-        old_titles: set[str] = set()
+        old_titles: dict[str, str] = {}
         for rel in rels:
             row = conn.execute(
                 "SELECT title FROM graph_nodes WHERE path = ? AND kind = 'file'", (rel,)
             ).fetchone()
             indexed = row is not None
             if row is not None and row[0] is not None and str(row[0]).strip():
-                old_titles.add(str(row[0]).strip().casefold())
-            exists = (self.vault_root / rel).exists()
-            if exists and not indexed:
-                appeared.add(rel)
-            elif indexed and not exists:
+                old_titles[rel] = str(row[0]).strip().casefold()
+            if not indexed:
+                unindexed.add(rel)
+            elif not (self.vault_root / rel).exists():
                 vanished.add(rel)
 
             # A changed non-KB target that has no persisted file row cannot
@@ -7054,6 +7085,14 @@ class EpistemicGraphIndex:
                     conn.rollback()
                 return None
 
+        moved = {
+            rel
+            for rel in rels
+            if not owns_topology
+            or rel in unindexed
+            or rel in vanished
+            or self._stored_resolver_entry(conn, rel) != self._live_resolver_entry(resolver, rel)
+        }
         affected: set[str] = set()
         for rel in vanished:
             affected.update(
@@ -7063,11 +7102,14 @@ class EpistemicGraphIndex:
                     (_file_key(rel),),
                 )
             )
-        keys = _dependency_changed_keys(rels, resolver) | old_titles
+        keys = _dependency_changed_keys(moved, resolver) | {
+            title for rel, title in old_titles.items() if rel in moved
+        }
         affected.update(
             source_path
             for source_path, _raw_target in self._dependency_sources_for_keys(conn, keys)
         )
+        affected.update(self._fragment_sources(conn, rels - moved, resolver))
         if opened_snapshot:
             conn.rollback()
         return affected - rels
@@ -7187,17 +7229,23 @@ class EpistemicGraphIndex:
             }
             probe = self._connect()
             try:
-                affected = self._topology_affected_sources(
-                    probe, queued_rels, resolver=resolver
-                )
+                # One snapshot, so the ownership proof and the widening that
+                # relies on it read the same rows.
+                if not probe.in_transaction:
+                    probe.execute("BEGIN")
                 # Decided on the pre-pass rows, which still carry the stored
                 # titles; inside the publication hook the rows already hold the
                 # new ones, and reverting to them would prove nothing. Only the
                 # queued pages explain topology: widening follows their keys,
-                # so an affected page's own retitle was never widened.
+                # so an affected page's own retitle was never widened. Decided
+                # before the widening, which narrows to what moved only when
+                # these pages explain every change.
                 carry = self._read_topology_carry(probe)
-                owns_topology = affected is not None and self._drain_owns_topology(
+                owns_topology = self._drain_owns_topology(
                     probe, resolver, queued_rels, carry
+                )
+                affected = self._topology_affected_sources(
+                    probe, queued_rels, resolver=resolver, owns_topology=owns_topology
                 )
                 carry_after = (
                     None
@@ -13344,13 +13392,30 @@ def _nodes_by_keys(conn: sqlite3.Connection, keys: set[str]) -> list[dict[str, A
     return [n for n in nodes if n is not None]
 
 
+def _one_resolver(vault_root: Path) -> Callable[[], vault_module.WikilinkResolver]:
+    """One wikilink resolver for a whole candidate pass, built on first use.
+
+    Without one, `normalize_wikilink` walks the vault for every bare link, so
+    a link-dense page cost one walk per link (a 74-minute call on 2026-10-29).
+    """
+    built: list[vault_module.WikilinkResolver] = []
+
+    def factory() -> vault_module.WikilinkResolver:
+        if not built:
+            built.append(find_module.writer_resolver_snapshot(vault_root))
+        return built[0]
+
+    return factory
+
+
 def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    resolver_factory = _one_resolver(vault_root)
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                _page_target(target), vault_root, strict=False
+                _page_target(target), vault_root, strict=False, resolver_factory=resolver_factory
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
@@ -14130,11 +14195,12 @@ def _draft_wikilink_candidates(
 ) -> list[dict[str, Any]]:
     pseudo = f"draft:{draft_title or 'untitled'}"
     candidates: list[dict[str, Any]] = []
+    resolver_factory = _one_resolver(vault_root)
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                _page_target(target), vault_root, strict=False
+                _page_target(target), vault_root, strict=False, resolver_factory=resolver_factory
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
