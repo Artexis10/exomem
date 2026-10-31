@@ -187,6 +187,8 @@ class ClusterObservation:
 
     namespace_exists: bool = False
     namespace_cell_label: str | None = None
+    # D12: whether the namespace carries the label the media edge's network wall admits.
+    namespace_media_edge_access: bool = False
     # D4: the operator's `exomem.io/volume-lost` mark on the namespace, naming
     # the recorded volume that no disk holds, so the cell is relocated.
     namespace_volume_lost: str | None = None

@@ -1174,6 +1174,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         BACKUP_RETRY_MINUTES_ANNOTATION,
         HOLD_ANNOTATION,
         HOLD_STARTED_ANNOTATION,
+        MEDIA_EDGE_ACCESS_LABEL,
         PRE_UPGRADE_SNAPSHOT_ANNOTATION,
         PREVIOUS_IMAGE_ANNOTATION,
         RENDER_DIGEST_ANNOTATION,
@@ -1185,11 +1186,13 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
 
     statefulset = cluster.applied[(namespace_name(cell_id), "StatefulSet", "cell")]
     annotations = statefulset["metadata"]["annotations"]
+    namespace_labels = cluster.applied[("", "Namespace", namespace_name(cell_id))]["metadata"]["labels"]
     image = statefulset["spec"]["template"]["spec"]["containers"][0]["image"]
     running = statefulset["spec"]["replicas"] > 0
     fields: dict[str, object] = dict(
         namespace_exists=True,
         namespace_cell_label=cell_id,
+        namespace_media_edge_access=namespace_labels.get(MEDIA_EDGE_ACCESS_LABEL) == "true",
         pvc_bound=True,
         pvc_uid="pvc-uid-1",
         pv_claim_ref_uid="pvc-uid-1",

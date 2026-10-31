@@ -46,6 +46,7 @@ from .manifests import (
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
     MEDIA_CENSUS_UNKNOWN,
+    MEDIA_EDGE_ACCESS_LABEL,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
     PREVIOUS_IMAGE_ANNOTATION,
@@ -525,7 +526,8 @@ class ClusterClient:
         self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None,
         family_secret_references: frozenset[tuple[str, str]] | None = frozenset(),
     ) -> ClusterObservation:
-        namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
+        namespace_labels = namespace_obj.metadata.labels or {}
+        namespace_cell_label = namespace_labels.get(CELL_LABEL)
         namespace_annotations = getattr(namespace_obj.metadata, "annotations", None) or {}
         namespace_volume_lost = namespace_annotations.get(VOLUME_LOST_ANNOTATION)
         namespace_move_volume = namespace_annotations.get(MOVE_VOLUME_ANNOTATION)
@@ -673,6 +675,7 @@ class ClusterClient:
         return ClusterObservation(
             namespace_exists=True,
             namespace_cell_label=namespace_cell_label,
+            namespace_media_edge_access=namespace_labels.get(MEDIA_EDGE_ACCESS_LABEL) == "true",
             pvc_bound=pvc_bound,
             pvc_volume_id=pvc_volume_id,
             pvc_uid=pvc_uid,

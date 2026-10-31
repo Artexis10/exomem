@@ -291,6 +291,8 @@ artifactBroker:
 # allowance, eviction and hydration settings cells read beside their keys. Create the
 # signing key and the edge's Secrets first (docs/runbooks/cloud-media-edge.md).
 mediaEdge:
+  # An upgrade to false is refused while the live active set lists a cell, draining
+  # cells included. `helm template`, a client-side dry run and `helm rollback` skip it.
   enabled: false
   endpoint: ""
   cellIds: []

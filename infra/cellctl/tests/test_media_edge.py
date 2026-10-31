@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import dataclasses
 import json
 import math
@@ -31,6 +32,7 @@ from .test_reconcile import (
     FakeClusterGateway,
     _cluster_config,
     _converged_cell,
+    _observed_from_applied,
     _secrets_config,
     _seed_cell,
 )
@@ -630,6 +632,29 @@ async def test_the_edge_access_label_stays_while_served_or_draining_and_leaves_w
         await fleet.close()
 
 
+async def test_a_served_cell_whose_live_namespace_lacks_the_edge_label_gets_it_on_the_next_pass(cell_db) -> None:
+    # The chart keys the edge's network wall on the label as it rolls out, before any render carried it. A
+    # served cell left to its next digest re-apply could not reach the edge until then.
+    fleet = await _fleet(cell_db, CANARY)
+    namespace = ("", "Namespace", namespace_name(CANARY))
+    try:
+        await fleet.run()
+        fleet.cluster.observations[CANARY] = _observed_from_applied(fleet.cluster, CANARY)
+        await fleet.run(NOW + timedelta(minutes=1))
+        unlabelled = copy.deepcopy(fleet.cluster.applied[namespace])
+        del unlabelled["metadata"]["labels"][MEDIA_EDGE_ACCESS_LABEL]
+        fleet.cluster.applied[namespace] = unlabelled
+        fleet.cluster.observations[CANARY] = _observed_from_applied(fleet.cluster, CANARY)
+        before = len(fleet.cluster.events)
+        await fleet.run(NOW + timedelta(minutes=2))
+
+        assert fleet.cluster.applied[namespace]["metadata"]["labels"].get(MEDIA_EDGE_ACCESS_LABEL) == "true"
+        # The label alone: no StatefulSet apply, so the pod keeps running untouched.
+        assert fleet.cluster.events[before:] == []
+    finally:
+        await fleet.close()
+
+
 async def test_a_cell_served_again_forgets_its_earlier_turn_off(cell_db) -> None:
     # A report from while it was served again must not count for its next turn-off.
     fleet = await _fleet(cell_db, CANARY)
@@ -722,28 +747,6 @@ async def test_one_unreadable_custody_observation_does_not_stop_the_pass_for_eve
         assert set(fleet.cluster.published()["cells"]) == {CANARY, OTHER}
     finally:
         await owner.close()
-        await fleet.close()
-
-
-async def test_with_the_edge_off_cellctl_stops_at_startup_until_every_keyed_cell_has_drained(cell_db, tmp_path) -> None:
-    # Started with the edge off, cellctl would take an undrained cell to its store identity alone and
-    # leave every evicted original unreadable. Stopping fails the deploy, so the edge stays on.
-    fleet = await _fleet(cell_db, CANARY)
-    try:
-        await fleet.run()
-        edge_off = dataclasses.replace(fleet.config, media_edge=None)
-
-        with pytest.raises(reconcile.MediaStoreNotDrained, match=CANARY):
-            await asyncio.wait_for(reconcile.run_loop(
-                cell_db.dsn(role="exomem_cellctl"), EdgeCluster(), FakeB2(), FakeHetznerVolumeProvider(),
-                _secrets_config(), edge_off, heartbeat_path=str(tmp_path / "heartbeat")), timeout=20)
-
-        _turn_off(fleet)
-        await fleet.run(NOW + timedelta(minutes=5))
-        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=10))
-        await fleet.run(NOW + timedelta(minutes=15))
-        assert (await reconcile._observe_media_key_columns(fleet.connection, edge_off)).media_edge is None
-    finally:
         await fleet.close()
 
 

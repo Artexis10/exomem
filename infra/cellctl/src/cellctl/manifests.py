@@ -320,10 +320,14 @@ class CellManifestSpec:
 
 
 def _labels(spec: CellManifestSpec) -> dict[str, str]:
+    return _cell_labels(spec.cell_id)
+
+
+def _cell_labels(cell_id: str) -> dict[str, str]:
     return {
         "app.kubernetes.io/name": "exomem-cell",
         "app.kubernetes.io/part-of": "exomem-cloud",
-        "exomem.io/cell": spec.cell_id,
+        "exomem.io/cell": cell_id,
     }
 
 
@@ -335,24 +339,29 @@ def _selector_labels(spec: CellManifestSpec) -> dict[str, str]:
 
 
 def render_namespace(spec: CellManifestSpec) -> dict:
+    return render_cell_namespace(spec.cell_id, media_edge_access=bool(spec.media_edge_url))
+
+
+def render_cell_namespace(cell_id: str, *, media_edge_access: bool) -> dict:
+    """A cell's namespace with every label cellctl owns on it, so an apply of it alone drops none."""
     return {
         "apiVersion": "v1",
         "kind": "Namespace",
         "metadata": {
-            "name": spec.namespace,
+            "name": namespace_name(cell_id),
             "labels": {
-                **_labels(spec),
-                "exomem.io/cloud-cell": spec.cell_id,
+                **_cell_labels(cell_id),
+                "exomem.io/cloud-cell": cell_id,
                 "pod-security.kubernetes.io/enforce": "restricted",
                 "pod-security.kubernetes.io/enforce-version": POD_SECURITY_VERSION,
                 "pod-security.kubernetes.io/audit": "restricted",
                 "pod-security.kubernetes.io/audit-version": POD_SECURITY_VERSION,
                 "pod-security.kubernetes.io/warn": "restricted",
                 "pod-security.kubernetes.io/warn-version": POD_SECURITY_VERSION,
-                # D12: the label follows the credential, so it leaves in the render that drops the credential,
-                # never earlier. This namespace applies first in that render (simplest choice: one render, no
-                # second namespace apply), and the active-set entry leaves at the next pass's start.
-                **({MEDIA_EDGE_ACCESS_LABEL: "true"} if spec.media_edge_url else {}),
+                # D12: the label follows the credential. In the render that drops the credential the namespace
+                # applies before the Secret, so the label leaves first and the credential next; the active-set
+                # entry leaves at the next pass's start.
+                **({MEDIA_EDGE_ACCESS_LABEL: "true"} if media_edge_access else {}),
             },
         },
     }

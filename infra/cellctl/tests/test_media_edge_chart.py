@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import subprocess
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,6 +21,7 @@ from .test_platform_chart_headers import (
     ARTIFACT_BROKER_ARGS,
     HELM,
     PLATFORM_CHART,
+    REPO_ROOT,
     _find,
     _helm_template,
     _helm_template_result,
@@ -248,3 +255,91 @@ def test_unusable_edge_settings_refuse_the_render(override: tuple[str, str]) -> 
 
 def test_a_cell_list_without_the_edge_refuses_the_render() -> None:
     assert _helm_template_result("--set-json", f'mediaEdge.cellIds=["{CANARY}"]').returncode != 0
+
+
+@contextlib.contextmanager
+def _api_server(active_set_json: str | None) -> Iterator[str]:
+    """A local stand-in for the Kubernetes API that answers the chart's `lookup` calls: the edge's
+    active set when given, and 404 for every other object. Offline, `helm template` skips `lookup`."""
+    active_set = f"/api/v1/namespaces/{NAMESPACE}/configmaps/exomem-media-edge-active-set"
+
+    class Api(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - the http.server hook name
+            path = self.path.split("?")[0]
+            if path == "/api/v1":
+                code, body = 200, {"kind": "APIResourceList", "groupVersion": "v1", "resources": [
+                    {"name": "configmaps", "namespaced": True, "kind": "ConfigMap", "verbs": ["get"]}]}
+            elif path == active_set and active_set_json is not None:
+                code, body = 200, {"apiVersion": "v1", "kind": "ConfigMap",
+                                   "metadata": {"name": "exomem-media-edge-active-set", "namespace": NAMESPACE},
+                                   "data": {"active-set.json": active_set_json}}
+            else:
+                code, body = 404, {"apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "NotFound",
+                                   "code": 404}
+            payload = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Api)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _upgrade_with_the_edge_off(active_set_json: str | None, home: Path) -> subprocess.CompletedProcess[str]:
+    """The server-side render an upgrade does, against a cluster whose live active set is the one given.
+    An empty kubeconfig keeps every real cluster and credential out of it."""
+    kubeconfig = home / "kubeconfig"
+    kubeconfig.write_text("")
+    with _api_server(active_set_json) as url:
+        return subprocess.run(
+            [HELM, "template", "platform-header-test", str(PLATFORM_CHART), "--namespace", "exomem-platform",
+             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
+             "--dry-run=server", "--kube-apiserver", url],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+            env={"HOME": str(home), "KUBECONFIG": str(kubeconfig), "PATH": "/usr/bin:/bin"},
+        )
+
+
+def test_turning_the_edge_off_is_refused_while_the_live_active_set_lists_a_cell(tmp_path: Path) -> None:
+    # With the edge off cellctl signs no credential, so a listed cell would lose every evicted original.
+    # A draining cell stays listed until its record shows no evicted original.
+    result = _upgrade_with_the_edge_off(f'{{"generation":7,"cells":{{"{OTHER}":6,"{CANARY}":7}}}}', tmp_path)
+
+    assert result.returncode != 0
+    assert CANARY in result.stderr and OTHER in result.stderr
+
+
+def test_turning_the_edge_off_is_refused_while_the_live_active_set_cannot_be_read(tmp_path: Path) -> None:
+    # An unreadable set proves nothing drained.
+    result = _upgrade_with_the_edge_off("{not json", tmp_path)
+
+    assert result.returncode != 0
+    assert "cannot be read" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "active_set_json",
+    [
+        # Every cell drained and left the set.
+        '{"generation":9,"cells":{}}',
+        # The edge never ran, so cellctl never published a set.
+        None,
+    ],
+)
+def test_turning_the_edge_off_renders_once_the_live_active_set_lists_no_cell(
+    active_set_json: str | None, tmp_path: Path
+) -> None:
+    result = _upgrade_with_the_edge_off(active_set_json, tmp_path)
+
+    assert result.returncode == 0, result.stderr

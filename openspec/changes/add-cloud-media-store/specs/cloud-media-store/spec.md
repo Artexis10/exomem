@@ -535,7 +535,7 @@ A failed listing or an unobserved edge generation MUST NOT count as done.
 
 ### Requirement: The media store is off by default and drains on disable
 
-The media store SHALL be off unless a cell is on the canary list or the fleet switch is on. A cell that was never selected SHALL have no media edge egress, no offload and no eviction. Turning the store off for a selected cell SHALL stop new offload at once. When the volume can hold every evicted original within its size cap, eviction SHALL also stop at once. The cell SHALL then hydrate every evicted original back. cellctl SHALL keep the cell's media key, edge credential, edge egress and active-set entry until a report from the cell shows no evicted original. Only then SHALL cellctl remove them. When no such report exists, or cellctl cannot read it, cellctl SHALL keep them. Only a report that the cell captured after the store was turned off SHALL count for that removal. A report SHALL give its evicted count as unknown, never 0, when its census of sidecars is incomplete. cellctl SHALL treat unknown as evicted originals present. Cell deletion and key retirement override this rule: a cell row that becomes `deleted` follows the requirement "Deleting originals and cells removes their stored objects". A cell whose evicted originals do not fit SHALL follow the requirement "A cell that cannot drain keeps its stored media readable". cellctl SHALL refuse to start without the edge settings while a live cell that holds a media key bundle has not drained.
+The media store SHALL be off unless a cell is on the canary list or the fleet switch is on. A cell that was never selected SHALL have no media edge egress, no offload and no eviction. Turning the store off for a selected cell SHALL stop new offload at once. When the volume can hold every evicted original within its size cap, eviction SHALL also stop at once. The cell SHALL then hydrate every evicted original back. cellctl SHALL keep the cell's media key, edge credential, edge egress and active-set entry until a report from the cell shows no evicted original. Only then SHALL cellctl remove them. When no such report exists, or cellctl cannot read it, cellctl SHALL keep them. Only a report that the cell captured after the store was turned off SHALL count for that removal. A report SHALL give its evicted count as unknown, never 0, when its census of sidecars is incomplete. cellctl SHALL treat unknown as evicted originals present. Cell deletion and key retirement override this rule: a cell row that becomes `deleted` follows the requirement "Deleting originals and cells removes their stored objects". A cell whose evicted originals do not fit SHALL follow the requirement "A cell that cannot drain keeps its stored media readable". A chart upgrade that turns the edge off SHALL be refused while the edge's live active set lists any cell.
 
 #### Scenario: Default installation
 
@@ -564,8 +564,8 @@ The media store SHALL be off unless a cell is on the canary list or the fleet sw
 
 #### Scenario: The edge is turned off before every cell drained
 
-- **WHEN** the operator deploys with the edge off while a live cell with a media key bundle has not drained
-- **THEN** cellctl stops at startup and names the cell, and the deploy fails
+- **WHEN** the operator upgrades the chart with the edge off while the edge's active set lists a cell that has not drained
+- **THEN** the upgrade is refused before it changes anything, and the refusal names the cell
 
 #### Scenario: A turned-off cell is deleted
 
@@ -585,6 +585,11 @@ The edge's network allowlist SHALL follow the namespace label `exomem.io/media-e
 
 - **WHEN** a turned-off cell's report shows that it has drained
 - **THEN** cellctl removes the credential and the label in one render, and removes the active-set entry after them
+
+#### Scenario: A served cell's namespace lacks the label
+
+- **WHEN** a served cell's live namespace lacks the label, and the cell's render is unchanged
+- **THEN** cellctl sets the label on its next pass and does not restart the cell
 
 ### Requirement: A cell that cannot drain keeps its stored media readable
 

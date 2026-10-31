@@ -83,6 +83,7 @@ from .manifests import (
     render_backup_family_secret,
     render_backup_job,
     render_cell_manifests,
+    render_cell_namespace,
     render_clone_claim,
     render_export_job,
     render_export_verification_secret,
@@ -1350,8 +1351,8 @@ def _media_mode(cluster_config: ClusterConfig, row: CellRow) -> str | None:
         return MEDIA_SERVED
     if row.media_key_wrapped is None:
         return None
-    # Without edge settings cellctl can sign no credential, so the store identity alone is left. Startup
-    # refuses edge settings that are gone while a store is still undrained (MediaStoreNotDrained).
+    # Without edge settings cellctl can sign no credential, so the store identity alone is left. The chart's
+    # upgrade refuses to turn the edge off while the active set lists a cell; a rollback skips that check.
     if edge is not None and not _media_store_drained(_media_store_of(row)):
         return MEDIA_DRAINING
     # The identity alone keeps an evicted original evicted; without it the runtime reads it as deleted.
@@ -1397,6 +1398,26 @@ def _publish_media_edge_set(cluster: ClusterGateway, cells: Mapping[str, int], n
     except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
         logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
         return None
+
+
+def _label_media_edge_namespaces(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: Mapping[str, ClusterObservation],
+) -> None:
+    """D12: the edge's network wall admits a namespace by its label. A served or draining cell whose live
+    namespace lacks it gets it on this pass, whatever its restart or digest cadence: the chart keys the wall
+    on the label as it rolls out, before any re-apply has carried it. A namespace another cell owns is left."""
+    for row in rows:
+        observation = observations[row.cell_id]
+        if (_media_mode(cluster_config, row) not in MEDIA_KEYED or not observation.namespace_exists
+                or observation.namespace_cell_label != row.cell_id or observation.namespace_media_edge_access):
+            continue
+        try:
+            cluster.apply_all([render_cell_namespace(row.cell_id, media_edge_access=True)])
+        except Exception as error:  # noqa: BLE001 - one cell's namespace must not stop the pass; the next one retries
+            logger.error("cellctl could not label cell %s for the media edge: %s", row.cell_id, _describe_error(error))
 
 
 def _media_edge_settled(
@@ -1523,6 +1544,7 @@ async def reconcile_once(
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
+    _label_media_edge_namespaces(cluster, cluster_config, rows, observations)
 
     non_deleted_rows = [row for row in rows if row.desired_state != "deleted"]
     # H1/H9: an upgrade or a restore hold blocks new candidates; a deleted
@@ -2954,27 +2976,12 @@ class MediaKeyColumnsMissing(RuntimeError):
     """The media edge is configured, but the schema has no column to hold a cell's media key bundle."""
 
 
-class MediaStoreNotDrained(RuntimeError):
-    """D12: the media edge is off, but a live cell's store has not drained."""
-
-
 async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_config: ClusterConfig) -> ClusterConfig:
     present = await db.has_media_key_columns(connection)
     if cluster_config.media_edge is not None and not present:
         raise MediaKeyColumnsMissing(
             "the media edge is configured, but exomem_cloud_cells has no media key columns: apply Substrate "
             f"migration {db.MEDIA_KEY_MIGRATION} and its grants, or turn the media edge off")
-    if cluster_config.media_edge is None and present:
-        # D12: without edge settings cellctl signs no credential, so an undrained cell would keep its store
-        # identity alone and every evicted original would be unreadable. Stopping fails the deploy instead.
-        undrained = sorted(row.cell_id for row in await db.select_all_rows(connection, media_keys=True)
-                           if row.desired_state != "deleted" and row.media_key_wrapped is not None
-                           and not _media_store_drained(_media_store_of(row)))
-        if undrained:
-            raise MediaStoreNotDrained(
-                f"the media edge is off, but {len(undrained)} cell(s) have not drained their media store: "
-                f"{', '.join(undrained)}. Turn the edge on with them off mediaEdge.cellIds, and turn it off "
-                "once each record shows no evicted original")
     return dataclass_replace(cluster_config, media_key_columns=present)
 
 
@@ -3023,7 +3030,7 @@ async def run_loop(
                         raise RuntimeError("cellctl advisory lock is held by another writer")
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
-                except (MediaKeyColumnsMissing, MediaStoreNotDrained):
+                except MediaKeyColumnsMissing:
                     # A deploy-order fault, not an outage: stop, so the rollout fails where it started.
                     raise
                 except Exception as error:  # noqa: BLE001

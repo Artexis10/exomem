@@ -186,7 +186,9 @@
     - a deleted cell leaves the active set and has its keys retired without a report;
     - a turned-off canary's namespace keeps the edge access label, and the chart's edge ingress and cellctl's admission admit a labelled namespace and refuse an unlabelled one (operator decision of 2026-10-31);
     - the credential and the label leave in one render, and the active-set entry leaves after them;
-    - with the edge off, cellctl refuses to start while a live cell with a key bundle has not drained;
+    - a served cell whose live namespace lacks the label gets it on the next pass, with no restart;
+    - on real K3s, admission gives the edge peer to a labelled namespace, refuses an unlabelled one, and admits a label-then-policy pair;
+    - a chart upgrade with the edge off is refused while the live active set lists a cell or cannot be read, and renders once it lists none;
     - a cell whose evicted originals do not fit hydrates an owner read, offloads nothing new, evicts the hydrated copy again and reports the shortfall.
   - [ ] 5.4.16 Extend the large-import rehearsal of `scale-agent-led-imports` (its task 5.1) with the media store on a local-storage cell. Use a sandbox bucket with a bucket-restricted key in the existing B2 account. The operator creates the bucket and key before this task (pending). Import at least 50 GiB of mixed media and notes. Include files over 200 MiB, one large offloadable file and one file above the object bound. Run no owner reads during the series. Record the store policy used, with the 5.25 GiB of hydration capacity and `max_hydrations` at 1 that the operator confirmed.
     - Size the large file or the cell from the band. One way is a 20 GiB cell with a large file within the effective file limit that status reports before the series. The other is a cell whose band holds a 5 GiB file, which needs `max_cell_gib` raised above 20 GiB for the rehearsal. Do not assume that a 5 GiB file fits a 20 GiB cell during a large import.
