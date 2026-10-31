@@ -606,11 +606,11 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None) -
 
 def _max_hydrations(vault_root: Path) -> int | None:
     """The store policy's hydration slots, or None when no store bounds hydration."""
-    from . import originals
+    from . import media_capacity, originals
 
     config = originals.configuration(vault_root)
-    value = None if config is None else config.get("max_hydrations")
-    return None if value is None else int(value)
+    limits = None if config is None else media_capacity.hydration_limits(config)
+    return None if limits is None else limits.hydrations
 
 
 class MediaJobStore:

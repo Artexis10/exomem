@@ -2179,6 +2179,23 @@ def test_a_reused_process_id_does_not_keep_a_dead_reservation(vault: Path, selec
         assert connection.execute("SELECT token FROM media_access").fetchall() == [("current",)]
 
 
+@pytest.mark.parametrize("unset", [("max_temporary_bytes", "max_hydrations"), ("max_hydrations",)])
+def test_a_policy_without_hydration_limits_offloads_and_evicts_nothing(vault: Path, selected_store, monkeypatch, unset):
+    """Catches a policy without hydration limits, the chart default, that fails every offload,
+    or a half-set one that evicts an original no hydration could bring back."""
+    from exomem import media_store
+
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {k: v for k, v in values.items() if k not in unset}}}))
+    path = _preserved(vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, path))
+
+    assert _offload(vault, path) is not None
+    assert originals.original_state(vault, path).state == "cached"
+    assert media_store.evict_to_target(vault) == 0
+    assert path.exists()
+
+
 def test_an_original_as_large_as_the_whole_hydration_capacity_hydrates(vault: Path, selected_store):
     """Catches a reservation that also counts the ciphertext, so a file that fits the capacity never hydrates."""
     from exomem import media_store

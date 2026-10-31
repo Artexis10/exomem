@@ -67,15 +67,38 @@ class Bounds:
         return plaintext_bytes <= self.hydration_bytes
 
 
+@dataclass(frozen=True, slots=True)
+class HydrationLimits:
+    """The store policy's hydration capacity: temporary bytes in use at once, and concurrent hydrations."""
+
+    temporary_bytes: int
+    hydrations: int
+
+
+def hydration_limits(config: dict[str, object]) -> HydrationLimits | None:
+    """The policy's hydration capacity, or None when the policy configures none (D12, choice 3).
+
+    With none, offload stores an original without a reservation, as before the capacity
+    existed, and nothing classifies or evicts, because no hydration could be bounded.
+    """
+    if config.get("max_temporary_bytes") is None or config.get("max_hydrations") is None:
+        return None
+    limits = HydrationLimits(int(config["max_temporary_bytes"]), int(config["max_hydrations"]))
+    if limits.temporary_bytes <= 0 or limits.hydrations <= 0:
+        raise ValueError("media hydration limits must be positive")
+    return limits
+
+
 def bounds_for(config: dict[str, object], vault: Path) -> Bounds | None:
     """The rule's inputs for a store policy, or None when the policy sets no hydration capacity."""
-    if config.get("max_temporary_bytes") is None:
+    limits = hydration_limits(config)
+    if limits is None:
         return None
     bound = config.get("max_object_bytes")
     fraction = config.get("volume_fraction")
     return Bounds(
         object_bytes=None if bound is None else int(bound),
-        hydration_bytes=int(config["max_temporary_bytes"]),
+        hydration_bytes=limits.temporary_bytes,
         volume_bytes=shutil.disk_usage(vault).total,
         volume_fraction=DEFAULT_VOLUME_FRACTION if fraction is None else float(fraction),
     )

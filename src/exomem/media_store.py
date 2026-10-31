@@ -329,7 +329,7 @@ def _pin(vault: Path, path: Path, *, read: bool = False):
             conn.close()
 
 
-def _reserve(store: MediaJobStore, token: str, needed: int, config: dict[str, object], *,
+def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capacity.HydrationLimits, *,
              hydration: bool, temporary: str | None = None) -> None:
     """Reserve `needed` bytes of the hydration capacity on this pin's row (D12, choice 3).
 
@@ -337,12 +337,7 @@ def _reserve(store: MediaJobStore, token: str, needed: int, config: dict[str, ob
     offload reserves its ciphertext temporary file and takes no slot. Dead
     reservations and their files go first.
     """
-    if config.get("max_temporary_bytes") is None or config.get("max_hydrations") is None:
-        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "media hydration limits are not configured")
-    maximum = int(config["max_temporary_bytes"])
-    concurrent = int(config["max_hydrations"])
-    if maximum <= 0 or concurrent <= 0:
-        raise ValueError("media hydration limits must be positive")
+    maximum, concurrent = limits.temporary_bytes, limits.hydrations
     if needed > maximum:
         raise MediaStoreError(HYDRATION_TOO_LARGE_CODE, "the original exceeds the whole hydration capacity")
     conn = store._connect()
@@ -839,8 +834,11 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                 assert reference is not None
             else:
                 # The ciphertext temporary file shares the hydration capacity and takes no slot (D12, choice 3).
-                _reserve(ledger, token, media_capacity.age_ciphertext_size(snapshot.binary_size), config,
-                         hydration=False)
+                # A policy with no capacity reserves nothing, as before the capacity existed.
+                limits = media_capacity.hydration_limits(config)
+                if limits is not None:
+                    _reserve(ledger, token, media_capacity.age_ciphertext_size(snapshot.binary_size), limits,
+                             hydration=False)
                 try:
                     with tempfile.TemporaryFile() as ciphertext:
                         result = subprocess.run(["age", "--encrypt", "--recipient", str(config["recipient"])],
@@ -911,7 +909,10 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
     config = _settings(vault)
     assert snapshot.reference is not None and snapshot.binary_size is not None
     relative = snapshot.path.relative_to(vault)
-    _reserve(ledger, token, snapshot.binary_size, config, hydration=True, temporary=temporary)
+    limits = media_capacity.hydration_limits(config)
+    if limits is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "media hydration limits are not configured")
+    _reserve(ledger, token, snapshot.binary_size, limits, hydration=True, temporary=temporary)
     backend = store_for(vault)
     guard = PathGuard.capture(vault, relative.as_posix(), leaf_policy="absent")
     with held_fs.acquire(vault).require() as filesystem:
