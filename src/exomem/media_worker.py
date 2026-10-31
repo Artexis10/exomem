@@ -569,6 +569,11 @@ class MediaWorker:
         if outcome.state == _HANDOFF:
             return outcome
         if offload_error is not None:
+            # An offload that waits for the shared capacity spends no attempt (D12, choice 3). Only
+            # an offload row returns: a row that also extracted would run its extraction again.
+            if (job.media_type == media_jobs.OFFLOAD_MEDIA_TYPE and isinstance(offload_error, media_store.MediaStoreError)
+                    and offload_error.code == media_store.STORE_BUSY_CODE):
+                return _ProcessOutcome(_RETURNED, str(offload_error))
             raise offload_error
         return outcome
 

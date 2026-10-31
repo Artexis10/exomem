@@ -40,9 +40,6 @@ MAX_SHARING_ATTEMPTS = 3
 _SHARING_WINERRORS = frozenset({5, 32})
 _BATCH_WORKSPACE_RE = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$")
 _BATCH_STAGE_RE = re.compile(r"^stage-[0-9]+\.tmp$")
-_HELD_PUBLISH_RE = re.compile(
-    rf"^{re.escape(held_fs.PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}$"
-)
 _QUOTED_PATH = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
 _STORED_SHARING_ERROR_RE = re.compile(
     rf"^PermissionError: \[WinError (?P<winerror>5|32)\] .*?: "
@@ -404,7 +401,7 @@ def is_guarded_sidecar_sharing_violation(
     )
     held_publication = (
         _normalized_path(source.parent) == _normalized_path(destination.parent)
-        and _HELD_PUBLISH_RE.fullmatch(source.name) is not None
+        and held_fs.is_publish_temporary(source.name)
     )
     if (
         not source.is_absolute()
@@ -486,6 +483,31 @@ def pid_alive(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def process_start(pid: int) -> str | None:
+    """The kernel's start time for `pid`, which a later process that reuses the ID does not share.
+
+    Linux exposes it as field 22 of `/proc/<pid>/stat`. Elsewhere it is None, and
+    liveness falls back to the process ID alone.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+    # The command name, field 2, may hold spaces and parentheses; the fields after it do not.
+    fields = stat.rpartition(")")[2].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+def holder_alive(pid: int | None, start: str | None) -> bool:
+    """Whether the process that recorded (`pid`, `start`) still runs."""
+    if not pid_alive(pid):
+        return False
+    if start is None:
+        return True
+    current = process_start(int(pid))
+    return current is None or current == start
 
 
 def _windows_pid_alive(pid: int) -> bool:
@@ -808,6 +830,12 @@ class MediaJobStore:
         if "evicted" not in cache:
             conn.execute("ALTER TABLE media_cache ADD COLUMN evicted INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS media_cache_candidates ON media_cache(evicted, size)")
+        # A reservation names its process by ID and start time, and its temporary file by name (D12, choice 3).
+        access = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_access)").fetchall()}
+        if "pid_start" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN pid_start TEXT")
+        if "temporary_name" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN temporary_name TEXT")
         jobs = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "pinned" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")

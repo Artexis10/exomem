@@ -116,6 +116,7 @@ def test_corrupt_ciphertext_never_places_an_original(vault: Path, selected_store
         with media_store.open_original(vault, path):
             pytest.fail("corruption must not yield an original")
     assert not path.exists()
+    assert [entry.name for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")] == []
 
 
 def test_a_vault_taken_off_its_store_reads_an_evicted_original_as_unavailable(vault: Path, selected_store):
@@ -436,38 +437,41 @@ def test_a_new_sidecar_digest_releases_only_its_old_verification_refusal(vault: 
 
 
 def test_hydration_reports_local_disk_exhaustion_as_local(vault: Path, selected_store, monkeypatch):
-    """A local staging write must not become a misleading remote-store outage."""
+    """A full volume must not become a misleading remote-store outage, and leaves no temporary file."""
     import errno
-    from contextlib import contextmanager
+    import os
 
     from exomem import media_store
 
     path = _preserved(vault)
     _offload(vault, path)
     assert media_store.evict(vault, path)
-    temporary_file = media_store.tempfile.TemporaryFile
+    fdopen = os.fdopen
 
     class FullDisk:
         def __init__(self, stream):
             self.stream = stream
 
-        def __getattr__(self, name):
-            return getattr(self.stream, name)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.stream.close()
 
         def write(self, _chunk):
-            raise OSError(errno.ENOSPC, "staging disk is full")
+            raise OSError(errno.ENOSPC, "the volume is full")
 
-    @contextmanager
-    def full_staging(*args, **kwargs):
-        with temporary_file(*args, **kwargs) as stream:
-            yield FullDisk(stream)
+    def full_volume(descriptor, mode="r", *args, **kwargs):
+        stream = fdopen(descriptor, mode, *args, **kwargs)
+        return FullDisk(stream) if "w" in mode else stream
 
-    monkeypatch.setattr(media_store.tempfile, "TemporaryFile", full_staging)
+    monkeypatch.setattr(media_store.os, "fdopen", full_volume)
     with pytest.raises(OSError) as error:
         with media_store.open_original(vault, path):
-            pytest.fail("a full staging disk cannot hydrate an original")
+            pytest.fail("a full volume cannot hydrate an original")
     assert error.value.errno == errno.ENOSPC
     assert originals.original_state(vault, path).state == "evicted"
+    assert [entry.name for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")] == []
 
 
 def test_page_move_refuses_the_catalog_before_hydrating(vault: Path, selected_store, monkeypatch):
@@ -541,10 +545,12 @@ def test_idle_pins_do_not_spend_hydration_capacity_or_block_unrelated_eviction(v
     values, config = selected_store
     config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_hydrations": 1}}}))
     with sqlite3.connect(ledger.path) as connection:
-        connection.executemany("INSERT INTO media_access VALUES (?, ?, ?, 0, 0)",
+        connection.executemany("INSERT INTO media_access(token, binary_rel, pid) VALUES (?, ?, ?)",
                                [(f"idle-{i}", "Knowledge Base/Evidence/other.bin", os.getpid()) for i in range(100)])
-        connection.execute("INSERT INTO media_access VALUES ('dead', ?, ?, 1024, 1)", (relative, dead_pid))
-        connection.execute("INSERT INTO media_access VALUES ('live', ?, ?, 1024, 1)", (relative, os.getpid()))
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('dead', ?, ?, 1024, 1)", (relative, dead_pid))
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('live', ?, ?, 1024, 1)", (relative, os.getpid()))
     with pytest.raises(media_store.MediaStoreError) as busy:
         with media_store.open_original(vault, path):
             pytest.fail("a live reservation must retain its capacity")
@@ -943,14 +949,14 @@ def test_hydration_does_not_overwrite_an_external_create(vault: Path, selected_s
     path = _preserved(vault)
     _offload(vault, path)
     assert media_store.evict(vault, path)
-    publish = held_fs.publish_bytes
+    install = held_fs.install_temporary
 
-    def external_create(filesystem, parent, leaf, data, **kwargs):
+    def external_create(filesystem, parent, temporary, leaf, **kwargs):
         if leaf == path.name:
             path.write_bytes(b"external edit")
-        return publish(filesystem, parent, leaf, data, **kwargs)
+        return install(filesystem, parent, temporary, leaf, **kwargs)
 
-    monkeypatch.setattr(held_fs, "publish_bytes", external_create)
+    monkeypatch.setattr(held_fs, "install_temporary", external_create)
     with pytest.raises(held_fs.HeldFsError):
         with media_store.open_original(vault, path):
             pytest.fail("an external create must retain its bytes")
@@ -2058,3 +2064,177 @@ def test_the_path_download_refuses_an_original_larger_than_the_hydration_capacit
 
     assert response.json()["code"] == "MEDIA_HYDRATION_TOO_LARGE"
     assert response.status_code < 500 and "retry-after" not in response.headers
+
+
+_STALLED_HYDRATION = """
+import sys
+import time
+from pathlib import Path
+
+from exomem import media_store
+
+vault, path, signal = (Path(argument) for argument in sys.argv[1:4])
+stream = media_store._stored_chunks
+
+
+def stalled(backend, reference):
+    # Everything but the last byte, so age writes its first chunks and then waits.
+    data = b"".join(stream(backend, reference))
+    for start in range(0, len(data) - 1, 65536):
+        yield data[start:min(start + 65536, len(data) - 1)]
+    signal.touch()
+    time.sleep(120)
+    yield data[-1:]
+
+
+media_store._stored_chunks = stalled
+with media_store.open_original(vault, path):
+    pass
+"""
+
+
+@pytest.mark.parametrize("restart", ["runtime start", "next reservation"])
+def test_a_hydration_killed_mid_write_leaves_nothing_at_the_path_and_its_row_and_file_clear_after(
+        vault: Path, selected_store, tmp_path: Path, monkeypatch, restart):
+    """Catches a stop that leaves a partial original at its path, or a temporary file and reservation that stay for good."""
+    import signal
+    import sys
+    import time
+
+    from exomem import media_jobs, media_store, server_runtime
+
+    path = _stored(vault, "recording", 300_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    stalled = tmp_path / "stalled"
+    child = subprocess.Popen([sys.executable, "-c", _STALLED_HYDRATION, str(vault), str(path), str(stalled)])
+
+    def temporaries():
+        return [entry for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")]
+
+    try:
+        deadline = time.monotonic() + 30
+        while not (stalled.exists() and temporaries() and temporaries()[0].stat().st_size > 0):
+            assert child.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        assert not path.exists()
+    finally:
+        child.send_signal(signal.SIGKILL)
+        child.wait()
+    assert not path.exists()
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT pid, temporary_name, temporary_bytes FROM media_access").fetchall() == [
+            (child.pid, temporaries()[0].name, len(expected))]
+
+    if restart == "runtime start":
+        monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+        server_runtime._start_media_worker(vault)
+    else:
+        with media_store.open_original(vault, path) as original:
+            assert original.stream.read() == expected
+
+    assert temporaries() == []
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_access").fetchone()[0] == 0
+
+
+def test_a_reused_process_id_does_not_keep_a_dead_reservation(vault: Path, selected_store):
+    """Catches a liveness check by process ID alone: a restarted container gives the same ID to a new process."""
+    import os
+
+    from exomem import media_jobs, media_store
+
+    if media_jobs.process_start(os.getpid()) is None:
+        pytest.skip("this platform exposes no process start time")
+    path = _stored(vault, "recording", 3_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    relative = path.relative_to(vault).as_posix()
+    residue = path.with_name(".exomem-held-publish-" + "a" * 32)
+    residue.write_bytes(b"part of an earlier hydration")
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start, temporary_bytes, hydrating, "
+                           "temporary_name) VALUES ('earlier', ?, ?, '1', 3000, 1, ?)",
+                           (relative, os.getpid(), residue.name))
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start) VALUES ('current', ?, ?, ?)",
+                           (relative, os.getpid(), media_jobs.process_start(os.getpid())))
+
+    assert media_store.clear_dead_reservations(vault) == 1
+
+    assert not residue.exists()
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT token FROM media_access").fetchall() == [("current",)]
+
+
+def test_an_original_as_large_as_the_whole_hydration_capacity_hydrates(vault: Path, selected_store):
+    """Catches a reservation that also counts the ciphertext, so a file that fits the capacity never hydrates."""
+    from exomem import media_store
+
+    path = _stored(vault, "recording", 3_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    _configure(selected_store, vault, max_temporary_bytes=3_000)
+
+    with media_store.open_original(vault, path) as original:
+        assert original.stream.read() == expected
+
+
+def test_an_offload_waits_with_no_attempt_spent_while_a_hydration_holds_the_capacity(vault: Path, selected_store):
+    """Catches an offload that writes its ciphertext beside a hydration that holds the capacity, or fails while it waits."""
+    import os
+    import time
+
+    from exomem import media_jobs, media_worker
+
+    path = _preserved(vault)
+    ledger = media_jobs.MediaJobStore(vault)
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).state == media_jobs.PENDING
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('hydration', 'elsewhere', ?, ?, 1)",
+                           (os.getpid(), selected_store[0]["max_temporary_bytes"] - 10))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    waiting = ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
+    assert waiting.state == media_jobs.PENDING and waiting.attempts == 0
+    assert originals.original_state(vault, path).state == "local"
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM media_access WHERE token = 'hydration'")
+        connection.execute("UPDATE jobs SET retry_at = ? WHERE id = ?", (time.time() - 1, waiting.id))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_an_offload_takes_no_hydration_slot(vault: Path, selected_store, monkeypatch):
+    """Catches an offload that takes a hydration slot, so an owner's playback waits for every upload."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import media_store
+
+    evicted = _stored(vault, "playback", 3_000)
+    expected = evicted.read_bytes()
+    assert media_store.evict(vault, evicted)
+    local = _preserved(vault, category="upload")
+    _configure(selected_store, vault, max_hydrations=1)
+    uploading, release = threading.Event(), threading.Event()
+    upload = media_store.FilesystemStore.upload
+
+    def paused(self, name, stream, *, size, sha256):
+        uploading.set()
+        assert release.wait(10)
+        return upload(self, name, stream, size=size, sha256=sha256)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", paused)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(media_store.offload, vault, local)
+        try:
+            assert uploading.wait(10)
+            with media_store.open_original(vault, evicted) as original:
+                assert original.stream.read() == expected
+        finally:
+            release.set()
+        assert pending.result(timeout=10) is not None
