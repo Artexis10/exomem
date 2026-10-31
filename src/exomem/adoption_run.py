@@ -799,9 +799,29 @@ def _present(root: Path, run: dict, **extra) -> dict:
         out["verified_total"] = verify.get("verified_total")
         out["consumed"] = verify.get("consumed", 0)
     if isinstance(out.get("finish"), dict):
-        out["finish"] = {**out["finish"], "handoff": _handoff(run)}
+        out["finish"] = _presented_finish(run)
     out.update(extra)
     return out
+
+
+def _presented_finish(run: dict) -> dict:
+    """The stored finish with its handoff and routes spelled for the surface reading it.
+
+    `finish` stores each route in the grouped spelling that the command registry runs, so a
+    run finished on one surface and read on another names tools that the reader lists.
+    """
+    finish = {**run["finish"], "handoff": _handoff(run)}
+    if "route" in finish:
+        finish["route"] = _spelled_route(finish["route"])
+    recall = finish.get("recall_check")
+    if isinstance(recall, dict) and "next_action" in recall:
+        finish["recall_check"] = {**recall, "next_action": _spelled_route(recall["next_action"])}
+    return finish
+
+
+def _spelled_route(route: dict) -> dict:
+    """A stored grouped `{"tool", "args"}` route, spelled for the serving surface."""
+    return capabilities.active_call_route(route["tool"], route["args"])
 
 
 def _next_actions(run: dict) -> list[dict]:
@@ -2483,7 +2503,7 @@ def _recall_check(root: Path, run: dict) -> dict:
             if degraded:
                 result["warming"] = _recall_warming(degraded)
         else:
-            result["next_action"] = capabilities.active_call_route("maintain_memory", {"mode": "reconcile"})
+            result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
     return result
 
 
@@ -2673,7 +2693,7 @@ def finish(
         ready = (
             {
                 "first_question": f'What do my notes say about "{title}"?',
-                "route": capabilities.active_call_route("search_memory", {"query": title}),
+                "route": {"tool": "search_memory", "args": {"query": title}},
             }
             if recall["ok"] is True
             else {"indexing": _indexing(recall, coverage["recall"])}

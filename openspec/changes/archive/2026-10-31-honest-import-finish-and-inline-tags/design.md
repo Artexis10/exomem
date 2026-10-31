@@ -5,7 +5,7 @@
 ## Decisions
 
 - `finish` offers the first question only when `ok` is true. A miss misleads the same way as a pending check: the question asks about a page that the search does not return. The `indexing` block replaces the question, so the caller sees why no question is ready and how much of the sample the search found.
-- `finish` renders the search route and the reconcile route through `capabilities.active_call_route`. The handoff already renders its calls through the same capability map, so each surface gets a tool that it lists.
+- `finish` stores the search route and the reconcile route in the grouped spelling that the command registry runs. Each presentation of the run spells them through `capabilities.active_call_route`, as it already rebuilds the handoff, so a run finished on one surface and read on another names tools that the reader lists.
 - `plan` passes the front-matter tags and the result of `markdown_regions.inline_tags` to the existing tag normalization in one list. The shared parser already skips code spans, fenced blocks, comments and escapes, and drops a token of digits only. The normalization keeps the first spelling of a tag and reports a rejected tag as before. The tags are part of the planned front matter, so they are part of `plan_id`.
 
 ## Not chosen

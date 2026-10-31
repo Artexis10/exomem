@@ -15,6 +15,7 @@ from exomem import (
     adopt,
     adoption_plan,
     adoption_run,
+    capabilities,
     epistemic_graph,
     find,
     held_fs,
@@ -428,6 +429,35 @@ def test_recall_check_accepts_only_the_exact_target_page(
     # The search answered without the page, so a question about it is not ready.
     assert "first_question" not in wrong["finish"]
     assert wrong["finish"]["indexing"]["state"] == "missed"
+
+
+def test_a_finished_run_names_the_reconcile_tool_of_the_surface_that_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/one/plan.md": "# Plan\n\ntext\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/one/plan.md"]["target_path"]
+
+    class Hit:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    # The search answers without the imported page, so finish names a reconcile.
+    monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+    with capabilities.active_surface(nested):
+        finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    read_later = adoption_run.status(vault, run_id=run_id)
+
+    assert finished["finish"]["recall_check"]["next_action"] == {
+        "tool": "repair_memory", "args": {"operation": {"kind": "reconcile"}},
+    }
+    assert read_later["finish"]["recall_check"]["next_action"] == {
+        "tool": "maintain_memory", "args": {"mode": "reconcile"},
+    }
 
 
 @pytest.mark.parametrize("read_state", ["pending", "failed"])
