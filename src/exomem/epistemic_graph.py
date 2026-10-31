@@ -5484,11 +5484,8 @@ class EpistemicGraphIndex:
         self,
         resolver: vault_module.WikilinkResolver,
         expected_membership: frozenset[str],
-        *,
-        changed_rels: set[str] | None = None,
     ) -> dict[str, GraphSourceSignature] | None:
         """Bind the resolver's vault-wide paths and titles to current bytes."""
-        changed = changed_rels or set()
         resolver_paths = {rel.removesuffix(".md") for rel in expected_membership}
         if resolver.full_paths != resolver_paths:
             return None
@@ -5508,7 +5505,7 @@ class EpistemicGraphIndex:
             finally:
                 if conn is not None:
                     conn.close()
-            if (set(indexed_hashes) - changed) != (set(expected_membership) - changed):
+            if set(indexed_hashes) != set(expected_membership):
                 return None
         versions: dict[str, GraphSourceSignature] = {}
         for rel in foreground_priority.yielding_in_bulk(sorted(expected_membership)):
@@ -5529,11 +5526,7 @@ class EpistemicGraphIndex:
             )
             if page is None:
                 return None
-            if (
-                indexed_hashes is not None
-                and rel not in changed
-                and indexed_hashes.get(rel) != source_signature[3]
-            ):
+            if indexed_hashes is not None and indexed_hashes.get(rel) != source_signature[3]:
                 return None
             title = page.title.strip().lower() if page.title.strip() else None
             if resolver.title_key_for_path(rel) != title:
@@ -6944,8 +6937,9 @@ class EpistemicGraphIndex:
         difference between the resolver and the stored topology is then a queued
         page, so a queued page whose existence and title the stored row already
         records moved no resolution or existence. Only the pages that moved
-        widen to every linker by key; the others widen to their fragment
-        dependants. A queued page with no row counts as moved: no row says
+        widen to every linker by key and to every page with a stored edge to
+        them; the others widen to their fragment dependants. A queued page
+        with no row counts as moved: no row says
         whether it existed, and a linker's edge to a Records page that exists
         is suppressed, so the page's later deletion moves that edge. Without
         `owns_topology` any difference may be outside `rels`, and every queued
@@ -6990,7 +6984,11 @@ class EpistemicGraphIndex:
             or self._stored_resolver_entry(conn, rel) != self._live_resolver_entry(resolver, rel)
         }
         affected: set[str] = set()
-        for rel in vanished:
+        # A stored edge to a moved page re-derives under whatever name made it:
+        # an earlier pass may have linked the page under a title that neither
+        # its stored row nor its live entry carries, so no dependency key names
+        # that linker.
+        for rel in moved:
             affected.update(
                 str(row[0])
                 for row in conn.execute(

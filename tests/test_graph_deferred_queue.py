@@ -1384,17 +1384,6 @@ def _forbid_vault_wide_proofs(patch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _stored_hash(root: Path, rel: str) -> str | None:
-    conn = sqlite3.connect(EpistemicGraphIndex(root).path)
-    try:
-        row = conn.execute(
-            "SELECT source_hash FROM graph_nodes WHERE path = ? AND kind = 'file'", (rel,)
-        ).fetchone()
-    finally:
-        conn.close()
-    return None if row is None else str(row[0])
-
-
 def test_a_created_page_that_names_an_unresolved_link_re_derives_only_its_linkers(
     vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
 ) -> None:
@@ -1481,6 +1470,59 @@ def test_a_retitled_page_re_derives_the_pages_citing_its_old_and_new_titles(
     index_sync.drain_graph_work(vault)
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def _edge_between(root: Path, source: str, target: str) -> bool:
+    return any(
+        edge[1] == f"file:{source}" and edge[2] == f"file:{target}"
+        for edge in _graph_contents(root)["edges"]
+    )
+
+
+def _publish_an_edit(root: Path, rel: str, text: str) -> None:
+    """Write one page and publish its corpus delta and resolver patch, with no graph fan-out."""
+    (root / rel).write_text(text, encoding="utf-8")
+    assert index_sync.publish_corpus_delta(root, changed=[root / rel])
+    find_module.on_resolver_files_changed(root, [rel], [])
+
+
+@pytest.mark.parametrize("settle", ["refresh", "drain"])
+def test_a_page_retitled_twice_loses_the_edge_a_drain_gave_it_under_the_first_title(
+    vault: Path, settle: str
+) -> None:
+    """A stored edge to a moved page is re-derived, whatever name produced it.
+
+    The first retitle publishes only its corpus delta. A drain of another page
+    then re-derives the linker under the page's new title, so the linker gains
+    an edge that the page's own stored row (still the first title) does not
+    explain. A second retitle must re-derive that linker: the dependency keys
+    of the page's stored and live titles name neither the middle title nor
+    the linker.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            RETITLED: _titled("Title One", "A page renamed twice."),
+            NEW_LINKER: _titled("Linker", "Cites [[Title Two]] and [[queue-b]]."),
+        },
+    )
+    _publish_an_edit(vault, RETITLED, _titled("Title Two", "A page renamed twice."))
+    _publish_an_edit(vault, PAGE_B, _page("B", "B is an edited claim."))
+    EpistemicGraphIndex(vault).drain_paths([vault / PAGE_B])
+    assert _edge_between(vault, NEW_LINKER, RETITLED), "the premise: the drain linked the page"
+
+    _publish_an_edit(vault, RETITLED, _titled("Title Three", "A page renamed twice."))
+    index = EpistemicGraphIndex(vault)
+    if settle == "refresh":
+        index.refresh_paths([vault / RETITLED])
+    else:
+        index.drain_paths([vault / RETITLED])
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert not _edge_between(vault, NEW_LINKER, RETITLED)
     _assert_matches_a_fresh_rebuild(vault)
 
 

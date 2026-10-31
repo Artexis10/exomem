@@ -202,8 +202,9 @@ resolvers, an O(vault) *read* scan. That helper is gone: an owned `refresh_paths
 the same question the drain does, through `_topology_affected_sources`. The drain answers
 it split by what each direction costs:
 
-- A page that **vanished** leaves its inbound edges behind, and every such edge names its
-  own source. One indexed query on `dst_key` answers it.
+- A page that **vanished or moved** leaves its stored inbound edges behind, whatever name
+  produced them, and every such edge names its own source. One indexed query on
+  `dst_page_key` answers it.
 - A page that **appeared** leaves no trace at all, because the links that should point at
   it were never written down. Only the bodies know, so this scans them.
 
