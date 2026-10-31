@@ -574,7 +574,8 @@ _NEEDS_HYDRATION = (
 _HYDRATED_CLAIMS = "SELECT COUNT(*) FROM jobs WHERE hydrated = 1 AND pinned = 1"
 
 
-def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None) -> sqlite3.Row | None:
+def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None,
+                      migrated: bool = True) -> sqlite3.Row | None:
     """The job to claim next, in the order of D3 (M4).
 
     Offload jobs come first. Then come jobs whose original is on the volume, then jobs
@@ -584,12 +585,8 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None) -
     advancing delays a new upload by at most one job timeout. A returned job waits
     for its retry time. Each group is one indexed `LIMIT 1` query.
     """
-    # PRAGMA table_info rows are (cid, name, ...); read by position on any row factory.
-    jobs = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-    cache = {str(row[1]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
-    # These are the columns that this module's own migrations add; a read-only caller can see
-    # a ledger from before them, which keeps the earlier order until the next write adds them.
-    if "evicted" not in cache or not {"do_offload", "pinned", "hydrated", "retry_at"} <= jobs:
+    # A ledger from before this order's columns keeps the earlier order until the next write adds them.
+    if not migrated:
         claimable, needs_hydration, groups = "state = 'pending'", "0", [_FRESH, "1"]
     else:
         claimable, needs_hydration = _CLAIMABLE, _NEEDS_HYDRATION
@@ -1368,12 +1365,13 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def return_for_retry(self, job: MediaJob) -> bool:
+    def return_for_retry(self, job: MediaJob, reason: str | None = None) -> bool:
         """Return a claimed job whose original could not be hydrated now (D3, M4).
 
         The return spends no attempt and keeps the job's speech progress. The job holds
         no original, so it releases its pin, and a worker claims it again only after its
-        retry time.
+        retry time. `reason` stays as the job's error until the next claim, so status
+        shows why the job waits.
         """
         if job.id is None:
             return False
@@ -1384,8 +1382,9 @@ class MediaJobStore:
                 return conn.execute(
                     "UPDATE jobs SET state = 'pending', attempts = MAX(0, attempts - 1), pinned = 0, "
                     "hydrated = 0, retry_at = ? + MIN(?, ? * (1 << MIN(returns, 4))), returns = returns + 1, "
-                    "last_error = NULL, updated_at = ? WHERE id = ? AND state = 'running' AND claim_revision = ?",
-                    (now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS, now, job.id, job.claim_revision),
+                    "last_error = ?, updated_at = ? WHERE id = ? AND state = 'running' AND claim_revision = ?",
+                    (now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS, (reason or "")[:1000] or None, now, job.id,
+                     job.claim_revision),
                 ).rowcount == 1
         finally:
             conn.close()
@@ -1728,7 +1727,12 @@ class MediaJobStore:
         max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect(readonly=True)
         try:
-            row = _next_pending_row(conn, max_hydrations=max_hydrations)
+            # A write connection migrates the ledger first; a read-only one can see it before the columns
+            # that this module's migrations add. PRAGMA rows are (cid, name, ...), read by position.
+            jobs = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            cache = {str(row[1]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
+            migrated = "evicted" in cache and {"do_offload", "pinned", "hydrated", "retry_at"} <= jobs
+            row = _next_pending_row(conn, max_hydrations=max_hydrations, migrated=migrated)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -2231,7 +2235,7 @@ class MediaJobStore:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
                         "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
-                        "blocked_reason = NULL, "
+                        "returns = 0, retry_at = NULL, blocked_reason = NULL, "
                         "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                         "WHERE media_job_results.job_id = jobs.id)",

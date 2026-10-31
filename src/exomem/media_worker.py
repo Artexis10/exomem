@@ -570,11 +570,12 @@ class MediaWorker:
         if outcome.state == _HANDOFF:
             return outcome
         if offload_error is not None:
-            # An offload that waits for the shared capacity spends no attempt (D12, choice 3). Only
-            # an offload row returns: a row that also extracted would run its extraction again.
-            if (job.media_type == media_jobs.OFFLOAD_MEDIA_TYPE and isinstance(offload_error, media_store.MediaStoreError)
-                    and offload_error.code == media_store.STORE_BUSY_CODE):
-                return _ProcessOutcome(_RETURNED, str(offload_error))
+            # An offload that waits for the shared capacity spends no attempt (D12, choice 3).
+            if isinstance(offload_error, media_store.MediaStoreError) and offload_error.code == media_store.STORE_BUSY_CODE:
+                if not (job.do_ocr or job.do_clip or job.do_reembed):
+                    return _ProcessOutcome(_RETURNED, str(offload_error))
+                # The other stages ran, so the row keeps only its offload stage when it completes.
+                return outcome
             raise offload_error
         return outcome
 
@@ -2640,7 +2641,7 @@ def run_child(
                 elif outcome.state == FAILED:
                     fail(job, outcome.error)
                 elif outcome.state == _RETURNED:
-                    store.return_for_retry(job)
+                    store.return_for_retry(job, outcome.error)
                     log.info("media worker: returned %s to the queue: %s", job.binary_path, outcome.error)
                 elif outcome.state == _STALE:
                     try:

@@ -2018,10 +2018,11 @@ def test_at_the_cap_the_worker_claims_no_job_that_needs_a_hydration_and_still_cl
     assert ledger.claim_next().binary_path == hydrated[2]
 
 
-@pytest.mark.parametrize("cause", ["transport", "capacity"])
+@pytest.mark.parametrize(("cause", "code"), [("transport", "MEDIA_STORE_UNAVAILABLE"), ("capacity", "MEDIA_STORE_BUSY")])
 def test_a_hydration_that_cannot_run_now_returns_the_job_with_no_attempt_spent_and_its_progress_kept(
-        vault: Path, selected_store, cause):
-    """Catches a hydration outage that fails the job, which no scan queues again, or that drops its transcript progress."""
+        vault: Path, selected_store, cause, code):
+    """Catches a hydration outage that fails the job, which no scan queues again, that drops its transcript progress,
+    or that status shows as plain pending with no reason."""
     import os
     import time
 
@@ -2043,7 +2044,9 @@ def test_a_hydration_that_cannot_run_now_returns_the_job_with_no_attempt_spent_a
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
 
     returned = ledger.get(job_id)
-    assert returned.state == media_jobs.PENDING and returned.attempts == 0 and returned.last_error is None
+    assert returned.state == media_jobs.PENDING and returned.attempts == 0
+    [shown] = [job for job in media_jobs.status(vault)["jobs"] if job["id"] == job_id]
+    assert shown["state"] == media_jobs.PENDING and shown["error"].startswith(code)
     with sqlite3.connect(ledger.path) as connection:
         assert connection.execute("SELECT stop_offset FROM speech_progress WHERE job_id = ?", (job_id,)).fetchone() == (1234,)
         retry_at = connection.execute("SELECT retry_at FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
@@ -2071,6 +2074,29 @@ def test_a_returned_job_waits_a_retry_time_that_doubles_from_one_minute_to_fifte
         now = retry_at
 
     assert waits == [60, 120, 240, 480, 900, 900]
+
+
+def test_a_persons_retry_starts_the_return_wait_again_at_one_minute(vault: Path, monkeypatch):
+    """Catches a retry that keeps the earlier returns, so a job that a person retried waits 15 minutes at its next return."""
+    import time
+
+    from exomem import media_jobs
+
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(vault / "recording.mp3", vault / "recording.mp3.md", "audio"))
+    now = time.time()
+    monkeypatch.setattr(media_jobs.time, "time", lambda: now)
+    for _ in range(4):
+        assert ledger.return_for_retry(ledger.claim_next())
+        now += media_jobs.RETRY_LIMIT_SECONDS
+    assert ledger.mark(ledger.claim_next(), media_jobs.FAILED, "MEDIA_ORIGINAL_UNVERIFIED: the stored copy differs")
+    assert ledger.retry(include_failed=True) == 1
+
+    assert ledger.return_for_retry(ledger.claim_next())
+
+    with sqlite3.connect(ledger.path) as connection:
+        retry_at = connection.execute("SELECT retry_at FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+    assert round(retry_at - now) == media_jobs.RETRY_FIRST_SECONDS
 
 
 def test_an_original_larger_than_the_whole_hydration_capacity_blocks_its_job(vault: Path, selected_store):
@@ -2315,6 +2341,67 @@ def test_an_offload_waits_with_no_attempt_spent_while_a_hydration_holds_the_capa
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
 
     assert originals.original_state(vault, path).state == "cached"
+
+
+def test_a_busy_capacity_keeps_the_offload_of_a_row_whose_other_stages_ran(vault: Path, selected_store):
+    """Catches a busy capacity that fails a row from before offload had rows of its own, after its other stages ran."""
+    import os
+
+    from exomem import media_jobs, media_worker
+
+    path = _preserved(vault)
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM jobs")
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('hydration', 'elsewhere', ?, ?, 1)",
+                           (os.getpid(), selected_store[0]["max_temporary_bytes"] - 10))
+    job_id = ledger.enqueue(media_jobs.MediaJob(path, originals.original_state(vault, path).sidecar_path, "text",
+                                                do_ocr=False, do_reembed=True, do_offload=True))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    waiting = ledger.get(job_id)
+    assert waiting.state == media_jobs.PENDING and waiting.do_offload and not waiting.do_reembed
+    assert originals.original_state(vault, path).state == "local"
+
+
+def test_a_reservation_of_a_reused_process_id_does_not_defer_the_watcher(vault: Path, selected_store):
+    """Catches a liveness check by process ID alone, which defers a path's events after its holder died."""
+    import os
+
+    from exomem import media_jobs, media_store
+
+    if media_jobs.process_start(os.getpid()) is None:
+        pytest.skip("this platform exposes no process start time")
+    path = _stored(vault, "recording", 300)
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start) VALUES ('earlier', ?, ?, '1')",
+                           (path.relative_to(vault).as_posix(), os.getpid()))
+
+    assert media_store.managed_event(vault, path) == "suppress"
+
+
+def test_a_failed_hydration_removes_its_temporary_after_its_folder_moved(vault: Path, selected_store, monkeypatch):
+    """Catches a temporary removed by its path, which leaves a partial original in a folder that moved meanwhile."""
+    from exomem import held_fs, media_store
+
+    path = _stored(vault, "recording", 3_000)
+    assert media_store.evict(vault, path)
+    moved = path.parent.with_name(path.parent.name + "-moved")
+
+    def interrupted(backend, reference, identity, sink):
+        sink.write(b"part of the original")
+        sink.flush()
+        path.parent.rename(moved)
+        raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the download stopped")
+
+    monkeypatch.setattr(media_store, "_decrypt_into", interrupted)
+    with pytest.raises(media_store.MediaStoreError, match="the download stopped"):
+        with media_store.open_original(vault, path):
+            pytest.fail("an interrupted hydration yields no original")
+
+    assert [entry.name for entry in moved.iterdir() if held_fs.is_publish_temporary(entry.name)] == []
 
 
 def test_an_offload_takes_no_hydration_slot(vault: Path, selected_store, monkeypatch):

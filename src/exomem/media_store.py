@@ -31,7 +31,6 @@ from .media_jobs import (
     MediaJob,
     MediaJobStore,
     holder_alive,
-    pid_alive,
     process_start,
 )
 from .originals import OriginalSnapshot, StoredObject, original_state
@@ -370,8 +369,9 @@ def managed_event(vault: Path, path: Path) -> str | None:
         conn = store._connect(readonly=True)
         try:
             if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_access' AND type = 'table'").fetchone() is not None:
-                rows = conn.execute("SELECT pid FROM media_access WHERE binary_rel = ?", (store._relative(path),)).fetchall()
-                if any(pid_alive(row["pid"]) for row in rows):
+                rows = conn.execute("SELECT * FROM media_access WHERE binary_rel = ?", (store._relative(path),)).fetchall()
+                # A read-only reader can see a ledger from before the start column, which the next write adds.
+                if any(holder_alive(row["pid"], row["pid_start"] if "pid_start" in row.keys() else None) for row in rows):
                     return "defer"
         finally:
             conn.close()
@@ -917,31 +917,38 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
     guard = PathGuard.capture(vault, relative.as_posix(), leaf_policy="absent")
     with held_fs.acquire(vault).require() as filesystem:
         with filesystem.parent(relative.parent.as_posix(), access="mutate").require() as parent:
-            with filesystem.file(parent, temporary, access="write", create=True, exclusive=True).require() as file:
-                written = file.identity
-                with os.fdopen(os.dup(file.descriptor), "wb") as sink:
-                    plaintext = _decrypt_into(backend, snapshot.reference, str(config["identity_path"]), sink)
-                os.fsync(file.descriptor)
-            if plaintext != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
-                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original failed authenticated verification")
-            # Only the link runs under the vault guard; the download and the decryption ran outside it.
-            with _guard(vault, "media_store_hydrate"):
-                if original_state(vault, snapshot.path) != snapshot:
-                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed during hydration")
-                recheck_path_guards(vault, (guard,))
-                held_fs.install_temporary(filesystem, parent, temporary, relative.name,
-                                          expected_identity=written).require()
-                filesystem.flush_directory(parent).require()
-                with reserved_paths.open_generic_binary(vault, relative.as_posix()) as placed:
-                    # The verified temporary is now the original; its inode proves it without a second hash.
-                    if (placed.version.identity.device, placed.version.identity.inode) != (written.device, written.inode):
-                        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the placed original changed")
-                    conn = ledger._connect()
-                    try:
-                        with conn:
-                            _record_cache(conn, ledger, original_state(vault, snapshot.path), placed)
-                    finally:
-                        conn.close()
+            try:
+                with filesystem.file(parent, temporary, access="write", create=True, exclusive=True).require() as file:
+                    written = file.identity
+                    with os.fdopen(os.dup(file.descriptor), "wb") as sink:
+                        plaintext = _decrypt_into(backend, snapshot.reference, str(config["identity_path"]), sink)
+                    os.fsync(file.descriptor)
+                if plaintext != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+                    raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original failed authenticated verification")
+                # Only the link runs under the vault guard; the download and the decryption ran outside it.
+                with _guard(vault, "media_store_hydrate"):
+                    if original_state(vault, snapshot.path) != snapshot:
+                        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed during hydration")
+                    recheck_path_guards(vault, (guard,))
+                    held_fs.install_temporary(filesystem, parent, temporary, relative.name,
+                                              expected_identity=written).require()
+                    filesystem.flush_directory(parent).require()
+                    with reserved_paths.open_generic_binary(vault, relative.as_posix()) as placed:
+                        # The verified temporary is now the original; its inode proves it without a second hash.
+                        if (placed.version.identity.device, placed.version.identity.inode) != (written.device, written.inode):
+                            raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the placed original changed")
+                        conn = ledger._connect()
+                        try:
+                            with conn:
+                                _record_cache(conn, ledger, original_state(vault, snapshot.path), placed)
+                        finally:
+                            conn.close()
+            except BaseException:
+                # The held folder reaches the temporary even after a move renamed its path.
+                with suppress(held_fs.HeldFsError, OSError):
+                    with filesystem.file(parent, temporary, access="mutate").require() as file:
+                        filesystem.unlink(file).require()
+                raise
 
 
 def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
