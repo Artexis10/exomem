@@ -1289,6 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    # A plain `kill` must unwind the finally blocks, or the run's coordinator outlives it.
-    signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
+    # A plain `kill` must unwind the finally blocks, or the run's coordinator outlives it. KeyboardInterrupt,
+    # not SystemExit: the per-case guards record SystemExit as a failed case and carry on.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     raise SystemExit(main())
