@@ -77,7 +77,7 @@ def test_relation_proposal_never_mutates_and_confirmation_uses_audited_edit(
     assert target.read_bytes() == before
     candidate = proposal["candidates"][0]
     current = _post(client, "read_memory", {"path": target_rel})
-    relation = candidate.get("relation_type") or "relates_to"
+    relation = candidate["relation_type"]
     destination = str(candidate["to"]).removesuffix(".md")
     _post(
         client,
@@ -96,6 +96,82 @@ def test_relation_proposal_never_mutates_and_confirmation_uses_audited_edit(
     assert "Accepted reviewed Studio relation" in (
         vault / "Knowledge Base/log.md"
     ).read_text(encoding="utf-8")
+
+
+def test_studio_payloads_carry_the_relations_that_fit_a_person_and_an_organization(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = "Knowledge Base/Sources/Sessions/2026-05-05-metabolism-curriculum-design.md"
+    person = "Knowledge Base/Entities/People/Ada Marsh.md"
+    organization = "Knowledge Base/Entities/Organizations/Birch Works.md"
+    for page, entity_type, name in (
+        (person, "person", "Ada Marsh"),
+        (organization, "organization", "Birch Works"),
+    ):
+        _write(
+            vault,
+            page,
+            f"---\ntype: entity\nentity_type: {entity_type}\nstatus: active\n"
+            f"sources:\n  - {source}\n---\n# {name}\n\n## Summary\n\n"
+            f"{name} is an invented entity for the Studio check.\n\n## Relations\n\n",
+        )
+    find.clear_cache()
+    semantic_contract.reset_corpus_context_cache()
+    freshness.clear()
+    freshness.rebaseline(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    client = _client(vault, monkeypatch)
+
+    # The suggest dialog offers one choice per fitting relation, shown by label and written by key.
+    proposal = _post(
+        client, "connect_memory", {"operation": "suggest-relations", "path": person, "limit": 10}
+    )
+    candidate = next(c for c in proposal["candidates"] if c["to"] == organization)
+    assert "owns" in [option["key"] for option in candidate["options"]]
+    assert all(option["label"] for option in candidate["options"])
+
+    # The queue item offers the same relations and authors no bullet of its own.
+    queue = _post(client, "review_memory", {"mode": "relation-queue"})
+    group = next(g for g in queue["groups"] if g["path"] == person)
+    item = next(i for i in group["items"] if i["to"] == organization)
+    assert [option["key"] for option in item["options"]] == [
+        option["key"] for option in candidate["options"]
+    ]
+    assert item["bullet"] is None
+
+    # Accepting it as generic is refused with the code and remediation Studio shows.
+    refused = client.post(
+        "/api/connect_memory",
+        json={
+            "operation": "accept-relation",
+            "ref": item["ref"],
+            "path": group["source_path"],
+            "expected_hash": group["source_content_hash"],
+            "why": "Accepted reviewed relation from the Studio queue",
+            "expected_fingerprint": item["fingerprint"],
+        },
+        headers={"Authorization": "Bearer studio-key"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == "RELATION_CHOICE_REQUIRED"
+    assert refused.json()["error"]["remediation"]
+
+    # Writing the chosen key through the audited edit lands one bullet.
+    current = _post(client, "read_memory", {"path": person})
+    destination = organization.removesuffix(".md")
+    _post(
+        client,
+        "edit_memory",
+        {
+            "path": person,
+            "why": "Accepted reviewed Studio relation",
+            "heading": "Relations",
+            "section_position": "append",
+            "new_string": f"- owns [[{destination}]]",
+            "expected_hash": current["content_hash"],
+        },
+    )
+    assert (vault / person).read_text(encoding="utf-8").count(f"- owns [[{destination}]]") == 1
 
 
 def test_compilation_proposal_preserves_source_until_confirmed_remember(
