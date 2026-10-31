@@ -34,9 +34,9 @@ A direct `/upload` commit that finds the boundary held by a holder still inside 
 
 ### Requirement: Tenant-Scoped Retry And Idempotency Semantics
 
-All MCP and REST mutations, including hosted mutations, SHALL preserve caller-supplied idempotency keys and bounded implicit retry replay through the existing common invocation boundary. Retry identity MUST include the resolved vault or tenant, authenticated principal scope, command, and canonical arguments. A key or implicit retry from one tenant MUST NOT replay or suppress a mutation for another tenant. An identical pending retry MUST inspect or wait on its receipt outside the exclusive vault mutation boundary, while different identities remain subject to normal serialization. Failed precommit mutations MUST become retryable, and committed terminal outcomes MUST replay without executing the leaf again.
+All MCP mutations, including hosted mutations, SHALL preserve caller-supplied idempotency keys and bounded implicit retry replay through the existing common invocation boundary. Retry identity MUST include the resolved vault or tenant, authenticated principal scope, command, and canonical arguments. A key or implicit retry from one tenant MUST NOT replay or suppress a mutation for another tenant. An identical pending retry MUST inspect or wait on its receipt outside the exclusive vault mutation boundary, while different identities remain subject to normal serialization. Failed precommit mutations MUST become retryable, and committed terminal outcomes MUST replay without executing the leaf again.
 
-A REST mutation without an `Idempotency-Key` header SHALL take its implicit retry scope from its resolved principal's canonical audience, as an MCP mutation takes it from its retry scope, so that a resend with the same credential after a lost reply replays or waits on the first attempt. An in-process CLI or terminal UI mutation without an explicit key SHALL wait out ordinary contention inside the invocation without any replay identity: it creates no replay receipt, it is never offered another invocation's result, and a gate that requires a reusable identity, such as a vocabulary application, still refuses it. A command that issues a credential SHALL carry no implicit identity on any surface, so its terminal never enters the replay store.
+A REST mutation without an `Idempotency-Key` header SHALL carry no replay identity: two identical requests are two writes, and a busy boundary refuses it at once with a retryable `MUTATION_BUSY`, because a client that gave up during a wait and resent it would otherwise commit it twice. A REST client that wants ordinary contention waited out sends one key per intended write; the bundled Studio SHALL send a distinct key with every action, so a repeated action, such as a re-selected folder or a re-run plan, executes again. An in-process CLI or terminal UI mutation without an explicit key SHALL wait out ordinary contention inside the invocation without any replay identity: it creates no replay receipt, it is never offered another invocation's result, and a gate that requires a reusable identity, such as a vocabulary application, still refuses it. A command that issues a credential SHALL carry no implicit identity on any surface, so its terminal never enters the replay store.
 
 A replay identity REQUIRES either an explicit caller-supplied idempotency key or a retry scope that is stable across the retry. Where neither resolves for a remote request — an unauthenticated caller, an unresolved or most-restrictive principal, or a stateless transport whose session identifier changes per request — the repeat carries no replay identity, and the system SHALL treat the two requests as distinct by definition: no shared receipt is created, no replay is offered, and normal serialization applies, up to and including `MUTATION_BUSY` for the second request. Such a request SHALL NOT wait out contention, because a client that gave up during the wait and resent it would commit it twice. The replay guarantee above is therefore explicitly out of scope for that configuration rather than silently unmet.
 
@@ -58,24 +58,22 @@ A replay identity REQUIRES either an explicit caller-supplied idempotency key or
 - **THEN** the repeat resolves no replay identity, creates no shared receipt, and is not offered the first request's result
 - **AND** it contends for the vault mutation boundary like any other distinct mutation, up to and including `MUTATION_BUSY`
 
-#### Scenario: A REST resend after a lost reply replays
+#### Scenario: A Studio action meets an ordinary busy boundary
 
-- **WHEN** a REST client sends a mutation without an `Idempotency-Key` header, loses the reply, and resends the identical mutation with the same credential within the implicit replay window
-- **THEN** the resend replays the first result, or waits on the first attempt while it is pending, without executing the leaf again
-- **AND** only one durable vault change exists
-
-#### Scenario: An unkeyed REST write meets an ordinary busy boundary
-
-- **WHEN** a REST mutation without an `Idempotency-Key` header finds the boundary held by a holder still inside its allowance
+- **WHEN** a Studio action finds the boundary held by a holder still inside its allowance
 - **AND** the holder releases within the request's wait budget
-- **THEN** the write commits once
-- **AND** no `MUTATION_BUSY` reaches the client
+- **THEN** the action commits once and the Studio shows its result
+- **AND** no `MUTATION_BUSY` reaches the Studio
 
-#### Scenario: Two principals send the same unkeyed REST write
+#### Scenario: A repeated Studio action executes again
 
-- **WHEN** two REST principals with different canonical audiences send identical mutations without an `Idempotency-Key` header
-- **THEN** each resolves its own implicit retry identity and executes
-- **AND** neither receives the other's result
+- **WHEN** a Studio user selects a folder, changes the selection, and selects the folder again
+- **THEN** each action is its own write and the stored selection is the last one sent
+
+#### Scenario: An unkeyed REST write meets a busy boundary
+
+- **WHEN** a REST mutation without an `Idempotency-Key` header finds the boundary busy
+- **THEN** it returns the retryable `MUTATION_BUSY` without waiting, and nothing is written
 
 #### Scenario: A CLI write waits out contention without replaying another invocation
 

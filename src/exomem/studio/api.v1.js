@@ -20,9 +20,22 @@ export function setStoredKey(key) {
   else window.sessionStorage.removeItem(KEY_NAME);
 }
 
+function actionKey() {
+  // randomUUID exists only in secure contexts; a plain-HTTP LAN page still has getRandomValues.
+  if (window.crypto.randomUUID) return window.crypto.randomUUID();
+  return Array.from(window.crypto.getRandomValues(new Uint8Array(16)),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export async function command(name, body = {}, {key = storedKey()} = {}) {
   if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new ApiError("Invalid command name");
-  const headers = {"Content-Type": "application/json", "Accept": "application/json"};
+  // One key per action: the server waits out a busy boundary for a keyed write,
+  // and a repeated action (a toggled selection, a re-plan) is a new write.
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Idempotency-Key": actionKey(),
+  };
   if (key) headers.Authorization = `Bearer ${key}`;
   let response;
   try {

@@ -6,7 +6,7 @@
 
 ### D1. Each surface supplies its own retry scope; the key function gains no fallback
 
-- REST passes the authenticated principal's scope as the implicit scope when no `Idempotency-Key` header arrives. The principal is stable across a resend with the same credential, so a resend after a lost reply attaches to the first attempt.
+- REST passes no implicit scope. A digest-derived identity would replay a write the client repeats on purpose: the Studio re-sends a selection after toggling and re-runs a plan after changing the selection, and review reproduced the server keeping the old selection and serving a stale plan. A keyless REST client that waited and then timed out could commit twice, so it keeps the immediate refusal. The Studio sends a fresh key per action, so its writes take the keyed wait and stay distinct.
 - The CLI and terminal UI wait out contention with no replay identity at all. An in-process caller cannot lose a reply, so a receipt buys nothing; a re-attempt is safe because commit observation (`commit_state`) stops any attempt that committed from running again. A per-invocation key was rejected in review: it passed the vocabulary-application gate, which requires an identity a retry can reuse, and a failed attempt then left the reviewed decision bound to an identity nobody could present again. It would also have made every CLI write depend on a healthy replay store.
 - `_effective_idempotency_key` keeps returning no key when a caller supplies neither a key nor a scope. Credential-issuing commands clear both before key derivation so that a bearer never enters the replay store; a fallback inside the key function would bypass that rule for every internal caller.
 
@@ -26,6 +26,6 @@ The direct `/upload` handlers acquire the boundary before they read or write any
 
 ## Risks
 
-- An identical unkeyed REST write from the same principal inside 600 s now replays instead of committing twice. MCP already behaves this way; an explicit `Idempotency-Key` per intended write keeps both.
+- REST callers without a key gain nothing from this change; the deployment guide tells them to send one key per intended write.
 - A waiter process that is suspended mid-wait (for example by SIGSTOP) keeps its signal until it resumes or exits. Derived rows and store ticks still advance one unit per pass; graph republication defers until then.
 - A foreign waiter makes background work step aside more often. Each unit still completes before the holder checks, so background work keeps making progress.
