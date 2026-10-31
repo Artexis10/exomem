@@ -180,6 +180,103 @@ clients to authorize again. If startup fails, leave the unit stopped and
 inspect the journal and retained state before another change; do not silently
 start an older release over migrated state.
 
+## Rehearse a release on a copy
+
+Rehearse each release on a copy of the live vault and state before you install
+it. The rehearsal runs the same handoff on a throwaway managed service, so it
+shows what the live switch will do. Install the release only when both checks
+pass:
+
+- The promoted worker does not run a full lexical catalog repair.
+- `handoff.ready_after_ms` is under 120000 (two minutes).
+
+A failed check holds the install. A full repair on the live service keeps
+`/health/ready` at `not_ready`, and requests are refused for the whole repair.
+
+The copy needs disk for the vault and the state directory, plus one release
+environment. The throwaway service needs memory for two workers during the
+standby warm. Admit it as a bounded local run before you start.
+
+The first start on a copy always repairs the catalog once. The freshness
+checkpoint covers each page's absolute path and change time, and a copy keeps
+neither. Let the current release settle on the copy first; only the switch that
+follows tells you about the candidate.
+
+The supervisor verifies its systemd identity, so the throwaway service runs as
+a transient user unit. Keep its paths short: the control sockets under the
+runtime directory have a 104-byte limit.
+
+1. Create the scratch root: `install -d -m 700 /tmp/xr /tmp/xr/{managed,home,logs,lease,cwd,state}`.
+2. Copy the vault to `/tmp/xr/vault` at a quiet moment, with no import or bulk apply running.
+3. Compute the copy's state key with the command below.
+4. Copy the live vault state directory to `/tmp/xr/state/<key>`.
+5. Set `vault_identity` in the copied `.state-migration.json` to `<key>`.
+6. Create `/tmp/xr/launcher` with `uv venv` and install the serving version with its profile extras.
+7. Write `/tmp/xr/rehearsal.env` with mode 600, as shown below.
+8. Start the transient unit with the `systemd-run` command below.
+9. Wait for `/health/ready` on the rehearsal port to answer 200 and the catalog repair to finish.
+10. Confirm `--status` reports `phase: ready` with no pending transition.
+11. Note the time, then switch with the `service_upgrade` command below.
+12. Read `last_transition.handoff` in the printed result and the worker log after the noted time.
+13. Stop the unit and remove the scratch root with `storage-reap remove /tmp/xr`.
+
+Expect `ready_after_ms` under 120000 and no `scope=full` repair after the noted
+time.
+
+```sh
+/tmp/xr/launcher/bin/python -c 'from pathlib import Path; from exomem.state_paths import vault_state_key; print(vault_state_key(Path("/tmp/xr/vault")))'
+```
+
+The environment file gives the copy its own paths and disconnects everything
+that reaches a live or external system. Leave out every writer lease, OAuth,
+GitHub, public base URL, local port, upload token and model hub token variable
+from the live file. Keep the live budget and preload values, so the timings
+match:
+
+```sh
+EXOMEM_VAULT_PATH=/tmp/xr/vault
+EXOMEM_STATE_ROOT=/tmp/xr/state
+EXOMEM_LOG_DIR=/tmp/xr/logs
+EXOMEM_WRITER_LEASE_STATE_DIR=/tmp/xr/lease
+HOME=/tmp/xr/home
+XDG_STATE_HOME=/tmp/xr/home/.local/state
+XDG_CONFIG_HOME=/tmp/xr/home/.config
+XDG_DATA_HOME=/tmp/xr/home/.local/share
+EXOMEM_REST_API_KEY=<new random value>
+EXOMEM_DISABLE_MEDIA_EXTRACTION=1
+EXOMEM_ASR_PREWARM=0
+EXOMEM_DISABLE_CLIP=1
+HF_HUB_OFFLINE=1
+EXOMEM_PRELOAD_MODELS=<live value>
+EXOMEM_STANDBY_WARM_SECONDS=<live value>
+EXOMEM_COLD_START_SECONDS=<live value>
+```
+
+```sh
+systemd-run --user --collect --unit=exomem-rehearsal.service -p Type=simple -p KillMode=control-group -p SendSIGKILL=yes -p TimeoutStopSec=30 -p EnvironmentFile=/tmp/xr/rehearsal.env -p WorkingDirectory=/tmp/xr/cwd /tmp/xr/launcher/bin/python -m exomem.service_manager serve --runtime-dir /tmp/xr/managed --worker-python /tmp/xr/launcher/bin/python --host 127.0.0.1 --port 18765 --unit-name exomem-rehearsal.service
+```
+
+```sh
+HOME=/tmp/xr/home EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH=1 /tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --package-version VERSION --profile standard
+```
+
+For a candidate that is not published, pass `--wheel` and `--source-revision`
+in place of `--package-version`, as for a live upgrade. The candidate stages
+under `/tmp/xr/releases`, never under the live service root.
+
+Read these log lines after the noted time in `/tmp/xr/logs/exomem.log`:
+
+- `lexical repair pass starting scope=full` from the promoted worker fails the
+  first check. `scope=targeted` is the expected delta repair.
+- `standby built a detached lexical catalogue` and `adopted retrieval catalog
+  healed=` show that promotion adopted the standby's catalog.
+- `managed retrieval catalog delegated to background repair` or `maintained
+  retrieval catalog warm-up failed` explain a slow or failed adoption.
+
+The rehearsal does not cover a collection store schema change or the move of
+file collections into the store. Both need the writer lease coordinator, and
+the copy runs without one so that it cannot reach the live coordinator.
+
 ## Release retention
 
 After the target is confirmed active, the operator removes the release
