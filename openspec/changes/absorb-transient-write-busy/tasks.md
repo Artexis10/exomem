@@ -6,7 +6,7 @@
 
 ## 2. Cross-process waiter signal
 
-- [ ] 2.1 `mutation_lock`: hold a shared advisory lock on the boundary's waiter sidecar while any thread of the process waits; `waiter_count()` reports a waiter in another process; Windows stays process-local.
+- [ ] 2.1 `mutation_lock`: hold a shared advisory lock on the boundary's waiter sidecar from a thread's first failed try until it stops waiting; `waiter_count()` reports a waiter in another process; Windows stays process-local.
 - [ ] 2.2 Tests: a holder sees a waiter in a second process and stops seeing it after that process stops waiting or is killed; a background unit loop steps aside for the foreign waiter.
 
 ## 3. Upload commits wait out contention (after PR #2239 merges)

@@ -1440,6 +1440,33 @@ def test_a_stalled_probe_does_not_stretch_a_bounded_wait(tmp_path: Path) -> None
         _join_or_terminate([holder])
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the cross-process waiter signal is POSIX-only")
+def test_threads_asking_at_once_see_no_waiter_when_none_exists(tmp_path: Path) -> None:
+    """Two probes of the sidecar from one process must not mistake each other for a waiter."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = VaultMutationCoordinator(tmp_path / "state", vault, poll_interval_seconds=0.0001)
+    # The sidecar exists once any waiter has used it; no process waits now.
+    mutation_lock_module._open_lock_handle(
+        mutation_lock_module._waiters_lock_path(holder.lock_path)
+    ).close()
+    phantoms: list[int] = []
+    stop = time.monotonic() + 1.0
+
+    def ask() -> None:
+        while time.monotonic() < stop:
+            if holder.waiter_count():
+                phantoms.append(1)
+
+    with holder.hold(timeout_seconds=3.0, operation="background", holder_kind="graph"):
+        askers = [threading.Thread(target=ask) for _ in range(4)]
+        for asker in askers:
+            asker.start()
+        for asker in askers:
+            asker.join()
+    assert phantoms == []
+
+
 def test_sequential_holds_on_one_thread_reacquire_the_os_boundary(
     tmp_path: Path,
 ) -> None:

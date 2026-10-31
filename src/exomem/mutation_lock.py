@@ -1932,6 +1932,9 @@ class _LocalLockState:
     #: once per poll interval, however often background work asks.
     foreign_waiter: bool = False
     foreign_probed_at: float = -math.inf
+    #: One probing thread per process: two probes of the same sidecar would make
+    #: each other's exclusive try fail and report a waiter nobody is.
+    foreign_probe: threading.Lock = field(default_factory=threading.Lock)
 
 
 _LOCAL_STATES: dict[Path, _LocalLockState] = {}
@@ -2211,11 +2214,18 @@ class VaultMutationCoordinator:
             now = time.monotonic()
             if now - state.foreign_probed_at < self.poll_interval_seconds:
                 return int(state.foreign_waiter)
-        # This process holds its shared lock only while `waiters > 0`, so the
-        # probe cannot meet it here.
-        found = _another_process_waits(self.lock_path)
-        with state.metadata_guard:
-            state.foreign_waiter, state.foreign_probed_at = found, now
+        if not state.foreign_probe.acquire(blocking=False):
+            # Another thread is probing now; its answer is at most this old.
+            with state.metadata_guard:
+                return int(state.foreign_waiter)
+        try:
+            # This process holds its shared lock only while `waiters > 0`, so the
+            # probe cannot meet it here.
+            found = _another_process_waits(self.lock_path)
+            with state.metadata_guard:
+                state.foreign_waiter, state.foreign_probed_at = found, now
+        finally:
+            state.foreign_probe.release()
         return int(found)
 
     @contextmanager
