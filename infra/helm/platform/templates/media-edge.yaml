@@ -181,9 +181,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: cellctl
-        {{- if $edge.allCells }}
-        # Every cell runtime, including cells created later; the listed cells are a subset.
+        # D12, decided by the operator on 2026-10-31: the runtime of every cell namespace that cellctl
+        # labels while the cell's store is served or draining. mediaEdge.cellIds only chooses the served
+        # cells, so a cell taken off that list keeps its access until it drains.
         - namespaceSelector:
+            matchLabels:
+              exomem.io/media-edge-access: "true"
             matchExpressions:
               - key: exomem.io/cloud-cell
                 operator: Exists
@@ -193,21 +196,6 @@ spec:
             matchExpressions:
               - key: exomem.io/cell-job
                 operator: DoesNotExist
-        {{- else }}
-        {{- range $edge.cellIds }}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ printf "exo-cell-%s" . }}
-              exomem.io/cloud-cell: {{ . }}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: exomem-cell
-              exomem.io/cell: {{ . }}
-            matchExpressions:
-              - key: exomem.io/cell-job
-                operator: DoesNotExist
-        {{- end }}
-        {{- end }}
       ports:
         - protocol: TCP
           port: 8769

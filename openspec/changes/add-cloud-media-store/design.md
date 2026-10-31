@@ -545,6 +545,14 @@ The cost on a 20 GiB cell with 5.25 GiB of hydration capacity and `max_hydration
 - Today cellctl does otherwise. It gives a cell that the edge stops serving a retained store at once: the store identity, disabled, with no key, credential or egress. The drain requirement already kept hydration until no original is evicted, so the code and the spec disagreed before task 5.4. Task 5.4.15 changes the code.
 - The cost: a turned-off cell that cannot drain keeps the posture of a served cell. The edge still accepts its credential for writes (see Open questions).
 
+**The network wall follows a namespace label (decided by the operator on 2026-10-31).** In the code, the retained store above is the `draining` mode. The code's `retained` mode is the store identity alone, which a cell keeps after it drains. Before this decision, the edge's ingress and cellctl's admission both followed `mediaEdge.cellIds`, so a draining cell lost its network path to the edge when it left the list.
+- cellctl sets the label `exomem.io/media-edge-access: "true"` on a cell's namespace while the cell's store is served or draining.
+- The edge's ingress admits cellctl and the runtime pods of cell namespaces that carry the label. cellctl's admission lets it give a runtime edge egress only in such a namespace.
+- `mediaEdge.cellIds` and the fleet switch only choose which cells the edge serves.
+- Removal order: the credential leaves first, then the label, then the active-set entry. The label leaves in the render that drops the credential, and that render applies the namespace before the Secret (simplest choice, marked). The active-set entry leaves at the start of the next pass.
+- Without the edge settings, cellctl can sign no credential. It therefore refuses to start while a live cell with a key bundle has not drained, and the deploy fails.
+- The cost: the wall holds no operator list. cellctl sets the label, and cellctl already holds the signing key, so the list did not confine a compromised cellctl.
+
 Options considered:
 
 | Option | Holds | Agent between windows | Large media | Verdict |

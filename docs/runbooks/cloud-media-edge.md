@@ -53,7 +53,10 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 5. Check that ConfigMap `exomem-media-edge-active-set` lists the canary in `active-set.json`.
 6. Wait for cellctl to re-render the canary. Check that its Secret `cell-credentials` has the keys
    `media-edge-credential`, `media-age-identity`, `media-name-key` and `media-store.json`.
-7. Read `/v1/generation` on the edge. It must report the generation in the ConfigMap.
+7. Check that the canary's namespace carries the label that opens the network to the edge:
+   `kubectl get namespace exo-cell-<canary> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
+   Expect `true`.
+8. Read `/v1/generation` on the edge. It must report the generation in the ConfigMap.
    The edge reports a generation only after it drains the requests of the earlier set.
 
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and

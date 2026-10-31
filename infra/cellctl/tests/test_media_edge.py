@@ -21,7 +21,7 @@ from kubernetes.client.rest import ApiException
 
 from cellctl import db, main, manifests, media_edge, reconcile
 from cellctl.decide import GROWTH_THRESHOLD_PERCENT
-from cellctl.manifests import MEDIA_STORE_CONFIG_KEY, namespace_name
+from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, MEDIA_STORE_CONFIG_KEY, namespace_name
 from cellctl.state import ClusterObservation, MediaCensus
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
@@ -600,6 +600,36 @@ async def test_a_later_report_with_no_evicted_original_removes_key_credential_an
         await fleet.close()
 
 
+async def test_the_edge_access_label_stays_while_served_or_draining_and_leaves_with_the_credential(cell_db) -> None:
+    # The edge admits a runtime by this label. Dropped before the credential, a draining cell could no longer
+    # read its evicted originals; the set entry leaves last, so the edge honours the credential while it is held.
+    fleet = await _fleet(cell_db, CANARY)
+
+    def held() -> dict[str, bool]:
+        namespace = fleet.cluster.applied[("", "Namespace", namespace_name(CANARY))]["metadata"]["labels"]
+        return {"credential": "media-edge-credential" in fleet.cluster.secret(CANARY),
+                "label": namespace.get(MEDIA_EDGE_ACCESS_LABEL) == "true",
+                "active set": CANARY in fleet.cluster.published()["cells"]}
+
+    try:
+        await fleet.run()
+        served = held()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        draining = held()
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+        drained = held()
+        await fleet.run(NOW + timedelta(minutes=20))
+        retained = held()
+
+        assert served == draining == {"credential": True, "label": True, "active set": True}
+        assert drained == {"credential": False, "label": False, "active set": True}
+        assert retained == {"credential": False, "label": False, "active set": False}
+    finally:
+        await fleet.close()
+
+
 async def test_a_cell_served_again_forgets_its_earlier_turn_off(cell_db) -> None:
     # A report from while it was served again must not count for its next turn-off.
     fleet = await _fleet(cell_db, CANARY)
@@ -635,12 +665,15 @@ async def test_a_deleted_cell_leaves_the_set_and_retires_its_keys_without_a_repo
         await fleet.run(NOW + timedelta(minutes=5))
         assert CANARY in fleet.cluster.published()["cells"]
         await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", CANARY)
+        fleet.cluster.observations[CANARY] = ClusterObservation(namespace_exists=True, namespace_cell_label=CANARY)
         await fleet.run(NOW + timedelta(minutes=10))
         await fleet.run(NOW + timedelta(minutes=15))
 
         retired = (await fleet.rows())[CANARY]
         assert CANARY not in fleet.cluster.published()["cells"]
         assert retired.media_key_wrapped is None and retired.content_keys_retired_at is not None
+        # Deletion removes the namespace first (D9), and the edge access label with it.
+        assert namespace_name(CANARY) in fleet.cluster.deleted_namespaces
     finally:
         await app.close()
         await fleet.close()

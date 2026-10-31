@@ -8,6 +8,9 @@ from typing import Any
 import pytest
 import yaml
 
+from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, render_cell_manifests
+
+from .test_media_edge import _spec
 from .test_platform_chart_headers import (
     ARTIFACT_BROKER_ARGS,
     HELM,
@@ -43,6 +46,31 @@ def _clause(peer: str, cells: str) -> str:
 
 def _ingress_peers(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _find(documents, "NetworkPolicy", "exomem-media-edge")["spec"]["ingress"][0]["from"]
+
+
+def _selects(selector: dict[str, Any], labels: dict[str, str]) -> bool:
+    """Kubernetes label-selector matching for the two operators the chart uses; another one raises."""
+    operators = {"Exists": lambda key: key in labels, "DoesNotExist": lambda key: key not in labels}
+    return (all(labels.get(key) == value for key, value in selector.get("matchLabels", {}).items())
+            and all(operators[e["operator"]](e["key"]) for e in selector.get("matchExpressions", [])))
+
+
+def _edge_admits(documents: list[dict[str, Any]], rendered: list[dict[str, Any]]) -> bool:
+    """Whether the edge's ingress admits the runtime pod of a cell that cellctl rendered."""
+    namespace = next(m for m in rendered if m["kind"] == "Namespace")["metadata"]["labels"]
+    pod = next(m for m in rendered if m["kind"] == "StatefulSet")["spec"]["template"]["metadata"]["labels"]
+    # A peer with no namespace selector admits pods of the edge's own namespace only.
+    return any(_selects(peer["namespaceSelector"], namespace) and _selects(peer["podSelector"], pod)
+               for peer in _ingress_peers(documents) if "namespaceSelector" in peer)
+
+
+def _edge_peer_guarded_by_the_label(expression: str) -> bool:
+    """Whether the admission gives a runtime the edge peer only in a namespace that carries the label."""
+    clause = (f"((namespaceObject != null && has(namespaceObject.metadata.labels) && "
+              f"'{MEDIA_EDGE_ACCESS_LABEL}' in namespaceObject.metadata.labels && "
+              f"namespaceObject.metadata.labels['{MEDIA_EDGE_ACCESS_LABEL}'] == 'true') && "
+              "e.to[0].podSelector.matchLabels == {'app.kubernetes.io/name': \"exomem-media-edge\"}")
+    return clause in " ".join(expression.split())
 
 
 def test_the_edge_is_off_by_default_and_the_default_render_names_none_of_it() -> None:
@@ -94,14 +122,18 @@ def test_the_edge_render_holds_neither_the_media_keys_nor_the_signing_key() -> N
     assert any(v.get("secret", {}).get("secretName") == "exomem-media-edge-signing-key" for v in cellctl["volumes"])
 
 
-def test_the_edge_admits_cellctl_and_only_the_selected_runtimes_and_reaches_public_443_and_dns() -> None:
+def test_the_edge_admits_cellctl_and_the_runtimes_cellctl_labels_and_reaches_public_443_and_dns() -> None:
     documents = _helm_template(*EDGE)
     policy = _find(documents, "NetworkPolicy", "exomem-media-edge")["spec"]
     peers = _ingress_peers(documents)
 
-    assert peers[0] == {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "cellctl"}}}
-    runtimes = peers[1:]
-    assert [p["namespaceSelector"]["matchLabels"]["exomem.io/cloud-cell"] for p in runtimes] == [CANARY]
+    assert peers == [
+        {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "cellctl"}}},
+        {"namespaceSelector": {"matchLabels": {MEDIA_EDGE_ACCESS_LABEL: "true"},
+                               "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
+         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell"},
+                         "matchExpressions": [{"key": "exomem.io/cell-job", "operator": "DoesNotExist"}]}},
+    ]
     assert policy["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8769}]
     assert [rule["to"][0].get("ipBlock", {}).get("cidr") for rule in policy["egress"]] == ["0.0.0.0/0", None]
     assert {p["port"] for rule in policy["egress"] for p in rule["ports"]} == {443, 53}
@@ -111,30 +143,43 @@ def test_the_edge_admits_cellctl_and_only_the_selected_runtimes_and_reaches_publ
             "ports": [{"port": 8769, "protocol": "TCP"}]} in cellctl_egress
 
 
-def test_only_a_selected_cell_may_be_given_the_edge_peer_and_nothing_else_widens() -> None:
+def test_only_a_labelled_namespace_may_be_given_the_edge_peer_and_nothing_else_widens() -> None:
     documents = _helm_template(*EDGE)
     expression = _scope_expression(documents, "runtime-ingress only")
 
-    # The edge's port is allowed for the canary and the broker's for its own cell, each for that cell alone.
-    assert _clause("exomem-media-edge", CANARY) in expression
+    # The edge's port follows the namespace label; the broker's stays with its own cell list.
+    assert _edge_peer_guarded_by_the_label(expression)
     assert _clause("exomem-artifact-broker", OTHER) in expression
-    assert _clause("exomem-media-edge", OTHER) not in expression
+    assert _clause("exomem-media-edge", CANARY) not in expression
     assert "e.ports[0].port == 8769" in expression and "e.ports[0].port == 8767" in expression
     assert "size(variables.np.egress) <= 2" in expression
     assert "!has(e.to[0].ipBlock)" in expression
 
 
-def test_the_fleet_switch_selects_every_cell_beside_the_canary_list() -> None:
-    documents = _helm_template(*EDGE, "--set", "mediaEdge.allCells=true")
-    peers = _ingress_peers(documents)
+def test_a_turned_off_canary_reaches_the_edge_while_its_namespace_is_labelled_and_never_without_the_label() -> None:
+    # A draining cell must still read its evicted originals after the edge stops selecting it (D12).
+    documents = _helm_template(*EDGE, "--set-json", "mediaEdge.cellIds=[]")
     expression = _scope_expression(documents, "runtime-ingress only")
+    draining = render_cell_manifests(_spec(media_store_enabled=False))
+    retained = render_cell_manifests(_spec(
+        media_edge_url="", media_edge_credential="", media_age_identity="", media_recipient="",
+        media_name_key=b"", media_key_version=0, media_max_object_bytes=0, media_store_retained=True))
+
+    assert _edge_admits(documents, draining) is True
+    assert _edge_admits(documents, retained) is False
+    assert _edge_peer_guarded_by_the_label(expression)
+
+
+def test_the_fleet_switch_selects_every_cell_beside_the_canary_list_and_leaves_the_network_wall() -> None:
+    canary = _helm_template(*EDGE)
+    documents = _helm_template(*EDGE, "--set", "mediaEdge.allCells=true")
     cellctl = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in cellctl["env"]}
 
-    assert len(peers) == 2 and peers[1]["namespaceSelector"] == {
-        "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]}
-    assert _clause("exomem-media-edge", CANARY) not in expression
-    assert _clause("exomem-artifact-broker", OTHER) in expression
+    # The switch chooses which cells cellctl serves; the label, not the switch, opens the network.
+    assert _ingress_peers(documents) == _ingress_peers(canary)
+    assert (_scope_expression(documents, "runtime-ingress only")
+            == _scope_expression(canary, "runtime-ingress only"))
     assert env["CELLCTL_MEDIA_EDGE_ALL_CELLS"] == "true"
     assert json.loads(env["CELLCTL_MEDIA_EDGE_CELL_IDS"]) == [CANARY]
 

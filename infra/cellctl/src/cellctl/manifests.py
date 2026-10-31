@@ -38,6 +38,10 @@ ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
 MEDIA_EDGE_PORT = 8769
 MEDIA_EDGE_POD_LABEL_VALUE = "exomem-media-edge"
+# D12, decided by the operator on 2026-10-31: the namespace label that opens the network to the edge while a
+# cell's store is served or draining. The chart's edge ingress and cellctl admission select on it, and
+# test_media_edge_chart imports it to keep them in step.
+MEDIA_EDGE_ACCESS_LABEL = "exomem.io/media-edge-access"
 MEDIA_SLOT_PORT = 8768
 MEDIA_SLOT_POD_LABEL_VALUE = "exomem-media-slot-lease"
 STORAGE_CLASS = LEGACY_CLASS
@@ -345,6 +349,10 @@ def render_namespace(spec: CellManifestSpec) -> dict:
                 "pod-security.kubernetes.io/audit-version": POD_SECURITY_VERSION,
                 "pod-security.kubernetes.io/warn": "restricted",
                 "pod-security.kubernetes.io/warn-version": POD_SECURITY_VERSION,
+                # D12: the label follows the credential, so it leaves in the render that drops the credential,
+                # never earlier. This namespace applies first in that render (simplest choice: one render, no
+                # second namespace apply), and the active-set entry leaves at the next pass's start.
+                **({MEDIA_EDGE_ACCESS_LABEL: "true"} if spec.media_edge_url else {}),
             },
         },
     }

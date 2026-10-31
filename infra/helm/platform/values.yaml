@@ -284,7 +284,9 @@ artifactBroker:
 # credential. Cells reach it through a literal Service IP on port 8769. It runs
 # the broker's image (`artifactBroker.image`). `cellIds` lists the cells it serves,
 # such as one canary; `allCells` serves every cell, including each cell created
-# later, and works beside the list. Raise a cell's number in `credentialEpochs`
+# later, and works beside the list. Neither opens the network: the edge admits a
+# cell whose namespace cellctl labels while its store is served or draining, so a
+# cell taken off the list keeps its access until it drains. Raise a cell's number in `credentialEpochs`
 # to replace its credential and revoke the old one. `storePolicy` holds the
 # allowance, eviction and hydration settings cells read beside their keys. Create the
 # signing key and the edge's Secrets first (docs/runbooks/cloud-media-edge.md).
