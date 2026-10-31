@@ -926,6 +926,15 @@ _PUBLISHED_HANDOFF_PENDING: set[Path] = set()
 #: request observed during it, the request stays pending for a later caller to
 #: restart after an idle boundary instead of chaining full scans forever.
 _MAX_FULL_REBUILDS_PER_FLIGHT = 1
+#: Progress floor of a full repair's rebuild (`foreground_priority.PassBudget`).
+#: An import's apply holds the boundary for 97% of each call (rehearsals,
+#: 2026-10-31). In a local reproduction, the default half share let the repair
+#: work through half of each apply call and cost the apply a third of its files;
+#: at 0.9 the apply kept its quiet rate. The ceiling keeps a pass that never
+#: meets a gap within its work plus five minutes, where the default floor allows
+#: twice its work: inside the 900 s stalled-recall alert up to ten minutes of work.
+_REPAIR_WAIT_SHARE = 0.9
+_REPAIR_MAX_PARKED_SECONDS = 300.0
 #: Affected identities a contended publication declined, awaiting current-state replay.
 #:
 #: A governed write's incremental upsert cannot take the publication barrier
@@ -1012,6 +1021,7 @@ def _log_repair_finished(
     *,
     excused: int = 0,
     retargeted: int = 0,
+    parked_s: float = 0.0,
     promoted: bool | None = None,
 ) -> None:
     """Name one repair pass's result and the stage that produced it.
@@ -1021,6 +1031,8 @@ def _log_repair_finished(
     excused, across both scopes and every census in the pass. `retargeted`
     counts the times the pass's detached replays, the census replay included,
     waited for the registry to observe a newer write and replayed it.
+    `parked_s` is the part of `duration_s` that the pass's rebuild waited at its
+    yields for foreground work, such as an apply that holds the mutation boundary.
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -1029,6 +1041,7 @@ def _log_repair_finished(
         "duration_s": round(max(0.0, time.monotonic() - started), 3),
         "excused": excused,
         "retargeted": retargeted,
+        "parked_s": round(max(0.0, parked_s), 3),
     }
     if promoted is not None:
         fields["promoted"] = promoted
@@ -2668,6 +2681,7 @@ def _schedule_repair(
                     pass_started,
                     excused=len(getattr(store, "_last_census_excused", ())) if full_pass else 0,
                     retargeted=getattr(store, "_last_replay_retargets", 0) if full_pass else 0,
+                    parked_s=getattr(store, "_last_parked_seconds", 0.0) if full_pass else 0.0,
                     promoted=promoted,
                 )
                 pass_kind = None
@@ -4622,6 +4636,9 @@ class LexicalStore:
         # included, waited for the registry to observe a newer write and
         # replayed it (`_await_observed_rewrites`).
         self._last_replay_retargets = 0
+        # Seconds the last rebuild waited at its yields for foreground work:
+        # requests and every wait for or hold of a mutation boundary.
+        self._last_parked_seconds = 0.0
         # Per-path build signatures of a detached catalogue this process
         # adopted, awaiting the one heal that reconciles it (single use).
         self._adopted_rows: dict[str, tuple] | None = None
@@ -7374,6 +7391,7 @@ class LexicalStore:
         self._last_rebuild_stage = RepairStage.BUILD
         self._last_census_excused = set()
         self._last_replay_retargets = 0
+        self._last_parked_seconds = 0.0
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
         try:
@@ -7409,13 +7427,23 @@ class LexicalStore:
                 # A foreground bulk pass: its corpus walks and page inserts
                 # pause while an activation is in flight, never under the
                 # publication lock or a boundary (`foreground_priority`).
-                with foreground_priority.bulk():
-                    published = self._build_and_publish(
-                        temp_path,
-                        start_identity,
-                        start_checkpoints,
-                        start_live_guard,
+                with foreground_priority.bulk(
+                    budget=foreground_priority.PassBudget(
+                        wait_share=_REPAIR_WAIT_SHARE,
+                        max_waited=_REPAIR_MAX_PARKED_SECONDS,
                     )
+                ):
+                    # A delta, so a pass nested in another's scope reports only its own waits.
+                    parked_before = foreground_priority.pass_waited()
+                    try:
+                        published = self._build_and_publish(
+                            temp_path,
+                            start_identity,
+                            start_checkpoints,
+                            start_live_guard,
+                        )
+                    finally:
+                        self._last_parked_seconds = foreground_priority.pass_waited() - parked_before
             except sqlite3.Error as e:
                 if classify_sqlite_error(e) == "transient":
                     # A passing lock/interrupt fails only this attempt; the next
