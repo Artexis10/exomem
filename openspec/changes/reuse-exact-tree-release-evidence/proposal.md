@@ -6,9 +6,10 @@ Releases repeat source tests and wait for unrelated image publication before ret
 
 ## What Changes
 
-- Run historical full CI alongside ordinary checks when a non-release PR is ready.
-- Reuse that full receipt when its actual tested tree equals the selected release source tree.
-- Keep draft checks partial and release checks targeted; dispatch full CI when matching proof is absent.
+- Keep every pull request, draft or ready, on the partial tier and the supported floor Python; run Full CI only on schedule and manual dispatch, where it supplies release evidence.
+- Reuse a Full receipt when its actual tested tree equals the selected release source tree.
+- Keep release checks targeted; dispatch full CI when matching proof is absent.
+- Run the advisory MCP read latency comparison nightly in its own workflow, so a Full run ends when its gate passes.
 - Balance long K3s jobs with measured case durations, without dropping cases.
 - Partition paired recall samples and compare each complete series once after checking coverage and provenance.
 - Give package acquisition and installation separate bounds without replaying interrupted installation.

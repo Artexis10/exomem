@@ -258,6 +258,21 @@ class LocalIngressMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+        from mcp.server.auth.middleware.auth_context import auth_context_var
+
+        # A request can start in the context of an earlier request on the same
+        # keep-alive connection: when a large body pauses reading, the socket
+        # reader keeps that request's context (CPython issue 140947). Only a
+        # grant verified below for this request may reach downstream.
+        grant_token = _GRANT.set(None)
+        user_token = auth_context_var.set(None)
+        try:
+            await self._gate(scope, receive, send)
+        finally:
+            auth_context_var.reset(user_token)
+            _GRANT.reset(grant_token)
+
+    async def _gate(self, scope: Any, receive: Any, send: Any) -> None:
         headers = list(scope.get("headers") or [])
         stamps = _values(headers, INGRESS_STAMP_HEADER)
         proofs = _values(headers, INGRESS_PROOF_HEADER)

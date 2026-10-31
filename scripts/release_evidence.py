@@ -26,20 +26,15 @@ FULL_EVENTS = ("workflow_dispatch", "schedule")
 
 
 def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
-    """One policy owns ready PR, release metadata, and scheduled/manual Full scope."""
+    """One policy owns release-PR targeting and the scheduled/manual Full scope."""
     pr = event.get("pull_request", {})
-    # GitHub's PR schema fixes these types; malformed receipts cannot claim ready scope.
+    # GitHub's PR schema fixes these types; a malformed payload cannot name the release PR.
     if event_name == "pull_request" and (
-        not isinstance(pr, dict)
-        or not isinstance(pr.get("draft"), bool)
-        or not isinstance(pr.get("head"), dict)
+        not isinstance(pr, dict) or not isinstance(pr.get("head"), dict)
     ):
         raise ValueError("pull request scope requires the GitHub PR schema")
     release = event_name == "pull_request" and pr.get("head", {}).get("ref") == RELEASE_BRANCH
-    full = event_name in FULL_EVENTS or (
-        event_name == "pull_request" and not pr.get("draft", True) and not release
-    )
-    return {"full": full, "release": release}
+    return {"full": event_name in FULL_EVENTS, "release": release}
 
 
 def event_payload() -> dict:
@@ -68,7 +63,7 @@ def runs(commit: str) -> list[dict]:
 
 def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
     return (
-        run.get("event") in (*FULL_EVENTS, "pull_request")
+        run.get("event") in FULL_EVENTS
         and run.get("path") == WORKFLOW
         and run.get("workflow_id") == workflow_id
         and (run.get("repository") or {}).get("full_name") == repository
@@ -155,16 +150,7 @@ def read_receipt(run: dict, repository: str) -> dict | None:
             tested = api(f"commits/{receipt['tested_commit']}")
             if tested["commit"]["tree"]["sha"] != receipt.get("tested_tree"):
                 raise ValueError("Full receipt tree differs from its tested commit")
-            if run["event"] == "pull_request":
-                pr = receipt["pull_request"]
-                if (
-                    not ci_scope("pull_request", {"pull_request": pr})["full"]
-                    or pr["head"]["sha"] != run["head_sha"]
-                    or [parent["sha"] for parent in tested["parents"]]
-                    != [pr["base"]["sha"], pr["head"]["sha"]]
-                ):
-                    raise ValueError("Full receipt does not bind the PR merge parents")
-            elif receipt["tested_commit"] != run["head_sha"]:
+            if receipt["tested_commit"] != run["head_sha"]:
                 raise ValueError("Full receipt commit differs from its producer")
             return {
                 **receipt,
@@ -342,18 +328,6 @@ def main() -> int:
         }
         if receipt["tested_commit"] != os.environ["GITHUB_SHA"]:
             raise ValueError("actual checkout differs from GITHUB_SHA")
-        if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
-            pr = event["pull_request"]
-            parents = command("git", "show", "-s", "--format=%P", "HEAD").decode().split()
-            if len(parents) != 2 or parents[1] != pr["head"]["sha"]:
-                raise ValueError("actual checkout differs from the PR merge parents")
-            receipt["pull_request"] = {
-                "number": event["number"],
-                "draft": pr["draft"],
-                "head": {"sha": pr["head"]["sha"], "ref": pr["head"]["ref"]},
-                # The tested merge binds the base; the PR payload can carry an older snapshot.
-                "base": {"sha": parents[0]},
-            }
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     elif args.command == "select":
         if not args.source:
@@ -411,12 +385,23 @@ def main() -> int:
             if run["status"] == "completed":
                 break
             time.sleep(15)
-        if (
-            run["status"] == "completed"
-            and run["conclusion"] == "success"
-            and trusted_full(run, repository, api("actions/workflows/ci.yml")["id"])
-        ):
-            refresh_checks(repository)
+        else:
+            # A silent success here would let a release PR wait for checks that never re-run.
+            raise ValueError(
+                f"Full run {args.run_id} attempt {args.attempt} had not completed "
+                f"(status {run['status']}) when the poll ended; release checks were not re-run"
+            )
+        if run["conclusion"] != "success":
+            raise ValueError(
+                f"Full run {args.run_id} attempt {args.attempt} concluded {run['conclusion']}; "
+                "no evidence was recorded and release checks were not re-run"
+            )
+        if not trusted_full(run, repository, api("actions/workflows/ci.yml")["id"]):
+            raise ValueError(
+                f"Full run {args.run_id} attempt {args.attempt} is not a trusted Full run of "
+                f"{WORKFLOW}; release checks were not re-run"
+            )
+        refresh_checks(repository)
     return 0
 
 
