@@ -7091,11 +7091,11 @@ class EpistemicGraphIndex:
                     self._write_resolver_topology(conn, resolver_fingerprint)
                 if before_commit is not None:
                     before_commit(conn)
-                n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
-                n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
         finally:
             conn.close()
-        return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
+        # No row totals: counting `graph_edges` inside the hold read the whole table, which took
+        # about 13 s at 15,000 pages on a cold page cache, and no caller reads the totals.
+        return {"indexed_files": indexed}
 
     def _topology_affected_sources(
         self,

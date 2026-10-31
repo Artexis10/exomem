@@ -400,3 +400,28 @@ def test_a_writer_does_not_record_into_a_database_that_lost_a_retiring_trigger(
     EpistemicGraphIndex(vault).drain_paths([_edit(vault, SOURCE)])
 
     assert not _recorded(vault)
+
+
+def test_an_owned_drain_counts_no_whole_graph_table(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row totals that no caller reads cost a cold scan of `graph_edges` inside the hold."""
+    statements: list[str] = []
+    real_connect = epistemic_graph._sqlite_connect_owned
+
+    def traced(*args, **kwargs) -> sqlite3.Connection:
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(epistemic_graph, "_sqlite_connect_owned", traced)
+
+    EpistemicGraphIndex(vault).drain_paths([_edit(vault, SOURCE)])
+
+    assert any("graph_nodes" in statement for statement in statements)
+    assert not [
+        statement
+        for statement in statements
+        if "COUNT(*)" in statement
+        and ("FROM graph_edges" in statement or "FROM graph_nodes" in statement)
+    ]
