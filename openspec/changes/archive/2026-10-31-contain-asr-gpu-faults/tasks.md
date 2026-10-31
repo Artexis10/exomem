@@ -13,7 +13,7 @@
 ## 3. Proof
 
 - [x] 3.1 Cover the probe, the child (busy defers and a later attempt runs the jobs; an image behind a deferred recording still runs; out of memory at load defers) and the supervisor (queued media ends the wait).
-- [ ] 3.2 After the release is installed, set `EXOMEM_ASR_DEVICE=cuda`, hold the GPU with another process, queue one recording, and record that the job stays pending and completes after the GPU frees up.
+- [x] 3.2 After the release is installed, set `EXOMEM_ASR_DEVICE=cuda`, hold the GPU with another process, queue one recording, and record that the job stays pending and completes after the GPU frees up. Evidence (2026-10-31, release 0.153.1, explicit CUDA device): another process held all but 1.1 GiB of a 16 GiB GPU; a reprocessed 80-second recording stayed pending with the status reason "insufficient free GPU memory for ASR: 711 MiB free, 2048 MiB needed" and `gpu_waiting_count` 1, rechecked each minute; about 40 seconds after the hold ended, the job completed on the batched GPU path with its prior extraction kept and no failure.
 
 ## 4. A CUDA fault never takes down the serving worker
 
@@ -26,4 +26,4 @@
 - [x] 4.7 End a GPU wait when any path queues work that needs no GPU, record the preflight verdict and the crash loop in status, and keep these facts out of a Cloud cell's tool status.
 - [x] 4.8 Run doctor's GPU probe in a throwaway process, show the crash loop in a check of its own, and disclose the CPU move only where an NVIDIA driver exists.
 - [x] 4.9 Record the preflight verdict and the CUDA split at the first child launch, and let a supervisor start change only what is stale.
-- [ ] 4.10 After the stale NVIDIA package is repaired on the affected host, install the release, confirm that the preflight passes and that the worker stays up, and run one speech job on the GPU.
+- [x] 4.10 After the stale NVIDIA package is repaired on the affected host, install the release, confirm that the preflight passes and that the worker stays up, and run one speech job on the GPU. Evidence (2026-10-31, release 0.153.0 and 0.153.1): after the package repair, the GPU preflight passed, the serving worker kept CUDA hidden and stayed up, and hour-long speech recordings completed on the GPU with batched decoding.
