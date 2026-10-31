@@ -140,15 +140,16 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     job = workflow["jobs"][job_id]
     matrix = job["strategy"]["matrix"]
 
-    # PRs pay for the newest runtime only; the compatibility runtime joins on
-    # nightly/manual full runs. The runtime matrix never names the release
-    # branch (see test_expensive_ci_runs_nightly_and_manually_only).
+    # PRs run the supported floor only; the newest runtime joins on nightly/manual
+    # full runs. The runtime matrix never names the release branch.
     versions = " ".join(str(matrix["python-version"]).split())
     assert "needs.scope.outputs.full == 'true'" in versions
     assert "release-please" not in versions
     assert "head_ref" not in versions
     assert '["3.11", "3.13"]' in versions
-    assert '["3.13"]' in versions
+    assert "fromJSON('[\"3.11\"]')" in versions
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["requires-python"] == ">=3.11", "the PR leg is the supported floor"
 
     assert matrix["shard"] == list(range(1, shards + 1))
     assert job["name"] == (
@@ -649,9 +650,7 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
 
 def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() -> None:
     workflow = _workflow()
-    assert _triggers(workflow)["pull_request"]["types"] == [
-        "opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft",
-    ]
+    assert _triggers(workflow)["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
     jobs = workflow["jobs"]
     assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
     assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
@@ -661,7 +660,6 @@ def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() 
     for name in RELEASE_PR_SKIPPED_JOBS:
         assert jobs[name]["needs"] == "scope"
         assert jobs[name]["if"] == "${{ needs.scope.outputs.release != 'true' }}"
-    assert jobs["cloud-cellctl"]["with"]["full"] == "${{ needs.scope.outputs.full == 'true' }}"
     assert "if" not in jobs["release-evidence"]
 
 
@@ -688,7 +686,7 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
 SCOPED_JOBS = ("core-tests", "harness-tests", "product-e2e")
 
 
-def _change_scope(repository: Path, event: str, *, full: bool = False) -> tuple[dict[str, str], str]:
+def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
@@ -697,7 +695,6 @@ def _change_scope(repository: Path, event: str, *, full: bool = False) -> tuple[
         env={
             **os.environ,
             "EVENT_NAME": event,
-            "FULL_CI": str(full).lower(),
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
         },
@@ -770,11 +767,11 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
 
 
 @pytest.mark.parametrize(
-    "event,has_parent,full",
-    [("pull_request", False, False), ("push", True, False), ("schedule", True, False), ("workflow_dispatch", True, False), ("pull_request", True, True)],
+    "event,has_parent",
+    [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
 )
 def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
-    tmp_path: Path, event: str, has_parent: bool, full: bool
+    tmp_path: Path, event: str, has_parent: bool
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -788,7 +785,7 @@ def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
         path.write_text("changed\n")
         _scope_fixture_git(repository, "commit", "-am", "spec change")
 
-    decision, summary = _change_scope(repository, event, full=full)
+    decision, summary = _change_scope(repository, event)
 
     assert decision == {"docs_only": "false", "pytest_args": ""}
     assert not summary
@@ -864,20 +861,13 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     # release-evidence-landed runs after the gate and depends on it.
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it. The push-run
-    # cancel is a best-effort saving that must not decide evidence. The MCP read latency jobs
-    # report without gating until a full run fits its step budget (measure-sandbox-mcp-reads 4.8).
+    # cancel is a best-effort saving that must not decide evidence.
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
         "quality",
-        "mcp-read-latency-plan",
-        "mcp-read-latency-paired",
-        "mcp-read-latency-aggregate",
     }
-    # An advisory job outside the gate must also not turn the full run red, or release evidence stays red.
-    assert all(workflow["jobs"][name].get("continue-on-error") is True
-               for name in ("mcp-read-latency-plan", "mcp-read-latency-paired", "mcp-read-latency-aggregate"))
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
     assert "test" not in gate["needs"]
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ toJSON(needs) }}"
