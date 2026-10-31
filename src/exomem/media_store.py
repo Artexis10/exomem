@@ -1219,6 +1219,68 @@ _EVICTION_ORDER = (
 )
 
 
+# An offload job that no claimed, unfinished job pins; a pinned original is counted as job-pinned instead.
+_UNPINNED_OFFLOAD = (
+    "SELECT DISTINCT offload.binary_rel FROM jobs AS offload WHERE offload.media_type = :offload "
+    "AND offload.do_offload = 1 AND offload.state IN ('pending', 'running') "
+    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = offload.binary_rel AND {_JOB_PINS})"
+)
+_PINNED_ORIGINALS = f"SELECT DISTINCT jobs.binary_rel FROM jobs WHERE {_JOB_PINS}"
+
+
+@dataclass(frozen=True, slots=True)
+class Occupancy:
+    """What the media ledger holds on the volume that the window budget counts (D12).
+
+    Each figure counts offloadable originals only: a resident original never leaves the volume.
+    A pinned original is in `pinned_bytes` alone, so no byte is in two figures.
+    """
+
+    evictable_bytes: int
+    pending_offloads: int
+    pending_offload_bytes: int
+    pinned_bytes: int
+
+
+def _volume_bytes(vault: Path, relatives, largest_offloadable: int) -> tuple[int, int]:
+    """The count and bytes of the originals that the volume holds now and that the rule calls offloadable."""
+    count = total = 0
+    for relative in relatives:
+        try:
+            size = os.lstat(vault / relative).st_size
+        except FileNotFoundError:
+            continue  # A moved or evicted original holds no byte on the volume.
+        if size <= largest_offloadable:
+            count, total = count + 1, total + size
+    return count, total
+
+
+def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_seconds: float | None) -> Occupancy:
+    """Read the ledger for the window budget; raises `MediaStoreError` when it cannot be read.
+
+    `eviction_idle_seconds` is the policy's minimum idle age, or None when eviction is off: then no
+    cached original is evictable, because a window can never reuse its room. A missing ledger holds nothing.
+    """
+    vault = Path(vault).resolve()
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        return Occupancy(0, 0, 0, 0)
+    largest = bounds.largest_offloadable()
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            evictable = 0
+            if eviction_idle_seconds is not None:
+                evictable = int(conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE,
+                    {"hydration": bounds.hydration_bytes, "idle_before": time.time() - eviction_idle_seconds},
+                ).fetchone()[0])
+            pending = _volume_bytes(vault, (row[0] for row in conn.execute(_UNPINNED_OFFLOAD, {"offload": OFFLOAD_MEDIA_TYPE})), largest)
+            pinned = _volume_bytes(vault, (row[0] for row in conn.execute(_PINNED_ORIGINALS)), largest)[1]
+    except (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
+    return Occupancy(evictable, pending[0], pending[1], pinned)
+
+
 def record_demand(vault: Path, series: str, demand_bytes: int, *, budget: int, reachable_budget: int) -> bool:
     """Renew one import series' demand for room; a demand above the reachable budget is ignored.
 

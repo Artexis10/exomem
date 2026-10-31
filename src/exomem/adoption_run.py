@@ -274,22 +274,29 @@ class AdoptionRunStore:
     def list_runs(self) -> list[dict]:
         return self.listing()["runs"]
 
-    def runs_of_stage(self, import_id: str) -> tuple[dict, ...]:
-        """Every readable run that started in the import's stage, the most recently updated first."""
+    def runs_by_stage(self) -> dict[str, tuple[dict, ...]]:
+        """Every readable run, grouped by the import whose stage it started in; the most recently updated first."""
         try:
             names = sorted(folder.name for folder in self.base.iterdir())
         except OSError:
-            return ()
-        runs = []
+            return {}
+        grouped: dict[str, list[dict]] = {}
         for name in names:
             try:
                 run = self.load(name)
             except AdoptionRunError:
                 continue
             recorded = run.get("stage") if isinstance(run, dict) else None
-            if isinstance(recorded, dict) and recorded.get("stage") == import_id:
-                runs.append(run)
-        return tuple(sorted(runs, key=lambda run: str(run.get("updated") or ""), reverse=True))
+            if isinstance(recorded, dict) and isinstance(recorded.get("stage"), str):
+                grouped.setdefault(recorded["stage"], []).append(run)
+        return {
+            import_id: tuple(sorted(runs, key=lambda run: str(run.get("updated") or ""), reverse=True))
+            for import_id, runs in grouped.items()
+        }
+
+    def runs_of_stage(self, import_id: str) -> tuple[dict, ...]:
+        """Every readable run that started in the import's stage, the most recently updated first."""
+        return self.runs_by_stage().get(import_id, ())
 
     def listing(self, *, path: str = "") -> dict:
         rows: list[dict] = []
@@ -514,6 +521,14 @@ def _stands_for_manifest(stage: import_stage.Stage | None, rel: str, info: os.st
     """Whether the stat of a staged file equals the identity its stage's manifest records."""
     vouched = adoption_consume.vouched(stage, rel)
     return vouched is not None and vouched[0] == import_stage.Identity.of(info)
+
+
+def reads_as_text(path: str, size: int) -> bool:
+    """Whether the importer files this member as text: a text-like suffix within the inline text limit.
+
+    The importer also needs the bytes to decode as UTF-8, which a status call does not read.
+    """
+    return PurePosixPath(path).suffix.lower() in _TEXT_IMPORT_SUFFIXES and size <= adoption_plan.INLINE_TEXT_MAX_BYTES
 
 
 def _row(
@@ -1430,7 +1445,7 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
     return tuple(pages)
 
 
-def unfiled_members(root: Path, import_id: str) -> list[dict]:
+def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
     """The members of an import that adoption did not file, as a residual record lists them.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
@@ -1438,9 +1453,10 @@ def unfiled_members(root: Path, import_id: str) -> list[dict]:
     left the stage, by rename or by hand, keeps the bytes the manifest gives it; the runs that started in the
     stage classify every member, the most recent first, and one that no run scanned is `outside_run`. A member
     that adoption filed, and the series file, are left out: filed is what a run's outcome says, not what the
-    stage no longer holds.
+    stage no longer holds. A caller that lists many windows passes `runs`, the stage's runs from `runs_by_stage`,
+    so it reads the run store once.
     """
-    pages = AdoptionRunStore(root).runs_of_stage(import_id)
+    pages = AdoptionRunStore(root).runs_of_stage(import_id) if runs is None else runs
     stage = import_stage.read(root, import_id)
     files = dict(import_stage.staged_files(root, import_id))
     for path, (size, _digest) in (stage.members if stage is not None else {}).items():

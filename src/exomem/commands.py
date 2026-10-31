@@ -94,6 +94,7 @@ from . import (
 )
 from . import freshness as freshness_module
 from . import get_page as get_page_module
+from . import import_windows as import_windows_module
 from . import knowledge_packs as knowledge_packs_module
 from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
@@ -10637,6 +10638,7 @@ _ADOPTION_STUDIO_ACTIONS = (
     "work-item",
     "propose",
     "apply-proposal",
+    "acknowledge",
 )
 
 
@@ -10680,6 +10682,10 @@ def op_adoption_studio(
     expected_hash: str | None = None,
     after: str | None = None,
     consume: bool = True,
+    series_id: str | None = None,
+    next_window_bytes: int | None = None,
+    import_id: str | None = None,
+    paths: list[str] | None = None,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -10718,14 +10724,19 @@ def op_adoption_studio(
         expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
-        after: For `start`, a reply's `next_after`.
+        after: For `start` or run-listing `status`, a reply's `next_after`.
         consume: For `start`, false keeps staged copies.
+        series_id: For run-listing `status`, an import series whose next window
+            needs room; send with next_window_bytes.
+        next_window_bytes: For run-listing `status`, that window's bytes.
+        import_id: For `acknowledge`, the discarded window.
+        paths: For `acknowledge`, the residual paths to clear; none is refused.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
         raise ValueError(
             "INVALID_MODE: adoption_studio action must be start, status, select, "
-            "plan, apply, cancel, finish, work-item, propose, or apply-proposal"
+            "plan, apply, cancel, finish, work-item, propose, apply-proposal, or acknowledge"
         )
     try:
         if action == "start":
@@ -10734,7 +10745,13 @@ def op_adoption_studio(
                 initialize_kb=initialize_kb, collection=collection, after=after, consume=consume,
             )
         if action == "status":
-            return adoption_run_module.status(vault_root, run_id=run_id, path=path)
+            listing = adoption_run_module.status(vault_root, run_id=run_id, path=path)
+            if run_id:
+                return listing
+            return {**listing, **import_windows_module.report(
+                vault_root, after=after, series_id=series_id, next_window_bytes=next_window_bytes)}
+        if action == "acknowledge":
+            return import_windows_module.acknowledge(vault_root, import_id, paths)
         if action == "select":
             return adoption_run_module.select(
                 vault_root,

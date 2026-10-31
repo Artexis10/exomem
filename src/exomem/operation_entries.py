@@ -573,7 +573,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume")),
-        _row("status", "read_import", ("run_id", "path")),
+        _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",)),
         _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),
@@ -582,6 +582,8 @@ _REMAINING = {
         _row("work-item", "read_import", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
         _row("propose", "import_memory", ("run_id", "proposals"), ("run_id",)),
         _row("apply-proposal", "import_memory", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True),
+        # `paths` stays optional so the handler refuses a call without them, whatever the client sends.
+        _row("acknowledge", "import_memory", ("import_id", "paths"), ("import_id",), destructive=True),
     )),
     "read_media": (None, (_row("video", "read_media"),)),
     "process_media": ("operation", (

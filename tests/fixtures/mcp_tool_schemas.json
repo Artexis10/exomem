@@ -4314,7 +4314,7 @@
                 },
                 "after": {
                   "type": "string",
-                  "description": "For `start`, a reply's `next_after`."
+                  "description": "For `start` or run-listing `status`, a reply's `next_after`."
                 },
                 "consume": {
                   "description": "For `start`, false keeps staged copies.",
@@ -4509,6 +4509,31 @@
                 "why",
                 "ref",
                 "expected_fingerprint"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "acknowledge",
+                  "type": "string"
+                },
+                "import_id": {
+                  "description": "For `acknowledge`, the discarded window.",
+                  "type": "string"
+                },
+                "paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `acknowledge`, the residual paths to clear; none is refused."
+                }
+              },
+              "required": [
+                "kind",
+                "import_id"
               ],
               "additionalProperties": false
             }
@@ -5538,6 +5563,18 @@
                   "description": "For `start`, scan subtree (default: whole vault; ask which folder). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
                   "type": "string",
                   "default": ""
+                },
+                "after": {
+                  "type": "string",
+                  "description": "For `start` or run-listing `status`, a reply's `next_after`."
+                },
+                "series_id": {
+                  "type": "string",
+                  "description": "For run-listing `status`, an import series whose next window needs room; send with next_window_bytes."
+                },
+                "next_window_bytes": {
+                  "type": "integer",
+                  "description": "For run-listing `status`, that window's bytes."
                 }
               },
               "required": [

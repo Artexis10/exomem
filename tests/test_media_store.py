@@ -2529,3 +2529,135 @@ def test_an_offload_takes_no_hydration_slot(vault: Path, selected_store, monkeyp
         finally:
             release.set()
         assert pending.result(timeout=10) is not None
+
+
+# The status of an import sent as windows reads this ledger; the budget terms are in tests/test_adoption_windows.py.
+
+# A volume of 1 GB at an 80% growth threshold, a 1 MB reserve, a 10 MB hydration capacity for two hydrations,
+# and a largest offloadable file of 5 MB (0.5% of the volume): 21 MB of fixed terms.
+_WINDOW_VOLUME = 1_000_000_000
+_FIXED_TERMS = 1_000_000 + 10_000_000 + 2 * 5_000_000
+
+
+def _window_policy(selected_store, monkeypatch) -> None:
+    vault = Path(next(iter(json.loads(selected_store[1].read_text())["vaults"])))
+    _configure(selected_store, vault, growth_threshold=0.8, volume_fraction=0.005, minimum_idle_seconds=3600)
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", "1000000")
+
+
+def _window_status(vault: Path, **arguments) -> dict:
+    from exomem import commands
+
+    return commands.op_adoption_studio(vault, action="status", **arguments)["window_budget"]
+
+
+def test_the_status_counts_a_copy_the_worker_hydrated_in_the_job_pinned_bytes(vault: Path, selected_store, monkeypatch):
+    """Catches job-pinned bytes that miss the hydrated copy of an evicted original, which a claimed job returns when it ends."""
+    from exomem import media_jobs, media_store
+
+    _window_policy(selected_store, monkeypatch)
+    path = _stored(vault, "recording", 300)
+    size = path.stat().st_size
+    assert media_store.evict(vault, path)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    assert ledger.claim_next().binary_path == path
+    assert _window_status(vault)["job_pinned"] == {"bytes": 0}  # Claimed, and nothing hydrated yet.
+
+    with media_store.open_original(vault, path):  # The worker's hydration places the copy.
+        pass
+
+    assert originals.original_state(vault, path).state == "cached"
+    assert _window_status(vault)["job_pinned"] == {"bytes": size}
+
+
+@pytest.mark.parametrize("used, reachable, effective", [(776_500_000, 2_000_000, 2_500_000), (770_000_000, 8_500_000, 5_000_000)])
+def test_the_effective_file_limit_is_the_reachable_budget_plus_the_job_pinned_bytes_up_to_the_largest_offloadable_file(
+        vault: Path, selected_store, monkeypatch, used, reachable, effective):
+    """Catches a limit that leaves out the room a claimed job returns, or that promises a file above the largest offloadable one."""
+    from exomem import media_jobs
+
+    _window_policy(selected_store, monkeypatch)
+    pinned = _stored(vault, "pinned", 500_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(pinned, pinned.with_name(pinned.name + ".md"), "text"))
+    ledger.claim_next()
+    # The 500 000 bytes of the pinned original count in use: 0.8 * 1 000 000 000 - (used + 500 000) - 21 000 000 = reachable.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, used, pinned))
+
+    figures = _window_status(vault)
+
+    assert figures["reachable_budget"] == {"bytes": reachable}
+    assert figures["job_pinned"] == {"bytes": 500_000}
+    assert figures["effective_file_limit"] == {"bytes": effective}
+
+
+def test_the_reachable_budget_adds_what_eviction_filing_and_a_pending_offload_free_but_not_a_recent_owner_read(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a reachable budget that counts an original the owner just read, or leaves out a term that frees room."""
+    from test_adoption_windows import _window
+
+    from exomem import media_jobs, media_store
+
+    _window_policy(selected_store, monkeypatch)
+    unread, played = _stored(vault, "unread", 3_000), _stored(vault, "played", 1_000)
+    with media_store.open_original(vault, played, read=True):
+        pass
+    local = _preserved(vault, category="pending")  # Filing queues its offload, which no worker has run.
+    assert media_jobs.MediaJobStore(vault).get_by_binary(local, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
+    _window(vault, {"report.pdf": 4_000})  # A landed window that holds one unfiled artifact of 4 000 bytes.
+    held = [unread, played, local]
+    in_use = sum(path.stat().st_size for path in held)
+    # The window budget is 1 000 bytes: 0.8 * 1 000 000 000 - in use - 21 000 000 of fixed terms.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 779_000_000 - 1_000 - in_use, *held))
+
+    figures = _window_status(vault)
+
+    assert figures["window_budget"] == {"bytes": 1_000}
+    # Plus the unread original (3 000), the local original once offloaded and evicted, and the unfiled artifact (4 000).
+    assert figures["reachable_budget"] == {"bytes": 1_000 + 3_000 + local.stat().st_size + 4_000}
+
+
+def test_a_status_call_records_and_renews_a_demand_for_each_series_and_ignores_one_above_the_reachable_budget(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a demand that replaces another series' lease, or one the cell cannot meet that still asks for eviction."""
+    from exomem import media_jobs
+
+    _window_policy(selected_store, monkeypatch)
+    held = [_stored(vault, "large", 3_000), _stored(vault, "middle", 2_000), _stored(vault, "small", 1_000)]
+    base = 779_000_000 - 1_000 - 6_000  # A window budget of 1 000 bytes, and 6 000 bytes that eviction can free.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, base, *held))
+    ledger = media_jobs.MediaJobStore(vault)
+
+    def leases() -> dict[str, tuple[int, int, float]]:
+        with sqlite3.connect(ledger.path) as connection:
+            return {series: (demand, offset, renewed) for series, demand, offset, renewed in connection.execute(
+                "SELECT series, demand_bytes, budget_offset, renewed_at FROM media_demands")}
+
+    first = _window_status(vault, series_id="series-a", next_window_bytes=4_000)
+    assert first["window_budget"] == {"bytes": 1_000} and first["reachable_budget"] == {"bytes": 7_000}
+    assert first["demand"]["recorded"] is True
+    _window_status(vault, series_id="series-b", next_window_bytes=6_500)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("UPDATE media_demands SET renewed_at = 1")
+    _window_status(vault, series_id="series-a", next_window_bytes=5_000)
+    _window_status(vault, series_id="series-b", next_window_bytes=6_000)
+
+    renewed = leases()
+    assert {series: demand for series, (demand, _offset, _renewed) in renewed.items()} == {"series-a": 5_000, "series-b": 6_000}
+    assert all(lease[2] > 1 for lease in renewed.values())
+    assert renewed["series-a"][1] == 1_000 + base + 6_000  # The cell stored its own budget as an offset from its own use.
+
+    ignored = _window_status(vault, series_id="series-c", next_window_bytes=7_001)
+
+    assert ignored["demand"]["recorded"] is False
+    assert set(leases()) == {"series-a", "series-b"}
+
+
+def test_the_status_reports_the_remaining_media_allowance(vault: Path, selected_store):
+    """Catches an allowance figure that reports the setting alone, so a series larger than the room starts anyway."""
+    path = _stored(vault, "recording", 300)
+
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert allowance == {"allowance_bytes": 10_000_000, "used_bytes": path.stat().st_size, "remaining_bytes": 10_000_000 - path.stat().st_size}

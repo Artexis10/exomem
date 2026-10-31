@@ -263,3 +263,60 @@ def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
         return None
     receipt_members = _members_of((read_receipt(vault_root, import_id) or {}).get(RESIDUAL_KEY))
     return receipt_members if receipt_members is not None else read_walk_members(vault_root, import_id)
+
+
+def _stems(directory: Path) -> set[str]:
+    """The import IDs that name a record file in `directory`; a missing folder holds none, an unreadable one raises."""
+    try:
+        with os.scandir(directory) as entries:
+            return {Path(entry.name).stem for entry in entries if entry.name.endswith(".json") and vault.is_import_id(Path(entry.name).stem)}
+    except FileNotFoundError:
+        return set()
+
+
+def window_ids(vault_root: Path) -> list[str]:
+    """The import IDs of every window with a Cloud receipt or a walk file, in order; raises OSError when a folder cannot be listed."""
+    try:
+        state = state_paths.vault_state_dir(vault_root)
+    except ValueError:
+        return []  # A vault with no state placement has no receipt and no walk file, as `read_receipt` finds.
+    return sorted(_stems(state / CLOUD_RECEIPTS) | _stems(state / WALK_RECORDS))
+
+
+def clear_residual(vault_root: Path, import_id: str, paths: set[str]) -> list[str] | None:
+    """Drop the named members from the window's residual record, and return the paths it dropped.
+
+    None means the window has no record to clear. The record is written where `read_residual` reads it,
+    so the receipt's record outranks a walk's. A path that the record does not list changes nothing.
+    """
+    receipt = read_receipt(vault_root, import_id)
+    record = receipt.get(RESIDUAL_KEY) if receipt is not None else None
+    if _members_of(record) is not None:
+        assert receipt is not None
+        dropped = _drop(record, paths)
+        if dropped:
+            _store_record(vault_root, CLOUD_RECEIPTS, import_id, receipt)
+        return dropped
+    walk = read_walk(vault_root, import_id)
+    if _members_of(walk) is None:
+        return None
+    assert walk is not None
+    dropped = _drop(walk, paths)
+    if dropped:
+        _store_record(vault_root, WALK_RECORDS, import_id, walk)
+    return dropped
+
+
+def _drop(record: dict, paths: set[str]) -> list[str]:
+    """Remove the members whose path is in `paths` from `record`, in place; return the paths it removed."""
+    kept = [entry for entry in record[MEMBERS_KEY] if entry.get("path") not in paths]
+    dropped = [entry["path"] for entry in record[MEMBERS_KEY] if entry.get("path") in paths]
+    record[MEMBERS_KEY] = kept
+    return dropped
+
+
+def _store_record(vault_root: Path, dirname: str, import_id: str, record: dict) -> None:
+    """Replace one record whole and durably, as the Job writes it."""
+    store = private_state.store(vault_root, dirname)
+    private_state.write_record(store, import_id, record, temp_suffix=".tmp", durable=True)
+    private_state.sync_directory(store)
