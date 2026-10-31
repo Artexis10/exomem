@@ -11,5 +11,5 @@
 #   sh scripts/setup-diarizer.sh --prewarm
 
 set -eu
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 exec uv run --no-sync --directory "$repo_root" python -m exomem.diarizer_sidecar "$@"
