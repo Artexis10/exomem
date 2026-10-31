@@ -13,7 +13,7 @@ const relationGroups = [
     content_hash: "hash-z",
     source_content_hash: "hash-z",
     items: [
-      {ref: "exomem://review/relation/z-second", fingerprint: "fp-z-second", source_path: "Knowledge Base/Notes/Insights/z-source.md", source_content_hash: "hash-z", relation_type: "supports", to: "Knowledge Base/Notes/Insights/target-two.md", method: "body-wikilink"},
+      {ref: "exomem://review/relation/z-second", fingerprint: "fp-z-second", source_path: "Knowledge Base/Notes/Insights/z-source.md", source_content_hash: "hash-z", relation_type: "vault.backs", relation_label: "backs (a kind of supports)", to: "Knowledge Base/Notes/Insights/target-two.md", method: "body-wikilink"},
       {ref: "exomem://review/relation/z-first", fingerprint: "fp-z-first", source_path: "Knowledge Base/Notes/Insights/z-source.md", source_content_hash: "hash-z", relation_type: "part_of", to: "Knowledge Base/Notes/Insights/target-one.md", method: "shared-source"},
     ],
   },
@@ -119,7 +119,7 @@ async function mockApi(page, calls, controls = {}) {
         controls.removedRefs.add(body.ref);
         data = {accepted: true};
       } else {
-        data = {mutated: false, warnings: [], candidates: [{from: inboxItems[0].path, to: "Knowledge Base/Notes/Insights/related.md", relation_type: "supports", method: "recorded-link"}]};
+        data = {mutated: false, warnings: [], candidates: [{from: inboxItems[0].path, to: "Knowledge Base/Notes/Insights/related.md", relation_type: "vault.backs", relation_label: "backs (a kind of supports)", method: "recorded-link"}]};
       }
     } else if (name === "triage_memory" && body.ref?.startsWith("exomem://review/relation/")) {
       const code = controls.decisionErrors?.shift();
@@ -186,10 +186,13 @@ test("activation stays separate and governed relation requires confirmation", as
   await page.getByRole("button", {name: /First measured conclusion/}).click();
   await page.getByRole("button", {name: "Suggest relation"}).click();
   await expect(page.getByRole("dialog")).toContainText("provisional relation");
+  await expect(page.getByLabel("Provisional candidate")).toContainText("backs (a kind of supports) → Knowledge Base/Notes/Insights/related.md");
   expect(calls.some((call) => call.name === "connect_memory")).toBeTruthy();
   expect(calls.some((call) => call.name === "edit_memory")).toBeFalsy();
   await page.getByRole("button", {name: "Confirm governed edit"}).click();
   await expect.poll(() => calls.some((call) => call.name === "edit_memory")).toBeTruthy();
+  // The authored bullet carries the key; the display label is not a relation spelling.
+  expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- vault.backs [[Knowledge Base/Notes/Insights/related]]");
 });
 
 test("narrow viewport and keyboard-only list navigation remain usable", async ({page}) => {
@@ -218,7 +221,7 @@ test("relation queue preserves order, bounded truth, and complete governed paylo
 
   await expect(page.locator(".relation-group h3")).toHaveText(["Z source", "A source"]);
   await expect(page.locator(".relation-summary strong")).toHaveText([
-    "supports → Knowledge Base/Notes/Insights/target-two",
+    "backs (a kind of supports) → Knowledge Base/Notes/Insights/target-two",
     "part_of → Knowledge Base/Notes/Insights/target-one",
     "applies_to → Knowledge Base/Notes/Insights/target-a",
   ]);
@@ -227,7 +230,7 @@ test("relation queue preserves order, bounded truth, and complete governed paylo
   await expect(page.locator("#worklist-status")).toContainText("not the complete vault backlog");
   expect(calls.some((call) => call.name === "connect_memory" && call.body.operation === "suggest-relations")).toBeFalsy();
 
-  const accept = page.getByRole("button", {name: /Accept supports.*target-two/});
+  const accept = page.getByRole("button", {name: /Accept backs \(a kind of supports\).*target-two/});
   await accept.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByLabel("Audit reason")).toBeFocused();
@@ -301,7 +304,7 @@ test("relation queue waits for the governed response before refreshing", async (
   page.on("requestfailed", (request) => failedRequests.push(request.url()));
   await connectRelations(page, calls, controls);
 
-  const accept = page.getByRole("button", {name: /Accept supports.*target-two/});
+  const accept = page.getByRole("button", {name: /Accept backs \(a kind of supports\).*target-two/});
   await accept.focus();
   await page.keyboard.press("Enter");
   await page.getByLabel("Audit reason").fill("Accepted after delayed governed response");
@@ -336,7 +339,7 @@ for (const driftCode of ["REVIEW_ITEM_CHANGED", "REVIEW_REFRESH_REQUIRED", "STAL
     });
     page.on("requestfailed", (request) => failedRequests.push(request.url()));
     await connectRelations(page, calls, controls);
-    const accept = page.getByRole("button", {name: /Accept supports.*target-two/});
+    const accept = page.getByRole("button", {name: /Accept backs \(a kind of supports\).*target-two/});
     await accept.focus();
     await page.keyboard.press("Enter");
     await page.getByRole("button", {name: "Confirm governed accept"}).focus();
@@ -391,7 +394,7 @@ test("narrow relation queue distinguishes retryable states and refreshes to a tr
   await expect(page.locator("#worklist-status")).not.toContainText("pending");
   await page.keyboard.press("Enter");
   await expect(page.locator("#worklist-status")).toContainText("not the complete vault backlog");
-  await expect(page.getByRole("button", {name: /Accept supports.*target-two/})).toBeVisible();
+  await expect(page.getByRole("button", {name: /Accept backs \(a kind of supports\).*target-two/})).toBeVisible();
   expect(calls.some((call) => call.name === "connect_memory" && call.body.operation === "suggest-relations")).toBeFalsy();
   expect(controls.relationQueueCalls).toBe(4);
   expect(consoleErrors).toEqual([]);
