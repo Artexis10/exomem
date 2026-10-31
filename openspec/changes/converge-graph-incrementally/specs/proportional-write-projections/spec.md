@@ -9,13 +9,14 @@ to select affected sources without rereading unrelated Markdown bodies.
 
 A refresh or drain that owns the stored topology SHALL prove the topology from the
 delta, from the pages the delta affects, and from every page that holds a stored
-edge to a moved page. It SHALL NOT prove the topology over the whole vault. The
+edge to a moved page. It SHALL NOT read or re-normalise the Markdown bodies of pages
+outside that set. A check that the dependency index is complete MAY scan that index. The
 publication proof and the source-version proof remain required for every page the
 pass rewrites, independently of discovery.
 
 A change with no recorded file event SHALL converge on its event or on the periodic
-reconcile. An edit that leaves the file's stat unchanged SHALL converge only on the
-next change to that page.
+reconcile. An edit that leaves the file's stat unchanged SHALL converge no later than
+the next change to that page or the next whole-vault rebuild.
 
 The resulting public graph SHALL equal a full rebuild over the same canonical
 state and SHALL retain its established unresolved-link presentation.
@@ -44,6 +45,6 @@ state and SHALL retain its established unresolved-link presentation.
 - **WHEN** a page changes on disk and no file event is recorded for it
 - **THEN** an owned refresh or drain does not read the vault to find it, and the graph converges on its event or on the periodic reconcile
 
-#### Scenario: An edit that leaves the file stat unchanged converges on the next change
+#### Scenario: An edit that leaves the file stat unchanged converges by the next change or rebuild
 - **WHEN** a page's bytes change while its file stat stays the same
-- **THEN** the graph converges when that page next changes, not before
+- **THEN** the graph converges no later than that page's next change or the next whole-vault rebuild
