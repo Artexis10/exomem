@@ -196,10 +196,11 @@ is not recorded as unresolved; it is not recorded. Nothing about later indexing 
 gets this right for free by re-deriving every page once the corpus is complete, and that is
 precisely the property a proportional repair gives up.
 
-The existing incremental path already handles this via `_resolver_affected_sources`: on a
-topology change it re-reads every indexed source from disk and re-normalises its links
-under the old and new resolvers — an O(vault) *read* scan that the incremental path already
-pays today. The drain answers the same question, split by what each direction costs:
+The incremental path once handled this with a separate helper that, on a topology change,
+re-read every indexed source from disk and re-normalised its links under the old and new
+resolvers, an O(vault) *read* scan. That helper is gone: an owned `refresh_paths` now asks
+the same question the drain does, through `_topology_affected_sources`. The drain answers
+it split by what each direction costs:
 
 - A page that **vanished** leaves its inbound edges behind, and every such edge names its
   own source. One indexed query on `dst_key` answers it.
