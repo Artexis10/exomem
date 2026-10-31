@@ -236,7 +236,15 @@ class EndState:
 
 
 class Situation:
-    """The key's items resolved against one arm's end state."""
+    """The key's items resolved against one arm's end state.
+
+    A typed claim is from the capture session when the page that holds the edge
+    was created or changed in that session (``pages_changed``), or, for an entity
+    page, when the seed snapshot does not hold the page (``in_seed``). The run
+    file keeps no list of seed edges, so the scorer cannot check that the seed
+    did not hold an edge. SCHEMA.md seeds carry no typed edges, so the two
+    readings agree; a seed edge on a page the session changed would also count.
+    """
 
     def __init__(self, key: Mapping, state: EndState) -> None:
         self.key = key
@@ -446,14 +454,21 @@ def _pair_edge_promoted(s: Situation) -> tuple[bool, list[str]]:
     return False, _pair_omission(s, edges, reference_code=False) or ["promoted_entry_not_used"]
 
 
+#: Each rule, and the key fields it reads beyond ``KEY_REQUIRED``, as dotted paths.
 RULES = {
-    "pair_edge_supported": _pair_edge_supported,
-    "none_required": _none_required,
-    "referent_entity_exists_with_fitting_type": _referent_fits,
-    "placed_under_home": _placed_under_home,
-    "placed_outside_homes": _placed_outside_homes,
-    "referent_type_lineage_includes_promoted": _referent_type_promoted,
-    "pair_edge_lineage_includes_promoted": _pair_edge_promoted,
+    "pair_edge_supported": (_pair_edge_supported, ("state_success.pair", "supported_edges")),
+    "none_required": (_none_required, ()),
+    "referent_entity_exists_with_fitting_type": (_referent_fits, ("referent.match_tokens",)),
+    "placed_under_home": (_placed_under_home, ("state_success.folder",)),
+    "placed_outside_homes": (_placed_outside_homes, ("state_success.folders",)),
+    "referent_type_lineage_includes_promoted": (
+        _referent_type_promoted,
+        ("referent.match_tokens", "promoted_entry.key"),
+    ),
+    "pair_edge_lineage_includes_promoted": (
+        _pair_edge_promoted,
+        ("state_success.required_edge", "promoted_entry.key"),
+    ),
 }
 
 
@@ -490,11 +505,11 @@ def received_fact(key: Mapping, run_dir: Path, fresh: Mapping) -> bool:
 def score_arm(key: Mapping, run: Mapping, run_dir: Path) -> dict:
     """One arm's deterministic row for one situation."""
 
-    rule = key["state_success"]["rule"]
+    rule = key["state_success"].get("rule")
     if rule not in RULES:
         raise ScoreRefused(f"{key['id']}: rule {rule!r} is not implemented")
     situation = Situation(key, EndState.read(run["end_state"]))
-    state, omissions = RULES[rule](situation)
+    state, omissions = RULES[rule][0](situation)
     false_precision = situation.false_precision()
     sessions = {s["role"]: s for s in run.get("sessions") or []}
     fresh = sessions.get("fresh") or {}
@@ -672,7 +687,30 @@ def diagnostics(rows: Sequence[Mapping]) -> dict:
         "uncounted_typed_claims": paired(lambda arm: arm["diagnostics"]["uncounted_typed_claims"]),
         "capture_calls": paired(calls("capture")),
         "fresh_calls": paired(calls("fresh")),
+        "edge_review_reasons": {
+            role: edge_review_counts([r[role]["diagnostics"]["edge_review_reasons"] for r in rows])
+            for role in ("baseline", "candidate")
+        },
         "unavailable": list(DIAGNOSTICS_UNAVAILABLE),
+    }
+
+
+def edge_review_counts(records: Sequence[Mapping]) -> dict:
+    """One arm's generic edges with and without an edge-review reason, from the readback record.
+
+    Unavailable for the arm when any of its records is, never zero: the
+    readback reports no count for a writer that cannot record a reason.
+    """
+
+    if not records or any(r.get("status") != "available" for r in records):
+        return {"status": "unavailable"}
+    generic = sum(int(r.get("generic_added_edges") or 0) for r in records)
+    reasoned = sum(int(r.get("reasons_recorded") or 0) for r in records)
+    return {
+        "status": "available",
+        "generic_added_edges": generic,
+        "with_reason": reasoned,
+        "without_reason": generic - reasoned,
     }
 
 
@@ -714,6 +752,46 @@ def unknown_fields(value: object, schema: object, where: str = "key") -> list[st
     return found
 
 
+def _has(value: object, path: str) -> bool:
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return value is not None
+
+
+def missing_fields(key: Mapping) -> list[str]:
+    """Each field the key's rule, answer views and edge entries need but lack."""
+
+    rule = (key.get("state_success") or {}).get("rule")
+    if rule not in RULES:
+        return [f"state_success.rule (no implemented rule {rule!r})"]
+    needed = [*KEY_REQUIRED, *RULES[rule][1]]
+    needed += [f"{view}.{name}" for view in ("answer", "judge_reference_view") for name in _ANSWER]
+    missing = [path for path in needed if not _has(key, path)]
+    pairs = (key.get("false_precision") or {}).get("pairs") or []
+    edges = [
+        *(("supported_edges", e) for e in key.get("supported_edges") or []),
+        *(("diagnostic_anchor_edge", e) for e in key.get("diagnostic_anchor_edge") or []),
+        *(
+            ("false_precision.pairs.supported_edges", e)
+            for p in pairs
+            for e in p.get("supported_edges") or []
+        ),
+    ]
+    if _has(key, "state_success.required_edge"):
+        edges.append(("state_success.required_edge", key["state_success"]["required_edge"]))
+    missing += [f"{where}.{name}" for where, e in edges for name in _EDGE if not _has(e, name)]
+    missing += [
+        "false_precision.pairs.between (two references)"
+        for p in pairs
+        if len(p.get("between") or []) != 2
+    ]
+    if _has(key, "state_success.pair") and len(key["state_success"]["pair"]) != 2:
+        missing.append("state_success.pair (two references)")
+    return missing
+
+
 def held_out(situation_id: str) -> bool:
     return situation_id.startswith(HELD_OUT_PREFIX)
 
@@ -736,13 +814,11 @@ def load_key(keys: Path, situation_id: str, manifest: Path | None) -> dict:
     if not isinstance(key, dict):
         raise ScoreRefused(f"{path.name} is not a mapping")
     unknown = unknown_fields(key, KEY_SCHEMA)
-    missing = [name for name in KEY_REQUIRED if name not in key]
+    missing = missing_fields(key)
     if unknown or missing:
         raise ScoreRefused(f"{path.name}: unknown fields {unknown}, missing fields {missing}")
     if key["id"] != situation_id:
         raise ScoreRefused(f"{path.name} names situation {key['id']!r}, not {situation_id!r}")
-    if "judge_reference_view" not in key or "answer" not in key:
-        raise ScoreRefused(f"{path.name} has no answer or judge_reference_view")
     return key
 
 
@@ -837,6 +913,12 @@ def score(
         for item, entry in (judge_key or {}).items()
     }
     declared = expected_situations(manifest, expect)
+    if any(held_out(situation_id) for situation_id in declared):
+        # Checked once up front, so a run whose every situation is struck still checks it.
+        try:
+            _refuse_held_out_without_custody("this held-out run", manifest)
+        except SituationRefused as refused:
+            raise ScoreRefused(str(refused)) from refused
     present = {
         p.name
         for p in out.iterdir()

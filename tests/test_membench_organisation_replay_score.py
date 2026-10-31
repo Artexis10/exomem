@@ -123,6 +123,7 @@ def write_run(
     vault_types: dict | None = None,
     status: str = "ok",
     shape: str = "hookless",
+    reasons: dict | None = None,
 ) -> dict:
     """A run file that conforms to SCHEMA.md section 2, with the given end state."""
 
@@ -155,7 +156,7 @@ def write_run(
             "entity_types": {"core": ["concept", "person"], "vault": vault_types or {}},
             "registry_history": [],
             "homes": {},
-            "operation_log": {"edge_review_reasons": {"status": "unavailable"}},
+            "operation_log": {"edge_review_reasons": reasons or {"status": "unavailable"}},
             "promotions": [],
         },
         "faults": [],
@@ -314,6 +315,34 @@ def test_a_key_field_the_scorer_does_not_know_is_refused_by_name(tmp_path):
     key["false_precision"]["new_rule"] = ["anything"]
     with pytest.raises(ScoreRefused, match=r"key\.false_precision\.new_rule"):
         baseline_row(tmp_path, key, pages=[ALPHA, BETA])
+
+
+def test_an_all_struck_held_out_run_still_checks_its_manifest(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    keys.mkdir()
+    manifest = tmp_path / "manifest.sha256"
+    manifest.write_text(f"{CASE_SHA}  h01.yaml\n", encoding="utf-8")
+    write_run(out, "h01", "x1", status="struck")
+    write_run(out, "h01", "x2", status="struck")
+    with pytest.raises(ScoreRefused, match="preregistered"):
+        score(out, keys, baseline="x1", candidate="x2", manifest=manifest)
+
+
+def test_a_key_without_a_field_its_rule_reads_is_refused_by_name(tmp_path):
+    key = pair_key("d01", "specific_fits", SUPPORTED, "pair_edge_supported")
+    del key["state_success"]["pair"]
+    with pytest.raises(ScoreRefused, match=r"missing fields \['state_success\.pair'\]"):
+        baseline_row(tmp_path, key, pages=[ALPHA, BETA])
+
+
+def test_a_situation_the_run_did_not_declare_is_refused(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
+    for situation in ("d01", "d02"):
+        write_run(out, situation, "x1", pages=[ALPHA, BETA])
+        write_run(out, situation, "x2", pages=[ALPHA, BETA])
+    with pytest.raises(ScoreRefused, match="undeclared"):
+        score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
 
 
 def test_a_held_out_key_with_a_manifest_that_is_not_the_preregistered_one_is_refused(tmp_path):
@@ -586,6 +615,46 @@ def test_a_residual_answer_goes_to_the_judge_and_its_verdict_completes_the_table
     )
     assert judged["rows"][0]["candidate"]["omissions"] == ["answer_lacks_fact"]
     assert (judged["statistics"]["success"]["c"], judged["judge_model"]) == (1, "judge-model-id")
+
+
+def test_a_verdict_on_an_answer_that_changed_since_its_item_was_issued_is_refused(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
+    write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
+    write_run(out, "d01", "x2", pages=[ALPHA, BETA], answer="Other.", tool_results=["Entity Beta"])
+    pending = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    [item] = pending["judge_items"]
+    run_file = out / "d01" / "x2" / "run.json"
+    run = json.loads(run_file.read_text(encoding="utf-8"))
+    run["sessions"][1]["final_answer"] = "Another answer."
+    run_file.write_text(json.dumps(run), encoding="utf-8")
+    with pytest.raises(ScoreRefused, match="answer changed"):
+        score(
+            out,
+            keys,
+            baseline="x1",
+            candidate="x2",
+            expect=["d01"],
+            judgements={"judge_model": "judge-model-id", "verdicts": {item["id"]: True}},
+            judge_key=pending["judge_key"],
+        )
+
+
+def test_generic_edge_reasons_are_counted_per_arm_or_unavailable(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
+    write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
+    record = {"status": "available", "generic_added_edges": 3, "reasons_recorded": 2}
+    write_run(out, "d01", "x2", pages=[ALPHA, BETA], answer="Entity Beta.", reasons=record)
+    report = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    counts = report["diagnostics"]["edge_review_reasons"]
+    assert counts["baseline"] == {"status": "unavailable"}
+    assert counts["candidate"] == {
+        "status": "available",
+        "generic_added_edges": 3,
+        "with_reason": 2,
+        "without_reason": 1,
+    }
 
 
 def test_a_judge_pass_never_clears_false_precision(tmp_path):
