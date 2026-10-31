@@ -9,7 +9,7 @@ from test_collection_store_s1_gate import LATER, ROW, _until, coordinator
 from test_collection_store_service import ON, Service, _served_vault, call, offline_create
 from test_collection_store_writer import CID, manifest_path
 
-from exomem import graph_sync, writer_lease
+from exomem import writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import capability, connection, edit_back, runtime
 from exomem.collection_store.writer import CollectionWriter
@@ -55,12 +55,6 @@ def release_on_idle(manager):
     _until(released, seconds=30)
 
 
-def graph_rebuilding():
-    """Whether a graph rebuild thread is still running in this process."""
-    return any(thread.name == graph_sync.GRAPH_REBUILD_THREAD_NAME and thread.is_alive()
-               for thread in threading.enumerate())
-
-
 def watching(monkeypatch, manager):
     """The lease grants the coordinator made, and how many views ticks ran, from here on."""
     grants, ticks = [], []
@@ -88,8 +82,10 @@ def test_a_released_store_takes_the_lease_only_for_an_edited_view_or_a_request(i
          item_key=ROW, why="first row")
     view = root / "Knowledge Base/Records/Work/_collection.md"  # a summary collection's editable view
     _until(lambda: rows(root, "SELECT count(*) FROM projection_state WHERE state!='current'") == [(0,)])
-    # The writes' graph rebuilds take the lease to publish; only the store's own ticks are under test.
-    _until(lambda: not graph_rebuilding(), seconds=30)
+    # Edit-back records each published view's file identity under the lease. A view released before
+    # that looks edited to the lease-free sweep, so the release waits for every view to be observed.
+    _until(lambda: rows(root, "SELECT count(*) FROM projection_state "
+                              "WHERE state IN ('current','held') AND stat_identity IS NULL") == [(0,)])
     grants, ticks = watching(monkeypatch, manager)
     release_on_idle(manager)
     granted, head = len(grants), rows(root, "SELECT value FROM store_meta WHERE key='commit_seq'")
