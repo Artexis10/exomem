@@ -110,6 +110,10 @@ async function mockApi(page, calls, controls = {}) {
       data = contextFor(item);
     } else if (name === "connect_memory") {
       if (body.operation === "accept-relation") {
+        if (controls.choiceRefusal) {
+          await route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({success: false, error: controls.choiceRefusal})});
+          return;
+        }
         const code = controls.decisionErrors?.shift();
         if (code) {
           await route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({success: false, error: {code, message: `Synthetic ${code} refusal.`}})});
@@ -119,7 +123,7 @@ async function mockApi(page, calls, controls = {}) {
         controls.removedRefs.add(body.ref);
         data = {accepted: true};
       } else {
-        data = {mutated: false, warnings: [], candidates: [{from: inboxItems[0].path, to: "Knowledge Base/Notes/Insights/related.md", relation_type: "vault.backs", relation_label: "backs (a kind of supports)", method: "recorded-link"}]};
+        data = {mutated: false, warnings: [], candidates: controls.suggestions || [{from: inboxItems[0].path, to: "Knowledge Base/Notes/Insights/related.md", relation_type: "vault.backs", relation_label: "backs (a kind of supports)", method: "recorded-link"}]};
       }
     } else if (name === "triage_memory" && body.ref?.startsWith("exomem://review/relation/")) {
       const code = controls.decisionErrors?.shift();
@@ -193,6 +197,51 @@ test("activation stays separate and governed relation requires confirmation", as
   await expect.poll(() => calls.some((call) => call.name === "edit_memory")).toBeTruthy();
   // The authored bullet carries the key; the display label is not a relation spelling.
   expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- vault.backs [[Knowledge Base/Notes/Insights/related]]");
+});
+
+test("a suggestion with fitting relations is written as the chosen one, never the generic", async ({page}) => {
+  const calls = [];
+  const target = "Knowledge Base/Entities/Organizations/Birch Works.md";
+  const controls = {suggestions: [
+    {from: inboxItems[0].path, to: target, relation_type: "relates_to", relation_label: "relates to", method: "shared_sources", options: [
+      {key: "owns", label: "owns", description: "The subject owns the object.", parent: null},
+      {key: "operates", label: "operates", description: "The subject runs the object.", parent: null},
+    ]},
+    {from: inboxItems[0].path, to: "Knowledge Base/Notes/Insights/unnamed.md", method: "model"},
+  ]};
+  await connect(page, calls, controls);
+  await page.getByRole("button", {name: /First measured conclusion/}).click();
+  await page.getByRole("button", {name: "Suggest relation"}).click();
+  const choices = page.getByLabel("Provisional candidate");
+  await expect(choices).toContainText(`owns → ${target}`);
+  await expect(choices).toContainText(`operates → ${target}`);
+  await expect(choices).not.toContainText("relates to");
+  await expect(page.getByRole("option", {name: /unnamed relation \(not writable\)/})).toHaveJSProperty("disabled", true);
+  await choices.selectOption({label: `operates → ${target}`});
+  await expect(page.getByRole("dialog")).toContainText("The subject runs the object.");
+  await page.getByRole("button", {name: "Confirm governed edit"}).click();
+  await expect.poll(() => calls.some((call) => call.name === "edit_memory")).toBeTruthy();
+  expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- operates [[Knowledge Base/Entities/Organizations/Birch Works]]");
+});
+
+test("a refused queue accept names the relations that fit with the server's remediation", async ({page}) => {
+  const calls = [];
+  const options = [{key: "owns", label: "owns", description: "", parent: null}, {key: "operates", label: "operates", description: "", parent: null}];
+  const group = {...relationGroups[0], items: [{...relationGroups[0].items[0], relation_type: "relates_to", relation_label: "relates to", bullet: null, options}]};
+  const controls = {
+    queueResponses: [relationQueue({groups: [group]})],
+    choiceRefusal: {code: "RELATION_CHOICE_REQUIRED", message: "a specific relation fits these two pages, so the generic relation is not chosen for you", remediation: "Choose one of the offered relations."},
+  };
+  await connectRelations(page, calls, controls);
+  await expect(page.getByText("a specific relation fits: owns, operates")).toBeVisible();
+  await page.getByRole("button", {name: /Accept relates to/}).click();
+  await page.getByLabel("Audit reason").fill("Accepted after review");
+  await page.getByRole("button", {name: "Confirm governed accept"}).click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("Relations that fit: owns, operates.");
+  await expect(alert).toContainText("Choose one of the offered relations.");
+  await expect(alert).not.toContainText("RELATION_CHOICE_REQUIRED");
+  await expect(page.getByRole("dialog")).toBeVisible();
 });
 
 test("narrow viewport and keyboard-only list navigation remain usable", async ({page}) => {
