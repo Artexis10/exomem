@@ -224,9 +224,8 @@ class RelationFit:
             if page is None:
                 return []
             registry = relation_registry.load_for_page(self._root, page.rel_path, page.frontmatter)
-        definition = registry.definition(str(relation or candidate.get("relation_type") or ""))
         # Generic is a registry attribute (`generic`); no relation key is compared here.
-        if definition is None or not definition.generic:
+        if not registry.is_generic(str(relation or candidate.get("relation_type") or "")):
             return []
         page = page or self._page(str(candidate.get("from") or ""))
         target = self._page(str(candidate.get("to") or ""))
@@ -381,20 +380,22 @@ def _is_placeholder_target(vault_root: Path, target: str) -> bool:
     return not (Path(vault_root) / epistemic_graph_module._page_rel(target)).is_file()
 
 
-def _current_candidate_is_authored(
+def _authors_toward(
     vault_root: Path,
     page: Any,
-    candidate: dict[str, Any],
+    target: str,
+    *,
+    accepts: Callable[[str], bool],
 ) -> bool | None:
-    """Check current Markdown using exact cached resolver authority."""
-    relation_type = str(candidate.get("relation_type") or "")
-    target = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
-    if not relation_type or not target:
-        return False
+    """Whether current Markdown has `page` author an accepted relation to `target`.
+
+    Targets resolve through the exact cached resolver authority. None means that
+    authority is unavailable or moved while it was read.
+    """
     matching_relations = tuple(
         relation
         for relation in _relation_document(page, vault_root).canonical_note_relations
-        if relation.kind == relation_type
+        if accepts(relation.kind)
     )
     if not matching_relations:
         return False
@@ -416,6 +417,50 @@ def _current_candidate_is_authored(
     ):
         return None
     return False
+
+
+def _current_candidate_is_authored(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+) -> bool | None:
+    """Check current Markdown using exact cached resolver authority."""
+    relation_type = str(candidate.get("relation_type") or "")
+    target = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
+    if not relation_type or not target:
+        return False
+    return _authors_toward(
+        vault_root, page, target, accepts=lambda kind: kind == relation_type
+    )
+
+
+def _current_pair_is_settled(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+) -> bool | None:
+    """Whether a generic candidate's two pages already have a specific authored relation.
+
+    Either page may author it, toward the other. This is the Markdown twin of the
+    graph read's `_specific_pairs`, so accept and the queue agree on what is settled.
+    """
+    registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
+    if not registry.is_generic(str(candidate.get("relation_type") or "")):
+        return False
+    target = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
+    forward = _authors_toward(vault_root, page, target, accepts=registry.is_specific)
+    if forward:
+        return True
+    other = _page_for(vault_root, target)
+    if other is None:
+        return forward
+    other_registry = relation_registry.load_for_page(vault_root, other.rel_path, other.frontmatter)
+    backward = _authors_toward(
+        vault_root, other, page.rel_path, accepts=other_registry.is_specific
+    )
+    if backward:
+        return True
+    return None if forward is None or backward is None else False
 
 
 def _eligible_pages(vault_root: Path) -> list[Any]:
@@ -1094,7 +1139,9 @@ def accept(
             f"exists; refresh the queue and inspect {ref} again"
         )
     authored_now = _current_candidate_is_authored(vault_root, page, candidate)
-    if authored_now is None:
+    # A settled generic pair classifies like an authored edge: nothing is left to accept.
+    settled_now = _current_pair_is_settled(vault_root, page, candidate)
+    if authored_now is None or settled_now is None:
         raise _refresh_required(ref)
     store = review_state_module.ReviewStateStore(vault_root)
     reason, _enriched = _classify_candidate(
@@ -1113,7 +1160,7 @@ def accept(
                     ),
                 )
             }
-            if authored_now
+            if authored_now or settled_now
             else set()
         ),
     )

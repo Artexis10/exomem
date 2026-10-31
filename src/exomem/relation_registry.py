@@ -180,6 +180,16 @@ class RelationRegistry:
     def definition(self, key: str) -> RelationDefinition | None:
         return self.core.get(key) or self.extensions.get(key)
 
+    def is_generic(self, key: str) -> bool:
+        """True for the relation the registry marks `generic`; no key is compared."""
+        definition = self.definition(key)
+        return definition is not None and definition.generic
+
+    def is_specific(self, key: str) -> bool:
+        """True for a registered relation that is not the generic one."""
+        definition = self.definition(key)
+        return definition is not None and not definition.generic
+
     def endpoints_of(self, key: str) -> relation_endpoints.Endpoints | None:
         """The endpoints a relation declares, else its parent's; None when neither does."""
         definition = self.definition(key)

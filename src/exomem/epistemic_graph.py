@@ -8383,6 +8383,7 @@ class EpistemicGraphIndex:
             # Selected meanings decide suppression and candidates before any
             # rank: SQL rows below are interpreted facts, never stored guesses.
             authored_pages, authored_raw = _authored_relations(conn, view, selected)
+            specific_pairs = _specific_pairs(conn, view, selected)
             generic = relation_registry.generic_relation_key()
             unit_relations = _unit_relation_rows(conn, view, sources=selected)
             selected_registries = {source: view.registry_for(source) for source in selected}
@@ -8951,7 +8952,11 @@ class EpistemicGraphIndex:
             for candidate in ordered:
                 target = str(candidate["to"])
                 relation_type = str(candidate["relation_type"])
-                if bool(candidate.get("_authored")):
+                # A generic candidate is settled once a specific authored relation joins the two pages.
+                if bool(candidate.get("_authored")) or (
+                    selected_registries[source].is_generic(relation_type)
+                    and frozenset((source, target)) in specific_pairs
+                ):
                     filtered["authored_edge"] += 1
                     continue
                 if target in placeholder_targets:
@@ -9886,6 +9891,38 @@ def _plan_matches(
     )
 
 
+def _without_settled_generics(
+    vault_root: Path,
+    rel: str,
+    registry: relation_registry.RelationRegistry,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop a generic candidate whose two pages a specific authored relation already joins.
+
+    The same rule as the batch read in `relation_review_batch`. An unavailable snapshot keeps
+    every candidate, as the graph-backed generators return none then.
+    """
+    if not any(registry.is_generic(str(item.get("relation_type") or "")) for item in candidates):
+        return candidates
+    conn = EpistemicGraphIndex(vault_root)._open_read_snapshot()
+    if conn is None:
+        return candidates
+    try:
+        pairs = _specific_pairs(conn, GraphView(vault_root, conn), [rel])
+    except sqlite3.Error:
+        return candidates
+    finally:
+        conn.close()
+    return [
+        item
+        for item in candidates
+        if not (
+            registry.is_generic(str(item.get("relation_type") or ""))
+            and frozenset((rel, _page_rel(str(item.get("to") or "")))) in pairs
+        )
+    ]
+
+
 def suggest_relations(
     vault_root: Path,
     *,
@@ -9936,6 +9973,8 @@ def suggest_relations(
         candidates.extend(
             _draft_wikilink_candidates(vault_root, draft_body, draft_title=draft_title)
         )
+    if path and candidates:
+        candidates = _without_settled_generics(vault_root, _page_rel(path), registry, candidates)
     if include_model_suggestions:
         warnings.append("model-backed graph relation suggestions unavailable")
     from . import relation_queue
@@ -13741,6 +13780,39 @@ def _authored_relations(
                 (str(dst_page_key), str(edge["relation_type"]), str(edge["origin"]))
             )
     return authored, raw
+
+
+def _specific_pairs(
+    conn: sqlite3.Connection, view: GraphView, pages: list[str]
+) -> set[frozenset[str]]:
+    """Page pairs, either direction, that an authored note relation of a specific meaning joins.
+
+    Only pairs with a page in `pages` are read. A relation counts when its authoring page's
+    registry serves it as a registered relation that is not the generic one; an unregistered
+    label means nothing here. Both directions count because a typed edge between two pages
+    already says how they relate, so the generic one adds nothing.
+    """
+    if not pages:
+        return set()
+    keys = [_file_key(page) for page in pages]
+    found = conn.execute(
+        f"SELECT {EDGE_COLUMNS}, e.dst_page_key FROM graph_edges e "
+        "WHERE e.origin = 'markdown_relation' AND e.src_key = ('file:' || e.source_path) "
+        f"AND (e.source_path IN ({_marks(pages)}) OR e.dst_page_key IN ({_marks(keys)}))",
+        [*pages, *keys],
+    ).fetchall()
+    view.prefetch(
+        [*(str(row[10]) for row in found), *(str(row[-1] or "").removeprefix("file:") for row in found)]
+    )
+    pairs: set[frozenset[str]] = set()
+    for *edge_row, dst_page_key in found:
+        edge = view.edge(_edge_row_to_dict(edge_row))
+        if edge is None or edge.get("relation_type") is None:
+            continue
+        source = str(edge["source_path"])
+        if view.registry_for(source).is_specific(str(edge["relation_type"])):
+            pairs.add(frozenset((source, str(dst_page_key).removeprefix("file:"))))
+    return pairs
 
 
 def _unit_relation_rows(

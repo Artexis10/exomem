@@ -98,7 +98,7 @@ def test_relation_proposal_never_mutates_and_confirmation_uses_audited_edit(
     ).read_text(encoding="utf-8")
 
 
-def test_studio_payloads_carry_the_relations_that_fit_a_person_and_an_organization(
+def test_studio_payloads_carry_the_relations_that_fit_and_settle_once_one_is_written(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = "Knowledge Base/Sources/Sessions/2026-05-05-metabolism-curriculum-design.md"
@@ -156,6 +156,20 @@ def test_studio_payloads_carry_the_relations_that_fit_a_person_and_an_organizati
     assert refused.json()["error"]["code"] == "RELATION_CHOICE_REQUIRED"
     assert refused.json()["error"]["remediation"]
 
+    # The same two pages are also proposed the other way round, in the queue and in a suggestion.
+    generic = item["relation_type"]
+    back_group = next(g for g in queue["groups"] if g["path"] == organization)
+    assert any(i["to"] == person and i["relation_type"] == generic for i in back_group["items"])
+
+    def suggested_generic(page: str, other: str) -> list[dict]:
+        found = _post(
+            client, "connect_memory", {"operation": "suggest-relations", "path": page, "limit": 10}
+        )
+        return [c for c in found["candidates"] if c["to"] == other and c["relation_type"] == generic]
+
+    assert suggested_generic(person, organization)
+    assert suggested_generic(organization, person)
+
     # Writing the chosen key through the audited edit lands one bullet.
     current = _post(client, "read_memory", {"path": person})
     destination = organization.removesuffix(".md")
@@ -172,6 +186,18 @@ def test_studio_payloads_carry_the_relations_that_fit_a_person_and_an_organizati
         },
     )
     assert (vault / person).read_text(encoding="utf-8").count(f"- owns [[{destination}]]") == 1
+
+    # The specific edge settles the generic proposal between the two pages, whichever way it runs.
+    # A proposal of another relation (derived_from) is not settled by it.
+    queue = _post(client, "review_memory", {"mode": "relation-queue"})
+    listed = {
+        (g["path"], i["to"], i["relation_type"]) for g in queue["groups"] for i in g["items"]
+    }
+    assert (person, organization, generic) not in listed
+    assert (organization, person, generic) not in listed
+    assert (person, source, "derived_from") in listed
+    assert not suggested_generic(person, organization)
+    assert not suggested_generic(organization, person)
 
 
 def test_compilation_proposal_preserves_source_until_confirmed_remember(
