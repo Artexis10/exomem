@@ -2676,7 +2676,7 @@ def run_child(
                 continue
             if job.id in deferred_for_gpu:
                 # The claim skips speech work once the GPU is busy; a job back here anyway would spin.
-                store.defer(job)
+                store.defer(job, release_original=True)
                 return _GPU_BUSY_EXIT_CODE
             idle_signature = None
             last_work = _clock()
@@ -2718,7 +2718,8 @@ def run_child(
                 return _TRANSIENT_EXIT_CODE
             except asr_runtime.ASRGpuBusy as exc:
                 assert job.id is not None
-                store.defer(job)
+                # The GPU wait has no known end, so the job keeps neither a hydration slot nor its original.
+                store.defer(job, release_original=True)
                 gpu_busy = True
                 deferred_for_gpu.add(job.id)
                 store.note_gpu_wait(str(exc))

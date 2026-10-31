@@ -2038,6 +2038,56 @@ def test_at_the_cap_the_worker_claims_no_job_that_needs_a_hydration_and_still_cl
     assert ledger.claim_next().binary_path == hydrated[2]
 
 
+def test_a_speech_job_that_waits_for_a_busy_gpu_holds_no_hydration_slot_and_does_not_pin_its_original(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a GPU wait that keeps the hydration slot and the pin of its original, so every image whose original
+    is in the store waits for the GPU too, and the recording stays on the volume for the whole wait. Also catches
+    a claim that skips speech work only among local originals, so a child that knows the GPU is busy still
+    downloads the next recording from the store for nothing."""
+    import os
+
+    from exomem import (
+        asr_runtime,
+        extract,
+        media_jobs,
+        media_processing,
+        media_store,
+        media_worker,
+        preserve,
+    )
+
+    _configure(selected_store, vault, max_hydrations=1)
+    # Only a transcribed original goes to the store, so the jobs that hydrate one are requests to process it again.
+    speech, later = (preserve.preserve_bytes(vault, scope="Test", category="audio", filename=name, data=b"FAKEBYTES",
+                                             text="[0:00] earlier words") for name in ("meeting.m4a", "call.m4a"))
+    image = preserve.preserve_bytes(vault, scope="Test", category="photos", filename="receipt.png",
+                                    data=b"\x89PNG fake", text="RECEIPT 41")
+    for captured in (speech, later, image):
+        _offload(vault, vault / captured.path)
+        media_processing.reprocess_media(vault, captured.path)
+        # A queued job that no worker claimed yet does not keep its original on the volume.
+        assert media_store.evict(vault, vault / captured.path)
+    ledger = media_jobs.MediaJobStore(vault)
+
+    def extract_text(path, **_kwargs):
+        if extract.media_type_for(Path(path)) == "image":
+            return extract.ExtractResult(text="RECEIPT 42", media_type="image", engine="tesseract")
+        raise asr_runtime.ASRGpuBusy("the GPU has 512 MiB free, 2048 MiB needed")
+
+    monkeypatch.setattr(extract, "extract_text", extract_text)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == media_worker._GPU_BUSY_EXIT_CODE
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert "RECEIPT 42" in (vault / image.sidecar_path).read_text(encoding="utf-8")
+    waiting = ledger.get_by_binary(vault / speech.path)
+    assert (waiting.state, waiting.attempts) == (media_jobs.PENDING, 0)
+    assert media_store.evict(vault, vault / speech.path)
+    assert originals.original_state(vault, vault / later.path).state == "evicted"
+
+
 @pytest.mark.parametrize(("cause", "code"), [("transport", "MEDIA_STORE_UNAVAILABLE"), ("capacity", "MEDIA_STORE_BUSY")])
 def test_a_hydration_that_cannot_run_now_returns_the_job_with_no_attempt_spent_and_its_progress_kept(
         vault: Path, selected_store, cause, code):

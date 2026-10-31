@@ -1378,8 +1378,13 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def defer(self, job: MediaJob | int) -> bool:
-        """Return a claimed job to pending after transient coordination refusal."""
+    def defer(self, job: MediaJob | int, *, release_original: bool = False) -> bool:
+        """Return a claimed job to pending after transient coordination refusal.
+
+        A short refusal keeps the job's pin and hydration slot, so the retry finds its original on the volume.
+        `release_original` drops both, for a wait with no known end: the original can then leave the volume
+        and the slot serves other jobs, and the next claim hydrates the original again if it left.
+        """
         job_id = job.id if isinstance(job, MediaJob) else job
         if job_id is None:
             return False
@@ -1395,7 +1400,7 @@ class MediaJobStore:
                     """
                     UPDATE jobs
                     SET state = 'pending', attempts = MAX(0, attempts - 1),
-                        last_error = NULL, updated_at = ?
+                        last_error = NULL, updated_at = ?""" + (", pinned = 0, hydrated = 0" if release_original else "") + """
                     WHERE id = ? AND state = 'running'""" + revision_clause,
                     tuple(params),
                 ).rowcount
