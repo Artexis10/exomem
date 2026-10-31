@@ -1,3 +1,19 @@
+## Status (2026-10-31): deferred, not merged
+
+This change is parked on its branch. Its code and tests are complete except
+for the real-machine proof (task 5.2). It is not merged.
+
+- The personal case does not need it now. When the vault host's GPU is busy,
+  speech jobs wait and then run on that GPU (`contain-asr-gpu-faults`). A
+  remote worker only removes that wait.
+- Exomem Cloud keeps media processing inside each cell
+  (`add-cloud-multimodal-processing`), so tenant content never crosses a shared
+  process. A shared GPU pool needs a different trust model. The "Revival
+  triggers" section of `design.md` names it.
+
+Revive this change when a revival trigger holds. Then rebase it, run the
+independent review and do task 5.2.
+
 ## Why
 
 Every media job runs on the machine that owns the vault. Speech recognition and

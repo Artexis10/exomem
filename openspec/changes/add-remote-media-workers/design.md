@@ -35,6 +35,28 @@ amendment M4, D12). The GPU-busy defer and `skip_media_types` come from
 - Changing the MCP tool surface, the result payload contract of local jobs, or
   the claim order.
 
+## Revival triggers
+
+This change is deferred. Revive it when one of these holds:
+
+1. Exomem Cloud gets GPU nodes, and a speech or diarisation engine must run on
+   them.
+2. An engine needs more memory than a cell's media budget allows, as measured
+   under `add-cloud-multimodal-processing`.
+3. Concurrent media work in several cells on one node breaks the latency or
+   memory gates, by measurement.
+
+A Cloud pool needs more than this change gives:
+
+- one job per disposable sandbox, so that no process handles the content of two
+  tenants;
+- no retained bytes after the lease ends (D8a already requires this);
+- per-cell worker credentials that the operator issues from infrastructure
+  code, not the vault owner;
+- transport over a private network. In this change the worker routes are served
+  only on the public listener, because the local listener admits loopback
+  clients only.
+
 ## Decisions
 
 ### D1. The remote worker replaces the child at the result seam
