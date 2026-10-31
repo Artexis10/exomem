@@ -133,6 +133,9 @@ class FakeClusterGateway:
     def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
         return {}
 
+    def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
+        return {}
+
 
 def _secrets_config() -> reconcile.SecretsConfig:
     return reconcile.SecretsConfig(

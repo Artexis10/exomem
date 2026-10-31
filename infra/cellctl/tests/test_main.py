@@ -166,13 +166,19 @@ def test_the_cell_alert_thresholds_load_from_the_environment_the_chart_renders(m
     _settings_env(monkeypatch, {})
     monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", "1234")
     monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", "2147483648")
+    monkeypatch.setenv("CELLCTL_RECALL_LAG_WARN_SECONDS", "600")
 
     assert main.build_cluster_config().alert_thresholds == AlertThresholds(
-        unavailable_after=timedelta(seconds=1234), disk_free_floor_bytes=2 * 1024**3
+        unavailable_after=timedelta(seconds=1234),
+        disk_free_floor_bytes=2 * 1024**3,
+        recall_lag_after=timedelta(seconds=600),
     )
 
 
-@pytest.mark.parametrize("name", ["CELLCTL_PENDING_OPERATION_WARN_SECONDS", "CELLCTL_PVC_RESERVED_FREE_BYTES"])
+@pytest.mark.parametrize(
+    "name",
+    ["CELLCTL_PENDING_OPERATION_WARN_SECONDS", "CELLCTL_PVC_RESERVED_FREE_BYTES", "CELLCTL_RECALL_LAG_WARN_SECONDS"],
+)
 @pytest.mark.parametrize(
     "bad",
     [None, "0", "1.073741824e+09"],

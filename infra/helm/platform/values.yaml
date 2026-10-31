@@ -24,7 +24,7 @@ scheduler:
       servesCloud: true
 
 observability:
-  contractSha256: 3f3afe827755d253695bb9a71058cbc303bb5dff60fb6eb6eaab880e976d4973
+  contractSha256: dd3a90cef88308ca93c5af7409679e2f724f1b36f09b380f3ff9c4b6c5ff818c
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
 
