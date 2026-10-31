@@ -469,9 +469,10 @@ def register_rest_facade(
                     explicit_key = request.headers.get("idempotency-key")
                     # An unkeyed write takes its implicit retry identity from the
                     # canonical audience, so it waits out contention and a resend
-                    # replays. An unresolved principal has no stable identity: it
-                    # keeps today's immediate refusal (MCP does the same). The
-                    # `rest:` prefix keeps these scopes apart from MCP's.
+                    # replays. A principal that did not resolve, or that fell back
+                    # to the most restrictive audience, has no stable identity: it
+                    # keeps today's immediate refusal. The `rest:` prefix keeps
+                    # these scopes apart from MCP's.
                     implicit_scope = (
                         f"rest:{bound_principal.audience_id}"
                         if not explicit_key

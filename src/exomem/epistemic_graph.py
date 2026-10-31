@@ -2087,7 +2087,7 @@ class EpistemicGraphIndex:
         self._mutation_coordinator = mutation_coordinator
 
     def boundary_waiters(self) -> int:
-        """Threads of this process waiting on the boundary a drain of this index takes."""
+        """Writes waiting, in any process on this host, on the boundary a drain of this index takes."""
         return self._mutation_coordinator.waiter_count()
 
     def _canonical_mutation_coordinator(self) -> mutation_lock.VaultMutationCoordinator:

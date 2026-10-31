@@ -768,6 +768,12 @@ change the payload or create a fresh explicit identity to recover a pending or
 committed-uncertain acknowledgement: retry only with the same identity as
 directed, or reconcile.
 
+A REST write without an `Idempotency-Key` takes the same kind of implicit
+identity from the caller's audience, so a resend of the same request from the
+same credential also replays within the 600-second window. To make two identical
+writes, send a distinct `Idempotency-Key` with each. `EXOMEM_CAPTURE_CONTENTION_ABSORB=0`
+restores immediate refusals on a busy boundary; it does not change replay.
+
 Expected MCP operation refusals such as `MUTATION_WARMING` and `MUTATION_BUSY` are normal tool content:
 inspect top-level `success: false` and the structured `error` object, then follow
 its retry fields. They are not transport failures. A `receipt_id` is diagnostic,
