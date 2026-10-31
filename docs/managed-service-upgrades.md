@@ -222,7 +222,7 @@ runtime directory have a 104-byte limit.
 7. Set `vault_identity` in `/tmp/xr/state/KEY/.state-migration.json` to `KEY` with a JSON editor.
 8. Write `/tmp/xr/rehearsal.env` with mode 600 from the template below.
 9. Pick two free loopback ports as `PORT` and `LOCAL_PORT`.
-10. Unless `/tmp/xr/home/local-token` exists, issue a local session with the issue command below.
+10. Unless `/tmp/xr/home/local-token` exists from this `rehearsal.env`, issue a local session with the issue command below.
 11. Start the transient unit with the `systemd-run` command below.
 12. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
 13. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
@@ -308,6 +308,8 @@ EXOMEM_JWT_SIGNING_KEY=NEW_RANDOM_VALUE
 ```
 
 Generate each `NEW_RANDOM_VALUE` separately, for example with `openssl rand -hex 32`.
+Keep `rehearsal.env` with a kept copy. A new signing key invalidates
+`/tmp/xr/home/local-token`, so delete that file when you change the key.
 When the live file sets no owner identity, use any numeric id and any login.
 
 The last four lines let the copy's own local session call MCP tools on
@@ -327,14 +329,14 @@ its start. It writes one line per call, `TIME read|write RESPONSE`, and each
 write creates a disposable note in the copy:
 
 ```sh
-TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 ))
+TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
 while [ "$(date +%s)" -lt "$END" ]; do
   NOW=$(date -u +%H:%M:%S)
   for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"create_note\",\"arguments\":{\"title\":\"Rehearsal probe $NOW\",\"content\":\"Disposable rehearsal write.\",\"note_type\":\"insight\"}}"; do
     BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
       -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":${CALL#* }}" | tr -d '\n')
-    echo "$NOW ${CALL%% *} ${BODY:-no-response}" >> /tmp/xr/calls.log
+    printf '%s\n' "$NOW ${CALL%% *} ${BODY:-no-response}" >> /tmp/xr/calls.log
   done
   sleep 30
 done
@@ -342,7 +344,7 @@ done
 
 A call fails when its line holds `"isError":true`, `MUTATION_BUSY`,
 `VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. The check command
-counts them:
+prints two counts; expect both to be 0:
 
 ```sh
 grep -cE '"isError":true|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
