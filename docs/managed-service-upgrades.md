@@ -243,7 +243,9 @@ Expect all four checks to pass in the 45 minutes after the noted time.
 The service writes its state while you copy it. The state copy command copies
 each SQLite database through SQLite's backup API, so each copy is consistent. It
 tells a database by its file header, skips SQLite's side files and rebuild
-temporaries, and skips files that disappear during the copy:
+temporaries (both `*.rebuild-*` and `.graph-rebuild-*`), and skips files that
+disappear during the copy. A rebuild temporary left by a crash can hold a hot
+journal, and a read-only open of it fails:
 
 ```sh
 /tmp/xr/launcher/bin/python -I - LIVE_STATE_DIR /tmp/xr/state/KEY <<'PY'
@@ -258,7 +260,7 @@ for path in sorted(src.rglob("*")):
         if path.is_dir():
             target.mkdir(mode=0o700, parents=True, exist_ok=True)
             continue
-        if path.name.endswith(("-wal", "-shm", "-journal")) or ".rebuild-" in path.name:
+        if path.name.endswith(("-wal", "-shm", "-journal")) or "rebuild-" in path.name:
             continue
         with path.open("rb") as handle:
             database = handle.read(16) == b"SQLite format 3\0"
