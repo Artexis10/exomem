@@ -847,7 +847,7 @@ def op_bootstrap(
     Reads no vault content. Full includes the public reference index.
 
     Args:
-        profile: compact (default), full, diagnostics, or session (needs installed skill digest).
+        profile: compact, full, diagnostics, or session (needs installed skill digest).
         workflow: Context label only.
         skill_contract: Session digest; missing/stale returns compact plus session_profile_unavailable.
         section: Compact block name; index lists available blocks.
@@ -4665,7 +4665,7 @@ def op_edit(
         relation_disposition: Reviewed relation outcome for the commit.
         relation_review_hash: Exact `relation_review_hash` returned by the
             validate-only semantic preflight.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
 
     Returns:
         Shape varies by mode (take-row -> {path, row, warnings};
@@ -4868,7 +4868,7 @@ def op_replace(
         draft_token: Opaque destination/date token returned by validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
         vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
             returned by an experiment-domain vocabulary preparation.
 
@@ -5513,7 +5513,7 @@ def op_note(
         relation_disposition: Reviewed relation outcome for commit, usually
             reviewed_none when no honest relation exists.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
         vocabulary_decision: After a vocabulary_preparation response, submit its
             evidence_fingerprint with outcome reuse, create, or defer and the
             reviewed canonical value. The response is bound to that evidence.
@@ -5744,7 +5744,7 @@ def op_create_file(
         draft_token: Opaque destination/date token returned by validate_only.
         relation_disposition: Reviewed relation outcome for semantic file creation.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
 
     Returns: {path, warnings} for files; {path, created, warnings} for dirs.
     Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
@@ -6181,7 +6181,7 @@ def op_append_to_file(
         semantic_transition_token: Opaque transition token returned by validate_only.
         relation_disposition: Reviewed relation outcome for a semantic append.
         relation_review_hash: Transition hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
 
     Returns: {path, bytes_appended, warnings}.
     Errors: INVALID_APPEND; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
@@ -7969,13 +7969,13 @@ def op_remember(
             insight, failure or pattern only warns.
         bridge_of: Source paths or stable refs for a cross-domain bridge;
             requires bridge_scope and bridge_review.
-        suggestions: Off by default. `suggestions=true` also returns pages to link
+        suggestions: `suggestions=true` also returns pages to link
             (read under `response_detail='full'`); costs one retrieval pass.
         validate_only: Return an immutable creation draft without writing.
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         vocabulary_decision: Answers a vocabulary_preparation response.
     """
     return op_note(
@@ -8191,7 +8191,7 @@ def op_observe_memory(
         transition_token: From validate.
         relation_disposition: Semantic review disposition (existing page).
         relation_review_hash: Transition hash the reviewed-none covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         reason: Optional rationale retained with the prior interpretation.
         target_fingerprints: Exact corrective target refs and current fingerprints.
             Omit for ordinary page or heading relations; episode unit leaves echo them.
@@ -8329,7 +8329,7 @@ def op_replace_memory(
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         vocabulary_decision: Answers an experiment-domain vocabulary preparation.
     """
     return op_replace(
@@ -12747,7 +12747,7 @@ def op_manage_memory_file(
         semantic_transition_token: The append transition token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create/append.
         relation_review_hash: Draft or transition hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
     """
     creation_review_requested = any(
