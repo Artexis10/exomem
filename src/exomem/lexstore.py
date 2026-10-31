@@ -7300,7 +7300,10 @@ class LexicalStore:
            identity in the temp DB, then fold its WAL into a single self-contained
            main file — publication is refused unless that provably succeeds.
         5. Rebase one retained suffix off-barrier, then re-walk the source and
-           require its exact triples to still match the temp targets. Under the
+           require its exact triples to still match the temp targets. When a
+           write landed during that walk, replay the observed suffix and excuse
+           exactly the paths that replay re-proved; every other path must still
+           match the registry, or the build aborts. Under the
            publication lock, rebase the final bounded suffix. If a large writer
            batch landed while publication waited, preserve the temp, catch up
            off-barrier, re-prove the source, and retry a bounded number of times.
@@ -7464,33 +7467,72 @@ class LexicalStore:
                 self._last_rebuild_result = "identity_changed"
                 return False
             final_members, final_signatures = self._walk_entries()
+            final_entries: dict[str, list[tuple[str, object]]] = {}
             final_triples = {}
             for scope, idx in (("kb", 0), ("vault", 1)):
-                entries = [
+                final_entries[scope] = [
                     (str(path), final_signatures[path])
                     for path, flags in final_members.items()
                     if flags[idx]
                 ]
-                final_triples[scope] = freshness_module.triple_from_entries(entries)
-            if any(final_triples[scope] != target[3] for scope, target in scope_targets.items()):
-                # Replay an observed suffix before discarding the completed build;
-                # the same independent census must still prove its exact target.
-                self._last_rebuild_stage = RepairStage.CENSUS_REPLAY
-                rebased = self._rebase_detached_catalog(
-                    temp_path, scope_targets, start_identity, max_paths=None,
+                final_triples[scope] = freshness_module.triple_from_entries(
+                    final_entries[scope]
                 )
-                if rebased is None:
-                    return False
-                scope_targets = rebased
-                self._last_rebuild_stage = RepairStage.CENSUS
+            if all(final_triples[scope] == target[3] for scope, target in scope_targets.items()):
+                return True
+            # The walk is not atomic: a write that lands while it runs can be
+            # seen on one path and missed on another. Record what the registry
+            # held by the end of the walk, then replay the observed suffix
+            # before judging the completed build.
+            after_walk = {}
+            for scope, target in scope_targets.items():
+                if target[0] != "delta":
+                    continue
+                try:
+                    after_walk[scope] = freshness_module.recall_projection_snapshot(
+                        self.vault_root, scope, allow_fallback=False
+                    )
+                except freshness_module.RecallProjectionUnavailable:
+                    continue
+            self._last_rebuild_stage = RepairStage.CENSUS_REPLAY
+            before_replay = scope_targets
+            rebased = self._rebase_detached_catalog(
+                temp_path, scope_targets, start_identity, max_paths=None,
+            )
+            if rebased is None:
+                return False
+            scope_targets = rebased
+            self._last_rebuild_stage = RepairStage.CENSUS
+            replayed = {
+                scope: target[1]
+                for scope, target in scope_targets.items()
+                if target[0] == "delta" and target[2] != before_replay[scope][2]
+            }
+            # A tainted delta came from the registry's own non-atomic walk, so
+            # only this census may prove it: excuse nothing, exactly as strict
+            # as a census that saw no replay at all.
+            tainted = any(
+                getattr(delta, "requires_source_proof", False) for delta in replayed.values()
+            )
+            excused: set[str] = set()
             for scope, final_triple in final_triples.items():
-                if final_triple != scope_targets[scope][3]:
+                if final_triple == scope_targets[scope][3]:
+                    continue
+                agreed = None if tainted else self._census_agrees_outside_replay(
+                    final_entries[scope],
+                    before_replay[scope][2],
+                    replayed.get(scope),
+                    after_walk.get(scope),
+                )
+                if agreed is None:
                     log.info(
                         "lexical atomic publish aborted: %s source changed after target capture",
                         scope,
                     )
                     self._last_rebuild_result = "source_changed"
                     return False
+                excused |= agreed
+            self._last_census_excused += len(excused)
             return True
 
         if not source_matches_targets():
@@ -8078,6 +8120,10 @@ class LexicalStore:
         detached SQLite family and never walks the vault. ``max_paths=None`` is
         reserved for off-barrier background catch-up; every final call under the
         publication barrier retains the foreground cap.
+
+        Each replayed path proves its target signature or absence; an event
+        that lands later on another path does not void the replay; the next
+        replay carries it (see `_delta_target_still_current`).
         """
         from . import freshness as freshness_module
 
@@ -8125,7 +8171,7 @@ class LexicalStore:
             if max_paths is not None and len(touched) > max_paths:
                 self._last_rebuild_result = "delta_unavailable"
                 return None
-            if not self._delta_target_still_current(scope, delta):
+            if not self._delta_target_still_current(scope, delta, bind_registry=False):
                 self._last_rebuild_result = "source_changed"
                 return None
             if delta.to != checkpoint:
@@ -8151,7 +8197,9 @@ class LexicalStore:
                     if catalog_semantic_identity(self.vault_root) != expected_identity:
                         raise _DeltaReplayStale
                     for scope, delta in deltas.items():
-                        if not self._delta_target_still_current(scope, delta):
+                        if not self._delta_target_still_current(
+                            scope, delta, bind_registry=False
+                        ):
                             raise _DeltaReplayStale
                         if delta.to.triple is not None:
                             conn.execute(
@@ -8173,6 +8221,63 @@ class LexicalStore:
             self._last_rebuild_result = "fold_failed"
             return None
         return updated
+
+    @staticmethod
+    def _census_agrees_outside_replay(
+        walked: list[tuple[str, object]],
+        temp_checkpoint,
+        replayed_delta,
+        after_walk,
+    ) -> set[str] | None:
+        """Excuse exactly the paths the census replay re-proved, or refuse.
+
+        `temp_checkpoint` is the temp catalogue's checkpoint, taken before the
+        census walk started, and `after_walk` is the registry's projected map
+        recorded when the walk ended. `replayed_delta` bridges the first to a
+        target at or past the second, so every path the registry saw change
+        during the walk is in it, and the replay proved each of those against
+        its target signature or absence. Every other path kept one registry
+        state for the whole walk, so the walk must show that state. A
+        difference there is drift that no event reported, and the census
+        refuses it as strictly as before.
+
+        Returns the excused path keys when the walk agrees with the registry
+        outside them, or None.
+        """
+        from . import freshness as freshness_module
+
+        if replayed_delta is None or after_walk is None:
+            return None
+        registry_checkpoint, registry_entries = after_walk
+        target = replayed_delta.to
+        if not (
+            replayed_delta.complete
+            and replayed_delta.from_ == temp_checkpoint
+            and (
+                registry_checkpoint.instance_id,
+                registry_checkpoint.policy_version,
+                registry_checkpoint.access_policy_fingerprint,
+            )
+            == (target.instance_id, target.policy_version, target.access_policy_fingerprint)
+            and temp_checkpoint.instance_id == target.instance_id
+            and temp_checkpoint.generation
+            <= registry_checkpoint.generation
+            <= target.generation
+        ):
+            return None
+        # Path keys as the freshness digest spells them, so a Windows alias of
+        # a replayed path is excused on both sides or on neither.
+        digest = freshness_module._digest_path
+        excused = {digest(path) for path in (*replayed_delta.changed, *replayed_delta.deleted)}
+        walked_outside = [(path, sig) for path, sig in walked if digest(path) not in excused]
+        registry_outside = [
+            (path, sig) for path, sig in registry_entries.items() if digest(path) not in excused
+        ]
+        if freshness_module.triple_from_entries(
+            walked_outside
+        ) != freshness_module.triple_from_entries(registry_outside):
+            return None
+        return excused
 
     # ---------------------------------------------------------- delta sidecar
 
@@ -8288,17 +8393,28 @@ class LexicalStore:
         except VaultLockError:
             return
 
-    def _delta_target_still_current(self, scope: str, delta) -> bool:
+    def _delta_target_still_current(
+        self, scope: str, delta, *, bind_registry: bool = True
+    ) -> bool:
         """Prove a bounded delta still names the registry and filesystem target.
 
         The registry checkpoint catches a later observed event. Captured signatures
         catch an edit/delete that happened after `delta_since` but before its event
         reached this process. Both are checked before and after row materialization.
+
+        `bind_registry=False` is for a detached temp catalogue only. A later
+        observed event there leaves the temp behind the registry, never wrong:
+        every replayed path still proves its signature or absence, and the next
+        replay or the published lag carries the newer event. The live catalogue
+        keeps the registry binding, because readers trust its checkpoint.
         """
         from . import freshness as freshness_module
         from . import recall_policy
 
-        if freshness_module.recall_checkpoint(self.vault_root, scope) != delta.to:
+        if (
+            bind_registry
+            and freshness_module.recall_checkpoint(self.vault_root, scope) != delta.to
+        ):
             return False
         expected = dict(getattr(delta, "target_signatures", ()))
         if set(expected) != set(delta.changed):
@@ -8324,7 +8440,10 @@ class LexicalStore:
                 and self._membership(path)[scope_index]
             ):
                 return False
-        return freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
+        return (
+            not bind_registry
+            or freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
+        )
 
     def _apply_delta_rows(self, conn: sqlite3.Connection, delta) -> None:
         """Replay one delta's row mutations onto `conn` (caller owns the txn).

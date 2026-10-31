@@ -196,50 +196,141 @@ def test_edit_after_start_is_replayed_and_target_checkpoint_is_exact(
     assert stored.generation > pre_gen
 
 
-@pytest.mark.parametrize("edit_timing", ["observed_before", "missed_before", "observed_after"])
+@pytest.mark.parametrize(
+    ("before_walk", "after_walk", "publishes"),
+    [
+        pytest.param("observed", None, True, id="observed_before"),
+        pytest.param("missed", None, False, id="missed_before"),
+        pytest.param(None, "observed", True, id="observed_after"),
+        # Under steady writes the walk sees some writes and misses others. Both
+        # were observed, so the replay re-proves them and the build publishes.
+        pytest.param("observed", "observed", True, id="observed_on_both_sides_of_the_walk"),
+        # An unobserved edit is not excused because another page's write was.
+        pytest.param("missed", "observed", False, id="missed_beside_an_observed_write"),
+        # A page's own event does not excuse a later edit nobody reported.
+        pytest.param(
+            "observed_then_missed", "observed", False, id="missed_after_its_own_event"
+        ),
+        # A safety-net walk diff needs this census as its source proof.
+        pytest.param("observed", "tainted", False, id="tainted_after_the_walk"),
+    ],
+)
 def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit_timing: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before_walk: str | None,
+    after_walk: str | None,
+    publishes: bool,
 ) -> None:
-    """An observed edit during final proof must not waste a completed build."""
-    page = _kb_file(tmp_path, "a.md", "- [config] beforecensus ^u1")
-    _seed(tmp_path, [page])
+    """Writes the registry observed during the census walk must not waste a
+    completed build; drift no event reported must still abort it.
+
+    Page P is edited before the census walk reads it, page Q after.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
+    _seed(tmp_path, [p, q])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
     real_walk = store._walk_entries
     walks = 0
 
-    def edit() -> None:
-        page.write_text(_page_text("a", "- [config] aftercensus ^u1"), encoding="utf-8")
+    def rewrite(page: Path, token: str) -> None:
+        page.write_text(_page_text(page.stem, f"- [config] {token} ^u1"), encoding="utf-8")
         _touch_future(page)
-        if edit_timing != "missed_before":
-            freshness.on_files_changed(tmp_path, changed=[page])
 
-    def walk_with_late_edit() -> Any:
+    def edit(page: Path, how: str | None) -> None:
+        if how is None:
+            return
+        rewrite(page, f"{page.stem}after")
+        if how in ("observed", "observed_then_missed"):
+            freshness.on_files_changed(tmp_path, changed=[page])
+        if how == "observed_then_missed":
+            rewrite(page, f"{page.stem}unreported")
+        if how == "tainted":
+            # The registry's own safety-net walk finds the missed edit and
+            # records it as a diff that needs a source proof.
+            entries = [(str(page), freshness.stat_signature(page)) for page in (p, q)]
+            for scope in ("kb", "vault"):
+                freshness.reconcile(tmp_path, scope, entries)
+
+    def census_walk_between_writes() -> Any:
         nonlocal walks
         walks += 1
-        if walks == 2 and edit_timing != "observed_after":
-            edit()
+        if walks == 2:
+            edit(p, before_walk)
         snapshot = real_walk()
-        if walks == 2 and edit_timing == "observed_after":
-            edit()
+        if walks == 2:
+            edit(q, after_walk)
         return snapshot
 
-    monkeypatch.setattr(store, "_walk_entries", walk_with_late_edit)
+    monkeypatch.setattr(store, "_walk_entries", census_walk_between_writes)
     published = store.rebuild_atomic()
     assert walks >= 2
-    assert published is (edit_timing != "missed_before")
+    assert published is publishes
     with sqlite3.connect(store.path) as live:
-        contents = {row[0] for row in live.execute("SELECT content FROM semantic_units")}
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
     if not published:
-        assert any("beforecensus" in content for content in contents)
-        assert not any("aftercensus" in content for content in contents)
+        assert "pbefore" in contents and "qbefore" in contents
+        assert "pafter" not in contents and "qafter" not in contents
+        assert "punreported" not in contents
         return
-    assert any("aftercensus" in content for content in contents)
-    assert not any("beforecensus" in content for content in contents)
+    for page, how in ((p, before_walk), (q, after_walk)):
+        if how is None:
+            assert f"{page.stem}before" in contents
+        else:
+            assert f"{page.stem}after" in contents
+            assert f"{page.stem}before" not in contents
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
     assert lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False) is not None
-    assert any("aftercensus" in hit.content for hit in _units_in_category(tmp_path, "config"))
+
+
+def test_a_replay_survives_an_observed_write_to_another_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write to Q that lands while the build replays P's event must not
+    discard the build: P's rows are still proven, and Q's event is replayed
+    next. Before, the replay demanded that no event at all follow its own.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
+    _seed(tmp_path, [p, q])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    real_apply_rows = store._apply_delta_rows
+    q_written = False
+
+    def write(page: Path) -> None:
+        page.write_text(
+            _page_text(page.stem, f"- [config] {page.stem}after ^u1"), encoding="utf-8"
+        )
+        _touch_future(page)
+        freshness.on_files_changed(tmp_path, changed=[page])
+
+    def materialize_then_write_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        write(p)
+        return built
+
+    def apply_rows_while_q_is_written(conn: sqlite3.Connection, delta: Any) -> None:
+        nonlocal q_written
+        real_apply_rows(conn, delta)
+        if not q_written and any(Path(path).name == "p.md" for path in delta.changed):
+            q_written = True
+            write(q)
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_write_p)
+    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_while_q_is_written)
+    assert store.rebuild_atomic() is True
+    assert q_written
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pafter" in contents and "qafter" in contents
+    assert "pbefore" not in contents and "qbefore" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
 
 
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
