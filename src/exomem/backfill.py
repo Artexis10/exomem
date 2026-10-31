@@ -31,6 +31,7 @@ from . import (
     index_sync,
     preserve,
     recall_policy,
+    rename_journal,
     scene_frames,
     semantic_segments,
 )
@@ -82,8 +83,13 @@ def _sidecar_for(binary: Path) -> Path:
 
 
 def _is_automatic_media_candidate(vault_root: Path, binary: Path) -> bool:
-    """Whether a media path may receive automatic recall-derived work."""
-    return not recall_policy.is_structured_only_path(vault_root, _sidecar_for(binary))
+    """Whether a media path may receive automatic recall-derived work.
+
+    A renamed import file that no Source page binds yet is left for the next `apply` to settle.
+    """
+    return not rename_journal.is_held(vault_root, binary) and not recall_policy.is_structured_only_path(
+        vault_root, _sidecar_for(binary)
+    )
 
 
 def _purge_suppressed_clip(clip_index, vault_root: Path, binary: Path) -> None:
@@ -197,7 +203,7 @@ def _iter_unpaged_artifacts(vault_root: Path, root: Path):
             continue
         if candidate.name.lower().endswith(".md"):
             continue
-        if _sidecar_for(candidate).exists():
+        if _sidecar_for(candidate).exists() or rename_journal.is_held(vault_root, candidate):
             continue
         yield candidate
 

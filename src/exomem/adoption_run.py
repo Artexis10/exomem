@@ -42,9 +42,11 @@ from . import (
     context_refs,
     due_state,
     held_fs,
+    import_rename,
     import_stage,
     knowledge_packs,
     note_types,
+    rename_journal,
     request_budget,
     reserved_paths,
     source_taxonomy,
@@ -1614,15 +1616,19 @@ def _source_status(outcome: dict) -> str:
     return outcome.get("source_status") or outcome["status"]
 
 
-def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
+def _read_original(
+    root: Path, planned: dict, ceiling: int, *, by_rename: bool = False
+) -> tuple[str | None, dict | None]:
     """The original's text (None for an artifact), or a failed outcome when it drifted.
 
     An artifact is only sized here: the batch hashes its bytes once, as it copies them, and refuses
-    them when they differ from the plan (`_commit_chunk` then finds which item drifted).
+    them when they differ from the plan (`_commit_chunk` then finds which item drifted). A member
+    that files by rename is not bound by the ceiling here; `import_rename` applies it to the hash of a
+    file whose identity no longer matches, and the size check below still catches a grown file.
     """
     read = adoption_plan.read_facts(
-        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text",
-        hash_artifact=False,
+        root, planned["original_path"], text_hint=planned["form"] == "text", hash_artifact=False,
+        ceiling=max(ceiling, planned["original_bytes"]) if by_rename else ceiling,
     )
     if isinstance(read, dict):
         code = "SOURCE_CHANGED" if read["code"] == adoption_plan.OVER_CEILING else read["code"]
@@ -1898,12 +1904,15 @@ def _commit_chunk(
     root: Path, store: AdoptionRunStore, run: dict,
     survivors: list[tuple[dict, adopt_module.ImportItem]], *,
     run_date: dt.date, label: str | None, reads: _CallReads,
+    placed: Mapping[str, import_rename.Placed],
 ) -> list[dict]:
     """Commit one chunk's pages, artifacts, indexes, log and the run object in one batch.
 
     Returns the items now on disk. A batch that raises may still have committed, so
     each item is resolved by the same identity check the next call would use; the
-    rest fail as retryable, and the call's closing save records them.
+    rest fail as retryable, and the call's closing save records them. `placed` holds the items
+    whose binary is already at its Knowledge Base path. When the batch fails, a binary that this
+    call renamed goes back to its stage; one that an earlier call renamed stays where it is.
     """
     outcomes = run["outcomes"]
     for planned, _item in survivors:
@@ -1936,7 +1945,8 @@ def _commit_chunk(
             # plan. Only now are the artifacts re-hashed, to fail the one that drifted and commit the rest.
             drifted = [
                 planned for planned, _item in unlanded
-                if planned["form"] == "artifact" and not _original_unchanged(root, planned)
+                if planned["form"] == "artifact" and planned["original_path"] not in placed
+                and not _original_unchanged(root, planned)
             ]
             if drifted and len(drifted) < len(unlanded):
                 for planned in drifted:
@@ -1945,7 +1955,7 @@ def _commit_chunk(
                     )
                 rest = [(planned, item) for planned, item in unlanded if planned not in drifted]
                 return landed + _commit_chunk(
-                    root, store, run, rest, run_date=run_date, label=label, reads=reads
+                    root, store, run, rest, run_date=run_date, label=label, reads=reads, placed=placed
                 )
         if isinstance(error, adopt_module.AdoptError):
             failure = {"code": error.code, "reason": error.reason}
@@ -1956,7 +1966,13 @@ def _commit_chunk(
         else:
             failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
         for planned, _item in unlanded:
-            outcomes[planned["original_path"]] = _failed(**failure)
+            path = planned["original_path"]
+            outcomes[path] = _failed(**failure)
+            moved = placed.get(path)
+            if moved is not None and not moved.replayed:
+                stuck = import_rename.put_back(root, moved)
+                if stuck is not None:
+                    outcomes[path] = _failed(stuck.code, stuck.reason)
         return landed
     reads.source_counts = committed["source_counts"]
     return [planned for planned, _item in survivors]
@@ -1974,9 +1990,14 @@ def _apply_chunk(
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
+    # A run that opted out of consuming keeps every staged copy, so it files by copy only.
+    stage = reads.recorded_stage(root, run) if run.get("consume", True) else None
+    placed: dict[str, import_rename.Placed] = {}
     for planned in chunk:
         path = planned["original_path"]
-        text, failure = _read_original(root, planned, ceiling)
+        by_rename = import_rename.renamable(stage, planned)
+        text, failure = _read_original(root, planned, ceiling, by_rename=by_rename)
+        moved = None
         if failure is not None and failure["code"] == "NOT_FOUND":
             # Not a failure when adoption already filed it and removed the staged copy.
             earlier = _filed_and_gone(root, run, reads, planned)
@@ -1987,9 +2008,18 @@ def _apply_chunk(
                 if run.get("consume", True):
                     outcomes[path]["consumed"] = True
                     stats["consumed"] += 1
+                    _queue_offload(root, planned)
                 else:  # a run that opted out claims no removal, and counts its missing copy as changed
                     _record_unchanged(root, planned, outcomes[path], stats)
                 continue
+            if by_rename:
+                # An earlier call may have renamed the file and stopped before its Source page committed.
+                replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
+                if isinstance(replay, import_rename.Refused):
+                    outcomes[path] = _failed(replay.code, replay.reason)
+                    continue
+                if replay is not None:
+                    moved, failure = replay, None
         if failure is not None:
             outcomes[path] = failure
             continue
@@ -2023,6 +2053,7 @@ def _apply_chunk(
         occupied = [
             target for target in (planned["target_path"], planned.get("artifact_path"))
             if target and os.path.lexists(root / target)
+            and not (moved is not None and target == planned["artifact_path"])
         ]
         if occupied:
             outcomes[path] = _failed(
@@ -2030,16 +2061,22 @@ def _apply_chunk(
                 f"{occupied[0]} already exists and is not an import of this file",
             )
             continue
-        survivors.append(
-            (planned, adopt_module.import_item(
-                root, planned, text=text, date_iso=plan["date"], collection=label
-            ))
-        )
+        item = adopt_module.import_item(root, planned, text=text, date_iso=plan["date"], collection=label)
+        if moved is not None:
+            item.artifact.placed = True
+            placed[path] = moved
+        survivors.append((planned, item))
+    if survivors and stage is not None:
+        survivors = _file_by_rename(root, stage, survivors, ceiling=ceiling, outcomes=outcomes, placed=placed)
     landed: list[dict] = []
     if survivors:
         landed = _commit_chunk(
-            root, store, run, survivors, run_date=run_date, label=label, reads=reads
+            root, store, run, survivors, run_date=run_date, label=label, reads=reads, placed=placed
         )
+        for planned in landed:
+            if planned["original_path"] in placed:
+                # The Source page binds the file now, so the scans may see it.
+                rename_journal.release(root, planned["artifact_path"])
         for planned in landed:
             if _source_status(outcomes[planned["original_path"]]) == "applied":
                 reads.pages.append(planned["target_path"])
@@ -2075,6 +2112,46 @@ def _apply_chunk(
         label=label, notes=reads.notes, pacer=pacer, stats=stats, written=written,
     )
     return extractions
+
+
+def _file_by_rename(
+    root: Path, stage: import_stage.Stage, survivors: list[tuple[dict, adopt_module.ImportItem]], *,
+    ceiling: int, outcomes: dict, placed: dict[str, import_rename.Placed],
+) -> list[tuple[dict, adopt_module.ImportItem]]:
+    """Rename each renamable survivor's staged file into its Knowledge Base path, before the batch.
+
+    A member that the primitive refuses fails here and leaves the batch; a member it cannot rename
+    stays a survivor and files by copy. Each renamed member is added to `placed`.
+    """
+    candidates = [
+        planned for planned, _item in survivors
+        if planned["original_path"] not in placed and import_rename.renamable(stage, planned)
+    ]
+    verdicts = import_rename.place_all(root, stage, candidates, ceiling=ceiling) if candidates else {}
+    kept = []
+    for planned, item in survivors:
+        path = planned["original_path"]
+        verdict = verdicts.get(path)
+        if isinstance(verdict, import_rename.Refused):
+            outcomes[path] = _failed(verdict.code, verdict.reason)
+            continue
+        if isinstance(verdict, import_rename.Placed):
+            item.artifact.placed = True
+            placed[path] = verdict
+        kept.append((planned, item))
+    return kept
+
+
+def _queue_offload(root: Path, planned: dict) -> None:
+    """Queue the offload job of a filed artifact; the store's classification rule decides whether it is offloadable."""
+    from . import media_store
+
+    if not planned.get("artifact_path"):
+        return
+    try:
+        media_store.enqueue_offload(root, root / planned["artifact_path"])
+    except Exception:  # noqa: BLE001 - the Source is committed, and the periodic offload scan queues a missed job
+        pass
 
 
 def _create_notes(
@@ -2323,6 +2400,8 @@ def _settle_staged(
     if not os.path.lexists(root / planned["original_path"]):
         # A run that opted out claims no removal; its missing copy is recorded as changed below.
         consumed = run.get("consume", True) and _filed_and_gone(root, run, reads, planned) is not None
+        if consumed:
+            _queue_offload(root, planned)
     else:
         consumed = (
             stage is not None and run.get("consume", True) and planned["form"] == "artifact"

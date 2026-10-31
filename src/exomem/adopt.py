@@ -718,6 +718,8 @@ class ImportArtifact:
     target: Path  # absolute destination beside the page
     digest: str
     size: int
+    #: Already renamed to `target` by `import_rename`; the batch then commits the page and never lists the binary.
+    placed: bool = False
 
 
 @dataclass
@@ -888,12 +890,14 @@ def commit_import_items(
     held_sources: list[reserved_paths.GenericBinarySource] = []
     with ExitStack() as originals:
         for item in items:
-            source = originals.enter_context(
-                reserved_paths.open_generic_binary(root, item.original_path, physical=True)
-            )
-            held_sources.append(source)
-            if source.version.size != item.bytes:
-                raise AdoptError("SOURCE_CHANGED", "the original changed before import")
+            placed = item.artifact is not None and item.artifact.placed
+            if not placed:
+                source = originals.enter_context(
+                    reserved_paths.open_generic_binary(root, item.original_path, physical=True)
+                )
+                held_sources.append(source)
+                if source.version.size != item.bytes:
+                    raise AdoptError("SOURCE_CHANGED", "the original changed before import")
             if item.artifact is None:
                 try:
                     digest, size = artifact_identity(source.stream, ceiling=item.bytes)
@@ -907,7 +911,7 @@ def commit_import_items(
                     create_only=True, expected_hash=MISSING_CONTENT_HASH,
                 )
             )
-            if item.artifact is not None:
+            if item.artifact is not None and not placed:
                 binary, _stream = artifact_binary_write(
                     source.stream, item.artifact.target,
                     item.artifact.digest, item.artifact.size,

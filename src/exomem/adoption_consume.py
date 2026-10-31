@@ -26,12 +26,22 @@ def recorded(root: Path, run: dict) -> import_stage.Stage | None:
     return import_stage.read(root, recorded_stage.get("stage", ""))
 
 
+def _member_path(stage: import_stage.Stage, original_path: str) -> str | None:
+    """A staged file's path relative to its stage, or None when the file is not in this stage."""
+    prefix = f"{import_stage.STAGE_DIR}/{stage.import_id}/"
+    return original_path[len(prefix):] if original_path.startswith(prefix) else None
+
+
 def entry_of(stage: import_stage.Stage, original_path: str) -> tuple[int, str] | None:
     """The manifest's (size, SHA-256) for a staged file given by its vault-relative path, or None if unlisted."""
-    prefix = f"{import_stage.STAGE_DIR}/{stage.import_id}/"
-    if not original_path.startswith(prefix):
-        return None
-    return stage.members.get(original_path[len(prefix):])
+    member_path = _member_path(stage, original_path)
+    return None if member_path is None else stage.members.get(member_path)
+
+
+def identity_of(stage: import_stage.Stage, original_path: str) -> import_stage.Identity | None:
+    """The manifest's identity for a staged file, or None when it is unlisted or has none."""
+    member_path = _member_path(stage, original_path)
+    return None if member_path is None else stage.identities.get(member_path)
 
 
 def _sha256_of(file: held_fs.HeldFile) -> str:
@@ -40,7 +50,7 @@ def _sha256_of(file: held_fs.HeldFile) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def _matches(file: held_fs.HeldFile, size: int, sha256: str) -> bool:
+def matches(file: held_fs.HeldFile, size: int, sha256: str) -> bool:
     """Whether the held file has these bytes, and was not written while it was read."""
     version = file.version()
     return version.size == size and _sha256_of(file) == sha256 and file.version() == version
@@ -55,7 +65,7 @@ def durable_matches(root: Path, artifact_path: str | None, planned: dict) -> boo
         with held_fs.acquire(root).require() as filesystem:
             with filesystem.parent(parent or ".").require() as directory:
                 with filesystem.file(directory, leaf).require() as durable:
-                    return _matches(durable, planned["original_bytes"], planned["original_sha256"])
+                    return matches(durable, planned["original_bytes"], planned["original_sha256"])
     except (held_fs.HeldFsError, OSError):
         return False
 
@@ -74,7 +84,7 @@ def remove_staged(root: Path, stage: import_stage.Stage, planned: dict) -> bool:
         with held_fs.acquire(root).require() as filesystem:
             with filesystem.parent(parent, access="mutate").require() as directory:
                 with filesystem.file(directory, leaf, access="mutate").require() as staged:
-                    if not _matches(staged, *entry):
+                    if not matches(staged, *entry):
                         return False
                     filesystem.unlink(staged).require()
     except (held_fs.HeldFsError, OSError):
@@ -94,9 +104,10 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     def classify(path: str) -> str | None:
         item = items.get(path)
         if item is not None:
-            status = (outcomes.get(path) or {}).get("status")
+            outcome = outcomes.get(path) or {}
+            status = outcome.get("status")
             if status == "failed":
-                return "failed"
+                return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
                 return "text" if item["form"] == "text" else "kept"
             return "pending"

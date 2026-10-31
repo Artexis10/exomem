@@ -11,8 +11,16 @@ import uuid
 from pathlib import Path
 
 import pytest
+import test_adoption_consume as consume
 
-from exomem import adoption_run, client_artifacts, cloud_import_job, state_migration, state_paths
+from exomem import (
+    _held_fs_posix,
+    adoption_run,
+    client_artifacts,
+    cloud_import_job,
+    state_migration,
+    state_paths,
+)
 
 TODAY = dt.date(2026, 10, 27)
 MIB = 1024 * 1024
@@ -215,6 +223,10 @@ def test_a_continuation_that_stopped_before_removing_a_chunk_s_staged_copies_rem
     usage = collections.namedtuple("usage", "total used free")
     monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage(capacity[0] * 2, 0, free_bytes()))
     stage = _stage(vault, {f"scans/{n}.bin": bytes([65 + n]) * size for n in range(2)})
+    # A rename leaves no staged copy to remove, so these files sit on another device and file by copy.
+    monkeypatch.setattr(
+        _held_fs_posix, "_rename_noreplace",
+        consume._rename_across_devices(_held_fs_posix._rename_noreplace, "0.bin", "1.bin"))
     run = adoption_run.start(vault, path=stage, today=TODAY)
     plan_id = _plan(vault, run, stage)
     stopped = adoption_run.apply(vault, run_id=run["run_id"], plan_id=plan_id, today=TODAY)
