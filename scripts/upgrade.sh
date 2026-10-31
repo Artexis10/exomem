@@ -142,9 +142,11 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; r=json.load(sys.stdin).get("release_retention"); print("Release retention: removed {} freed_bytes {}{} failures {} skipped {}".format(len(r["removed"]), "at_least " if r.get("bytes_freed_is_lower_bound") else "", r["bytes_freed"], len(r["failures"]), r["skipped"] or "no")) if r else print("Release retention: this operator predates release retention")' || true
     # The diarizer sidecar venv is keyed by the active release's sidecar lock; building it is a
     # no-op when the lock is unchanged. The switch already succeeded, so a failure here is reported.
-    ACTIVE_PYTHON="$(printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["active"]["python"])')"
-    EXOMEM_DIARIZE="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_DIARIZE "$VENV_PYTHON")" \
-        "$ACTIVE_PYTHON" -m exomem.diarizer_sidecar --if-enabled \
+    # The build runs with the unit's EXOMEM_STATE_ROOT, so it lands where the service looks.
+    { ACTIVE_PYTHON="$(printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["active"]["python"])')" \
+        && EXOMEM_DIARIZE="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_DIARIZE "$VENV_PYTHON")" \
+            EXOMEM_STATE_ROOT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_STATE_ROOT "$VENV_PYTHON")" \
+            "$ACTIVE_PYTHON" -m exomem.diarizer_sidecar --if-enabled; } \
         || echo "Diarizer sidecar: build failed for $SERVED; transcripts carry no speakers until it is rebuilt" >&2
     echo "Managed serving version: $SERVED"
     exit 0

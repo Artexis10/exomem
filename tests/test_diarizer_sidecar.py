@@ -224,8 +224,6 @@ def test_built_sidecar_is_the_one_the_service_finds(monkeypatch, tmp_path) -> No
     """Defect: the venv was built where the installed service never looked (sidecar_venv=False)."""
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path))
     monkeypatch.delenv("EXOMEM_DIARIZE_SIDECAR_PYTHON", raising=False)
-    stale = tmp_path / "sidecars" / "diarizer" / "an-older-lock"
-    stale.mkdir(parents=True)
     monkeypatch.setattr(diarizer_sidecar.shutil, "which", lambda name: "/usr/bin/uv")
 
     def _run(cmd, env=None, check=False):
@@ -240,4 +238,3 @@ def test_built_sidecar_is_the_one_the_service_finds(monkeypatch, tmp_path) -> No
     built = diarizer_sidecar.build()
     assert extract._diarizer_sidecar_python() == built
     assert extract._diarizer_worker_script().is_file()
-    assert not stale.exists()

@@ -66,9 +66,11 @@ transcript. Never raises.
   lives at `src/exomem/_sidecars/diarizer/` and ships in the wheel. Its venv lives under the
   machine-local state root at `sidecars/diarizer/<lock hash>`, so a release switch neither drops it
   nor shares a stale one: the same lock reuses the venv, a new lock looks for a new one.
-  `python -m exomem.diarizer_sidecar` builds it and removes venvs for other locks; the managed
-  `scripts/upgrade.sh` runs it with the newly active release after each switch while
-  `EXOMEM_DIARIZE` is on, and reports a failure without undoing the switch.
+  `python -m exomem.diarizer_sidecar` builds it. Venvs for other locks stay, because a retained
+  release may roll back to one and another checkout or service may share the state root. The
+  managed `scripts/upgrade.sh` runs the build with the newly active release and the unit's
+  `EXOMEM_STATE_ROOT` after each switch while `EXOMEM_DIARIZE` is on, and reports a failure
+  without undoing the switch.
 - **Remove pyannote from the main venv.** Leaving it reachable in cu132 is an active hazard: a
   future `uv sync --extra diarization` re-pulls `torchcodec`, which breaks the embedding stack on
   the next restart. The main `diarization` extra is now `speechbrain`-only.

@@ -74,10 +74,10 @@ Q runs the same diarization on the same Blackwell 5080 GPU, which proved CPU was
 - [x] 6.1 Move the sidecar project to `src/exomem/_sidecars/diarizer/` so the wheel ships `worker.py`,
       `pyproject.toml` and `uv.lock`.
 - [x] 6.2 Add `exomem.diarizer_sidecar`: the lock-keyed venv under the state root, the lookup the
-      service uses, and a build command (`--prewarm`, `--if-enabled`) that removes venvs for other
-      locks. The setup scripts call it.
-- [x] 6.3 `scripts/upgrade.sh` builds the sidecar for the active release after a managed switch while
-      `EXOMEM_DIARIZE` is on; a failure is reported, not fatal.
+      service uses, and a build command (`--prewarm`, `--if-enabled`). The setup scripts call it.
+- [x] 6.3 `scripts/upgrade.sh` builds the sidecar for the active release, with the unit's
+      `EXOMEM_STATE_ROOT`, after a managed switch while `EXOMEM_DIARIZE` is on; a failure is
+      reported, not fatal.
 - [ ] 6.4 Live: the personal service reports `sidecar_venv=True` on the release carrying 6.1-6.3 and
       diarizes one real recording with speaker labels.
 

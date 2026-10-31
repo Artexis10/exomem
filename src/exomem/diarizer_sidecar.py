@@ -5,7 +5,8 @@ wheel install has its `worker.py` and lock. Its venv lives under the machine-loc
 outside every release venv, so a managed release switch neither drops nor rebuilds it. The
 directory is keyed by the lock's hash: a release that changes the sidecar's dependencies looks
 for a new venv, and `python -m exomem.diarizer_sidecar` builds it; one that keeps the lock
-reuses the venv already built.
+reuses the venv already built. Venvs for other locks stay: a retained release may roll back to
+one, and another checkout or service may share the state root.
 
 The service only locates the venv; it never builds one at runtime.
 """
@@ -64,7 +65,7 @@ def worker_script() -> Path:
 
 
 def build(*, prewarm: bool = False) -> Path:
-    """Build (or refresh) the venv for this lock, smoke-test it, and drop venvs for other locks."""
+    """Build (or refresh) the venv for this lock and smoke-test it."""
     uv = shutil.which("uv")
     if uv is None:
         raise SystemExit("uv not found on PATH; install uv first: https://docs.astral.sh/uv/")
@@ -79,15 +80,12 @@ def build(*, prewarm: bool = False) -> Path:
             subprocess.run([str(interpreter), "-c", _PREWARM], check=True)
         else:
             print("HUGGINGFACE_TOKEN/HF_TOKEN not set; skipping prewarm.", file=sys.stderr)
-    for other in target.parent.iterdir():
-        if other != target and other.is_dir():
-            shutil.rmtree(other)
     return interpreter
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the speaker-diarization sidecar venv.")
-    parser.add_argument("--prewarm", action="store_true", help="download the pyannote weights now")
+    parser.add_argument("--prewarm", "-p", action="store_true", help="download the pyannote weights now")
     parser.add_argument("--if-enabled", action="store_true", help="do nothing unless EXOMEM_DIARIZE is on")
     args = parser.parse_args(argv)
     if args.if_enabled:
