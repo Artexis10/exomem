@@ -1291,7 +1291,12 @@ def run(
     standby: bool = False,
 ) -> None:
     """CLI entry: configure logging, build the server, run it."""
-    from . import service_standby
+    from . import cuda_containment, service_standby
+
+    # First, before any model can initialize CUDA: a CUDA library can crash the process that loads it, and
+    # this process serves requests. The service manager hides the devices of the workers it starts; this
+    # covers a foreground or stdio serve too. The media child gets the deployment's list back.
+    cuda_containment.hide_in_process()
     from .collection_store import connection
 
     # Serving threads import store modules lazily; load their libraries before any thread starts.
