@@ -10713,8 +10713,9 @@ def op_adoption_studio(
             from . import due_state as due_state_module
 
             # One apply call commits a bounded share of the plan, so it is a batch by
-            # definition: one counters block at its terminal, not one per page.
-            with due_state_module.batch_scope(vault_root):
+            # definition: one counters block at its terminal, not one per page. Its walks
+            # resolve the vault path for every page they read, so the call keeps that answer.
+            with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
                 applied = adoption_run_module.apply(
                     vault_root,
                     run_id=run_id,

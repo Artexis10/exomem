@@ -28,6 +28,7 @@ from drive import REPO_ROOT, init_vault, kb_pages, place_collection  # noqa: E40
 from mcp_session import isolated_env  # noqa: E402
 
 IMPORTED = "Knowledge Base/Sources/Imported"
+NOTES = "Knowledge Base/Notes/Insights"
 CLASSIFIED = "Knowledge Base/Sources/Book/Media"
 MISSING_NOTE, REFUSED_ATT, ABSENT_ATT = (17, 5), (4, 1), (5, 3)  # (modulus, remainder) by item index
 DROPPED_LINK, DROPPED_EMBED, STRIPPED_NOTE, FILE_EMBED_ATT = 6, 5, (13, 2), 7
@@ -181,6 +182,10 @@ def run(args: argparse.Namespace) -> int:
     for rel in duplicated:
         front, body = score.split_front_matter((vault / rel).read_text(encoding="utf-8"))
         write_page(vault, rel[:-3] + "-2.md", front or {}, body.strip())
+    # And one draft note made twice from an own note: it names no `imported_from`.
+    write_page(vault, f"{NOTES}/planted-rerun-note.md",
+               {"type": "insight", "status": "draft", "import_collection": COLLECTION,
+                "collection_path": built["notes"][0]["path"]}, "A planted re-run duplicate.")
     refusals = [{"stage": "select.rejected", "path": f"{COLLECTION}/{p}", "code": "PLANTED_REFUSAL",
                  "reason": "planted"} for p in built["refused"]]
     log = {
@@ -201,14 +206,15 @@ def run(args: argparse.Namespace) -> int:
     ns = argparse.Namespace(key=args.key, drive_log=log_path, out=args.out, python=args.python,
                             timeout=900.0, warm_deadline=600.0, settle_s=15.0)
     metrics = asyncio.run(score.score(ns))
-    return compare(metrics, built, key, len(duplicated))
+    return compare(metrics, built, key, len(duplicated), 1)
 
 
 def pairs(metric: dict[str, int]) -> tuple[int, int]:
     return metric["numerator"], metric["denominator"]
 
 
-def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: int) -> int:
+def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: int,
+            dup_notes: int) -> int:
     e = built["expect"]
     notes, atts = built["notes"], [i for i in key["items"] if i["kind"] == "attachment"]
     checks = [
@@ -227,6 +233,7 @@ def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: 
          (e["props_kept"], e["props"])),
         ("classified homes", m["homes"]["classified_homes"]["numerator"], e["classified"]),
         ("re-run duplicate pages", m["rerun_duplicates"]["new_source_pages_from_rerun"], dup),
+        ("re-run duplicate notes", m["rerun_duplicates"]["new_note_pages_from_rerun"], dup_notes),
         ("media states", m["media"]["states"], dict(sorted(built["states"].items()))),
         ("media phrases (counterpart in top 5)",
          tuple(sum(m["recall_at_5"]["media_phrases"]["counterpart_in_top5"][k][f] for k in

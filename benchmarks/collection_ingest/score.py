@@ -443,11 +443,16 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     # ---- re-run duplicates ---------------------------------------------------
-    rerun_new = [p for p in log["snapshot_after_rerun"] if p not in first_pages
-                 and scan["pages"].get(p, {"front": {}})["front"].get("imported_from")]
+    # A Source names its original in `imported_from`; a draft note made from an own note
+    # does not, and names its place in the collection in `collection_path` instead.
+    rerun_front = [scan["pages"].get(p, {"front": {}})["front"]
+                   for p in log["snapshot_after_rerun"] if p not in first_pages]
+    rerun_sources = [f for f in rerun_front if f.get("imported_from")]
+    rerun_notes = [f for f in rerun_front if f.get("collection_path") and not f.get("imported_from")]
     multiple = [i["path"] for i in notes + atts if len(pages_of[i["path"]]) > 1]
     duplicates = {
-        "new_source_pages_from_rerun": len(rerun_new),
+        "new_source_pages_from_rerun": len(rerun_sources),
+        "new_note_pages_from_rerun": len(rerun_notes),
         "items_with_more_than_one_page": frac(len(multiple), len(landed)),
         "collection_label": log.get("collection_label"),
     }
@@ -542,6 +547,7 @@ def headline(m: dict[str, Any]) -> dict[str, Any]:
         "tags_carried": pair(m["fidelity"]["tags_carried"]),
         "classified_homes": pair(m["homes"]["classified_homes"]),
         "rerun_new_source_pages": m["rerun_duplicates"]["new_source_pages_from_rerun"],
+        "rerun_new_note_pages": m["rerun_duplicates"]["new_note_pages_from_rerun"],
         "media_states": m["media"]["states"],
         "recall_note_counterpart": {k: pair(v) for k, v in
                                     m["recall_at_5"]["note_probes"]["counterpart_in_top5"].items()},
