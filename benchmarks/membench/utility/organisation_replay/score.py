@@ -5,13 +5,13 @@ of the situations those runs name, and nothing else. It makes no model call.
 A residual answer goes to a blind judge as a five-field item; the scorer
 never judges one, and a judge never overturns a deterministic result.
 
-The key files carry no published schema. The scorer reads these fields only:
-``id``, ``case_sha256``, ``category``, ``variant``, ``endpoints``,
-``referent.match_tokens``, ``state_success`` (``rule``, ``pair``, ``folder``,
-``folders``, ``required_edge``), ``supported_edges``, ``false_precision``
-(``pairs``, ``wrong_core_types``, ``wrong_homes``, ``twin_promoted``),
-``promoted_entry.key`` and ``answer`` (``question``, ``key_fact``,
-``accepted_values``). It refuses a rule it does not implement.
+The key files carry no published schema. ``KEY_SCHEMA`` below is the closed
+set of fields the scorer knows, and it refuses a key with any other field, or a
+rule it does not implement, rather than ignore what it cannot read.
+
+The run reaches a decision only when every situation it declares has both arms
+finished, no more than two are struck and every residual item has a verdict.
+Otherwise the report says which of those states it is in, and gives no table.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
+import secrets
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -26,8 +28,13 @@ from pathlib import Path
 
 import yaml
 
-from .runfile import _result_text
-from .situation import manifest_digests
+from .runfile import _result_text, check_run
+from .situation import (
+    HELD_OUT_PREFIX,
+    SituationRefused,
+    _refuse_held_out_without_custody,
+    manifest_digests,
+)
 
 #: The reference relations of the protocol's end-state reading: a closed set that
 #: the core relation pack fixes, so a code constant is the protocol's own list.
@@ -38,6 +45,60 @@ REFERENT_REF = "R"
 Z = 1.959963984540054
 #: More struck situations than this void the run (section 7, Faults).
 STRIKE_LIMIT = 2
+#: The Unicode ``Dash=Yes`` property (PropList.txt), a closed set the standard
+#: fixes; ``unicodedata`` has no property lookup, and a test pins it to ``\p{Dash}``.
+DASHES = frozenset(
+    map(
+        chr,
+        [
+            *(0x2D, 0x58A, 0x5BE, 0x1400, 0x1806, *range(0x2010, 0x2016), 0x2053, 0x207B),
+            *(0x208B, 0x2212, 0x2E17, 0x2E1A, 0x2E3A, 0x2E3B, 0x2E40, 0x2E5D, 0x301C),
+            *(0x3030, 0x30A0, 0xFE31, 0xFE32, 0xFE58, 0xFE63, 0xFF0D, 0x10D6E, 0x10EAD),
+        ],
+    )
+)
+#: protocol.yaml's diagnostics bootstrap: resamples and seed.
+BOOTSTRAP_RESAMPLES = 10_000
+BOOTSTRAP_SEED = 20261030
+#: The key file's closed schema: each mapping names its known fields, ``...`` marks
+#: a leaf, and a one-item list marks a list of that shape. ``endpoints`` maps open
+#: local references (``A``, ``B``, ``R``) to names, so its own keys are not checked.
+_EDGE = {"relation": ..., "from": ..., "to": ...}
+_ANSWER = {"question": ..., "key_fact": ..., "accepted_values": [...]}
+KEY_SCHEMA = {
+    "id": ...,
+    "case_file": ...,
+    "case_sha256": ...,
+    "category": ...,
+    "variant": ...,
+    "client_shape": ...,
+    "endpoints": ...,
+    "source_truth": [...],
+    "referent": {"match_tokens": [...], "wrong_core_types": [...], "durability": ...},
+    "promoted_entry": {"registry": ..., "key": ...},
+    "state_success": {
+        "rule": ...,
+        "note": ...,
+        "pair": [...],
+        "folder": ...,
+        "folders": [...],
+        "required_edge": _EDGE,
+    },
+    "supported_edges": [_EDGE],
+    "false_precision": {
+        "pairs": [{"between": [...], "supported_edges": [_EDGE]}],
+        "wrong_core_types": [...],
+        "wrong_homes": [...],
+        "twin_promoted": [...],
+        "lure_families_named_for_diagnosis": [...],
+    },
+    "diagnostic_anchor_edge": [_EDGE],
+    "matched_shape": ...,
+    "answer": _ANSWER,
+    "judge_reference_view": _ANSWER,
+}
+#: The fields a key must carry for every rule.
+KEY_REQUIRED = ("id", "case_sha256", "category", "variant", "client_shape", "state_success")
 
 
 class ScoreRefused(RuntimeError):
@@ -53,8 +114,7 @@ def normalize(text: str) -> str:
     """NFKC, casefold, every dash character read as ``-``, whitespace collapsed, trimmed."""
 
     folded = unicodedata.normalize("NFKC", text or "").casefold()
-    # A dash character is Unicode general category Pd, the standard's dash class.
-    dashed = "".join("-" if unicodedata.category(ch) == "Pd" else ch for ch in folded)
+    dashed = "".join("-" if ch in DASHES else ch for ch in folded)
     return " ".join(dashed.split())
 
 
@@ -101,10 +161,7 @@ class EndState:
     def read(cls, end_state: Mapping) -> EndState:
         from exomem import kbdir
         from exomem.note_types import NOTES_FOLDER
-        from membench.utility.switch_eval.state import require_default_kb_dirname
 
-        # The servers run with the default KB folder name; so must the scorer's reading.
-        require_default_kb_dirname()
         relations = end_state.get("relations") or {}
         aliases = {
             alias: key for key, entry in relations.items() for alias in entry.get("aliases") or []
@@ -283,6 +340,18 @@ class Situation:
             named |= self.resolve(ref)
         return named
 
+    def anchor_edge_supported(self) -> bool | None:
+        """Whether an edge states one of the key's diagnostic anchor entries; ``None`` without one."""
+
+        entries = self.key.get("diagnostic_anchor_edge") or []
+        if not entries:
+            return None
+        return any(
+            self.matches(edge, entry)
+            for entry in entries
+            for edge in self.between(entry["from"], entry["to"])
+        )
+
     def uncounted_typed_claims(self) -> int:
         named = self.named_paths()
         edges = sum(
@@ -300,8 +369,8 @@ class Situation:
         return edges + pages
 
 
-# Each rule returns ``(state outcome, omission codes)``. The rule names and the
-# omission codes are the closed tokens of protocol.yaml's category table.
+# Each rule returns ``(state outcome, omission codes)``. The rule names are the key
+# schema's closed ``state_success.rule`` tokens; the omission codes are protocol.yaml's.
 
 
 def _pair_omission(s: Situation, edges: list[dict], *, reference_code: bool) -> list[str]:
@@ -371,6 +440,9 @@ def _pair_edge_promoted(s: Situation) -> tuple[bool, list[str]]:
     held = any(s.matches(edge, required, lineage_key=promoted) for edge in edges)
     if held:
         return True, []
+    if any(promoted in s.state.relation_lineage(edge["relation"]) for edge in edges):
+        # The promoted entry is used, the other way round: no listed code says that.
+        return False, []
     return False, _pair_omission(s, edges, reference_code=False) or ["promoted_entry_not_used"]
 
 
@@ -457,6 +529,11 @@ def score_arm(key: Mapping, run: Mapping, run_dir: Path) -> dict:
                 if c.get("refusal_code")
             ),
             "uncounted_typed_claims": situation.uncounted_typed_claims(),
+            "anchor_edge_supported": situation.anchor_edge_supported(),
+            "registry_added": [
+                {"registry": row.get("registry"), "key": row.get("key")}
+                for row in run["end_state"].get("registry_history") or []
+            ],
             "edge_review_reasons": reasons,
             "fresh_calls_by_tool": _count(c.get("tool") for c in fresh.get("calls") or []),
         },
@@ -509,21 +586,93 @@ def _table(rows: Sequence[Mapping], measure: str) -> dict:
     return {**cells, **newcombe_paired(cells["a"], cells["b"], cells["c"], cells["d"])}
 
 
-def statistics(rows: Sequence[Mapping]) -> dict:
-    success = _table(rows, "success")
+def tables(rows: Sequence[Mapping]) -> dict:
+    """The success and false-precision tables, each with its Newcombe interval."""
+
     false_precision = _table(rows, "false_precision")
-    # Situations with false precision in the candidate minus those in the baseline.
-    fp_excess = false_precision["b"] - false_precision["c"]
-    gain = success["lower"] is not None and success["lower"] > 0
     return {
-        "success": success,
+        "success": _table(rows, "success"),
         "false_precision": false_precision,
-        "false_precision_excess": fp_excess,
+        # Situations with false precision in the candidate minus those in the baseline.
+        "false_precision_excess": false_precision["b"] - false_precision["c"],
+    }
+
+
+def statistics(rows: Sequence[Mapping]) -> dict:
+    """The primary tables and protocol.yaml's decision rule over them."""
+
+    primary = tables(rows)
+    lower = primary["success"]["lower"]
+    gain = lower is not None and lower > 0
+    guard = primary["false_precision_excess"] <= 1
+    return {
+        **primary,
         "decision_rule": {
             "gain_established": gain,
-            "false_precision_guard": fp_excess <= 1,
-            "merge": gain and fp_excess <= 1,
+            "false_precision_guard": guard,
+            "merge": gain and guard,
         },
+    }
+
+
+def bootstrap_difference(differences: Sequence[float]) -> dict:
+    """The mean paired difference with protocol.yaml's 95% percentile bootstrap over situations."""
+
+    n = len(differences)
+    if n == 0:
+        return {"n": 0, "difference": None, "lower": None, "upper": None}
+    rng = random.Random(BOOTSTRAP_SEED)
+    means = sorted(
+        sum(rng.choice(differences) for _ in range(n)) / n for _ in range(BOOTSTRAP_RESAMPLES)
+    )
+    return {
+        "n": n,
+        "difference": sum(differences) / n,
+        # Nearest-rank percentiles of the sorted resample means.
+        "lower": means[int(0.025 * BOOTSTRAP_RESAMPLES)],
+        "upper": means[int(0.975 * BOOTSTRAP_RESAMPLES) - 1],
+    }
+
+
+#: Diagnostics the scorer does not compute; reported as unavailable, never as zero.
+DIAGNOSTICS_UNAVAILABLE = (
+    "abandoned_writes",
+    "resent_bytes",
+    "duplicated_reasons: the readback records reason flags, not reason text",
+    "twin_referent_notice",
+    "promoted_key_served_before_first_write",
+    "fresh_map_profile_page_pulls: reported as calls by tool name only",
+)
+
+
+def diagnostics(rows: Sequence[Mapping]) -> dict:
+    """Per-arm counts and paired differences (candidate minus baseline), report only."""
+
+    def paired(value) -> dict:
+        pairs = [(value(r["baseline"]), value(r["candidate"])) for r in rows]
+        known = [(b, c) for b, c in pairs if b is not None and c is not None]
+        return {
+            "baseline": sum(b for b, _ in known),
+            "candidate": sum(c for _, c in known),
+            "unknown": len(pairs) - len(known),
+            "paired": bootstrap_difference([c - b for b, c in known]),
+        }
+
+    def calls(role: str):
+        return lambda arm: arm["diagnostics"]["calls"].get(role)
+
+    return {
+        # Every code some row carries; a code no row carries has no entry.
+        "omissions": {
+            code: paired(lambda arm, code=code: int(code in arm["omissions"]))
+            for code in sorted(
+                {c for r in rows for arm in ("baseline", "candidate") for c in r[arm]["omissions"]}
+            )
+        },
+        "uncounted_typed_claims": paired(lambda arm: arm["diagnostics"]["uncounted_typed_claims"]),
+        "capture_calls": paired(calls("capture")),
+        "fresh_calls": paired(calls("fresh")),
+        "unavailable": list(DIAGNOSTICS_UNAVAILABLE),
     }
 
 
@@ -535,31 +684,125 @@ def statistics(rows: Sequence[Mapping]) -> dict:
 def key_name(situation_id: str) -> str:
     """SCHEMA.md's naming: ``dNN`` has key ``dkNN`` and ``hNN`` has ``kNN``."""
 
-    prefix = {"d": "dk", "h": "k"}.get(situation_id[:1])
+    prefix = {"d": "dk", HELD_OUT_PREFIX: "k"}.get(situation_id[:1])
     if prefix is None:
         raise ScoreRefused(f"situation id {situation_id!r} is neither dNN nor hNN")
     return f"{prefix}{situation_id[1:]}.yaml"
 
 
+def unknown_fields(value: object, schema: object, where: str = "key") -> list[str]:
+    """Each field of ``value`` that ``schema`` does not name, as a dotted path."""
+
+    if schema is ... or not isinstance(value, (dict, list)):
+        return []
+    if isinstance(schema, list):
+        if not isinstance(value, list):
+            return [f"{where} is not a list"]
+        return [
+            p
+            for i, item in enumerate(value)
+            for p in unknown_fields(item, schema[0], f"{where}[{i}]")
+        ]
+    if not isinstance(value, dict):
+        return [f"{where} is not a mapping"]
+    found = []
+    for name, item in value.items():
+        if name not in schema:
+            found.append(f"{where}.{name}")
+        else:
+            found += unknown_fields(item, schema[name], f"{where}.{name}")
+    return found
+
+
+def held_out(situation_id: str) -> bool:
+    return situation_id.startswith(HELD_OUT_PREFIX)
+
+
 def load_key(keys: Path, situation_id: str, manifest: Path | None) -> dict:
     path = keys / key_name(situation_id)
+    if not path.is_file():
+        raise ScoreRefused(f"{path.name} is missing from {keys}")
     raw = path.read_bytes()
+    if held_out(situation_id):
+        try:
+            _refuse_held_out_without_custody(path.name, manifest)
+        except SituationRefused as refused:
+            raise ScoreRefused(str(refused)) from refused
     if manifest is not None:
         expected = manifest_digests(manifest).get(path.name)
         if expected != hashlib.sha256(raw).hexdigest():
             raise ScoreRefused(f"{path.name} does not match the manifest")
-    elif situation_id.startswith("h"):
-        raise ScoreRefused(f"{path.name} is held out and needs the custody manifest")
     key = yaml.safe_load(raw)
-    if key.get("id") != situation_id:
-        raise ScoreRefused(f"{path.name} names situation {key.get('id')!r}, not {situation_id!r}")
+    if not isinstance(key, dict):
+        raise ScoreRefused(f"{path.name} is not a mapping")
+    unknown = unknown_fields(key, KEY_SCHEMA)
+    missing = [name for name in KEY_REQUIRED if name not in key]
+    if unknown or missing:
+        raise ScoreRefused(f"{path.name}: unknown fields {unknown}, missing fields {missing}")
+    if key["id"] != situation_id:
+        raise ScoreRefused(f"{path.name} names situation {key['id']!r}, not {situation_id!r}")
+    if "judge_reference_view" not in key or "answer" not in key:
+        raise ScoreRefused(f"{path.name} has no answer or judge_reference_view")
     return key
 
 
-def judge_id(situation_id: str, arm: str, answer: str) -> str:
-    """An opaque item id: neither the situation nor the arm can be read from it."""
+def expected_situations(manifest: Path | None, expect: Sequence[str]) -> set[str]:
+    """The situations the run declares: the manifest's held-out cases and any named ones."""
 
-    return hashlib.sha256(f"{situation_id}\0{arm}\0{answer}".encode()).hexdigest()[:16]
+    declared = set(expect)
+    if manifest is not None:
+        declared |= {
+            Path(name).stem
+            for name in manifest_digests(manifest)
+            if name.startswith(HELD_OUT_PREFIX) and name.endswith(".yaml")
+        }
+    if not declared:
+        raise ScoreRefused(
+            "name the run's situations: --expect for development, --manifest held out"
+        )
+    return declared
+
+
+def _read_runs(out: Path, situation_id: str, arms: Sequence[str]) -> dict[str, dict]:
+    runs = {}
+    for arm in arms:
+        path = out / situation_id / arm / "run.json"
+        if not path.is_file():
+            continue
+        run = json.loads(path.read_text(encoding="utf-8"))
+        if (run.get("situation_id"), run.get("arm")) != (situation_id, arm):
+            raise ScoreRefused(f"{path} holds {run.get('situation_id')!r} {run.get('arm')!r}")
+        runs[arm] = run
+    return runs
+
+
+def _check_pair(situation_id: str, key: Mapping, runs: Mapping[str, Mapping], out: Path) -> None:
+    for arm, run in runs.items():
+        problems = check_run(run, out / situation_id / arm)
+        if problems:
+            raise ScoreRefused(
+                f"{situation_id} {arm}: the run file departs from SCHEMA.md: {problems}"
+            )
+        if run["situation_sha256"] != key["case_sha256"]:
+            raise ScoreRefused(f"{situation_id} {arm}: the run's case file is not the key's")
+        if run["client_shape"] != key["client_shape"]:
+            raise ScoreRefused(
+                f"{situation_id} {arm}: client shape {run['client_shape']!r} is not the key's"
+            )
+
+
+def _verdicts(judgements: Mapping | None) -> dict[str, bool]:
+    if judgements is None:
+        return {}
+    if not str(judgements.get("judge_model") or "").strip():
+        raise ScoreRefused("the judgement file records no judge_model")
+    verdicts = judgements.get("verdicts")
+    if not isinstance(verdicts, dict):
+        raise ScoreRefused("the judgement file has no verdicts mapping")
+    wrong = sorted(item for item, verdict in verdicts.items() if not isinstance(verdict, bool))
+    if wrong:
+        raise ScoreRefused(f"verdicts must be JSON booleans; these are not: {wrong}")
+    return dict(verdicts)
 
 
 def score(
@@ -569,95 +812,144 @@ def score(
     baseline: str,
     candidate: str,
     manifest: Path | None = None,
+    expect: Sequence[str] = (),
     judgements: Mapping | None = None,
+    judge_key: Mapping | None = None,
 ) -> dict:
-    """Score every situation under ``out`` that has a run for both arms."""
+    """Score the declared situations under ``out``; decide only on a complete, judged run.
 
-    verdicts = (judgements or {}).get("verdicts") or {}
-    if judgements is not None and not (judgements.get("judge_model") or "").strip():
-        raise ScoreRefused("the judgement file records no judge_model")
-    rows, struck, incomplete, items, unblind = [], [], [], [], {}
-    for situation_dir in sorted(p for p in out.iterdir() if p.is_dir()):
-        runs = {}
-        for arm in (baseline, candidate):
-            path = situation_dir / arm / "run.json"
-            if path.is_file():
-                runs[arm] = json.loads(path.read_text(encoding="utf-8"))
-        if not runs:
-            continue
-        situation_id = next(iter(runs.values()))["situation_id"]
+    ``judge_key`` is the earlier report's unblinding key: with it the residual
+    items keep their ids, so the judge's verdicts on them apply.
+    """
+
+    from membench.utility.switch_eval.state import StateError, require_default_kb_dirname
+
+    # The servers run with the default KB folder name; so must the scorer's reading.
+    try:
+        require_default_kb_dirname()
+    except StateError as error:
+        raise ScoreRefused(str(error)) from error
+    verdicts = _verdicts(judgements)
+    if verdicts and judge_key is None:
+        raise ScoreRefused("verdicts need the judge key that issued their item ids")
+    issued = {
+        (entry["situation_id"], entry["arm"]): (item, entry["answer_sha256"])
+        for item, entry in (judge_key or {}).items()
+    }
+    declared = expected_situations(manifest, expect)
+    present = {
+        p.name
+        for p in out.iterdir()
+        if p.is_dir() and any((p / a / "run.json").is_file() for a in (baseline, candidate))
+    }
+    if undeclared := sorted(present - declared):
+        raise ScoreRefused(f"the run root holds undeclared situations {undeclared}")
+    rows, struck, incomplete, items, unblind = [], {}, [], [], {}
+    for situation_id in sorted(declared):
+        runs = (
+            _read_runs(out, situation_id, (baseline, candidate))
+            if (out / situation_id).is_dir()
+            else {}
+        )
         if len(runs) < 2:
             incomplete.append(situation_id)
             continue
         if any(run["status"] == "struck" for run in runs.values()):
-            # A struck situation leaves both arms (section 7, Faults).
-            struck.append(situation_id)
+            # A struck situation leaves both arms (section 7, Faults); its key stays closed.
+            struck[situation_id] = {
+                arm: [f"{f.get('kind')}: {f.get('detail')}" for f in run.get("faults") or []]
+                for arm, run in runs.items()
+                if run["status"] == "struck"
+            }
             continue
         key = load_key(keys, situation_id, manifest)
+        _check_pair(situation_id, key, runs, out)
         row = {
             "situation_id": situation_id,
             "category": key["category"],
             "variant": key["variant"],
-            "client_shape": next(iter(runs.values()))["client_shape"],
+            "client_shape": key["client_shape"],
         }
+        view = key["judge_reference_view"]
         for role, arm in (("baseline", baseline), ("candidate", candidate)):
-            run = runs[arm]
-            if run["situation_sha256"] != key["case_sha256"]:
-                raise ScoreRefused(f"{situation_id} {arm}: the run's case file is not the key's")
-            arm_row = score_arm(key, run, situation_dir / arm)
+            arm_row = score_arm(key, runs[arm], out / situation_id / arm)
             answer = arm_row.pop("_answer")
             if arm_row["residual"]:
-                item = judge_id(situation_id, arm, answer)
-                unblind[item] = {"situation_id": situation_id, "arm": arm}
+                digest = hashlib.sha256(answer.encode()).hexdigest()
+                item, issued_digest = issued.get((situation_id, arm), (None, None))
+                if item is None:
+                    if judge_key is not None:
+                        raise ScoreRefused(f"the judge key has no item for {situation_id} {arm}")
+                    # A random id: the judge cannot recompute it from anything it might know.
+                    item = secrets.token_hex(8)
+                elif issued_digest != digest:
+                    raise ScoreRefused(
+                        f"{situation_id} {arm}: the answer changed since its item was issued"
+                    )
+                unblind[item] = {"situation_id": situation_id, "arm": arm, "answer_sha256": digest}
                 items.append(
                     {
                         "id": item,
-                        "question": key["answer"]["question"],
-                        "key_fact": key["answer"]["key_fact"],
-                        "accepted_values": list(key["answer"]["accepted_values"]),
+                        "question": view["question"],
+                        "key_fact": view["key_fact"],
+                        "accepted_values": list(view["accepted_values"]),
                         "answer": answer,
                     }
                 )
                 if item in verdicts:
-                    passed = bool(verdicts[item])
+                    passed = verdicts[item]
                     arm_row["judged"] = passed
+                    # A residual row already holds the state outcome and status ok.
                     arm_row["success"] = passed and not arm_row["false_precision"]
                     if not passed:
                         arm_row["omissions"].append("answer_lacks_fact")
             row[role] = arm_row
         rows.append(row)
-    pending = [i["id"] for i in items if i["id"] not in verdicts]
+    if stray := sorted(set(verdicts) - {item["id"] for item in items}):
+        raise ScoreRefused(f"verdicts name ids that are no residual item: {stray}")
+    pending = sorted(i["id"] for i in items if i["id"] not in verdicts)
     report = {
         "rows": rows,
+        "declared": sorted(declared),
         "struck": struck,
         "incomplete": incomplete,
-        "void": len(struck) > STRIKE_LIMIT,
+        "judge_model": (judgements or {}).get("judge_model"),
         "judge_items": sorted(items, key=lambda item: item["id"]),
         "judge_key": unblind,
-        "pending_judgement": sorted(pending),
+        "pending_judgement": pending,
     }
-    if pending:
-        # Success is unknown for these rows, so no table is computed from them.
+    if len(struck) > STRIKE_LIMIT:
+        report["verdict"] = "void"
+        report["statistics"] = f"void: {len(struck)} struck situations; no decision"
+    elif incomplete:
+        report["verdict"] = "incomplete"
+        report["statistics"] = (
+            f"incomplete: {incomplete} lack a finished run in an arm; no decision"
+        )
+    elif pending:
+        report["verdict"] = "awaiting_judge"
         report["statistics"] = "unavailable: residual items await the blind judge"
-        return report
-    report["statistics"] = statistics(rows)
-    report["descriptive"] = {
-        f"{name}:{value}": statistics([r for r in rows if r[name] == value])
-        for name in ("client_shape", "category")
-        for value in sorted({r[name] for r in rows})
-    }
+    else:
+        report["verdict"] = "decided"
+        report["statistics"] = statistics(rows)
+        report["descriptive"] = {
+            f"{name}:{value}": tables([r for r in rows if r[name] == value])
+            for name in ("client_shape", "category")
+            for value in sorted({r[name] for r in rows})
+        }
+        report["diagnostics"] = diagnostics(rows)
     return report
 
 
 def write_report(report: Mapping, to: Path) -> None:
-    """The scores, then the judge's view and its unblinding key, each in its own file."""
+    """``scores.json`` and ``judge-key.json`` in ``to``; the judge's items alone in ``to/judge``."""
 
-    to.mkdir(parents=True, exist_ok=True)
+    (to / "judge").mkdir(parents=True, exist_ok=True)
     body = {k: v for k, v in report.items() if k not in ("judge_items", "judge_key")}
     (to / "scores.json").write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
-    (to / "judge-items.json").write_text(
-        json.dumps(report["judge_items"], indent=2, sort_keys=True), encoding="utf-8"
-    )
     (to / "judge-key.json").write_text(
         json.dumps(report["judge_key"], indent=2, sort_keys=True), encoding="utf-8"
+    )
+    (to / "judge" / "judge-items.json").write_text(
+        json.dumps(report["judge_items"], indent=2, sort_keys=True), encoding="utf-8"
     )

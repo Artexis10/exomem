@@ -182,9 +182,9 @@ def cmd_check(args) -> int:
 def cmd_score(args) -> int:
     from .score import ScoreRefused, score, write_report
 
-    judgements = (
-        json.loads(Path(args.judgements).read_text(encoding="utf-8")) if args.judgements else None
-    )
+    def read(path: str | None):
+        return json.loads(Path(path).read_text(encoding="utf-8")) if path else None
+
     try:
         report = score(
             Path(args.out),
@@ -192,20 +192,22 @@ def cmd_score(args) -> int:
             baseline=args.baseline,
             candidate=args.candidate,
             manifest=Path(args.manifest) if args.manifest else None,
-            judgements=judgements,
+            expect=args.expect or (),
+            judgements=read(args.judgements),
+            judge_key=read(args.judge_key),
         )
     except ScoreRefused as refused:
         print(f"refused: {refused}", file=sys.stderr)
         return 2
     write_report(report, Path(args.to))
-    stats = report["statistics"]
     print(
-        f"{len(report['rows'])} scored, {len(report['struck'])} struck, "
+        f"{report['verdict']}: {len(report['rows'])} scored, {len(report['struck'])} struck, "
         f"{len(report['incomplete'])} incomplete, {len(report['pending_judgement'])} awaiting the judge"
-        + (f"; void: {len(report['struck'])} struck" if report["void"] else "")
     )
+    stats = report["statistics"]
     print(stats if isinstance(stats, str) else json.dumps(stats["decision_rule"], sort_keys=True))
-    return 0
+    # A void or incomplete run decides nothing; awaiting the judge is a normal stage.
+    return 1 if report["verdict"] in ("void", "incomplete") else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -256,9 +258,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keys", required=True, help="the directory that holds the key files")
     p.add_argument("--baseline", required=True, help="the baseline's opaque arm label")
     p.add_argument("--candidate", required=True, help="the candidate's opaque arm label")
-    p.add_argument("--manifest", help="the custody manifest; required for held-out keys")
+    p.add_argument(
+        "--manifest", help="the custody manifest; held-out keys need the preregistered one"
+    )
+    p.add_argument(
+        "--expect", action="append", metavar="ID", help="a development situation the run declares"
+    )
     p.add_argument("--judgements", help="the blind judge's verdicts on the residual items")
-    p.add_argument("--to", required=True, help="where scores.json and the judge files go")
+    p.add_argument("--judge-key", help="the judge-key.json that issued the verdicts' item ids")
+    p.add_argument(
+        "--to", required=True, help="scores.json and judge-key.json; the items go to TO/judge"
+    )
     p.set_defaults(func=cmd_score)
 
     args = parser.parse_args(argv)
