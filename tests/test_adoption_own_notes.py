@@ -18,7 +18,15 @@ from test_adoption_collection import (
     tiny_budget,  # noqa: F401 - the fixture
 )
 
-from exomem import adopt, adoption_run, commands, context_refs, request_budget
+from exomem import (
+    adopt,
+    adoption_run,
+    commands,
+    context_refs,
+    note,
+    request_budget,
+    semantic_writes,
+)
 from exomem import audit as audit_module
 
 JOURNAL_RULE = {"path": "Coll/Journal", "adopt_as": "note", "note_type": "insight"}
@@ -87,6 +95,25 @@ def test_a_mixed_collection_becomes_draft_notes_beside_their_sources_and_keeps_t
         applied["outcomes"]["Coll/Journal/trip.md"]["sha256"]
     )
     assert len(_notes(vault)) == 2  # the Exports file is a Source only
+
+
+def test_a_body_tag_joins_the_front_matter_tags_and_a_hash_in_code_does_not(
+    tmp_path: Path,
+) -> None:
+    original = (
+        "---\ntags: [travel]\n---\n# Trip\n\nPacked for #hiking today.\n\n"
+        "Run `#inline-code` first.\n\n```\n#fenced-code\n```\n"
+    )
+    vault = _vault(tmp_path, {"Coll/Journal/trip.md": original})
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    note_path = applied["outcomes"]["Coll/Journal/trip.md"]["note"]["target_path"]
+    assert _page(vault, note_path)[0]["tags"] == ["travel", "hiking"]
+    assert _page(vault, _copy(applied, "Coll/Journal/trip.md"))[0]["tags"] == [
+        "imported", "travel", "hiking",
+    ]
 
 
 def test_a_note_keeps_its_original_body_when_it_links_a_note_made_after_it(
@@ -343,13 +370,13 @@ def test_a_call_stops_between_notes_when_the_next_would_not_fit_and_the_continua
     monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
     monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "30")
     request_budget.reset_resolution_cache()
-    real_create = adopt.create_draft_note
+    real_create = adopt.create_draft_notes
 
-    def slow_note(*args, **kwargs):
-        clock["now"] += 20.0  # one note costs two thirds of a call
-        return real_create(*args, **kwargs)
+    def slow_notes(root, notes, **kwargs):
+        clock["now"] += 20.0 * len(notes)  # one note costs two thirds of a call
+        return real_create(root, notes, **kwargs)
 
-    monkeypatch.setattr(adopt, "create_draft_note", slow_note)
+    monkeypatch.setattr(adopt, "create_draft_notes", slow_notes)
     files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(3)}
     vault = _vault(tmp_path, files)
     run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
@@ -367,6 +394,107 @@ def test_a_call_stops_between_notes_when_the_next_would_not_fit_and_the_continua
     assert last["phase"] == "applied"
     assert len(_notes(vault)) == 3
     assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 3
+
+
+def test_a_quick_refusal_does_not_make_the_next_batch_of_notes_look_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "40")
+    request_budget.reset_resolution_cache()
+    files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(8)}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    refused = planned["plan"]["items"][0]["original_path"]  # the first note a call makes
+    real_validate = adopt._validate_draft
+    real_create = adopt.create_draft_notes
+
+    def refuse_the_first_note_at_once(root, planned_item, arguments):
+        if planned_item["original_path"] == refused:
+            raise adopt.AdoptError("PLAN_STALE", "refused by the test")
+        return real_validate(root, planned_item, arguments)
+
+    def eight_seconds_per_made_note(root, notes, **kwargs):
+        outcomes = real_create(root, notes, **kwargs)
+        clock["now"] += 8.0 * sum(outcome.created is not None for outcome in outcomes)
+        return outcomes
+
+    monkeypatch.setattr(adopt, "_validate_draft", refuse_the_first_note_at_once)
+    monkeypatch.setattr(adopt, "create_draft_notes", eight_seconds_per_made_note)
+
+    elapsed: list[float] = []
+    last: dict = {}
+    while not elapsed or last.get("continuation"):
+        began = clock["now"]
+        last = adoption_run.apply(
+            vault, run_id=run_id, plan_id=planned["plan"]["plan_id"],
+            continuation=last.get("continuation"), today=TODAY,
+        )
+        elapsed.append(clock["now"] - began)
+
+    assert max(elapsed) <= 40.0 - 2.0
+    assert last["outcomes"][refused]["note"]["code"] == "PLAN_STALE"
+    assert last["progress"] == {"applied": 7, "failed": 1, "remaining": 0, "total": 8}
+    assert len(_notes(vault)) == 7
+
+
+def test_a_refused_batch_creates_its_notes_alone_only_while_the_call_has_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "120")
+    request_budget.reset_resolution_cache()
+    files = {f"Coll/Journal/entry-{n:02d}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(14)}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+    real_validate = adopt._validate_draft
+    real_commit = note.commit_prepared_notes
+    real_create_alone = adopt.create_draft_note
+
+    def two_seconds_to_validate(root, planned_item, arguments):
+        clock["now"] += 2.0
+        return real_validate(root, planned_item, arguments)
+
+    def every_batch_of_several_refuses(root, prepared):
+        if len(prepared) > 1:
+            raise semantic_writes.SemanticWriteError(
+                "STALE_SEMANTIC_WRITE", "creations of one batch plan the same file"
+            )
+        clock["now"] += 8.0
+        return real_commit(root, prepared)
+
+    def eight_seconds_to_commit_alone(root, planned_item, text, **kwargs):
+        note_made = real_create_alone(root, planned_item, text, **kwargs)  # validates for 2 s
+        clock["now"] += 8.0
+        return note_made
+
+    # A note costs 10 s however it is made; a refused batch also loses its 2 s per note.
+    monkeypatch.setattr(adopt, "_validate_draft", two_seconds_to_validate)
+    monkeypatch.setattr(note, "commit_prepared_notes", every_batch_of_several_refuses)
+    monkeypatch.setattr(adopt, "create_draft_note", eight_seconds_to_commit_alone)
+
+    elapsed: list[float] = []
+    last: dict = {}
+    while not elapsed or last.get("continuation"):
+        began = clock["now"]
+        last = adoption_run.apply(
+            vault, run_id=run_id, plan_id=planned["plan"]["plan_id"],
+            continuation=last.get("continuation"), today=TODAY,
+        )
+        elapsed.append(clock["now"] - began)
+
+    assert max(elapsed) <= 120.0 - 2.0
+    assert len(elapsed) >= 2
+    assert last["progress"] == {"applied": 14, "failed": 0, "remaining": 0, "total": 14}
+    assert len(_notes(vault)) == 14
 
 
 def test_own_note_adoption_uses_the_project_home_in_its_frozen_plan(tmp_path: Path) -> None:

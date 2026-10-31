@@ -1131,7 +1131,7 @@ def test_the_contention_branch_hands_over_the_paths_it_deferred(
     monkeypatch.setattr(store, "_publication_lock", refuse)
 
     assert store.upsert_paths([page]) is False
-    assert seen == [{"root": tmp_path, "deferred_paths": [page]}]
+    assert [(call["root"], call["deferred_paths"]) for call in seen] == [(tmp_path, [page])]
 
 
 def test_a_failed_pass_puts_its_work_back(

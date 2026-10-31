@@ -160,9 +160,16 @@ def entries_of(data: Any) -> list[str]:
     return out
 
 
-def result_paths(data: Any) -> list[str]:
-    rows = data.get("result") or data.get("results") or [] if isinstance(data, dict) else data
-    return [str(row.get("path")) for row in rows or [] if isinstance(row, dict) and row.get("path")]
+def result_paths(data: Any) -> list[str] | None:
+    """Hit paths from a search reply, or None when the reply carries no hit list this scorer knows."""
+    rows = data
+    if isinstance(rows, dict):
+        rows = rows.get("result", rows.get("results", rows))
+    if isinstance(rows, dict):  # envelope form: {"hits": [...], plus advisory blocks}
+        rows = rows.get("hits")
+    if not isinstance(rows, list):
+        return None
+    return [str(row.get("path")) for row in rows if isinstance(row, dict) and row.get("path")]
 
 
 @dataclass
@@ -304,6 +311,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     entry_forms: Counter[str] = Counter()
     probes: list[Probe] = []
     settle = {"wait_s": args.settle_s, "requeried": 0, "recovered_note": 0, "recovered_media": 0}
+    unreadable_replies = 0
     started = time.perf_counter()
     async with McpSession(python=args.python, state=state, env=env, timeout=args.timeout) as session:
         outbound_cache: dict[str, list[str]] = {}
@@ -377,7 +385,11 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             outcome, data, _ = await session.call(
                 "search_memory", {"query": probe.query, "limit": RECALL_LIMIT},
                 journey="score", step=f"recall-{probe.kind}", retry_deadline_s=args.warm_deadline)
-            probe.top5 = result_paths(data) if outcome == "ok" else []
+            nonlocal unreadable_replies
+            paths = result_paths(data) if outcome == "ok" else []
+            if paths is None:
+                unreadable_replies += 1
+            probe.top5 = paths or []
             probe.strict = probe.strict or bool(probe.expected & set(probe.top5))
             needle = probe.query.lower()
             probe.loose = probe.loose or any(
@@ -493,7 +505,10 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         },
         # A read or search that failed counts as "not preserved / not found" above, so each one makes
         # the affected metric a lower bound. Zero here means every metric above was fully measured.
-        "measurement_gaps": dict(Counter(c["tool"] for c in scorer_calls if c["outcome"] != "ok")),
+        "measurement_gaps": {
+            **Counter(c["tool"] for c in scorer_calls if c["outcome"] != "ok"),
+            **({"search_memory_unreadable_reply": unreadable_replies} if unreadable_replies else {}),
+        },
         "samples": {
             "silently_absent": [i["path"] for i in absent[:SAMPLES]],
             "landed_notes": [{"key": i["path"], "pages": pages_of[i["path"]]}

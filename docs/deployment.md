@@ -768,6 +768,12 @@ change the payload or create a fresh explicit identity to recover a pending or
 committed-uncertain acknowledgement: retry only with the same identity as
 directed, or reconcile.
 
+A REST write without an `Idempotency-Key` carries no replay identity: two
+identical requests are two writes, and a busy boundary refuses it with a retryable
+`MUTATION_BUSY` after one bounded acquire wait, without waiting out contention. Send one `Idempotency-Key` per intended write to have
+the server wait out ordinary contention and to let a resend attach to the first
+attempt. The bundled Studio does this for every action.
+
 Expected MCP operation refusals such as `MUTATION_WARMING` and `MUTATION_BUSY` are normal tool content:
 inspect top-level `success: false` and the structured `error` object, then follow
 its retry fields. They are not transport failures. A `receipt_id` is diagnostic,
