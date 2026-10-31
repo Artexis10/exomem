@@ -97,6 +97,18 @@ def titles(root, collection):
     return sorted(row["title"] for row in call(root, "record_memory", action="query", collection=collection)["rows"])
 
 
+def journal_rows(tmp_path):
+    path = tmp_path / "logs" / "mutations.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def busy_total():
+    from exomem import metrics
+
+    return sum(counter["value"] for counter in metrics.snapshot()["counters"]
+               if counter["name"] == "exomem_mutation_busy_total")
+
+
 def store_meta(root):
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         return dict(reader.execute("SELECT key,value FROM store_meta"))
@@ -1735,9 +1747,11 @@ def test_pending_create_cannot_publish_over_an_arriving_file_declaration(service
     assert titles(root, late_id) == ["File during interruption"]
 
 
-def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service, monkeypatch):
+def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service, monkeypatch, tmp_path):
     """A lost acknowledgement must neither abandon the live mutation nor replay its leaf."""
     import threading
+
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
 
     from exomem import request_budget
     from exomem.collection_store.writer import CollectionWriter
@@ -1759,6 +1773,7 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
                      item_key=LATER, why="late acknowledgement", idempotency_key="late-commit")
     token = request_budget.set_current(request_budget.RequestBudget(
         seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.3))
+    busy_before = busy_total()
     try:
         with pytest.raises(OpError) as pending:
             call(service.root, "record_memory", **arguments)
@@ -1766,6 +1781,10 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
         assert pending.value.as_public_dict()["status"] == "uncertain"
         assert pending.value.as_public_dict()["committed"] is None
         assert "Late committed" not in str(pending.value.as_public_dict())
+        # The queue refuses before `invoke` can journal, so the refusal the caller saw is journaled here.
+        (refusal,) = [row for row in journal_rows(tmp_path) if row["outcome"] == "failed"]
+        assert (refusal["command"], refusal["error_code"]) == ("record_memory", "MUTATION_ACKNOWLEDGEMENT_PENDING")
+        assert busy_total() == busy_before  # an uncertain commit is not a MUTATION_BUSY
     finally:
         request_budget.reset_current(token)
         release.set()
@@ -1817,10 +1836,12 @@ def test_accepted_store_work_can_finish_its_bulk_dependency(service, monkeypatch
         assert server.call(finish_bulk_dependency, wake_maintenance=False) is False
 
 
-def test_queued_mutation_timeout_never_executes(service, monkeypatch):
+def test_queued_mutation_timeout_never_executes(service, monkeypatch, tmp_path):
     """A request refused before acceptance must leave no later row behind."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
 
     server = runtime._SERVERS[service.root]
     entered, release = threading.Event(), threading.Event()
@@ -1839,6 +1860,7 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
 
             token = request_budget.set_current(request_budget.RequestBudget(
                 seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.5))
+            busy_before = busy_total()
             try:
                 with monkeypatch.context() as queue_timeout, pytest.raises(OpError) as busy:
                     queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
@@ -1856,6 +1878,17 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
                        and frame["module"].startswith("exomem.") for frame in diagnostic["frames"])
             assert str(service.root) not in str(busy.value)
             assert "Never accepted" not in str(busy.value)
+            # The queue refuses before `invoke` can journal, so the refusal the caller saw is journaled here.
+            (refusal,) = journal_rows(tmp_path)
+            assert (refusal["command"], refusal["outcome"], refusal["error_code"]) == (
+                "record_memory", "failed", "COLLECTION_STORE_BUSY")
+            assert busy_total() == busy_before  # the counter is MUTATION_BUSY's, and this is the store's own code
+            # The row is written after the queue releases its lock, which the store thread takes work under.
+            holds_queue_lock = []
+            with monkeypatch.context() as queue_timeout, pytest.raises(OpError):
+                queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                server.call(lambda: None, on_refusal=lambda *_: holds_queue_lock.append(server._condition._is_owned()))
+            assert holds_queue_lock == [False]
         finally:
             release.set()
             occupied.result(timeout=5)
@@ -1949,6 +1982,71 @@ def test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread(service, 
     assert refusals, "the write never met the held boundary"
     assert appends == [LATER]
     assert titles(service.root, CID) == ["Canonical", "Waited"]
+
+
+@pytest.mark.parametrize("held", ["at_routing", "after_routing"])
+def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counted_once(
+        service, monkeypatch, tmp_path, held):
+    """The request thread waits out the boundary's busy and finally refuses; the caller sees one
+    MUTATION_BUSY, so the journal gets one row and the counter one count. Routing refuses before
+    `invoke` runs, and a hold met after routing is refused inside it: each path owes its own row."""
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
+    holding, release = threading.Event(), threading.Event()
+
+    def hold():
+        with service.manager.consistency_guard(service.root, operation="test hold"):
+            holding.set()
+            assert release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    if held == "at_routing":
+        holder.start()
+        assert holding.wait(5)
+    else:
+        route = runtime.route
+
+        def route_then_hold(*args):
+            server = route(*args)
+            if server is not None and not holding.is_set():
+                holder.start()
+                assert holding.wait(5)
+            return server
+
+        monkeypatch.setattr(runtime, "route", route_then_hold)
+    busy_before = busy_total()
+    try:
+        with monkeypatch.context() as short, pytest.raises(OpError) as refused:
+            short.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+            call(service.root, "record_memory", action="append", collection=CID, item={"title": "Held out"},
+                 item_key=LATER, why="held boundary", idempotency_key="held-out")
+    finally:
+        release.set()
+        holder.join(10)
+
+    assert refused.value.code == "MUTATION_BUSY"
+    (row,) = journal_rows(tmp_path)
+    assert (row["command"], row["outcome"], row["error_code"]) == ("record_memory", "failed", "MUTATION_BUSY")
+    assert busy_total() == busy_before + 1
+
+
+def test_a_store_busy_raised_by_the_work_is_journaled_once(service, monkeypatch, tmp_path):
+    """The store thread converts the work's busy for the caller; `invoke` already journaled it, so the queue adds no row."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+
+    def busy(*_args, **_kwargs):
+        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the store is busy")
+
+    monkeypatch.setattr(CollectionWriter, "append_record", busy)
+    with pytest.raises(OpError) as refused:
+        call(service.root, "record_memory", action="append", collection=CID,
+             item={"title": "Busy inside"}, item_key=LATER, why="store busy")
+
+    assert refused.value.code == "COLLECTION_STORE_BUSY"
+    (row,) = journal_rows(tmp_path)
+    assert (row["command"], row["outcome"], row["error_code"]) == ("record_memory", "failed", "COLLECTION_STORE_BUSY")
 
 
 def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypatch):
