@@ -821,8 +821,12 @@ def _presented_finish(run: dict) -> dict:
 
 
 def _spelled_route(route: dict) -> dict:
-    """A stored grouped `{"tool", "args"}` route, spelled for the serving surface."""
-    return capabilities.active_call_route(route["tool"], route["args"])
+    """A stored grouped `{"tool", "args"}` route, spelled for the serving surface, else as stored."""
+    try:
+        return capabilities.active_call_route(route["tool"], route["args"])
+    except ValueError:
+        # A route this surface cannot spell must not fail the whole read of the run.
+        return route
 
 
 def _next_actions(run: dict) -> list[dict]:

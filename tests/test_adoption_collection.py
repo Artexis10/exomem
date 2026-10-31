@@ -460,6 +460,37 @@ def test_a_finished_run_names_the_reconcile_tool_of_the_surface_that_reads_it(
     }
 
 
+def test_a_stored_route_that_no_longer_spells_still_lets_the_run_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/one/plan.md": "# Plan\n\ntext\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/one/plan.md"]["target_path"]
+
+    class Hit:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
+    adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    # A later release retires the operation that the stored route names.
+    store = adoption_run.AdoptionRunStore(vault)
+    run = store.load(run_id)
+    retired = {"tool": "maintain_memory", "args": {"mode": "retired-mode"}}
+    run["finish"]["recall_check"]["next_action"] = retired
+    store.save(run)
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+
+    with capabilities.active_surface(nested):
+        read = adoption_run.status(vault, run_id=run_id)
+
+    assert read["phase"] == "done"
+    assert read["finish"]["recall_check"]["next_action"] == retired
+
+
 @pytest.mark.parametrize("read_state", ["pending", "failed"])
 def test_finish_does_not_report_incomplete_recall_as_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_state: str
