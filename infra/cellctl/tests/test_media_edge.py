@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cellctl import db, main, manifests, media_edge, reconcile
 from cellctl.decide import GROWTH_THRESHOLD_PERCENT
 from cellctl.manifests import MEDIA_STORE_CONFIG_KEY, namespace_name
+from cellctl.state import ClusterObservation, MediaCensus
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
@@ -408,7 +409,7 @@ async def test_a_cell_the_pass_could_not_observe_keeps_its_place_in_the_set(cell
         await fleet.close()
 
 
-async def test_removing_a_cell_from_the_selection_revokes_it_and_a_later_return_is_a_new_version(cell_db) -> None:
+async def test_a_drained_cell_leaves_the_set_and_a_later_return_is_a_new_version(cell_db) -> None:
     fleet = await _fleet(cell_db, CANARY, OTHER, cell_ids=(CANARY, OTHER))
     try:
         await fleet.run()
@@ -416,6 +417,9 @@ async def test_removing_a_cell_from_the_selection_revokes_it_and_a_later_return_
         fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
             cell_ids=(CANARY,), signing_key=fleet.config.media_edge.signing_key))
         await fleet.run(NOW + timedelta(minutes=5))
+        _report(fleet, OTHER, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=6))
+        await fleet.run(NOW + timedelta(minutes=7))
+        await fleet.run(NOW + timedelta(minutes=8))
         revoked = fleet.cluster.published()
         fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
             cell_ids=(CANARY, OTHER), signing_key=fleet.config.media_edge.signing_key))
@@ -466,20 +470,15 @@ async def test_a_selected_cell_waits_when_the_active_set_cannot_be_published(cel
         await fleet.close()
 
 
-@pytest.mark.parametrize("taken_off", ["removed from the selection", "edge turned off"])
-async def test_a_cell_taken_off_the_edge_keeps_its_store_disabled_with_no_credential_or_egress(cell_db, taken_off) -> None:
+async def test_with_the_edge_turned_off_a_cell_keeps_its_store_disabled_with_no_credential_or_egress(cell_db) -> None:
     # Without its store identity the runtime reads every evicted original as deleted, and its
-    # reconcile then removes their derived data.
+    # reconcile then removes their derived data. With no edge settings cellctl can sign no credential.
     fleet = await _fleet(cell_db, CANARY)
     try:
         await fleet.run()
         assert "media-edge-credential" in fleet.cluster.secret(CANARY)
-        if taken_off == "removed from the selection":
-            fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
-                cell_ids=(), signing_key=fleet.config.media_edge.signing_key))
-        else:
-            # The chart's mediaEdge.enabled=false: no edge settings, on a schema that has the columns.
-            fleet.config = dataclasses.replace(fleet.config, media_edge=None, media_key_columns=True)
+        # The chart's mediaEdge.enabled=false: no edge settings, on a schema that has the columns.
+        fleet.config = dataclasses.replace(fleet.config, media_edge=None, media_key_columns=True)
         await fleet.run(NOW + timedelta(minutes=5))
 
         namespace = namespace_name(CANARY)
@@ -498,6 +497,173 @@ async def test_a_cell_taken_off_the_edge_keeps_its_store_disabled_with_no_creden
         assert policy["spec"]["egress"] == []
         assert (await fleet.rows())[CANARY].media_key_wrapped is not None
     finally:
+        await fleet.close()
+
+
+# -- the retained store (D12): a turned-off cell keeps its key until a later report shows none evicted --
+
+
+def _turn_off(fleet: Fleet) -> None:
+    """The operator takes the canary off the edge's selection; the edge itself stays on."""
+    fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
+        cell_ids=(), signing_key=fleet.config.media_edge.signing_key))
+
+
+def _report(fleet: Fleet, cell_id: str = CANARY, **census: object) -> None:
+    """A backup Job's media report, as the cluster observation carries it."""
+    fleet.cluster.observations[cell_id] = ClusterObservation(backup_job_media_census=MediaCensus(**census))
+
+
+def _media_posture(fleet: Fleet) -> dict[str, bool]:
+    """What the canary holds of the store after the last pass."""
+    secret = fleet.cluster.secret(CANARY)
+    policy = fleet.cluster.applied[(namespace_name(CANARY), "NetworkPolicy", "runtime-ingress")]
+    return {
+        "key": "media-age-identity" in secret,
+        "credential": "media-edge-credential" in secret,
+        "egress": policy["spec"]["egress"] != [],
+        "active set": CANARY in fleet.cluster.published()["cells"],
+        "offload": json.loads(secret[MEDIA_STORE_CONFIG_KEY])["vaults"]["/data/vault"]["enabled"],
+    }
+
+
+async def test_a_turned_off_cell_with_evicted_originals_keeps_its_key_credential_egress_and_set_entry(cell_db) -> None:
+    # Removing any of them leaves every evicted original unreadable.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        _report(fleet, evicted=3, evicted_bytes=3 << 30, captured_at=NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+        await fleet.run(NOW + timedelta(minutes=20))
+
+        assert _media_posture(fleet) == {
+            "key": True, "credential": True, "egress": True, "active set": True, "offload": False}
+    finally:
+        await fleet.close()
+
+
+async def test_a_turned_off_cell_with_no_report_keeps_its_key_credential_egress_and_set_entry(cell_db) -> None:
+    # Without a report cellctl cannot know that every original is back on the volume.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        await fleet.run(NOW + timedelta(days=1))
+
+        assert _media_posture(fleet) == {
+            "key": True, "credential": True, "egress": True, "active set": True, "offload": False}
+    finally:
+        await fleet.close()
+
+
+async def test_a_report_captured_before_the_turn_off_keeps_them_even_with_no_evicted_original(cell_db) -> None:
+    # Eviction ran on until the store was turned off, so an earlier census can miss what it evicted.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=1))
+        await fleet.run(NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+
+        assert _media_posture(fleet) == {
+            "key": True, "credential": True, "egress": True, "active set": True, "offload": False}
+    finally:
+        await fleet.close()
+
+
+async def test_an_incomplete_census_is_recorded_as_unknown_never_0_and_keeps_them(cell_db) -> None:
+    # A census that skipped a sidecar may have skipped an evicted original.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        _report(fleet, evicted=None, evicted_bytes=None, captured_at=NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+        await fleet.run(NOW + timedelta(minutes=20))
+
+        record = json.loads((await fleet.rows())[CANARY].custody_observation)["media_store"]
+        assert record == {"turned_off_at": (NOW + timedelta(minutes=5)).isoformat(), "evicted": "unknown",
+                          "evicted_bytes": "unknown", "captured_at": (NOW + timedelta(minutes=10)).isoformat()}
+        assert _media_posture(fleet) == {
+            "key": True, "credential": True, "egress": True, "active set": True, "offload": False}
+    finally:
+        await fleet.close()
+
+
+async def test_a_later_report_with_no_evicted_original_removes_key_credential_and_egress_and_keeps_the_bundle(
+    cell_db,
+) -> None:
+    # Kept on, a drained cell keeps edge access it no longer needs. Retiring the bundle would make a
+    # later return to the edge mint a key that no stored object was written with.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        bundle = (await fleet.rows())[CANARY].media_key_wrapped
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        assert _media_posture(fleet)["key"] is True
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+        await fleet.run(NOW + timedelta(minutes=20))
+
+        secret = fleet.cluster.secret(CANARY)
+        policy = fleet.cluster.applied[(namespace_name(CANARY), "NetworkPolicy", "runtime-ingress")]
+        assert json.loads(secret[MEDIA_STORE_CONFIG_KEY]) == {"vaults": {"/data/vault": {
+            "store": f"media-edge:{CANARY}", "enabled": False, "adapter": "media-edge"}}}
+        assert not {"media-edge-credential", "media-age-identity", "media-name-key"} & secret.keys()
+        assert policy["spec"]["egress"] == []
+        assert CANARY not in fleet.cluster.published()["cells"]
+        assert (await fleet.rows())[CANARY].media_key_wrapped == bundle
+    finally:
+        await fleet.close()
+
+
+async def test_a_cell_served_again_forgets_its_earlier_turn_off(cell_db) -> None:
+    # A report from while it was served again must not count for its next turn-off.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
+            cell_ids=(CANARY,), signing_key=fleet.config.media_edge.signing_key))
+        await fleet.run(NOW + timedelta(minutes=10))
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=12))
+        await fleet.run(NOW + timedelta(minutes=15))
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=20))
+        await fleet.run(NOW + timedelta(minutes=25))
+
+        assert _media_posture(fleet) == {
+            "key": True, "credential": True, "egress": True, "active set": True, "offload": False}
+    finally:
+        await fleet.close()
+
+
+async def test_a_deleted_turned_off_cell_leaves_the_set_and_retires_its_keys_without_a_report(cell_db) -> None:
+    # Waiting for a report that a deleted cell never sends would keep its keys and edge access forever.
+    fleet = await _fleet(cell_db, CANARY)
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        assert CANARY in fleet.cluster.published()["cells"]
+        await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", CANARY)
+        await fleet.run(NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+
+        retired = (await fleet.rows())[CANARY]
+        assert CANARY not in fleet.cluster.published()["cells"]
+        assert retired.media_key_wrapped is None and retired.content_keys_retired_at is not None
+    finally:
+        await app.close()
         await fleet.close()
 
 

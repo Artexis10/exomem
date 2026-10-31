@@ -19,7 +19,7 @@ from cellctl import reconcile
 from cellctl.decide import StorageRoom, decide
 from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import ClusterConfig
-from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, RolloutRow
+from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, MediaCensus, RolloutRow
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage_config import LocalStorage, StorageConfig
@@ -1392,6 +1392,10 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert observed.backup_job_total_bytes == filesystem.f_blocks * filesystem.f_frsize
     assert 0 < observed.backup_job_used_bytes <= observed.backup_job_total_bytes
+    # D12: the media report says unknown, never 0, until the cell can count its evicted originals,
+    # and its capture time is the hold start, which the volume it read cannot predate.
+    assert observed.backup_job_media_census == MediaCensus(
+        evicted=None, evicted_bytes=None, captured_at=datetime.fromisoformat(CURRENT_HOLD))
 
 
 async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a_restart(

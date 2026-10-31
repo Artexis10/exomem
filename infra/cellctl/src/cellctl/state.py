@@ -39,6 +39,20 @@ GROWTH_NO_ROOM = "no-room"
 GROWTH_AT_CAP = "at-cap"
 GROWTH_NOT_NEEDED = "fits"
 
+
+
+@dataclass(frozen=True)
+class MediaCensus:
+    """add-cloud-media-store D12: a backup Job's count of evicted originals.
+
+    A count is None when the census of sidecars was incomplete: unknown, never 0.
+    `captured_at` is the hold start, which the volume the Job read cannot predate."""
+
+    evicted: int | None
+    evicted_bytes: int | None
+    captured_at: datetime
+
+
 IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
 INIT_DEADLINE_EXCEEDED = "INIT_DEADLINE_EXCEEDED"
 BACKUP_FAILED = "BACKUP_FAILED"
@@ -259,6 +273,9 @@ class ClusterObservation:
     # backup Job reported them. None when it reported none.
     backup_job_used_bytes: int | None = None
     backup_job_total_bytes: int | None = None
+    # add-cloud-media-store D12: the evicted originals the finished backup Job
+    # counted, and when it captured the volume. None when it reported none.
+    backup_job_media_census: MediaCensus | None = None
     # D5: a failed backup Job's own value-free code (backup_source.py), or
     # None when it left none.
     backup_job_failure_code: str | None = None

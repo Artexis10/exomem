@@ -61,7 +61,7 @@ from .manifests import (
     snapshot_backup_name,
 )
 from .media_edge import ACTIVE_SET_NAME, read_generation
-from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
+from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation, MediaCensus
 from .storage.topolvm import FamilyRequest, LocalVolumeState, LogicalVolume
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
@@ -646,6 +646,7 @@ class ClusterClient:
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
+        backup_media_census = None
         snapshot_steps: dict[str, bool] = {}
         if backup_family_request or (started_raw and hold_kind == SNAPSHOT_BACKUP):
             snapshot_steps = self._snapshot_steps(namespace, started_raw, backup_family_request)
@@ -654,8 +655,9 @@ class ClusterClient:
             backup_job = self._get_job(namespace, backup_name)
             restore_job = self._get_job(namespace, hold_job_name(RESTORE_JOB_NAME, started_raw))
             if backup_job is not None and bool(backup_job.status.succeeded):
-                backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(
-                    self._job_pod_termination_message(namespace, backup_name))
+                report = self._job_pod_termination_message(namespace, backup_name)
+                backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(report)
+                backup_media_census = _media_census(report)
             elif backup_job is not None and bool(backup_job.status.failed):
                 message = self._job_pod_termination_message(namespace, backup_name, succeeded=False)
                 backup_failure_code = message if message in BACKUP_FAILURE_CODES else None
@@ -724,6 +726,7 @@ class ClusterClient:
             **_job_observation(backup_job, prefix="backup_job", snapshot_id=backup_snapshot_id),
             backup_job_used_bytes=backup_used_bytes,
             backup_job_total_bytes=backup_total_bytes,
+            backup_job_media_census=backup_media_census,
             backup_job_failure_code=backup_failure_code,
             **_job_observation(restore_job, prefix="restore_job"),
             **snapshot_steps,
@@ -1230,13 +1233,37 @@ def _backup_report(message: str | None) -> tuple[str | None, int | None, int | N
     them consistently. A use report that does not add up is dropped; the
     backup it came with still counts."""
 
-    match = _BACKUP_REPORT.fullmatch(message or "")
+    # add-cloud-media-store D12: the media census follows on a line of its own.
+    report = None if message is None else message.partition("\n")[0]
+    match = _BACKUP_REPORT.fullmatch(report or "")
     if match is None:
-        return message, None, None
+        return report, None, None
     used, total = int(match["used"]), int(match["total"])
     if not 0 <= used <= total or total == 0:
         return match["snapshot"], None, None
     return match["snapshot"], used, total
+
+
+# add-cloud-media-store D12: the backup Job's second line, "<evicted count> <evicted bytes>
+# <capture time>", a format manifests.render_backup_job fixes. "unknown" is an incomplete census.
+_MEDIA_CENSUS = re.compile(r"(?P<evicted>[0-9]{1,19}|unknown) (?P<bytes>[0-9]{1,19}|unknown) (?P<captured>\S+)")
+
+
+def _media_census(message: str | None) -> MediaCensus | None:
+    """The census a backup Job reported, or None when it reported none that cellctl can read.
+    None keeps a turned-off cell's key and egress, as no report does."""
+
+    match = _MEDIA_CENSUS.fullmatch((message or "").partition("\n")[2])
+    if match is None:
+        return None
+    try:
+        captured_at = datetime.fromisoformat(match["captured"])
+    except ValueError:
+        return None
+    if captured_at.tzinfo is None:
+        return None
+    evicted, evicted_bytes = (None if match[key] == "unknown" else int(match[key]) for key in ("evicted", "bytes"))
+    return MediaCensus(evicted=evicted, evicted_bytes=evicted_bytes, captured_at=captured_at)
 
 
 def _parse_timestamp(value) -> datetime | None:

@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -268,6 +269,9 @@ class CellManifestSpec:
     media_max_object_bytes: int = 0
     # Operator-set eviction and hydration settings the runtime reads from the same file.
     media_store_policy: dict[str, bool | int | float] = field(default_factory=dict)
+    # D12: False for a turned-off cell that keeps its key, credential and egress until it drains.
+    # Its runtime offloads nothing new and still hydrates its evicted originals.
+    media_store_enabled: bool = True
     # A cell that holds a media key bundle but that the edge does not serve. It keeps its store
     # identity, disabled, so its evicted originals still read as evicted, never as deleted. It
     # gets no credential, no key and no egress to the edge.
@@ -520,7 +524,7 @@ def _media_store_config(spec: CellManifestSpec) -> str:
     store = {
         **spec.media_store_policy,
         "store": f"media-edge:{spec.cell_id}",
-        "enabled": True,
+        "enabled": spec.media_store_enabled,
         "adapter": MEDIA_ADAPTER,
         "key_version": str(spec.media_key_version),
         "name_key_path": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_NAME_KEY_KEY]}",
@@ -1034,6 +1038,10 @@ FILESYSTEM_USE_COMMAND = (
     "print(\" %d %d\" % ((s.f_blocks - s.f_bfree) * s.f_frsize, s.f_blocks * s.f_frsize), end=\"\")'"
 )
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
+# add-cloud-media-store D12: the evicted count and bytes of the media report. The cell image has no
+# census of its sidecars yet (a seam in src/exomem), so every report says unknown. Unknown keeps a
+# turned-off cell's key and egress, the safe side of the drain rule.
+MEDIA_CENSUS_UNKNOWN = "unknown unknown"
 
 
 def hold_job_name(base: str, hold_started_at: str) -> str:
@@ -1251,6 +1259,10 @@ def render_backup_job(
         # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
         # the id alone and the Job successful: the backup itself succeeded.
         f"{{ {FILESYSTEM_USE_COMMAND} >> /dev/termination-log || true; }}",
+        # D12: "<evicted count> <evicted bytes> <capture time>" on a line of its own. The capture time
+        # is the hold start: the Job reads a clone, or the stopped cell's volume, taken after it.
+        f"{{ printf '\\n%s %s' {shlex.quote(MEDIA_CENSUS_UNKNOWN)} {shlex.quote(spec.hold_started_at)} "
+        ">> /dev/termination-log || true; }",
     ]
     return {
         "apiVersion": "batch/v1",
