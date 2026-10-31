@@ -179,3 +179,22 @@ def test_adoption_dir_is_in_the_corpus_exclusion_set() -> None:
     from exomem import find_corpus
 
     assert "_Adoption" in find_corpus.EXCLUDED_DIR_NAMES
+
+
+def test_a_staged_import_is_not_in_vault_scope_recall_but_a_person_s_own_imports_folder_is(vault: Path) -> None:
+    """A staged import is filed into the Knowledge Base and then discarded; indexing it doubles each note."""
+    staged = vault / "_Imports" / "6f1c2a9e-3b4d-4c5e-8f70-1a2b3c4d5e6f" / "notes"
+    staged.mkdir(parents=True)
+    (staged / "harbour.md").write_text("# Harbour survey\n\nThe kelpwater tide table.\n", encoding="utf-8")
+    own = {
+        "_Imports/Kindle Highlights/book.md": "brinewick",
+        "Projects/_Imports/reading.md": "saltmarrow",
+        "Knowledge Base/Notes/_Imports/inside.md": "driftholm",
+    }
+    for rel, word in own.items():
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(f"# Note\n\nThe {word} entry.\n", encoding="utf-8")
+
+    assert _recall(vault, "kelpwater", scope="vault") == []
+    for rel, word in own.items():
+        assert _recall(vault, word, scope="vault") == [rel]

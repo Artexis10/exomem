@@ -4179,7 +4179,7 @@
     }
   },
   "import_memory": {
-    "description": "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage. Select one operation.kind.",
+    "description": "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Carry continuations through plan and apply; finish records coverage. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -4276,7 +4276,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
+                  "description": "For `start`, scan subtree (default: whole vault; ask which folder). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
                   "type": "string",
                   "default": ""
                 },
@@ -4293,6 +4293,15 @@
                 "collection": {
                   "type": "string",
                   "description": "For `start`, a name kept across re-imports."
+                },
+                "after": {
+                  "type": "string",
+                  "description": "For `start`, a reply's `next_after`."
+                },
+                "consume": {
+                  "description": "For `start`, false keeps staged copies.",
+                  "type": "boolean",
+                  "default": true
                 }
               },
               "required": [
@@ -4515,7 +4524,7 @@
             },
             "continuation": {
               "type": "string",
-              "description": "For `plan` and `apply`, from the previous result."
+              "description": "For `plan`/`apply`, from the previous result."
             },
             "why": {
               "type": "string",
@@ -5446,7 +5455,7 @@
     }
   },
   "read_import": {
-    "description": "Scan existing material without importing it, inspect import runs or read a bounded work item. Stage external folders with the CLI import command first. Status retains recorded coverage and verification counts. Select one operation.kind.",
+    "description": "Scan material without importing it, inspect import runs or read a bounded work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import`), then start on the path it prints. Status keeps recorded coverage and verification counts. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5508,7 +5517,7 @@
                 },
                 "run_id": {},
                 "path": {
-                  "description": "For `start`, scan subtree (default: vault root). For run-listing `status`, count distinct successfully filed originals across historical runs in this subtree; null with `complete=false` if incomplete. Omit for legacy listing.",
+                  "description": "For `start`, scan subtree (default: whole vault; ask which folder). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
                   "type": "string",
                   "default": ""
                 }

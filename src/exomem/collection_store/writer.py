@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from collections import ChainMap
@@ -44,6 +45,7 @@ from . import (
     connection,
     derived_rows,
     edit_back,
+    filenames,
     governance,
     index_migrations,
     log_view,
@@ -864,8 +866,12 @@ class CollectionWriter:
         *,
         effects: Any = None,
         control: bool = False,
+        requested: bool = False,
     ):
-        """One chained txn; a ``control`` txn keeps the collection's generation and manifest."""
+        """One chained txn; a ``control`` txn keeps the collection's generation and manifest.
+
+        A ``requested`` view move is filename maintenance its caller asked for, so the caller is its actor.
+        """
         self._publication.business_started = True
         seq, previous = chain.recorded_head(self.connection)
         txn_id = self.connection.execute(
@@ -878,7 +884,8 @@ class CollectionWriter:
             after_manifest = before_manifest
         transition = records._transition_id()
         committed_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        view_edit = (self._view_edit is not None or operation in {"view_move", "view_frame_edit"}) and not control
+        view_edit = (self._view_edit is not None or operation == "view_frame_edit"
+                     or (operation == "view_move" and not requested)) and not control
         recorded = edit_back.OPERATION if self._view_edit is not None and not control else operation
         event = {
             "transition_id": transition,
@@ -1645,6 +1652,15 @@ class CollectionWriter:
                     observed = None if paths is None else paths[projection["path"]]
                     if observed is not None and digest != observed.digest:
                         continue  # changed again since it settled; the next pass looks again
+                    if projection["kind"] == "item" and self.connection.execute(
+                            "SELECT 1 FROM items WHERE row_id=? AND view_path!=?",
+                            (projection["row_id"], projection["path"])).fetchone():
+                        # Filename maintenance moved this row's view: the old path retires, never holds a delete.
+                        if raw is None and not preserved:
+                            self._execute("DELETE FROM projection_state WHERE path=?", (projection["path"],))
+                        else:
+                            batch.retire(projection)
+                        continue
                     if projection["kind"] == "history" and not history_context.exists(projection["path"]):
                         if raw is None and not preserved:
                             self._execute("DELETE FROM projection_state WHERE path=?", (projection["path"],))
@@ -2300,7 +2316,7 @@ class CollectionWriter:
         reference = (
             resumed["held_id"]
             if resumed
-            else records._derive_held_id(manifest, candidate.get("item"))
+            else records._derive_held_id(manifest, candidate.get("item"), candidate)
         )
         path = f"{records._held_directory(manifest)}/{reference}.md"
         encoded = _json(records._encode_held_value(candidate))
@@ -3459,3 +3475,174 @@ class CollectionWriter:
             }
         writer_lease.mark_active_mutation_committed()
         return receipt
+
+    def _filename_plan(self, row, manifest):
+        """This collection's filename plan, read inside the caller's snapshot or mutation."""
+        if not _renders_rows(manifest):
+            raise collections.CollectionError(
+                "UNSUPPORTED_STORAGE", "structured-file migration requires a collection with one view per item")
+        cid = manifest.collection_id
+        cursor = self.connection.execute("SELECT * FROM items WHERE collection_id=? ORDER BY item_key", (cid,))
+        names = [column[0] for column in cursor.description]
+        items = typed_storage.hydrate(self.connection, [dict(zip(names, item, strict=True)) for item in cursor])
+        rows = [filenames.Row(item["item_key"], item["view_path"], json.loads(item["values_json"]),
+                              item["body"] or "") for item in items]
+        blockers = []
+        # A pending view is journaled and moves like any rewrite; an owner's held edit stays where it is.
+        if self.connection.execute(
+            "SELECT 1 FROM projection_state WHERE collection_id=? AND kind='item' AND state='held' "
+            "UNION ALL SELECT 1 FROM held_candidates WHERE collection_id=? AND kind='view-correction' LIMIT 1",
+            (cid, cid),
+        ).fetchone():
+            blockers.append({"code": "STRUCTURED_FILE_HELD_EDIT",
+                             "reason": "a view of this collection holds an unresolved edit"})
+        aggregates = {path for (path,) in self.connection.execute(
+            "SELECT path FROM projection_state WHERE collection_id=? AND kind!='item'", (cid,))}
+        reserved = {collections._portable_path_key(path) for path in aggregates}
+        reserved |= {collections._portable_path_key(path) for (path,) in self.connection.execute(
+            "SELECT view_path FROM held_candidates WHERE collection_id=? AND view_path IS NOT NULL", (cid,))}
+        # A recipe renders into the storage folder, so a file there that no row owns holds its name.
+        owned = {collections._portable_path_key(row.path) for row in rows}
+        try:
+            with os.scandir(self.root / manifest.storage.source) as entries:
+                listed = {collections._portable_path_key(f"{manifest.storage.source}/{entry.name}")
+                          for entry in entries}
+        except FileNotFoundError:
+            listed = set()
+        reserved |= listed - owned
+        history = {path for (path,) in self.connection.execute(
+            "SELECT path FROM projection_state WHERE collection_id=? AND kind='history'", (cid,))}
+        plan = filenames.plan(
+            manifest, rows, source_snapshot=self._container(row), reserved_keys=reserved,
+            referrers=lambda paths: {path: [hit.path for hit in hits] for path, hits in
+                                     vault.find_inbound_wikilinks_many(self.root, paths).items()},
+            regenerated=history.__contains__, blockers=blockers,
+        )
+        return plan, {item["item_key"]: item for item in items}
+
+    def preview_filenames(self, collection):
+        """Plan a collection's filename recipe as view moves without writing (structured-files preview)."""
+        with self.read_snapshot(mutation=True):
+            row, manifest, _ = self._collection(collection)
+            return self._filename_plan(row, manifest)[0].public
+
+    def apply_filenames(self, collection, *, plan_id, source_snapshot, why):
+        """Commit one unchanged filename plan in one mutation, or replay it once committed.
+
+        Each moved row commits one ``view_move``, then each rewritten body one ``update``, chained
+        in item-key order, so history and audit keep their existing per-item transitions.
+        """
+        records._validate_why(why)
+        with self._mutation():
+            row, manifest, _ = self._collection(collection)
+            cid = manifest.collection_id
+            requests = {filenames.request_id(plan_id, key, step): (key, step)
+                        for (key,) in self.connection.execute("SELECT item_key FROM items WHERE collection_id=?", (cid,))
+                        for step in ("move", "relink")}
+            identities, committed = list(requests), []
+            # SQLite bounds a statement's variables, so the identities are read in slices.
+            for start in range(0, len(identities), 500):
+                chunk = identities[start:start + 500]
+                committed += self.connection.execute(
+                    f"SELECT commit_seq,request_id,request_hash,receipt_json FROM txns WHERE collection_id=? "
+                    f"AND request_id IN ({','.join('?' * len(chunk))})", (cid, *chunk)).fetchall()
+            if committed:
+                for _, request, digest, _ in committed:
+                    if digest != filenames.request_hash(cid, plan_id, source_snapshot, why, *requests[request]):
+                        raise collections.CollectionError(
+                            "IDEMPOTENCY_KEY_REUSED", "this plan was applied with different arguments")
+                return self._filename_receipt(manifest, plan_id, source_snapshot, why,
+                                              [json.loads(receipt) for *_, receipt in sorted(committed)], "replayed")
+            plan, items = self._filename_plan(row, manifest)
+            if plan.public["plan_id"] != plan_id or plan.public["source_snapshot"] != source_snapshot:
+                raise collections.CollectionError("STALE_STRUCTURED_FILE_PLAN", "migration preview is stale")
+            if plan.public["blockers"] or plan.public["truncated"]:
+                raise collections.CollectionError(
+                    "BLOCKED_STRUCTURED_FILE_PLAN", "migration preview has unresolved blockers")
+            if not plan.moves and not plan.bodies:
+                raise collections.CollectionError("EMPTY_STRUCTURED_FILE_PLAN", "migration preview contains no changes")
+            if plan.bodies:
+                self._rows_writable(manifest, "structured-files")
+            moves = {key: (source, target) for key, source, target in plan.moves}
+            self._preflight_views([*(path for pair in moves.values() for path in pair),
+                                   *(items[key]["view_path"] for key in plan.bodies.keys() - moves.keys()),
+                                   *(items[key]["view_path"] for key in plan.rerenders)])
+            # Every row takes its new path first, so each render resolves its links to the moved views.
+            self._execute("UPDATE items SET view_path=? WHERE collection_id=? AND item_key=?",
+                          [(target, cid, key) for key, (_, target) in moves.items()], many=True)
+            receipts = []
+            item_type = types.type_for_manifest(manifest).item_type
+            for key in sorted(moves.keys() | plan.bodies.keys()):
+                before = items[key]
+                version = self._version(before)
+                path = before["view_path"]
+                if key in moves:
+                    source, path = moves[key]
+                    row = self._collection_row(cid)
+                    txn = self._txn(row, manifest, "view_move", why, filenames.request_id(plan_id, key, "move"),
+                                    filenames.request_hash(cid, plan_id, source_snapshot, why, key, "move"),
+                                    requested=True, effects={"old_path": source, "path": path,
+                                                             "generation": row["generation"],
+                                                             "version": before["row_version"]})
+                    self._publication.retire(self._publication.captured[source])
+                    if key not in plan.bodies:
+                        # A relinked row renders once, with its new body, below.
+                        _, text = self._render_view({"kind": "item", "row_id": before["row_id"]}, manifest)
+                        self._pending(path, cid, "item", before["row_version"], text, before["row_id"],
+                                      manifest=manifest)
+                    self._execute(tables.INSERT_EFFECT, {
+                        "txn_id": txn["txn_id"], "ordinal": 0, "row_id": before["row_id"], "item_key": key,
+                        "effect": "update", "effect_label": "move", "version_before": before["row_version"],
+                        "version_after": before["row_version"], "hash_before": before["payload_hash"],
+                        "hash_after": before["payload_hash"]})
+                    self.handle.release_cache.touch(cid, f"exomem://{item_type}/{cid}/{key}")
+                    receipts.append(self._filename_commit(txn, row, manifest, key, version, version, [source, path]))
+                if key in plan.bodies:
+                    body = plan.bodies[key]
+                    records._validate_body(body)
+                    values = json.loads(before["values_json"])
+                    row = self._collection_row(cid)
+                    txn = self._txn(row, manifest, "update", why, filenames.request_id(plan_id, key, "relink"),
+                                    filenames.request_hash(cid, plan_id, source_snapshot, why, key, "relink"),
+                                    effects={"key": key, "sources": [], "payload_hash": tokens.payload_hash(
+                                        manifest.schema.version, key, values, body)})
+                    after_item = self._write_item(manifest, key, values, body, path, txn, before, None, [])
+                    receipts.append(self._filename_commit(txn, row, manifest, key, version, after_item, [path]))
+            for key in sorted(plan.rerenders):
+                version, text = self._render_view({"kind": "item", "row_id": items[key]["row_id"]}, manifest)
+                self._pending(items[key]["view_path"], cid, "item", version, text, items[key]["row_id"],
+                              manifest=manifest)
+            # Once for the whole plan: the moved paths reach the release check before commit.
+            self._precommit(manifest)
+            # Legacy history events name each item by its current view, so every page renders again.
+            self._history_reselection(cid)
+        writer_lease.mark_active_mutation_committed()
+        return self._filename_receipt(manifest, plan_id, source_snapshot, why, receipts, "committed")
+
+    def _filename_commit(self, txn, row, manifest, key, before_item, after_item, paths):
+        """Advance and record one item's filename transition under its closed collection receipt."""
+        receipt = records._result(
+            operation="update", manifest=manifest, key=key, before_item_hash=before_item,
+            after_item_hash=after_item, before_container_hash=self._container(row),
+            after_container_hash=self._advance(txn), affected_paths=paths, payload_hash=None,
+            outcome="committed", audit_correlation=txn["transition_id"])
+        self._insert_txn(txn, receipt)
+        return receipt
+
+    @staticmethod
+    def _filename_receipt(manifest, plan_id, source_snapshot, why, receipts, outcome):
+        """The closed structured-files receipt, its inverse taken from each item's own transition."""
+        return {
+            "_structured_files_receipt": "exomem.structured-files-migration",
+            "receipt_version": 1,
+            "operation": "structured-files",
+            "collection_id": manifest.collection_id,
+            "manifest_path": manifest.path,
+            "plan_id": plan_id,
+            "source_snapshot": source_snapshot,
+            "outcome": outcome,
+            "rationale": why,
+            "inverse": [{"before_path": receipt["affected_paths"][0], "after_path": receipt["affected_paths"][-1],
+                         "before_hash": receipt["before_item_hash"], "after_hash": receipt["after_item_hash"]}
+                        for receipt in receipts],
+        }

@@ -1,0 +1,168 @@
+# Advisory MCP read latency against the latest release, nightly and on demand.
+# It does not gate a pull request or release evidence: the Full run in ci.yml
+# does not wait for it. Dispatch it on a branch to measure that branch.
+name: MCP read latency
+
+on:
+  schedule:
+    - cron: "52 3 * * *"
+  workflow_dispatch:
+
+# The jobs run `gh release view` (scripts/release_arm.py) and local git only.
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-read-latency-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mcp-read-latency-plan:
+    name: MCP read latency plan
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      tag: ${{ steps.plan.outputs.tag }}
+      base_commit: ${{ steps.plan.outputs.base_commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Pin the latest release and list the shards
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        # The profile defines the shards and the release defines the base; no second list or tag lives here.
+        run: |
+          uv run --frozen python scripts/mcp_read_latency_gate.py plan --output mcp-read-latency-plan.json
+          {
+            echo "shards=$(jq -c .shards mcp-read-latency-plan.json)"
+            echo "tag=$(jq -r .tag mcp-read-latency-plan.json)"
+            echo "base_commit=$(jq -r .base_commit mcp-read-latency-plan.json)"
+          } >> "$GITHUB_OUTPUT"
+
+  mcp-read-latency-paired:
+    name: MCP read latency paired (shard ${{ matrix.shard }})
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
+    needs: mcp-read-latency-plan
+    # Keep this benchmark on the calibrated Ubuntu 24.04 runtime that the recall benchmark uses.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.mcp-read-latency-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Resolve the served encoder digest
+        id: encoder
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --encoder-cache-key >> "$GITHUB_OUTPUT"
+      - name: Cache the served encoder by digest
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
+      - name: Verify the latency instrument
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python -m pytest tests/test_mcp_read_latency_gate.py -q
+      - name: Compare MCP reads with the latest release
+        # Stop under the job budget so the evidence upload still runs.
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHARD: ${{ matrix.shard }}
+          TAG: ${{ needs.mcp-read-latency-plan.outputs.tag }}
+          BASE_COMMIT: ${{ needs.mcp-read-latency-plan.outputs.base_commit }}
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py paired --shard "$SHARD" --tag "$TAG" --base-commit "$BASE_COMMIT" --scratch "$RUNNER_TEMP/mcp-read-latency-$SHARD" --output "mcp-read-latency-fragment-$SHARD.json"
+      - name: Retain content-free MCP timings
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          timing_dir="$RUNNER_TEMP/mcp-read-timing-$SHARD"
+          mkdir -p "$timing_dir"
+          for arm in base head; do
+            ledger_path="$RUNNER_TEMP/mcp-read-latency-$SHARD/arms/$arm/logs/ledger.jsonl"
+            if test -f "$ledger_path"; then
+              # The ledger schema fixes these timing fields; exclude arguments, paths and identities.
+              if jq -c '{sequence, ts_utc, tool, outcome, error_code, duration_ms, total_ms,
+                  spans: [.spans[]? | {name, count, ms,
+                    fields: ((.fields // {}) | with_entries(select(.value | type == "number")))}]}' \
+                  "$ledger_path" > "$timing_dir/$arm.jsonl"; then
+                echo 'ledger_read=complete coverage=completed-calls-only' > "$timing_dir/$arm.status"
+              else
+                echo 'ledger_read=partial coverage=completed-calls-only' > "$timing_dir/$arm.status"
+              fi
+            else
+              echo 'ledger_read=missing' > "$timing_dir/$arm.status"
+            fi
+          done
+      - name: Upload content-free MCP timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-read-timings-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mcp-read-timing-${{ matrix.shard }}
+          if-no-files-found: warn
+      - name: Upload the paired fragment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-read-latency-fragment-${{ matrix.shard }}
+          path: mcp-read-latency-fragment-${{ matrix.shard }}.json
+          if-no-files-found: warn
+
+  mcp-read-latency-aggregate:
+    name: MCP read latency verdicts
+    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
+    continue-on-error: true
+    needs: [mcp-read-latency-plan, mcp-read-latency-paired]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Download the paired fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mcp-read-latency-fragment-*
+          merge-multiple: true
+          path: fragments
+      - name: Join the fragments into per-group verdicts
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py aggregate fragments/*.json --output mcp-read-latency-summary.json
+      - name: Upload the summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-read-latency-summary
+          path: mcp-read-latency-summary.json
+          if-no-files-found: warn

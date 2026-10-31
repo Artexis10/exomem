@@ -24,6 +24,7 @@ import json
 import os
 import posixpath
 import secrets
+import shutil
 import stat
 import threading
 import time
@@ -35,11 +36,13 @@ from urllib.parse import urlencode
 
 from . import adopt as adopt_module
 from . import (
+    adoption_consume,
     adoption_plan,
     capabilities,
     context_refs,
     due_state,
     held_fs,
+    import_stage,
     knowledge_packs,
     note_types,
     request_budget,
@@ -57,7 +60,7 @@ SCHEMA_VERSION = 1
 PLAN_FORMAT = 2
 MAX_CANDIDATES_DEFAULT = 5000
 # Where Exomem Cloud stages an uploaded collection (see `cloud_import_job`).
-IMPORT_STAGE_DIR = "_Imports"
+IMPORT_STAGE_DIR = import_stage.STAGE_DIR
 # One `apply` batch holds at most this many items or bytes of originals (the
 # batch writer re-validates the whole batch per write, so cost grows with size).
 # 25 items is about 2-4 s on the measured vaults: a small share of the 50 s call.
@@ -113,7 +116,7 @@ _REASONS = {
     "NOT_IN_INVENTORY": "path is not among the scanned adoption candidates",
     "UNSUPPORTED_IMPORT_TYPE": "the scan did not mark this file importable",
     "ALREADY_GOVERNED": f"path is already inside {kb_dirname()}/",
-    "TOO_LARGE": "file is larger than the artifact ceiling",
+    adoption_plan.OVER_CEILING: "file is larger than the adoption ceiling",
     "NOT_REGULAR_FILE": "only regular files import; links and special files do not",
     "HIDDEN_FOLDER": "hidden folders are not scanned unless include_hidden=true",
     "JUNK": "sync-conflict or zero-byte file; pass include_junk=true or list it in overrides",
@@ -350,6 +353,14 @@ def _count_files(folder: Path) -> int:
     return sum(len(files) for _dirpath, _dirs, files in os.walk(folder))
 
 
+def _order_key(row: dict) -> tuple[int, str]:
+    """A file row's place in the scan: artifacts first, then text, then rows that never import; each by path.
+
+    Artifacts go first so that a note's embeds resolve against imports that already exist.
+    """
+    return (0 if row["form"] == "artifact" else 1 if row["form"] == "text" else 2, row["path"])
+
+
 def build_inventory(
     root: Path,
     *,
@@ -357,23 +368,44 @@ def build_inventory(
     include_hidden: bool = False,
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
     ceiling: int | None = None,
+    after: tuple[int, str] | None = None,
 ) -> tuple[list[dict], int, int]:
-    """Return ``(rows, truncated, hidden_files)`` — every adoption candidate outside the KB.
+    """Return ``(rows, remaining, hidden_files)`` — one page of the adoption candidates outside the KB.
+
+    The page holds at most ``max_candidates`` file rows that follow ``after`` in the scan's order
+    (``_order_key``); ``remaining`` counts the file rows that follow the page. The first page, which has
+    no ``after``, also carries the hidden-folder rows; a later page repeats none of them.
+    ``hidden_files`` counts every hidden file the scan skipped, whatever the page.
+    """
+    files, folders, hidden_files = walk_inventory(
+        root, path=path, include_hidden=include_hidden, ceiling=ceiling
+    )
+    if after is not None:
+        files, folders = [row for row in files if _order_key(row) > after], []
+    return files[:max_candidates] + folders, max(len(files) - max_candidates, 0), hidden_files
+
+
+def walk_inventory(
+    root: Path,
+    *,
+    path: str = "",
+    include_hidden: bool = False,
+    ceiling: int | None = None,
+) -> tuple[list[dict], list[dict], int]:
+    """Return ``(files, folders, hidden_files)`` — every adoption candidate outside the KB, in scan order.
 
     Each file row carries the vault-relative path, byte size, mtime, import
     ``form`` (``text`` for a text-like suffix, ``artifact`` for any other file),
     an ``eligible`` flag, and a machine-readable ``reason`` when ineligible
     (never silently dropped). A skipped hidden folder is one ``kind: folder`` row
-    with its file count, kept outside the cap; ``hidden_files`` counts skipped
-    hidden files. Rows are stat-only (no file reads); per-source sha256 is
-    deferred to ``plan``. File rows are capped at ``max_candidates`` with the
-    overflow reported in ``truncated``.
+    with its file count; ``hidden_files`` counts skipped hidden files. Rows are
+    stat-only (no file reads); per-source sha256 is deferred to ``plan``.
     """
     from . import client_artifacts
 
     root = Path(root)
     kb_name = kb_dirname()
-    limit = client_artifacts.fetch_budget().max_file_bytes if ceiling is None else ceiling
+    limit = client_artifacts.adoption_ceiling() if ceiling is None else ceiling
     scan_root = root if not _clean(path) else (root / _clean(path))
     rows: list[dict] = []
     folders: list[dict] = []
@@ -422,7 +454,7 @@ def build_inventory(
                 if not stat.S_ISREG(st.st_mode):
                     reason = "NOT_REGULAR_FILE"
                 elif st.st_size > limit:
-                    reason = "TOO_LARGE"
+                    reason = adoption_plan.OVER_CEILING
                 # Stat-level junk classification (no reads), mirroring overview's
                 # categories. Rows are the UNCAPPED source of truth for the
                 # selection junk filter; overview's junk path lists are
@@ -435,13 +467,9 @@ def build_inventory(
                     _row(rel, st.st_size, st.st_mtime, eligible=reason is None, reason=reason,
                          junk=junk, suffix=fpath.suffix.lower())
                 )
-    rows.sort(key=lambda r: r["path"])
-    truncated = 0
-    if len(rows) > max_candidates:
-        truncated = len(rows) - max_candidates
-        rows = rows[:max_candidates]
+    rows.sort(key=_order_key)
     folders.sort(key=lambda r: r["path"])
-    return rows + folders, truncated, hidden_files
+    return rows, folders, hidden_files
 
 
 def _row(
@@ -463,11 +491,19 @@ def probe_staleness(root: Path, run: dict) -> list[str]:
     inv = {r["path"]: r for r in run.get("inventory") or []}
     selected = (run.get("selection") or {}).get("paths") or []
     stale: list[str] = []
+    reads = _CallReads()
+    outcomes = run.get("outcomes") or {}
+    items = {item["original_path"]: item for item in (run.get("plan") or {}).get("items") or []}
     for p in selected:
         fpath = root / p
         row = inv.get(p)
         if not fpath.exists():
-            stale.append(p)
+            # Adoption removes a staged copy after it files it; that copy is not missing, it is consumed.
+            # The flag settles it at once; the index is read only for a call that stopped before it saved.
+            if not (outcomes.get(p) or {}).get("consumed") and (
+                p not in items or _filed_and_gone(root, run, reads, items[p]) is None
+            ):
+                stale.append(p)
             continue
         st = fpath.stat()
         if row is None or st.st_size != row.get("bytes") or st.st_mtime != row.get("mtime"):
@@ -622,8 +658,9 @@ def _resolve_classification(
             )
         raise AdoptionRunError(
             "SOURCE_KIND_UNREGISTERED",
-            f"source_kind {kind.key!r} is not in the Source taxonomy; "
-            "register it in _Schema/source-taxonomy.yaml first",
+            f"source_kind {kind.key!r} is not in the Source taxonomy. Select again without source_kind or domain "
+            "to leave the files unclassified. Registering a new kind in _Schema/source-taxonomy.yaml changes the "
+            "person's vocabulary: do it only after they confirm",
         )
     if kind.key in source_taxonomy.UNCHOSEN_KINDS or kind.key == source_taxonomy.EPISODE_KIND:
         raise AdoptionRunError(
@@ -747,6 +784,9 @@ def _present(root: Path, run: dict, **extra) -> dict:
         # The run stores the spelling of the surface that started it; serve this surface's.
         out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
+    cursor = _open_cursor(run, "after")
+    if cursor:
+        out["next_after"] = f"{run['run_id']}:{cursor}"
     # Whenever the run carries a persisted `verify` block (kept current by `apply`
     # from the per-item re-hash of the originals), surface the SAME recorded counts
     # at the top level of every presented document — never a live re-hash. This is
@@ -757,6 +797,7 @@ def _present(root: Path, run: dict, **extra) -> dict:
     if verify:
         out["verified_unchanged"] = verify.get("verified_unchanged")
         out["verified_total"] = verify.get("verified_total")
+        out["consumed"] = verify.get("consumed", 0)
     if isinstance(out.get("finish"), dict):
         out["finish"] = {**out["finish"], "handoff": _handoff(run)}
     out.update(extra)
@@ -788,10 +829,18 @@ def _next_actions(run: dict) -> list[dict]:
              "description": "Commit exactly the previewed imports (echo the plan_id)."}
         )
     elif phase == "applying":
-        actions.append(
-            {"action": "apply", "status": "available",
-             "description": "Apply stopped with work left; call apply again with the continuation."}
-        )
+        stop = run.get("apply_stop")
+        if stop:
+            # Blocked, not available: the continuation that this reply carries stops at the same chunk again.
+            actions.append({"action": "apply", "status": "blocked", "description": stop["next"]})
+        else:
+            actions.append(
+                {"action": "apply", "status": "available",
+                 "description": "Apply stopped with work left; call apply again with the continuation, yourself, "
+                                "not in a background worker. If you stop before remaining is 0, tell the person the "
+                                "applied and remaining counts from progress, that the import is unfinished, and that "
+                                "apply with the run_id, plan_id and continuation resumes it."}
+            )
     elif phase in ("applied", "partial"):
         actions.append(
             {"action": "finish", "status": "available",
@@ -807,7 +856,32 @@ def _next_actions(run: dict) -> list[dict]:
             {"action": "work-item", "status": "available",
              "description": "Load bounded read-only context to submit structured proposals."}
         )
+        actions.extend(_residual_actions((run.get("finish") or {}).get("residual")))
+    if _open_cursor(run, "after"):
+        actions.append(
+            {"action": "start", "status": "available",
+             "description": "More files remain beyond this page. Call start with after set to next_after, "
+                            "and no path or collection. Pages file in order: apply this page before planning the next."}
+        )
     return actions
+
+
+def _residual_actions(residual: dict | None) -> list[dict]:
+    """Review the staged files that remain with the person, then discard; neither while later pages follow.
+
+    A page that later pages follow leaves the review and the discard to the last page, because the folder
+    still holds files that those pages file.
+    """
+    # A run finished before paging existed has no `more_pages` key, and no later page.
+    if not residual or not residual["files"] or residual.get("more_pages"):
+        return []
+    return [
+        {"action": "review-residual", "status": "available",
+         "description": f"{residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
+                        "finish.residual.by_reason says why. Review them with the person before anything is discarded."},
+        {"action": "discard", "status": "available",
+         "description": f"Only after the person agrees, and permanently: {residual['discard']}."},
+    ]
 
 
 def _handoff(run: dict) -> dict:
@@ -911,6 +985,19 @@ def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
+def _recorded_stage(root: Path, source_root: str) -> dict | None:
+    """`{"stage": id, "proof": ...}` when `source_root` lies in an import stage that has a member manifest, else None.
+
+    The manifest itself is read again at each apply, never stored in the run: a discarded stage must stop
+    being consumable at once.
+    """
+    parts = source_root.split("/") if source_root else []
+    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
+        return None
+    stage = import_stage.read(root, parts[1])
+    return None if stage is None else {"stage": stage.import_id, "proof": stage.proof}
+
+
 def _refuse_outside_vault(root: Path, path: str) -> None:
     """Refuse a `start` path that names a place outside the vault, before `_clean` can reshape it.
 
@@ -954,6 +1041,49 @@ def _vault_relative(root: Path, raw: str) -> str | None:
     return relative.as_posix() if relative.parts else None
 
 
+def _page_cursor(root: Path, after: str) -> tuple[dict, str, dict]:
+    """The run that issued the `after` cursor, the cursor's token and its entry.
+
+    The cursor is `<run id>:<token>`. The token is one the run object holds, so a guessed or altered
+    cursor finds nothing and is refused, the same way a continuation cursor is.
+    """
+    run_id, _, token = after.partition(":")
+    try:
+        if not run_id or Path(run_id).name != run_id:
+            raise AdoptionRunError("RUN_NOT_FOUND", "not a run id")
+        source = AdoptionRunStore(root).load(run_id)
+        return source, token, _cursor_entry(source, "after", token)
+    except AdoptionRunError as exc:
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            "no start issued that after cursor; call start without after to scan from the first page",
+        ) from exc
+
+
+def _pinned_scan(entry: dict, path: str, collection: str | None, consume: bool) -> dict:
+    """What the first page fixed for every later page, refusing a call that names something else.
+
+    A caller that opts out of consuming on a later page of a consuming scan is refused, because the pinned
+    choice would otherwise delete the staged copies that the caller asked to keep.
+    """
+    pinned = entry["after"]
+    if _clean(path) not in ("", pinned["path"]) or (
+        (collection or "").strip() and adoption_plan.nfc(collection.strip()) != pinned["collection"]["label"]
+    ):
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            f"that after cursor belongs to the scan of {pinned['path']!r} as collection "
+            f"{pinned['collection']['label']!r}; pass the same path and collection, or neither",
+        )
+    if pinned["consume"] and not consume:
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            "that after cursor belongs to a scan that removes staged copies once filed; "
+            "omit consume, since a later page keeps the choice of the first page",
+        )
+    return pinned
+
+
 def start(
     root: Path,
     *,
@@ -961,9 +1091,24 @@ def start(
     include_hidden: bool = False,
     initialize_kb: bool = False,
     collection: str | None = None,
+    consume: bool = True,
+    after: str | None = None,
+    max_candidates: int = MAX_CANDIDATES_DEFAULT,
     today: dt.date | None = None,
 ) -> dict:
+    """Scan a folder into a run holding one page of candidates; `after` starts the page that follows a cursor.
+
+    While file rows remain beyond `max_candidates`, the reply carries `next_after`. A later page keeps the
+    path, hidden-file choice, `consume` choice, collection root and collection label that the first page
+    fixed, whatever consuming has since done to the stage.
+    """
     root = Path(root)
+    source_run = entry = pinned = None
+    if after:
+        source_run, token, entry = _page_cursor(root, after)
+        pinned = _pinned_scan(entry, path, collection, consume)
+        path, include_hidden = pinned["path"], pinned["include_hidden"]
+        consume, max_candidates = pinned["consume"], pinned["max_candidates"]
     _refuse_outside_vault(root, path)
     run_date = _today(today)
     kb = root / kb_dirname()
@@ -985,8 +1130,9 @@ def start(
     except overview_module.OverviewError as exc:
         raise AdoptionRunError(exc.code, exc.reason) from exc
 
-    rows, truncated, hidden_files = build_inventory(
-        root, path=path, include_hidden=include_hidden
+    rows, remaining, hidden_files = build_inventory(
+        root, path=path, include_hidden=include_hidden, max_candidates=max_candidates,
+        after=None if pinned is None else tuple(pinned["after"]),
     )
     inv_fp = inventory_fingerprint(rows)
     created_iso = _now_iso()
@@ -1003,7 +1149,9 @@ def start(
         "updated": created_iso,
         "phase": "selecting",
         "source_root": source_root,
-        "collection": _collection_of(root, source_root, collection),
+        "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection),
+        "stage": _recorded_stage(root, source_root),
+        "consume": consume,
         "scan_summary": {
             "totals": scan.get("totals", {}),
             "kb": scan.get("kb", {}),
@@ -1013,7 +1161,7 @@ def start(
         },
         "pack_suggestions": knowledge_packs.suggest_packs(scan, limit=6),
         "inventory": rows,
-        "inventory_truncated": truncated,
+        "inventory_truncated": remaining,
         "hidden_files_skipped": hidden_files,
         "inventory_fingerprint": inv_fp,
         "selection": {
@@ -1030,9 +1178,33 @@ def start(
         "cancel": None,
         "errors": [],
     }
+    if remaining or pinned:
+        run["paging"] = {
+            "page": 1 if source_run is None else source_run["paging"]["page"] + 1,
+            "previous": None if source_run is None else source_run["run_id"],
+            "more": bool(remaining), "include_hidden": include_hidden,
+        }
+    if remaining:
+        last = max((row for row in rows if row.get("kind") != "folder"), key=_order_key)
+        issued = _issue_cursor(run, "after")
+        run["cursors"][issued]["after"] = {
+            "after": list(_order_key(last)), "path": source_root, "include_hidden": include_hidden,
+            "consume": consume, "max_candidates": max_candidates, "collection": run["collection"],
+        }
     store = AdoptionRunStore(root)
     with _LOCK:
-        store.save(run)
+        if source_run is None:
+            store.save(run)
+        else:
+            # The cursor turns `used` in the same atomic write that saves the page it opened.
+            source_run = store.load(source_run["run_id"])
+            current = _cursor_entry(source_run, "after", token)
+            if current["state"] == "used":
+                return _present(root, store.load(current["reply"]["run_id"]))
+            current["state"], current["reply"] = "used", {"run_id": run_id}
+            batch_atomic_write(
+                [store.planned_write(run), store.planned_write(source_run)], vault_root=root
+            )
     return _present(root, run)
 
 
@@ -1135,6 +1307,62 @@ def select(
     return _present(root, run, rejected=rejected)
 
 
+def _unapplied(run: dict) -> bool:
+    """Whether the run still has an item to apply: a planned item, or a selected one before a plan, without an applied outcome."""
+    plan = run.get("plan")
+    paths = (
+        [item["original_path"] for item in plan["items"]] if plan
+        else (run.get("selection") or {}).get("paths") or []
+    )
+    outcomes = run.get("outcomes") or {}
+    return any((outcomes.get(path) or {}).get("status") not in _APPLIED_STATUSES for path in paths)
+
+
+def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
+    """The earlier pages of this run's paged scan, nearest first; a page whose record is gone ends the chain."""
+    pages: list[dict] = []
+    previous = (run.get("paging") or {}).get("previous")
+    while previous:
+        try:
+            earlier = store.load(previous)
+        except AdoptionRunError:
+            break
+        pages.append(earlier)
+        previous = (earlier.get("paging") or {}).get("previous")
+    return tuple(pages)
+
+
+def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
+    """The id of the nearest earlier page of this run's collection that still has work to apply, or None.
+
+    A page holds destinations in its plan until it applies them, and a later plan reads the disk, so
+    a later page may plan only after the earlier ones have applied. A finished or cancelled page
+    holds none.
+    """
+    for earlier in _earlier_pages(store, run):  # a page whose record is gone holds no work
+        # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
+        if earlier["phase"] not in ("done", "cancelled") and _unapplied(earlier):
+            return earlier["run_id"]
+    return None
+
+
+def _whole_scan(root: Path, run: dict) -> list[str] | None:
+    """The collection path of every eligible file the scan holds, for a paged run; None for any other.
+
+    Consumed files of earlier pages are no longer on disk, but their Sources are in the import index.
+    """
+    paging = run.get("paging")
+    if not paging:
+        return None
+    files, _folders, _hidden = walk_inventory(
+        root, path=run["source_root"], include_hidden=paging["include_hidden"]
+    )
+    collection_root = (run.get("collection") or {}).get("root", "")
+    return [
+        adoption_plan.collection_path_of(row["path"], collection_root) for row in files if row["eligible"]
+    ]
+
+
 def plan(
     root: Path,
     *,
@@ -1177,6 +1405,13 @@ def plan(
                     "the selection changed or the plan is finished; call plan without a continuation",
                 )
         else:
+            earlier = _earlier_page_unapplied(store, run)
+            if earlier is not None:
+                raise AdoptionRunError(
+                    "EARLIER_PAGE_UNAPPLIED",
+                    f"run {earlier} holds an earlier page of this collection with work still to apply; "
+                    "apply it, or finish or cancel it, before planning this page",
+                )
             entry = None
             _supersede_cursors(run, "plan")
             draft = {
@@ -1193,7 +1428,7 @@ def plan(
         classification = selection.get("classification") or {}
         taxonomy = source_taxonomy.load_taxonomy(root) if classification else None
         inventory = {row["path"]: row for row in run.get("inventory") or []}
-        ceiling = client_artifacts.fetch_budget().max_file_bytes
+        ceiling = client_artifacts.adoption_ceiling()
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
@@ -1241,7 +1476,9 @@ def plan(
             return _present(root, run, **reply)
 
         items = draft["items"]
-        adoption_plan.resolve_links(items, index, collection=collection["label"])
+        adoption_plan.resolve_links(
+            items, index, collection=collection["label"], whole_scan=_whole_scan(root, run)
+        )
         skipped = list(draft["skipped"])
         for planned in items:
             if planned["action"] == "copy-as-source":
@@ -1334,20 +1571,24 @@ def _source_status(outcome: dict) -> str:
 
 
 def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
-    """The original's text (None for an artifact), or a failed outcome when it drifted."""
+    """The original's text (None for an artifact), or a failed outcome when it drifted.
+
+    An artifact is only sized here: the batch hashes its bytes once, as it copies them, and refuses
+    them when they differ from the plan (`_commit_chunk` then finds which item drifted).
+    """
     read = adoption_plan.read_facts(
-        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text"
+        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text",
+        hash_artifact=False,
     )
     if isinstance(read, dict):
-        code = "SOURCE_CHANGED" if read["code"] == "TOO_LARGE" else read["code"]
+        code = "SOURCE_CHANGED" if read["code"] == adoption_plan.OVER_CEILING else read["code"]
         return None, _failed(code, read["reason"])
     facts, text = read
-    if (
-        facts["original_sha256"] != planned["original_sha256"]
-        or facts["original_bytes"] != planned["original_bytes"]
-        or (planned["form"] == "text" and text is None)
+    if facts["original_bytes"] != planned["original_bytes"] or (
+        planned["form"] == "text"
+        and (text is None or facts["original_sha256"] != planned["original_sha256"])
     ):
-        return None, _failed("SOURCE_CHANGED", "sha256 mismatch at apply time")
+        return None, _failed("SOURCE_CHANGED", "the original differs from the plan at apply time")
     return text, None
 
 
@@ -1481,6 +1722,26 @@ def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
     return chunk
 
 
+def _space_shortfall(root: Path, chunk: list[dict]) -> dict | None:
+    """Why the chunk cannot start: its bytes and the import reserve do not fit the vault's free space.
+
+    The reserve is the one setting an import already keeps (`cloud_import.reserve_bytes_from_env`); it also
+    stands for the chunk's derived state (index, graph and sidecars), which is small beside the copy itself.
+    """
+    from . import cloud_import
+
+    needed = sum(planned["original_bytes"] for planned in chunk)
+    reserve = cloud_import.reserve_bytes_from_env()
+    free = shutil.disk_usage(root).free
+    if needed + reserve <= free:
+        return None
+    return {
+        "code": "INSUFFICIENT_SPACE", "chunk_bytes": needed, "reserve_bytes": reserve, "free_bytes": free,
+        "next": "Stop. The continuation stops at this chunk again until the vault's volume has this chunk's bytes "
+                "plus the reserve free. Free space and tell the person, then call apply again: it resumes at this chunk.",
+    }
+
+
 def _request_extraction(root: Path, planned: dict, budget: request_budget.RequestBudget,
                         stats: Counter) -> float | None:
     """Ask for text extraction of a committed media artifact; finish repairs what is missed.
@@ -1522,6 +1783,14 @@ class _CallReads:
     index: list[adoption_plan.EarlierImport] | None = None
     source_counts: dict[str, int] | None = None
     notes: adoption_plan.NoteIndex | None = None
+    stage: import_stage.Stage | None = None
+    stage_read: bool = False
+
+    def recorded_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
+        """The run's stage manifest, read once per call: a manifest can list a million files."""
+        if not self.stage_read:
+            self.stage, self.stage_read = adoption_consume.recorded(root, run), True
+        return self.stage
 
 
 def _commit_chunk(
@@ -1548,7 +1817,8 @@ def _commit_chunk(
         reads.source_counts = None
         reads.index = adoption_plan.read_import_index(root)
         landed: list[dict] = []
-        for planned, _item in survivors:
+        unlanded: list[tuple[dict, adopt_module.ImportItem]] = []
+        for planned, item in survivors:
             earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
@@ -1558,15 +1828,33 @@ def _commit_chunk(
                 _hold_for_note(outcomes[planned["original_path"]], planned)
                 landed.append(planned)
             else:
-                if isinstance(error, adopt_module.AdoptError):
-                    failure = {"code": error.code, "reason": error.reason}
-                elif isinstance(
-                    error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
-                ) or getattr(error, "code", None) == "PATH_GUARD_CONTENT":
-                    failure = adoption_plan.source_failure(error)
-                else:
-                    failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
-                outcomes[planned["original_path"]] = _failed(**failure)
+                unlanded.append((planned, item))
+        if getattr(error, "code", None) == "PATH_GUARD_CONTENT":
+            # The batch hashes each artifact as it copies it and names none when one differs from the
+            # plan. Only now are the artifacts re-hashed, to fail the one that drifted and commit the rest.
+            drifted = [
+                planned for planned, _item in unlanded
+                if planned["form"] == "artifact" and not _original_unchanged(root, planned)
+            ]
+            if drifted and len(drifted) < len(unlanded):
+                for planned in drifted:
+                    outcomes[planned["original_path"]] = _failed(
+                        "SOURCE_CHANGED", "the original differs from the plan at apply time"
+                    )
+                rest = [(planned, item) for planned, item in unlanded if planned not in drifted]
+                return landed + _commit_chunk(
+                    root, store, run, rest, run_date=run_date, label=label, reads=reads
+                )
+        if isinstance(error, adopt_module.AdoptError):
+            failure = {"code": error.code, "reason": error.reason}
+        elif isinstance(
+            error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+        ) or getattr(error, "code", None) == "PATH_GUARD_CONTENT":
+            failure = adoption_plan.source_failure(error)
+        else:
+            failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
+        for planned, _item in unlanded:
+            outcomes[planned["original_path"]] = _failed(**failure)
         return landed
     reads.source_counts = committed["source_counts"]
     return [planned for planned, _item in survivors]
@@ -1590,6 +1878,19 @@ def _apply_chunk(
     for planned in chunk:
         path = planned["original_path"]
         text, failure = _read_original(root, planned, ceiling)
+        if failure is not None and failure["code"] == "NOT_FOUND":
+            # Not a failure when adoption already filed it and removed the staged copy.
+            earlier = _filed_and_gone(root, run, reads, planned)
+            if earlier is not None:
+                outcomes[path] = _already_applied(
+                    earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
+                )
+                if run.get("consume", True):
+                    outcomes[path]["consumed"] = True
+                    stats["consumed"] += 1
+                else:  # a run that opted out claims no removal, and counts its missing copy as changed
+                    _record_unchanged(root, planned, outcomes[path], stats)
+                continue
         if failure is not None:
             outcomes[path] = failure
             continue
@@ -1644,8 +1945,14 @@ def _apply_chunk(
                 reads.index.append(
                     adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
                 )
+    landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
-        _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
+        outcome = outcomes[planned["original_path"]]
+        # A fresh write was hashed by the batch as it was written; a found copy is read back.
+        _settle_staged(
+            root, run, reads, planned, outcome, stats,
+            durable_verified=planned["original_path"] in landed_paths and _source_status(outcome) == "applied",
+        )
     extractions: list[float] = []
     copied: list[str] = []
     for planned in landed:
@@ -1785,6 +2092,56 @@ def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) 
     stats["verified_unchanged"] += int(unchanged)
 
 
+def _filed_and_gone(
+    root: Path, run: dict, reads: _CallReads, planned: dict
+) -> adoption_plan.EarlierImport | None:
+    """The committed Source of an artifact whose staged copy a recorded stage lists, or None.
+
+    The Source is the record that adoption filed the item: a copy that is gone from the stage was
+    removed by this run, by another run, or by a call that stopped before it saved. The caller has
+    already seen that the copy is missing.
+    """
+    stage = reads.recorded_stage(root, run)
+    if (
+        stage is None or planned["form"] != "artifact"
+        or adoption_consume.entry_of(stage, planned["original_path"]) is None
+    ):
+        return None
+    if reads.index is None:
+        reads.index = adoption_plan.read_import_index(root)
+    return _earlier_with_same_bytes(root, reads.index, (run.get("collection") or {}).get("label"), planned)
+
+
+def _settle_staged(
+    root: Path, run: dict, reads: _CallReads, planned: dict, outcome: dict, stats: Counter, *,
+    durable_verified: bool = False,
+) -> None:
+    """Settle one filed item's staged copy: it is gone, removed now, or re-hashed in place.
+
+    A removal needs an artifact item, a recorded stage that lists the file, and a run that did not opt out.
+    The copy is hashed against the manifest and the plan as it goes, so a removed copy is already checked
+    and only a copy that stays is re-hashed. A removal that fails leaves the item applied and not consumed.
+    """
+    if outcome.get("consumed"):
+        return
+    stage = reads.recorded_stage(root, run)
+    if not os.path.lexists(root / planned["original_path"]):
+        # A run that opted out claims no removal; its missing copy is recorded as changed below.
+        consumed = run.get("consume", True) and _filed_and_gone(root, run, reads, planned) is not None
+    else:
+        consumed = (
+            stage is not None and run.get("consume", True) and planned["form"] == "artifact"
+            and (durable_verified or adoption_consume.durable_matches(root, outcome.get("artifact_path"), planned))
+            and adoption_consume.remove_staged(root, stage, planned)
+        )
+    if consumed:
+        outcome["consumed"] = True
+        outcome.pop("original_unchanged", None)
+        stats["consumed"] += 1
+        return
+    _record_unchanged(root, planned, outcome, stats)
+
+
 def _progress(run: dict) -> dict:
     plan_items = (run.get("plan") or {}).get("items") or []
     scope = run.get("scope")
@@ -1807,6 +2164,11 @@ def _verify_counts(outcomes: dict) -> tuple[int, int]:
         if o.get("status") in _APPLIED_STATUSES and "original_unchanged" in o
     ]
     return sum(1 for o in checked if o["original_unchanged"]), len(checked)
+
+
+def _consumed_count(outcomes: dict) -> int:
+    """Items filed whose staged copy is gone because adoption filed it."""
+    return sum(1 for o in outcomes.values() if o.get("status") in _APPLIED_STATUSES and o.get("consumed"))
 
 
 def apply(
@@ -1859,6 +2221,7 @@ def apply(
             "cursors": copy.deepcopy(run.get("cursors")), "inflight": run.get("inflight"),
         }
         stats: Counter = Counter()
+        reads = _CallReads()
         fresh = entry is None
         if fresh:
             _supersede_cursors(run, "apply")
@@ -1879,11 +2242,20 @@ def apply(
                 in_scope = scope is None or path in scope
                 if in_scope and path in by_path and outcomes[path].get("status") in _APPLIED_STATUSES:
                     outcomes[path] = {**outcomes[path], "status": "already-applied"}
-                    _record_unchanged(root, by_path[path], outcomes[path], stats)
+                    _settle_staged(root, run, reads, by_path[path], outcomes[path], stats)
+        else:
+            # A call that stopped between a chunk's commit and its settlement left those items unsettled.
+            for path, outcome in outcomes.items():
+                if (
+                    path in by_path and outcome.get("status") in _APPLIED_STATUSES
+                    and "consumed" not in outcome and "original_unchanged" not in outcome
+                ):
+                    _settle_staged(root, run, reads, by_path[path], outcome, stats)
         run["outcomes"] = outcomes
 
+        run.pop("apply_stop", None)
         budget = _call_budget()
-        ceiling = client_artifacts.fetch_budget().max_file_bytes
+        ceiling = client_artifacts.adoption_ceiling()
         written: list[str] = []
         pending = _pending(run)
         if pending:
@@ -1893,12 +2265,16 @@ def apply(
             run["inflight"] = True
 
         pacer = _ApplyPacer(root, budget)
-        reads = _CallReads()
         stopped = False
         chunks = 0
         while pending:
             chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
+                stopped = True
+                break
+            shortfall = _space_shortfall(root, chunk)
+            if shortfall is not None:
+                run["apply_stop"] = shortfall
                 stopped = True
                 break
             started = time.monotonic()
@@ -1935,11 +2311,13 @@ def apply(
         # The run keeps the cumulative counts; this call reports those of the originals it handled.
         unchanged, checked = _verify_counts(outcomes)
         run["verify"] = {
-            "verified_unchanged": unchanged, "verified_total": checked, "at": _now_iso()
+            "verified_unchanged": unchanged, "verified_total": checked,
+            "consumed": _consumed_count(outcomes), "at": _now_iso(),
         }
         call_counts = {
             "verified_unchanged": stats["verified_unchanged"],
             "verified_total": stats["verified_total"],
+            "consumed": stats["consumed"],
         }
         reply: dict = {
             **call_counts,
@@ -2235,6 +2613,11 @@ def finish(
             )
         recall = _recall_check(root, run)
         coverage = _coverage(root, run, _call_budget())
+        # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
+        removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
+        stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
+        if stage_residual is not None:
+            stage_residual["removed_empty_folders"] = removed_folders
         # The counts the last `apply` recorded from its own re-hash — never a fresh
         # re-hash at finish time, which could disagree with what was verified then.
         verify = run.get("verify") or {}
@@ -2256,6 +2639,8 @@ def finish(
             "handoff": _handoff(run),
             "verified_unchanged": verified_unchanged,
             "verified_total": verified_total,
+            "consumed": _consumed_count(run.get("outcomes") or {}),
+            "residual": stage_residual,
             "manifest_path": manifest_path,
         }
         run["phase"] = "done"

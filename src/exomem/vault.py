@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import Context, ContextVar, copy_context
@@ -237,6 +238,9 @@ _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 
 
+# The vault folder that holds staged imports, one `<import_id>` folder each.
+IMPORT_STAGE_DIRNAME = "_Imports"
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
@@ -341,6 +345,24 @@ def is_lexical_rebuild_runtime_file_name(name: str) -> bool:
     return _LEXICAL_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
+def in_import_stage(rel_path: str) -> bool:
+    """True when a vault-relative path is, or lies inside, a staged import `_Imports/<import_id>`.
+
+    A stage is transient input that adoption files into the Knowledge Base and then discards;
+    indexing it doubles every filed note and, after a large import lands offline, makes readiness
+    wait on a whole-catalogue rebuild over the stage. Only the vault root holds stages, each under
+    an import id, so a person's own `_Imports` folder elsewhere, or a named one at the root, stays
+    indexed.
+    """
+    segments = rel_path.replace("\\", "/").strip("/").split("/")
+    if len(segments) < 2 or segments[0] != IMPORT_STAGE_DIRNAME:
+        return False
+    try:
+        return str(uuid.UUID(segments[1])) == segments[1]
+    except ValueError:
+        return False
+
+
 def in_excluded_scan_dir(rel_path: str) -> bool:
     """True when any segment of `rel_path` is a reserved scan directory.
 
@@ -353,6 +375,8 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
+    if in_import_stage(rel_path):
+        return True
     segments = rel_path.replace("\\", "/").split("/")
     if (
         len(segments) >= 2
@@ -7555,6 +7579,14 @@ def find_inbound_wikilinks(
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
     return _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+
+
+def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them."""
+    data = _inbound_index(vault_root)
+    with _INBOUND_INDEX_LOCK:
+        snapshots = {target: _snapshot_inbound(data, target) for target in targets}
+    return {target: _select_inbound_wikilinks(snapshot, target, None) for target, snapshot in snapshots.items()}
 
 
 def cached_inbound_wikilinks(

@@ -1727,6 +1727,67 @@ class RecallProjectionAdmission:
         return bool(self.lagging_scopes)
 
 
+def _published_catalog_admission(
+    root: Path,
+    *,
+    require_live_projection: bool = False,
+) -> RecallProjectionAdmission | None:
+    """Admit the catalog's own published projection per scope, with no repair.
+
+    The fallback half of :func:`runtime_retrieval_catalog_admission`: every
+    scope needs a well-formed published projection whose policy version and
+    access fingerprint still equal this vault's current identity, and whose
+    semantic catalog identity still matches. A scope whose live projection
+    differs from the published one is reported in ``lagging_scopes``.
+
+    ``require_live_projection`` additionally refuses a scope with no live
+    projection. The request path serves from the published projection then;
+    health does not report that as a lag, because the projection is lost.
+    """
+    from . import freshness as freshness_module
+    from . import recall_policy
+
+    store = get_store(root)
+    identity = recall_policy.recall_policy_identity(root)
+    checkpoints: dict[str, object] = {}
+    lagging: list[str] = []
+    for scope in ("kb", "vault"):
+        published = store.published_recall_checkpoint(scope)
+        if published is None or published.triple is None:
+            return None
+        if (published.policy_version, published.access_policy_fingerprint) != identity:
+            # The projection was published under an access identity this
+            # process no longer has; serving it could disclose pages the
+            # current policy hides. Refuse until republication.
+            return None
+        live = freshness_module.live_recall_checkpoint(root, scope)
+        if require_live_projection and live is None:
+            return None
+        if live is not None and live == published:
+            checkpoints[scope] = live
+            continue
+        checkpoints[scope] = published
+        lagging.append(scope)
+    return RecallProjectionAdmission(checkpoints, tuple(lagging))
+
+
+def served_catalog_lag(vault_root: Path) -> RecallProjectionAdmission | None:
+    """The lag per-request recall can serve, for health to report; else None.
+
+    Called after the strict proof has already failed, so it takes only the
+    published-projection half and schedules no repair. It answers None unless
+    both scopes still have a live projection and a published catalog under an
+    unchanged identity, and at least one scope trails its live projection.
+    """
+    if not maintained_content_index_enabled():
+        # No maintained catalog is served, so nothing trails a projection.
+        return None
+    admission = _published_catalog_admission(Path(vault_root), require_live_projection=True)
+    if admission is None or not admission.lagging_scopes:
+        return None
+    return admission
+
+
 def runtime_retrieval_catalog_admission(
     vault_root: Path,
     *,
@@ -1750,9 +1811,6 @@ def runtime_retrieval_catalog_admission(
     under which those rows still describe what this process may serve. Anything
     else returns None and the caller refuses as before.
     """
-    from . import freshness as freshness_module
-    from . import recall_policy
-
     # Call shape matters, not just the result: the request path has always
     # proved with the vault root alone, and that seam is pinned by callers who
     # substitute their own proof. Only the side-effect-free probe passes the
@@ -1766,29 +1824,11 @@ def runtime_retrieval_catalog_admission(
         return RecallProjectionAdmission(dict(strict), ())
 
     root = Path(vault_root)
-    store = get_store(root)
-    identity = recall_policy.recall_policy_identity(root)
-    checkpoints: dict[str, object] = {}
-    lagging: list[str] = []
-    for scope in ("kb", "vault"):
-        published = store.published_recall_checkpoint(scope)
-        if published is None or published.triple is None:
-            return None
-        if (published.policy_version, published.access_policy_fingerprint) != identity:
-            # The projection was published under an access identity this
-            # process no longer has; serving it could disclose pages the
-            # current policy hides. Refuse until republication.
-            return None
-        live = freshness_module.live_recall_checkpoint(root, scope)
-        if live is not None and live == published:
-            checkpoints[scope] = live
-            continue
-        checkpoints[scope] = published
-        lagging.append(scope)
-    if schedule_repair:
+    admission = _published_catalog_admission(root)
+    if admission is not None and schedule_repair:
         # Serving stale is a bridge, not a resting state: keep converging.
         _schedule_runtime_catalog_repair(root, lag_only=True)
-    return RecallProjectionAdmission(checkpoints, tuple(lagging))
+    return admission
 
 
 def runtime_retrieval_catalog_current(
@@ -6331,14 +6371,14 @@ class LexicalStore:
         """Would each walk yield this file? Single-file replay of the walks'
         directory skip rules, so hook-written rows match a rebuild's."""
         from . import find as find_module
-        from .vault import VAULT_SCAN_SKIP_DIRS
+        from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
 
         try:
             rel_parts = path.resolve().relative_to(self.vault_root.resolve()).parts
         except ValueError:
             return False, False
         dirs = rel_parts[:-1]
-        in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs)
+        in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage("/".join(dirs))
         in_kb = (
             len(rel_parts) > 1
             and rel_parts[0] == kb_dirname()
@@ -9263,18 +9303,21 @@ class LexicalStore:
     ) -> dict[str, bool]:
         """Compare stored rows against the exact bytes each identity names.
 
-        The catalogue stores no content digest, so the comparison is made
-        against everything it derives from a page's bytes and then serves:
-        title, ``updated``, the emitted-parent link, and the trigram lane's
-        lowercased title and body. Naming the expected sha256 keeps that exact
-        -- the file must hash to it before its parse is compared -- so a row
-        built from a different generation cannot answer yes.
+        The comparison covers everything the catalogue derives from a page's
+        bytes and then serves: title, ``updated``, the emitted-parent link,
+        every eligibility column with ``content_hash`` (the row
+        `_catalogue_custody_verify` compares), and the trigram lane's
+        lowercased title and body. The file must hash to the expected sha256
+        before its parse is compared, so a row built from a different
+        generation cannot answer yes -- including one that differs only in a
+        filter column such as ``status``, which no text column shows.
         """
         answers = dict.fromkeys(expected, False)
         if self._failed or not self.path.exists():
             return answers
         from . import find_corpus
 
+        eligibility = ", ".join(f"p.{column}" for column in (*_ELIGIBILITY_COLUMNS, "content_hash"))
         try:
             conn = self._connect()
         except sqlite3.Error as error:
@@ -9285,8 +9328,8 @@ class LexicalStore:
                 return answers
             for rel, digest in expected.items():
                 row = conn.execute(
-                    "SELECT p.rowid, p.title, p.updated, p.emitted_parent_path "
-                    "FROM pages AS p WHERE p.path = ?",
+                    "SELECT p.rowid, p.title, p.updated, p.emitted_parent_path, "  # noqa: S608 - fixed names
+                    f"{eligibility} FROM pages AS p WHERE p.path = ?",
                     (rel,),
                 ).fetchone()
                 if digest is None:
@@ -9310,10 +9353,12 @@ class LexicalStore:
                     continue
                 expected_title = page.title
                 expected_parent = page.parent_media + ".md" if page.parent_media else None
+                stored_eligibility = tuple(None if value is None else str(value) for value in row[4:])
                 if (
                     row[1] != expected_title
                     or str(row[2]) != (page.updated or "0000-00-00")
                     or row[3] != expected_parent
+                    or stored_eligibility != (*_eligibility_columns(page), digest)
                 ):
                     continue
                 if fts5_available():

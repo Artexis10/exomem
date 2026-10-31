@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, relation_registry
+from exomem import commands, epistemic_graph, find, relation_registry
 from exomem.governance.principal import library_scope
 
 
@@ -178,3 +178,83 @@ def test_resolve_relation_labels_every_row_beside_its_unchanged_key(vault: Path)
     candidate = result["candidates"][0]
     assert (candidate["key"], candidate["canonical"]) == ("vault.has_pet", "vault.has_pet")
     assert candidate["relation_label"] == "has_pet (a kind of owns)"
+
+
+# --- The payloads Studio renders ------------------------------------------- #
+# Studio shows `relation_label` and falls back to the key without one, so a
+# producer that drops the label degrades silently to the key.
+
+INSIGHTS = "Knowledge Base/Notes/Insights"
+
+
+def _seed_settles(vault: Path) -> None:
+    """`hive` settles `swarm` through a unit relation spelled with a vault extension's alias."""
+    schema = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    schema.write_text(
+        "schema_version: 1\nextensions:\n  vault.settles:\n    parent: answers\n"
+        "    description: Settles an open question.\n    aliases: [settles]\n",
+        encoding="utf-8",
+    )
+    pages = {
+        "swarm": "Do hot hives swarm earlier?",
+        "hive": f"## Claim\n- id: c-1\n- relations: settles: [[{INSIGHTS}/swarm]]\n\nShade settles it.",
+    }
+    for name, body in pages.items():
+        path = vault / INSIGHTS / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\nstatus: active\n---\n# {name} note\n\n{body}\n", encoding="utf-8"
+        )
+    find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+
+def test_a_relation_queue_item_reads_as_the_meaning_its_spelling_authors(tmp_path: Path) -> None:
+    _seed_settles(tmp_path)
+
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+
+    lifted = next(
+        item
+        for group in queue["groups"]
+        for item in group["items"]
+        if item["method"] == "unit_relation_lift"
+    )
+    assert (lifted["relation_type"], lifted["relation_label"]) == (
+        "settles",
+        "settles (a kind of answers)",
+    )
+
+
+def test_a_suggested_relation_reads_as_the_meaning_its_spelling_authors(tmp_path: Path) -> None:
+    _seed_settles(tmp_path)
+
+    candidates = commands.op_connect_memory(
+        tmp_path, operation="suggest-relations", path=f"{INSIGHTS}/hive.md"
+    )["candidates"]
+
+    lifted = next(item for item in candidates if item["method"] == "unit_relation_lift")
+    assert (lifted["relation_type"], lifted["relation_label"]) == (
+        "settles",
+        "settles (a kind of answers)",
+    )
+
+
+def test_a_review_context_graph_edge_keeps_its_label_beside_the_key(tmp_path: Path) -> None:
+    _seed_settles(tmp_path)
+    item = next(
+        item
+        for item in commands.op_review_memory(tmp_path, mode="attention")["items"]
+        if item["path"].endswith("swarm.md")
+    )
+
+    context = commands.op_review_item_context(
+        tmp_path, ref=item["ref"], expected_fingerprint=item["fingerprint"]
+    )
+
+    edge = next(edge for edge in context["graph"]["edges"] if edge["src_key"].startswith("block:"))
+    assert (edge["relation_type"], edge["relation_label"]) == (
+        "vault.settles",
+        "settles (a kind of answers)",
+    )

@@ -413,12 +413,15 @@ def _resolve(session, *, force=False):
             if staged is not None:
                 # The same held leaf survives, but install/restamp must not retain a SQLite reader.
                 staged.close_reader()
+            # Hashing the replica for a same-head re-admission stays outside the boundary.
+            unchanged = takeover.unchanged_replica(session, recorded, local) if action == "admit" else None
             # nosemgrep: ep-word-membership -- takeover.decide returns these action tokens.
             if action in {"admit", "adopt", "continue"} or (
                     action == takeover.DIVERGED and local is not None and not diverged):
                 try:
                     with manager.consistency_guard(session.root, operation="collection_store_takeover"):
-                        action, reason = _settle(session, runtime, token, facts, staged, action, reason, check)
+                        action, reason = _settle(session, runtime, token, facts, staged, action, reason, check,
+                                                 unchanged=unchanged)
                 except CollectionStoreError as error:
                     # BUSY is retried on next use, as Pending does; any other refusal waits until it is due.
                     if error.code != takeover.BUSY:
@@ -1165,7 +1168,7 @@ def _takeover_facts(session, runtime, token, raw, marker, fence):
     return facts, diverged, signature
 
 
-def _settle(session, runtime, token, facts, staged, action, reason, check):
+def _settle(session, runtime, token, facts, staged, action, reason, check, *, unchanged=None):
     """Under the boundary: revalidate cheaply what the decision read, then apply it."""
     manager = session.manager
     state_migration._require_collection_store_recovery(session, token)
@@ -1209,7 +1212,7 @@ def _settle(session, runtime, token, facts, staged, action, reason, check):
         except OSError:
             # Atomic publication can finish before durability reports an error; the same canonical marker retries next use.
             return takeover.BUSY, "marker ownership publication is pending"
-        published = _publish_current_epoch(session, writer, token)
+        published = _publish_current_epoch(session, writer, token, unchanged=unchanged)
     if published.status == "published":
         # Record this instance's head now, so the next holder adopts this replica.
         manager._renew_collection_store(token)
@@ -1325,7 +1328,7 @@ def _publication_authority(session, token):
     return check
 
 
-def _publish_current_epoch(session, writer, token):
+def _publish_current_epoch(session, writer, token, *, unchanged=None):
     from . import legacy_originals
 
     manager = session.manager
@@ -1334,6 +1337,18 @@ def _publish_current_epoch(session, writer, token):
     if not _publication_custody(session, token):
         return replica.PublicationResult("custody_unverified", reason=session.custody_reason)
     legacy_originals.backfill(writer, lambda: session.require(token))
+    if (unchanged is not None
+            and replica.published_evidence(legacy_originals.metadata(writer.connection)) == unchanged.evidence
+            and takeover.replica_witness(session.root) == unchanged.witness
+            and not legacy_originals.needs_replica_copy(session.root, writer.connection)):
+        # The replica already carries this head under the stored epoch, which every later
+        # grant exceeds; a new epoch would only force a copy no adopter reads (A3). No copy
+        # is made, so no new published head needs checking against the chain.
+        head = json.loads(unchanged.evidence[0])
+        with manager._report_lock:
+            session.require(token)
+            manager._collection_store.record_admission(token)
+        return replica.PublicationResult("published", head["commit_seq"], head["head_hash"])
     pending = replica.recover_replica(session.root, writer.handle, authority_check=check, deadline=deadline)
     if pending.status != "published" and (pending.reason is not None or writer.connection.execute(
         "SELECT 1 FROM store_meta WHERE key=?", (schema.META_PENDING_REPLICA_PUBLICATION,),
