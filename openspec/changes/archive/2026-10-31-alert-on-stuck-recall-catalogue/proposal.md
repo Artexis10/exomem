@@ -49,7 +49,9 @@ carries MCP without weakening that boundary.
 ## Impact
 
 - Cell: `src/exomem/cloud_health.py`, `cloud_cell.py`, `server.py`, `server_assets.py`.
-- cellctl: `alerts.py`, `reconcile.py`, `k8s_client.py`, `manifests.py`, `state.py`, `main.py`.
+- cellctl: `alerts.py`, `recall_lag.py`, `reconcile.py`, `k8s_client.py`, `manifests.py`, `state.py`, `main.py`.
+  `recall_lag.py` imports only the standard library, so `tests/test_runtime_readiness.py`
+  loads it by path and judges the payload that the cell builds.
 - Chart: `templates/cellctl.yaml`, the observability contract copy and its digest in `values.yaml`.
 - Contract: `infra/contracts/observability-v1.json` gains `alerts.recall_lag_warn_seconds`.
 - Runbook: `docs/runbooks/cloud-dedicated-host.md` gains "Cell recall lagging".

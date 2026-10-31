@@ -319,10 +319,11 @@ async def test_a_cell_whose_recall_lags_past_the_threshold_fires_and_catching_up
         None,  # the pod does not answer, or answers 503
         _lagging(None),  # the cell lags but has no age to report
         b"[" * 50_000,  # an answer nested deeper than the JSON parser recurses
+        _lagging(10**400),  # an age no float can hold, which a compromised cell can send
     ],
-    ids=["no-answer", "lag-with-no-age", "garbled-answer"],
+    ids=["no-answer", "lag-with-no-age", "garbled-answer", "hostile-age"],
 )
-async def test_a_cell_that_cannot_be_judged_never_resolves_a_firing_alert(
+async def test_a_missing_unreadable_or_hostile_answer_never_resolves_a_firing_alert(
     cell_db: CellDatabase, delivered: list[tuple[str, bool]], answer: bytes | None
 ) -> None:
     await _seed_cell(cell_db, CELL, "tenant-a")

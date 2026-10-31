@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import importlib.util
+import json
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from exomem.runtime_readiness import (
     HTTP_TRANSPORT,
+    RETRIEVAL_STATE_LAGGING,
     RUNTIME_CONTRACT,
     build_runtime_readiness,
 )
+
+# cellctl's reader of this payload for its cell-recall-lagging alert; it imports
+# only the standard library, so this suite loads it by path.
+CELLCTL_RECALL_LAG = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "recall_lag.py"
 
 
 def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
@@ -213,6 +221,43 @@ def test_a_served_catalogue_lag_is_ready_and_adds_no_takeover_reason() -> None:
         "catalogue_unchanged_seconds": 12.346,
     }
     assert "must-not-leak" not in repr(snapshot)
+
+
+def test_cellctl_judges_the_recall_lag_in_the_answer_a_cell_builds() -> None:
+    """Defect: this payload's retrieval fields drift from cellctl's reader, so
+    the cell-recall-lagging alert stays silent through every stall or never clears."""
+    spec = importlib.util.spec_from_file_location("cellctl_recall_lag", CELLCTL_RECALL_LAG)
+    assert spec is not None and spec.loader is not None
+    reader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reader)
+
+    def answer(retrieval: dict[str, object]) -> bytes:
+        return json.dumps(
+            build_runtime_readiness(
+                coordination={
+                    "enabled": False,
+                    "role": "standalone",
+                    "replica_id": None,
+                    "coordinator_healthy": True,
+                },
+                release="1.2.3",
+                mcp_tool_surface_sha256="d" * 64,
+                retrieval=retrieval,
+            )
+        ).encode()
+
+    stalled = answer(
+        {
+            "state": RETRIEVAL_STATE_LAGGING,
+            "admitted": True,
+            "lagging_scopes": ["kb"],
+            "catalogue_unchanged_seconds": 3600,
+        }
+    )
+    caught_up = answer({"state": "ready", "admitted": True})
+
+    assert reader.recall_lag_verdict(stalled, after=timedelta(minutes=10)) is True
+    assert reader.recall_lag_verdict(caught_up, after=timedelta(minutes=10)) is False
 
 
 def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:

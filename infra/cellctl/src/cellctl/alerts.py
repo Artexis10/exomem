@@ -62,10 +62,6 @@ DISK_LOW_ALERT = "cell-disk-low"
 # A serving cell whose recall serves a catalogue that has not advanced, read
 # from the cell's own readiness answer.
 RECALL_LAG_ALERT = "cell-recall-lagging"
-# `retrieval.state` values of that answer (exomem's runtime_readiness), a
-# closed protocol set this package cannot import; any other value is unread.
-RECALL_READY = "ready"
-RECALL_LAGGING = "lagging"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
@@ -164,40 +160,9 @@ def disk_low(rows: Iterable[CellRow], free_bytes: Mapping[str, int], *, floor: i
     return None if unmeasured else False
 
 
-def recall_lag_verdict(body: bytes, *, after: timedelta) -> bool | None:
-    """Whether one cell's readiness answer shows its recall serving a
-    catalogue unchanged for at least `after`. Only `retrieval.state` and
-    `retrieval.catalogue_unchanged_seconds` are read, and the body is never logged.
-
-    False only when recall reads strictly ready, which the cell answers only
-    once its catalogue has caught up. A lag younger than `after`, or with no
-    age, is unknown (None): the cell measures the age from when its own
-    process first saw that catalogue, so a cell restarted during a stall
-    reports a young age for an old stall, and a RESOLVED then would end an
-    alert while the stall goes on. An answer that cannot be read is unknown too."""
-
-    try:
-        payload = json.loads(body)
-    # RecursionError: a cell's answer is not trusted, and deep nesting must not take the pass down.
-    except (ValueError, RecursionError):
-        return None
-    retrieval = payload.get("retrieval") if isinstance(payload, dict) else None
-    if not isinstance(retrieval, dict):
-        return None
-    state = retrieval.get("state")
-    if state == RECALL_READY:
-        return False
-    if state != RECALL_LAGGING:
-        return None
-    age = retrieval.get("catalogue_unchanged_seconds")
-    if isinstance(age, bool) or not isinstance(age, int | float) or not math.isfinite(age):
-        return None
-    return True if age >= after.total_seconds() else None
-
-
 def recall_lagging_cells(rows: Iterable[CellRow], verdicts: Mapping[str, bool | None]) -> list[str]:
     """Serving cells whose last readiness answer showed recall lagging past
-    the threshold (recall_lag_verdict). `verdicts` lives in cellctl's memory."""
+    the threshold (recall_lag.recall_lag_verdict). `verdicts` lives in cellctl's memory."""
 
     return sorted(row.cell_id for row in rows if row.desired_state in SERVING_STATES and verdicts.get(row.cell_id))
 

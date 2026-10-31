@@ -24,7 +24,7 @@ from pathlib import Path
 import asyncpg
 from kubernetes.client.rest import ApiException
 
-from . import alerts, db
+from . import alerts, db, recall_lag
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -322,7 +322,7 @@ class LoopMemory:
     unavailable_cells: list[str] = field(default_factory=list)
     low_disk_cells: list[str] = field(default_factory=list)
     # The cell-recall-lagging alert: when the cells' readiness was last read,
-    # each serving cell's verdict from that read (alerts.recall_lag_verdict), and
+    # each serving cell's verdict from that read (recall_lag.recall_lag_verdict), and
     # the (lagging, unjudged) cells last logged. A restart forgets them, and the
     # alert sends nothing until every serving cell is judged again.
     recall_read_at: datetime | None = None
@@ -1886,10 +1886,15 @@ async def _recall_lag_alert(
             except Exception as error:  # noqa: BLE001 - every cell then reads as unjudged
                 logger.error("cellctl: %s: no cell readiness could be read: %s", alerts.RECALL_LAG_ALERT,
                              _describe_error(error))
-        memory.recall_verdicts = {
-            cell: alerts.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
-            for cell in addresses
-        }
+        verdicts: dict[str, bool | None] = {}
+        for cell in addresses:
+            try:
+                verdicts[cell] = recall_lag.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
+            except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
+                logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
+                             alerts.RECALL_LAG_ALERT, cell, _describe_error(error))
+                verdicts[cell] = None
+        memory.recall_verdicts = verdicts
     lagging = alerts.recall_lagging_cells(rows, memory.recall_verdicts)
     unjudged = sorted(
         row.cell_id for row in rows
