@@ -25,18 +25,21 @@ carries MCP without weakening that boundary.
   that rule and refuses cellctl on the cell port, any other peer and any other
   port. cellctl's egress gains TCP 8766 to cell runtime pods only.
 - cellctl reads each serving cell's readiness once a minute on the ready pod's
-  own IP, all cells at once, with a 3 s bound and a 64 KiB cap per cell. It
+  own IP, all cells at once on one connection each, with a 3 s bound and a 64 KiB cap per cell. It
   parses only the two fields above and never logs the answer.
 - cellctl raises `cell-recall-lagging` through the existing alert receiver
   while a serving cell lags on a catalogue unchanged for at least
   `alerts.recall_lag_warn_seconds`, 900 s in the observability contract. The
   chart renders the threshold into cellctl's environment, and cellctl refuses
   to start without it.
-- Decision: the alert resolves only when the cell reads `retrieval.state`
-  `ready`. The cell measures the age from when its own process first saw the
-  catalogue, so a cell restarted during a stall reports a young age for an old
-  stall. A younger lag, a lag with no age, a cell with no ready pod and a cell
-  that does not answer each leave the alert unchanged.
+- Decision: each serving cell keeps its last definite verdict, lagging past
+  the threshold or `retrieval.state` `ready`. The cell measures the age from
+  when its own process first saw the catalogue, so a cell restarted during a
+  stall reports a young age for an old stall. A younger lag, a lag with no age,
+  a cell with no ready pod and a cell that does not answer keep that cell's last
+  verdict. The alert resolves when every serving cell's last verdict is `ready`,
+  and sends no resolution while a serving cell has had no verdict since cellctl
+  started. A cell that leaves service forgets its verdict.
 - The render version changes, so every cell restarts once on rollout.
 
 ## Capabilities
@@ -49,9 +52,10 @@ carries MCP without weakening that boundary.
 ## Impact
 
 - Cell: `src/exomem/cloud_health.py`, `cloud_cell.py`, `server.py`, `server_assets.py`.
-- cellctl: `alerts.py`, `recall_lag.py`, `reconcile.py`, `k8s_client.py`, `manifests.py`, `state.py`, `main.py`.
-  `recall_lag.py` imports only the standard library, so `tests/test_runtime_readiness.py`
-  loads it by path and judges the payload that the cell builds.
+- cellctl: `alerts.py`, `cell_readiness.py`, `reconcile.py`, `k8s_client.py`, `manifests.py`, `state.py`, `main.py`.
+  `cell_readiness.py` holds the listener's port, its setting name, the path and the verdict. It imports
+  only the standard library, so the product suite loads it by path, starts the listener by those names
+  and judges the payload that the cell builds.
 - Chart: `templates/cellctl.yaml`, the observability contract copy and its digest in `values.yaml`.
 - Contract: `infra/contracts/observability-v1.json` gains `alerts.recall_lag_warn_seconds`.
 - Runbook: `docs/runbooks/cloud-dedicated-host.md` gains "Cell recall lagging".

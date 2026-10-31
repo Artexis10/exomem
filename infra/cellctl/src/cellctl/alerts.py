@@ -160,19 +160,20 @@ def disk_low(rows: Iterable[CellRow], free_bytes: Mapping[str, int], *, floor: i
     return None if unmeasured else False
 
 
-def recall_lagging_cells(rows: Iterable[CellRow], verdicts: Mapping[str, bool | None]) -> list[str]:
-    """Serving cells whose last readiness answer showed recall lagging past
-    the threshold (recall_lag.recall_lag_verdict). `verdicts` lives in cellctl's memory."""
+def recall_lagging_cells(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> list[str]:
+    """Serving cells whose last definite verdict (cell_readiness.recall_lag_verdict)
+    showed recall lagging past the threshold. `verdicts` lives in cellctl's memory."""
 
     return sorted(row.cell_id for row in rows if row.desired_state in SERVING_STATES and verdicts.get(row.cell_id))
 
 
-def recall_lagging(rows: Iterable[CellRow], verdicts: Mapping[str, bool | None]) -> bool | None:
-    """Whether any serving cell's recall has lagged past the threshold.
-    Unknown (None), never "resolved", while a serving cell has no verdict or
-    an unknown one: after a cellctl restart until each cell is read again,
-    while a cell has no ready pod or does not answer, and while a lag is too
-    young to judge. False only when every serving cell reads strictly ready."""
+def recall_lagging(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> bool | None:
+    """Whether any serving cell's recall has lagged past the threshold, from
+    each serving cell's last definite verdict. Unknown (None), never
+    "resolved", while a serving cell has no verdict yet: after a cellctl
+    restart, a cell may report a young lag for an old stall until its age
+    reaches the threshold or it reads ready. False only when every serving
+    cell's last definite verdict is strictly ready."""
 
     serving = [verdicts.get(row.cell_id) for row in rows if row.desired_state in SERVING_STATES]
     if True in serving:

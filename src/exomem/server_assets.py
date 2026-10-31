@@ -100,6 +100,8 @@ HEALTH_SNAPSHOT_TTL_SECONDS = 60.0
 # A refresh in flight longer than this means a read is wedged (a hung
 # filesystem): /health then answers 503 instead of serving a stale 200.
 HEALTH_REFRESH_WEDGED_SECONDS = 120.0
+# The readiness route. A Cloud cell also serves it on its health-only port (`cloud_health`).
+READINESS_PATH = "/health/ready"
 # How long a ready proof answers `/health/ready` before a probe proves again.
 # A not-ready proof is never reused. The kubelet probes every 5 s, and each
 # proof costs a coordination thread, a catalogue open and a log-directory write.
@@ -347,7 +349,7 @@ def register_health_routes(
             background=(BackgroundTask(on_liveness) if on_liveness is not None else None),
         )
 
-    @mcp_app.custom_route("/health/ready", methods=["GET"])
+    @mcp_app.custom_route(READINESS_PATH, methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001
         """Content-free admission probe; liveness remains the separate /health route.
 

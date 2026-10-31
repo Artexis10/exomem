@@ -383,8 +383,11 @@ def test_cloud_health_port_answers_readiness_and_nothing_else(
     """The platform operator derives every cell bearer, so a network policy
     opens only the cell's health-only port to it. That port must answer what
     `/health/ready` answers on the MCP port, and refuse every other method and
-    path, MCP included, even with the cell's own bearer."""
+    path, MCP included, even with the cell's own bearer. The env name and
+    the path are cellctl's own, so a rename on either side fails here."""
     import socket
+
+    from cellctl_cell_readiness import cell_readiness
 
     from exomem import readiness
 
@@ -393,7 +396,7 @@ def test_cloud_health_port_answers_readiness_and_nothing_else(
     )
     with socket.create_server(("127.0.0.1", 0)) as probe:
         port = probe.getsockname()[1]
-    monkeypatch.setenv("EXOMEM_CLOUD_HEALTH_PORT", str(port))
+    monkeypatch.setenv(cell_readiness.CELL_HEALTH_PORT_ENV, str(port))
     _spy_dotenv(monkeypatch)
     _cloud_env(monkeypatch)
     mcp = server.build_server(require_auth=True, http_host="127.0.0.1")
@@ -408,8 +411,8 @@ def test_cloud_health_port_answers_readiness_and_nothing_else(
                     ) as main_port,
                     httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as health_port,
                 ):
-                    on_main = await main_port.get("/health/ready")
-                    on_health = await health_port.get("/health/ready")
+                    on_main = await main_port.get(cell_readiness.CELL_READINESS_PATH)
+                    on_health = await health_port.get(cell_readiness.CELL_READINESS_PATH)
                     refused = {
                         "GET /health": await health_port.get("/health"),
                         "POST /mcp": await health_port.post(

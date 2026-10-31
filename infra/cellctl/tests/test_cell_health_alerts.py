@@ -11,6 +11,7 @@ from __future__ import annotations
 import http.server
 import json
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
@@ -38,6 +39,7 @@ CONFIG = ClusterConfig(
 )
 UNREADY = {"pod_ready": False}
 POD_IP = "10.42.0.7"
+OTHER_CELL, OTHER_POD_IP = "bbbbbbbbbbbbbbbb", "10.42.0.8"
 
 
 class Cluster(FakeClusterGateway):
@@ -345,7 +347,67 @@ async def test_a_missing_unreadable_or_hostile_answer_never_resolves_a_firing_al
     assert _states(delivered, alerts.RECALL_LAG_ALERT) == [True]
 
 
-async def test_a_cell_with_no_ready_pod_is_unjudged_not_clean(
+@pytest.mark.parametrize(
+    "later",
+    [
+        _lagging(5),  # a busy catalogue lags briefly and often
+        None,  # the pod stops answering, or loses readiness
+    ],
+    ids=["brief-lag", "no-answer"],
+)
+async def test_a_cell_that_catches_up_resolves_while_another_says_nothing_new(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], later: bytes | None
+) -> None:
+    # The other cell read strictly ready once; a later answer that cannot be
+    # judged says nothing new about it, so it must not hold the resolution back.
+    await _seed_cell(cell_db, CELL, "tenant-a")
+    await _seed_cell(cell_db, OTHER_CELL, "tenant-b")
+    connection = await _connect(cell_db)
+    cluster, memory = Cluster(), LoopMemory()
+    cluster.observations[CELL] = _served(CELL, ready_pod_ip=POD_IP)
+    cluster.observations[OTHER_CELL] = _served(OTHER_CELL, ready_pod_ip=OTHER_POD_IP)
+    try:
+        cluster.readiness[POD_IP] = _lagging(3600)
+        cluster.readiness[OTHER_POD_IP] = _answer("ready")
+        await _pass(connection, cluster, memory, NOW)
+        if later is None:
+            del cluster.readiness[OTHER_POD_IP]
+        else:
+            cluster.readiness[OTHER_POD_IP] = later
+        cluster.readiness[POD_IP] = _answer("ready")
+        await _pass(connection, cluster, memory, NOW + timedelta(minutes=1))
+    finally:
+        await connection.close()
+
+    assert _states(delivered, alerts.RECALL_LAG_ALERT) == [True, False]
+
+
+async def test_a_stalled_cell_stopped_and_started_again_is_judged_afresh(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]]
+) -> None:
+    # The started cell runs a new process that reports a young lag: its stall
+    # before the stop is not evidence about the catalogue it serves now.
+    await _seed_cell(cell_db, CELL, "tenant-a")
+    connection = await _connect(cell_db)
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    cluster, memory = Cluster(), LoopMemory()
+    cluster.observations[CELL] = _served(CELL, ready_pod_ip=POD_IP)
+    try:
+        cluster.readiness[POD_IP] = _lagging(3600)
+        await _pass(connection, cluster, memory, NOW)
+        await owner.execute("UPDATE exomem_cloud_cells SET desired_state = 'stopped' WHERE cell_id = $1", CELL)
+        await _pass(connection, cluster, memory, NOW + timedelta(minutes=1))
+        await owner.execute("UPDATE exomem_cloud_cells SET desired_state = 'running' WHERE cell_id = $1", CELL)
+        cluster.readiness[POD_IP] = _lagging(30)
+        await _pass(connection, cluster, memory, NOW + timedelta(minutes=2))
+    finally:
+        await owner.close()
+        await connection.close()
+
+    assert _states(delivered, alerts.RECALL_LAG_ALERT) == [True, False]
+
+
+async def test_a_stalled_cell_with_no_ready_pod_keeps_its_last_verdict(
     cell_db: CellDatabase, delivered: list[tuple[str, bool]]
 ) -> None:
     # A stuck cell that goes unready has no pod to read. The cell-unavailable
@@ -426,3 +488,36 @@ def test_the_readiness_read_asks_the_health_port_for_readiness_and_drops_a_not_r
     assert asked == ["/health/ready", "/health/ready"]
     assert ready == {CELL: _lagging(30)}
     assert not_ready == {}
+
+
+def test_a_fleet_read_gives_every_cell_the_whole_budget_however_many_cells_there_are(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each answer takes most of the budget. Reads queued behind a connection
+    # cap would run out of time, and the cells at the tail would go unjudged.
+    cells = {f"{index:016x}": "127.0.0.1" for index in range(150)}
+
+    class SlowCell(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - the http.server hook name
+            time.sleep(k8s_client.READINESS_TIMEOUT * 2 / 3)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(_answer("ready"))
+
+        def log_message(self, *args) -> None:
+            pass
+
+    class Server(http.server.ThreadingHTTPServer):
+        request_queue_size = len(cells)  # every cell connects at once
+
+    server = Server(("127.0.0.1", 0), SlowCell)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(k8s_client, "CELL_HEALTH_PORT", server.server_address[1])
+    client = k8s_client.ClusterClient.__new__(k8s_client.ClusterClient)
+    try:
+        answers = client.read_cell_readiness(cells)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert sorted(answers) == sorted(cells)

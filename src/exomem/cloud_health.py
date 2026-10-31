@@ -19,7 +19,7 @@ import uvicorn
 from starlette.requests import Request
 from starlette.responses import Response
 
-READINESS_PATH = "/health/ready"
+from .server_assets import READINESS_PATH
 
 Readiness = Callable[[Request], Awaitable[Response]]
 

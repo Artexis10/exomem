@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .backup_source import VAULT_CHECK_COMMAND
+from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .storage.topolvm import FamilyRequest
 from .storage_config import LEGACY_CLASS
 
@@ -33,11 +34,6 @@ GATEWAY_NAMESPACE = "exomem-cloud"
 GATEWAY_POD_LABEL = "app.kubernetes.io/name"
 GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
-# The cell's health-only listener: `GET /health/ready` and nothing else. cellctl
-# derives every cell bearer, so it reads readiness here and never on CELL_PORT.
-CELL_HEALTH_PORT = 8766
-CELL_HEALTH_PORT_ENV = "EXOMEM_CLOUD_HEALTH_PORT"
-CELL_READINESS_PATH = "/health/ready"
 # cellctl runs in GATEWAY_NAMESPACE; the chart schema pins that namespace.
 CELLCTL_POD_LABEL_VALUE = "cellctl"
 ARTIFACT_BROKER_PORT = 8767
@@ -960,7 +956,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                                 **_container_security_context(),
                             },
                             "readinessProbe": {
-                                "httpGet": {"path": "/health/ready", "port": "http"},
+                                "httpGet": {"path": CELL_READINESS_PATH, "port": "http"},
                                 "periodSeconds": 5,
                                 "timeoutSeconds": 2,
                                 "failureThreshold": 2,

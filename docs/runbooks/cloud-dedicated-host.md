@@ -452,9 +452,12 @@ and `retrieval.catalogue_unchanged_seconds` is at or above the threshold. The
 cell counts that age from when its own process first saw the catalogue, so a
 cell restart starts it again from zero, and a cellctl restart does not.
 
-The alert resolves only when the cell reads `retrieval.state` `ready` again,
-which means that its catalogue has caught up. A younger lag, a cell with no ready
-pod and a cell that does not answer each leave the alert as it was.
+cellctl keeps the last definite reading of each serving cell: lagging past the
+threshold, or `retrieval.state` `ready`, which means that the catalogue has
+caught up. A younger lag, a cell with no ready pod and a cell that does not
+answer keep that cell's last reading. The alert resolves when the last reading
+of every serving cell is `ready`. After a cellctl restart, the alert sends no
+resolution until cellctl has a reading for every serving cell.
 
 Do not restart the cell to clear the alert. A lagging cell still serves writes
 and recall. A restarted cell stays unready until it has warmed again, and its
@@ -469,7 +472,8 @@ age starts again from zero, so you lose the measure of the stall.
 6. Otherwise, save the readiness answer and the cell's log, and file the stall as a defect: `kubectl -n "exo-cell-$CELL_ID" logs cell-0 --since=1h`.
 
 Expected result: the cell's readiness shows `retrieval.state` `ready`, and a
-`RESOLVED: cell-recall-lagging` email follows within a few minutes.
+`RESOLVED: cell-recall-lagging` email follows within a few minutes. If no email
+follows, the cellctl log names the serving cells that cellctl could not read.
 
 ## Move a cell to a new claim
 

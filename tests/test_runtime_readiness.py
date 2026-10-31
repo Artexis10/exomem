@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import threading
 import time
@@ -8,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from cellctl_cell_readiness import cell_readiness
 
 from exomem.runtime_readiness import (
     HTTP_TRANSPORT,
@@ -15,10 +15,6 @@ from exomem.runtime_readiness import (
     RUNTIME_CONTRACT,
     build_runtime_readiness,
 )
-
-# cellctl's reader of this payload for its cell-recall-lagging alert; it imports
-# only the standard library, so this suite loads it by path.
-CELLCTL_RECALL_LAG = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "recall_lag.py"
 
 
 def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
@@ -226,10 +222,6 @@ def test_a_served_catalogue_lag_is_ready_and_adds_no_takeover_reason() -> None:
 def test_cellctl_judges_the_recall_lag_in_the_answer_a_cell_builds() -> None:
     """Defect: this payload's retrieval fields drift from cellctl's reader, so
     the cell-recall-lagging alert stays silent through every stall or never clears."""
-    spec = importlib.util.spec_from_file_location("cellctl_recall_lag", CELLCTL_RECALL_LAG)
-    assert spec is not None and spec.loader is not None
-    reader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reader)
 
     def answer(retrieval: dict[str, object]) -> bytes:
         return json.dumps(
@@ -256,8 +248,8 @@ def test_cellctl_judges_the_recall_lag_in_the_answer_a_cell_builds() -> None:
     )
     caught_up = answer({"state": "ready", "admitted": True})
 
-    assert reader.recall_lag_verdict(stalled, after=timedelta(minutes=10)) is True
-    assert reader.recall_lag_verdict(caught_up, after=timedelta(minutes=10)) is False
+    assert cell_readiness.recall_lag_verdict(stalled, after=timedelta(minutes=10)) is True
+    assert cell_readiness.recall_lag_verdict(caught_up, after=timedelta(minutes=10)) is False
 
 
 def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:

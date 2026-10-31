@@ -24,7 +24,7 @@ from pathlib import Path
 import asyncpg
 from kubernetes.client.rest import ApiException
 
-from . import alerts, db, recall_lag
+from . import alerts, cell_readiness, db
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -322,11 +322,12 @@ class LoopMemory:
     unavailable_cells: list[str] = field(default_factory=list)
     low_disk_cells: list[str] = field(default_factory=list)
     # The cell-recall-lagging alert: when the cells' readiness was last read,
-    # each serving cell's verdict from that read (recall_lag.recall_lag_verdict), and
-    # the (lagging, unjudged) cells last logged. A restart forgets them, and the
-    # alert sends nothing until every serving cell is judged again.
+    # each serving cell's last definite verdict (cell_readiness.recall_lag_verdict),
+    # kept through answers that cannot be judged, and the (lagging, unjudged)
+    # cells last logged. A restart forgets them, and the alert sends no
+    # resolution until every serving cell is judged again.
     recall_read_at: datetime | None = None
-    recall_verdicts: dict[str, bool | None] = field(default_factory=dict)
+    recall_verdicts: dict[str, bool] = field(default_factory=dict)
     recall_logged: tuple[list[str], list[str]] = field(default_factory=lambda: ([], []))
     # D10: what each local cell's latest measured hourly backup found (a
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
@@ -1865,17 +1866,21 @@ async def _recall_lag_alert(
     its health-only port at most once a RECALL_LAG_INTERVAL, says whether its
     recall serves a catalogue that has stayed unchanged and behind for
     `after`. The age is the cell's own, so a cellctl restart restarts no
-    clock. Nothing is read with no receiver to tell."""
+    clock. An answer that cannot be judged (none, or a lag too young) keeps
+    the cell's last definite verdict: it says nothing new, and a stalled cell's
+    last verdict is the stall. A cell that leaves service forgets its verdict.
+    Nothing is read with no receiver to tell."""
 
     if cluster_config.alert_delivery_secret is None:
         return
     if memory.recall_read_at is None or now - memory.recall_read_at >= RECALL_LAG_INTERVAL:
         memory.recall_read_at = now
-        # A cell with no ready pod, or not observed this pass, is not read: unjudged, never clean.
+        serving = {row.cell_id for row in rows if row.desired_state in alerts.SERVING_STATES}
+        # A cell with no ready pod, or not observed this pass, is not read: unjudged on this read.
         addresses = {
             row.cell_id: observation.ready_pod_ip
             for row in rows
-            if row.desired_state in alerts.SERVING_STATES
+            if row.cell_id in serving
             and (observation := observations.get(row.cell_id)) is not None
             and observation.ready_pod_ip
         }
@@ -1886,30 +1891,31 @@ async def _recall_lag_alert(
             except Exception as error:  # noqa: BLE001 - every cell then reads as unjudged
                 logger.error("cellctl: %s: no cell readiness could be read: %s", alerts.RECALL_LAG_ALERT,
                              _describe_error(error))
-        verdicts: dict[str, bool | None] = {}
+        latest: dict[str, bool | None] = {}
         for cell in addresses:
             try:
-                verdicts[cell] = recall_lag.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
+                latest[cell] = cell_readiness.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
             except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
                 logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
                              alerts.RECALL_LAG_ALERT, cell, _describe_error(error))
-                verdicts[cell] = None
+                latest[cell] = None
+        verdicts = {cell: verdict for cell, verdict in memory.recall_verdicts.items() if cell in serving}
+        verdicts.update((cell, verdict) for cell, verdict in latest.items() if verdict is not None)
         memory.recall_verdicts = verdicts
-    lagging = alerts.recall_lagging_cells(rows, memory.recall_verdicts)
-    unjudged = sorted(
-        row.cell_id for row in rows
-        if row.desired_state in alerts.SERVING_STATES and memory.recall_verdicts.get(row.cell_id) is None
-    )
-    if (lagging, unjudged) != memory.recall_logged:
-        memory.recall_logged = (lagging, unjudged)
-        seconds = int(after.total_seconds())
-        if lagging:
-            logger.warning("cellctl: %s: %d serving cell(s) have served an unchanged, lagging catalogue for %d "
-                           "seconds or more: %s", alerts.RECALL_LAG_ALERT, len(lagging), seconds, ", ".join(lagging))
-        if unjudged:
-            # Info: a busy catalogue lags briefly and often, and is no fault.
-            logger.info("cellctl: %s: %d serving cell(s) could not be read, or lag for less than %d seconds: %s",
-                        alerts.RECALL_LAG_ALERT, len(unjudged), seconds, ", ".join(unjudged))
+        lagging = alerts.recall_lagging_cells(rows, verdicts)
+        unjudged = sorted(cell for cell in serving if latest.get(cell) is None)
+        if (lagging, unjudged) != memory.recall_logged:
+            memory.recall_logged = (lagging, unjudged)
+            seconds = int(after.total_seconds())
+            if lagging:
+                logger.warning("cellctl: %s: %d serving cell(s) have served an unchanged, lagging catalogue for %d "
+                               "seconds or more: %s", alerts.RECALL_LAG_ALERT, len(lagging), seconds,
+                               ", ".join(lagging))
+            if unjudged:
+                # Info: a busy catalogue lags briefly and often, and is no fault.
+                logger.info("cellctl: %s: %d serving cell(s) could not be read, or lag for less than %d seconds; "
+                            "each keeps its last verdict: %s", alerts.RECALL_LAG_ALERT, len(unjudged), seconds,
+                            ", ".join(unjudged))
     firing = alerts.recall_lagging(rows, memory.recall_verdicts)
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.RECALL_LAG_ALERT, firing, now)

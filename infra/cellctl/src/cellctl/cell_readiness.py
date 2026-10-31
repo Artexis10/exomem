@@ -1,10 +1,11 @@
-"""One cell's verdict for the cell-recall-lagging alert, read from its readiness answer.
+"""How cellctl reaches a cell's readiness answer, and its verdict for the
+cell-recall-lagging alert.
 
-The answer is exomem's runtime readiness payload, and its `retrieval` fields
-are that package's protocol, which cellctl cannot import. This module therefore
-imports only the standard library: the product suite
-(tests/test_runtime_readiness.py) loads it by path and judges the payload the
-cell builds, so the two cannot drift apart unseen.
+The listener, its port setting and the answer are exomem's protocol, which
+cellctl cannot import. This module therefore imports only the standard
+library: the product suite loads it by path (tests/cellctl_cell_readiness.py),
+starts a cell's health-only listener by these names and judges the answer that
+the cell builds, so the two sides cannot drift apart unseen.
 """
 
 from __future__ import annotations
@@ -13,6 +14,12 @@ import json
 import math
 from datetime import timedelta
 
+# The cell's health-only listener: `GET /health/ready` and nothing else, on the
+# port that the cell reads from CELL_HEALTH_PORT_ENV. cellctl derives every cell
+# bearer, so it reads readiness here and never on the cell port.
+CELL_HEALTH_PORT = 8766
+CELL_HEALTH_PORT_ENV = "EXOMEM_CLOUD_HEALTH_PORT"
+CELL_READINESS_PATH = "/health/ready"
 # `retrieval.state` values of that answer, a closed protocol set; any other value is unread.
 RECALL_READY = "ready"
 RECALL_LAGGING = "lagging"

@@ -133,7 +133,8 @@ Thresholds SHALL come from the checked observability and schedule contracts rath
 A Cloud cell SHALL serve its readiness answer on a health-only port that answers no other request.
 cellctl SHALL read cell readiness only on that port, and network policy and admission SHALL admit cellctl to no other cell port.
 The stalled-recall alert SHALL fire while a serving cell reports its recall lagging on a catalogue that the cell has measured unchanged for at least the contract threshold.
-It SHALL resolve only when the cell reads its recall strictly ready; an unread cell, a lag with no age and a younger lag SHALL leave it unchanged.
+Each serving cell SHALL keep its last definite verdict, lagging past the threshold or strictly ready; an unread cell, a lag with no age and a younger lag SHALL leave that verdict unchanged.
+The alert SHALL resolve only when the last verdict of every serving cell is strictly ready, and SHALL send no resolution while a serving cell has had no verdict since cellctl started.
 
 #### Scenario: The production node disappears
 - **WHEN** the node and in-cluster monitors become unavailable
@@ -146,6 +147,10 @@ It SHALL resolve only when the cell reads its recall strictly ready; an unread c
 #### Scenario: A cell restarts during a stall
 - **WHEN** the restarted cell reports a younger lag, or does not answer
 - **THEN** cellctl sends no resolution until the cell reads its recall strictly ready
+
+#### Scenario: One cell catches up while another says nothing new
+- **WHEN** a lagging cell reads its recall strictly ready, and another serving cell that last read strictly ready lags briefly or does not answer
+- **THEN** cellctl resolves the stalled-recall alert
 
 #### Scenario: cellctl reaches for the cell port
 - **WHEN** cellctl connects to a cell's MCP port, or writes cell ingress that would admit it there

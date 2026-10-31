@@ -32,14 +32,13 @@ from .capacity import (
     parse_budget_frame,
     quantity,
 )
+from .cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH
 from .manifests import (
     BACKUP_FAMILY_ANNOTATION,
     BACKUP_JOB_NAME,
     BACKUP_OUTCOME_ANNOTATION,
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
-    CELL_HEALTH_PORT,
-    CELL_READINESS_PATH,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     GROW_STORAGE_ANNOTATION,
@@ -121,10 +120,13 @@ async def _read_pages(urls: dict[str, str], *, timeout: float, max_bytes: int) -
             pass
 
     # timeout=None: the asyncio.timeout above is the one bound, covering the phases a socket timeout misses.
+    # max_connections=None: one connection per page, all at once, so no page
+    # waits behind another inside its own timeout. `urls` bounds the count.
     # Accept-Encoding identity: the pods then send plain text, and a page that is
     # compressed anyway fails to decode or parse and reads unreadable.
     async with httpx.AsyncClient(
-        trust_env=False, timeout=None, headers={"Accept-Encoding": "identity"}
+        trust_env=False, timeout=None, limits=httpx.Limits(max_connections=None),
+        headers={"Accept-Encoding": "identity"},
     ) as client:
         await asyncio.gather(*(read(client, key, url) for key, url in urls.items()))
     return pages
