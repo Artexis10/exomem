@@ -723,6 +723,18 @@ validation.
   before
 - **AND** the repair telemetry counts the retargets of each pass
 
+#### Scenario: A write still publishing during the census walk is replayed, not refused
+
+- **WHEN** the final census walk sees a page that a governed write changed,
+  created or deleted before its event reached the registry
+- **THEN** the census replay waits a bounded time, on the same retarget budget,
+  for the registry to observe each path where the walk and the registry
+  disagree
+- **AND** replays and re-proves those paths before the census judges the walk
+- **AND** declines the pass as `source_changed` at the census when the registry
+  does not observe such a path in time
+- **AND** a delta that needs a source proof still excuses no path
+
 ### Requirement: Bounded write-time index maintenance
 
 A component deferral that has already durably recorded path-exact receipts covering the batch SHALL count as batch-report success and SHALL NOT seed a full-component refresh demand. The system SHALL mint a durable full-component refresh demand from a write-time outcome only for a component whose incomplete work has no durable path coverage, and SHALL count both outcomes — covered deferrals accepted and uncovered deferrals escalated — in stable content-free telemetry.

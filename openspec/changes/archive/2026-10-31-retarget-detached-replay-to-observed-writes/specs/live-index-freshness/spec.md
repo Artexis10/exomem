@@ -154,3 +154,15 @@ validation.
 - **AND** a replay under the publication barrier never waits and declines as
   before
 - **AND** the repair telemetry counts the retargets of each pass
+
+#### Scenario: A write still publishing during the census walk is replayed, not refused
+
+- **WHEN** the final census walk sees a page that a governed write changed,
+  created or deleted before its event reached the registry
+- **THEN** the census replay waits a bounded time, on the same retarget budget,
+  for the registry to observe each path where the walk and the registry
+  disagree
+- **AND** replays and re-proves those paths before the census judges the walk
+- **AND** declines the pass as `source_changed` at the census when the registry
+  does not observe such a path in time
+- **AND** a delta that needs a source proof still excuses no path

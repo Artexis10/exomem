@@ -288,6 +288,56 @@ def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
     assert lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False) is not None
 
 
+def test_a_census_waits_for_writes_whose_events_are_still_on_their_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import batch rewrites a shared page P and adds a new page N on disk
+    before its events reach the registry. The census walk sees both first. The
+    census must wait for the events and replay the pages. Before, it found the
+    walk ahead of the registry and discarded the build.
+
+    P's event lands before N's, so the census waits for every page it saw.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_walk = store._walk_entries
+    late_events: list[threading.Timer] = []
+    walks = 0
+
+    def deliver_later(seconds: float, page: Path) -> None:
+        late = threading.Timer(
+            seconds, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [page]}
+        )
+        late_events.append(late)
+        late.start()
+
+    def census_walk_during_an_unpublished_batch() -> Any:
+        nonlocal walks
+        walks += 1
+        if walks == 2:
+            p.write_text(_page_text("p", "- [config] pafter ^u1"), encoding="utf-8")
+            _touch_future(p)
+            n = _kb_file(tmp_path, "n.md", "- [config] nnew ^u2")
+            deliver_later(0.5, p)
+            deliver_later(1.0, n)
+        return real_walk()
+
+    monkeypatch.setattr(store, "_walk_entries", census_walk_during_an_unpublished_batch)
+    published = store.rebuild_atomic()
+    for late in late_events:
+        late.join()
+    assert walks >= 2
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pafter" in contents and "nnew" in contents
+    assert "pbefore" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
 def test_a_replay_survives_an_observed_write_to_another_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

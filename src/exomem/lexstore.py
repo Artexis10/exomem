@@ -888,13 +888,13 @@ _PUBLICATION_CATCHUP_RETRIES = 2
 # registry: the batch snapshot restores the page's timestamps, which moves its
 # ctime, and the rename lands before the publication. A page that every write
 # rewrites, such as an index or the activity log, is then often mid-write when
-# an off-barrier replay proves it. The replay waits for the registry to observe
-# the newer write and replays that, a bounded number of times per call; a page
-# the registry does not observe in time still refuses the replay. The wait
-# covers one batch's snapshot-to-publication span on a loaded cell: on
-# 2026-10-31 an import's apply call held the mutation boundary for up to 23 s.
-_REPLAY_RETARGETS = 3
-_REPLAY_OBSERVATION_WAIT_SECONDS = 30.0
+# an off-barrier replay proves it or the final census walks it, and a new page
+# of an import batch is on disk before the registry lists it. The replay waits
+# for the registry to observe the newer state and replays that, a bounded
+# number of times per call; a path the registry does not observe in time still
+# refuses the replay or the census.
+_REPLAY_RETARGETS = 3  # A page rewritten after every retarget ends the pass instead of holding it.
+_REPLAY_OBSERVATION_WAIT_SECONDS = 30.0  # One batch's snapshot-to-publication span (up to 23 s on a 2-CPU cell, 2026-10-31); worst case 3 x 30 s = 90 s of waiting per replay call.
 _REPLAY_OBSERVATION_POLL_SECONDS = 0.05
 
 _PROBE_RESULT: bool | None = None
@@ -1019,8 +1019,8 @@ def _log_repair_finished(
     Every field is a closed token or a count, so a hosted cell keeps the line.
     `excused` counts the distinct paths that the pass's source censuses
     excused, across both scopes and every census in the pass. `retargeted`
-    counts the times the pass's detached replays waited for the registry to
-    observe a newer write and replayed it.
+    counts the times the pass's detached replays, the census replay included,
+    waited for the registry to observe a newer write and replayed it.
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -4618,8 +4618,9 @@ class LexicalStore:
         # them. A set, so a path excused by two censuses in one pass counts once.
         self._last_rebuild_stage = RepairStage.BUILD
         self._last_census_excused: set[str] = set()
-        # How many times the pass's detached replays waited for the registry
-        # to observe a newer write and replayed it (`_await_observed_rewrites`).
+        # How many times the pass's detached replays, the census replay
+        # included, waited for the registry to observe a newer write and
+        # replayed it (`_await_observed_rewrites`).
         self._last_replay_retargets = 0
         # Per-path build signatures of a detached catalogue this process
         # adopted, awaiting the one heal that reconciles it (single use).
@@ -7541,10 +7542,17 @@ class LexicalStore:
                     )
                 except freshness_module.RecallProjectionUnavailable:
                     continue
+            # The walk can see a write that is still publishing before the
+            # registry does. The census replay waits for the registry to observe
+            # each path where the two disagree, so the replay re-proves it.
+            observe = {
+                scope: self._census_disagreements(final_entries[scope], snapshot)
+                for scope, snapshot in after_walk.items()
+            }
             self._last_rebuild_stage = RepairStage.CENSUS_REPLAY
             before_replay = scope_targets
             rebased = self._rebase_detached_catalog(
-                temp_path, scope_targets, start_identity, max_paths=None,
+                temp_path, scope_targets, start_identity, max_paths=None, observe=observe,
             )
             if rebased is None:
                 return False
@@ -8412,6 +8420,7 @@ class LexicalStore:
         expected_identity: str,
         *,
         max_paths: int | None = CATALOG_FOREGROUND_DELTA_CAP,
+        observe: dict[str, set[str]] | None = None,
     ) -> dict[str, tuple] | None:
         """Replay one complete bounded live suffix onto a detached catalogue.
 
@@ -8428,6 +8437,12 @@ class LexicalStore:
         a path whose proof fails because the registry has not yet observed a
         newer write to it is replayed again once the registry observes that
         write (`_await_observed_rewrites`), up to `_REPLAY_RETARGETS` times.
+
+        `observe` names, per scope, the paths where the final census walk and
+        the registry disagree. Before it replays, the census replay waits, on
+        the same retarget budget, until the registry observes each of them, so
+        that it replays and proves them. A path that the registry does not
+        observe in time refuses the census.
         """
         from . import freshness as freshness_module
 
@@ -8459,6 +8474,16 @@ class LexicalStore:
             if not self._replayable_delta(delta, checkpoint, max_paths=max_paths):
                 self._last_rebuild_result = "delta_unavailable"
                 return None
+            missing = self._uncovered_paths(observe.get(scope, ()), delta) if observe else set()
+            if missing and retargets_left:
+                retargets_left -= 1
+                self._last_replay_retargets += 1
+                observed = self._await_observed_rewrites(scope, checkpoint, delta, missing)
+                if observed is None:
+                    # The walk's disagreement refused, not a replayed path's proof.
+                    self._last_rebuild_stage = RepairStage.CENSUS
+                    return None
+                delta = observed[0]
             touched.update(delta.changed)
             touched.update(delta.deleted)
             if max_paths is not None and len(touched) > max_paths:
@@ -8581,13 +8606,47 @@ class LexicalStore:
                 if newer is None:
                     self._last_rebuild_result = "delta_unavailable"
                     return None
-                if unproven <= newer.changed | newer.deleted:
+                if not self._uncovered_paths(unproven, newer):
                     return fresh, newer
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._last_rebuild_result = "source_changed"
                 return None
             time.sleep(min(_REPLAY_OBSERVATION_POLL_SECONDS, remaining))
+
+    @staticmethod
+    def _uncovered_paths(paths, delta) -> set[str]:
+        """The paths in `paths` that `delta` neither changes nor deletes.
+
+        Paths compare as the freshness digest spells them, so a walked path and
+        its registry spelling are one path.
+        """
+        from . import freshness as freshness_module
+
+        digest = freshness_module._digest_path
+        covered = {digest(path) for path in (*delta.changed, *delta.deleted)}
+        return {path for path in paths if digest(path) not in covered}
+
+    @staticmethod
+    def _census_disagreements(walked: list[tuple[str, object]], after_walk) -> set[str]:
+        """The paths where the census walk and the registry's map after it differ.
+
+        A path is listed when only one side has it or when its signatures
+        differ, spelled as the registry spells it when the registry has it.
+        """
+        from . import freshness as freshness_module
+
+        digest = freshness_module._digest_path
+        signature = freshness_module._normalize_signature
+        _registry_checkpoint, registry_entries = after_walk
+        seen = {digest(path): (path, signature(sig)) for path, sig in walked}
+        held = {digest(path): (path, signature(sig)) for path, sig in registry_entries.items()}
+        disagreeing = set()
+        for key in seen.keys() | held.keys():
+            walked_entry, registry_entry = seen.get(key), held.get(key)
+            if walked_entry is None or registry_entry is None or walked_entry[1] != registry_entry[1]:
+                disagreeing.add((registry_entry or walked_entry)[0])
+        return disagreeing
 
     @staticmethod
     def _newer_part(delta, fresh):

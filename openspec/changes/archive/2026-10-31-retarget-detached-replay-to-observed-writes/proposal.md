@@ -14,6 +14,10 @@ On 2026-10-31, a cloud rehearsal of a 69,300-file import recorded 38
 each failed path was a hot page whose disk state the registry had not yet
 observed, and the registry had moved past the replay's target within 2 s.
 
+The same race then reaches the final source census. Its walk sees a hot page
+or a new page of an import batch before the registry does. When the census
+replay has no delta for that path, the census reports `source_changed`.
+
 ## What Changes
 
 - A detached replay off the publication barrier applies its rows first and
@@ -24,19 +28,25 @@ observed, and the registry had moved past the replay's target within 2 s.
 - A path that the registry does not observe changing in time still declines
   the replay as `source_changed`. A path that changes again after each retarget
   also ends the pass. A replay under the publication barrier never waits.
-- `lexical_repair_finished` carries a `retargeted` count for full passes.
+- The census replay first waits, on the same retarget budget, for the
+  registry to observe each path where the census walk and the registry
+  disagree. It then replays and re-proves those paths before the census judges
+  the walk. A path that the registry does not observe in time still declines
+  the pass as `source_changed` at the census.
+- `lexical_repair_finished` carries a `retargeted` count for full passes. It
+  counts the waits of both the replays and the census.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- `live-index-freshness`: a detached lexical replay waits for the registry to
-  observe a governed write that is still publishing, and replays it instead of
-  discarding the pass.
+- `live-index-freshness`: a detached lexical replay and the final census wait
+  for the registry to observe a governed write that is still publishing, and
+  replay it instead of discarding the pass.
 
 ## Impact
 
-- `src/exomem/lexstore.py`: detached replay retargeting and the repair event
-  field.
+- `src/exomem/lexstore.py`: detached replay retargeting, the census wait and
+  the repair event field.
 - `tests/test_lexstore_atomic_rebuild.py`: replay cases for a late event and a
-  page that never stops changing.
+  page that never stops changing, and a census case for an unpublished batch.
