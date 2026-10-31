@@ -103,8 +103,11 @@ def _preserve_under_guard(
     preserve_stream: Any,
     **kwargs: Any,
 ) -> Any:
-    """Run the complete upload read-plan-write path under vault authority."""
-    with manager.mutation_guard(vault_root):
+    """Run the complete upload read-plan-write path under vault authority.
+
+    The stream is read only once the guard is held, so only the acquire waits out contention.
+    """
+    with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
         return preserve_stream(vault_root, **kwargs)
 
 
@@ -113,7 +116,9 @@ def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any)
     from . import archive_members
 
     return archive_members.preserve_members(
-        vault_root, guard=lambda: manager.mutation_guard(vault_root), **kwargs
+        vault_root,
+        guard=lambda: manager.absorbing_mutation_guard(vault_root, operation="upload_manifest"),
+        **kwargs,
     )
 
 
@@ -153,7 +158,7 @@ def _capture_source_under_guard(
                 if written > max_bytes:
                     raise ValueError("TOO_LARGE: upload exceeds the configured limit")
                 sink.write(chunk)
-        with manager.mutation_guard(vault_root):
+        with manager.absorbing_mutation_guard(vault_root, operation="upload_capture"):
             return add_module.add(
                 vault_root,
                 source_schema,
@@ -178,7 +183,7 @@ def _reconcile_under_guard(
     media_processing = _media_processing_module()
     if media_processing.classify_media(binary_path) is None:
         return None
-    with manager.mutation_guard(vault_root):
+    with manager.absorbing_mutation_guard(vault_root, operation="upload_reconcile"):
         return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
 
 
@@ -238,28 +243,26 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             raise
         return _source_upload_receipt(root, result)
 
-    # A lane token carries no caller identity. Keep the same transfer floor across startup recovery.
-    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
-        try:
-            result = invoke_command(
-                Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
-                        cli_writes=True, response_detail="legacy"),
-                vault_root,
-                target=record["target"], length=record["length"],
-                sha256=record["sha256"], session_id=record["id"],
-                idempotency_key=record["id"], public_idempotency_key=None,
-            )
-        except OpError as error:
-            raise upload_sessions.CommitFailed(
-                error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
-            ) from error
-        if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
-            # Signed receipt recovery can prove a commit without recovering its complete leaf result.
-            raise upload_sessions.CommitFailed(
-                "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
-            )
-        # Also project older cached results before they leave the transfer principal's scope.
-        return _source_upload_receipt(vault_root, result)
+    try:
+        result = invoke_command(
+            Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
+                    cli_writes=True, response_detail="legacy"),
+            vault_root,
+            target=record["target"], length=record["length"],
+            sha256=record["sha256"], session_id=record["id"],
+            idempotency_key=record["id"], public_idempotency_key=None,
+        )
+    except OpError as error:
+        raise upload_sessions.CommitFailed(
+            error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
+        ) from error
+    if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
+        # Signed receipt recovery can prove a commit without recovering its complete leaf result.
+        raise upload_sessions.CommitFailed(
+            "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
+        )
+    # Also project older cached results before they leave the transfer principal's scope.
+    return _source_upload_receipt(vault_root, result)
 
 
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -270,6 +273,13 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     as an archive whose manifest is recorded already is. A refusal of the bytes
     or the target fails the session; anything else leaves it to a retry.
     """
+    # A lane token carries no caller identity. Every commit runs under the same transfer floor:
+    # the first attempt, a re-attempt by the server's own timer and startup recovery alike.
+    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
+        return _commit_session(vault_root, part, record)
+
+
+def _commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     from . import archive_members
     from .cli_ops import OpError, error_dict
     from .writer_lease import get_manager

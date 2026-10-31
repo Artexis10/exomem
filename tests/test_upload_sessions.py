@@ -25,6 +25,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from held_boundary import held_boundary
 
 from exomem import server, upload_sessions
 from exomem.governance import principal as principal_module
@@ -818,3 +819,79 @@ def test_a_number_too_long_to_parse_is_a_bad_request(vault, monkeypatch) -> None
     )
 
     assert (created.status_code, patched.status_code) == (400, 400)
+
+
+def _wait_for(condition, what: str, *, seconds: float = 20.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, f"never saw: {what}"
+        time.sleep(0.02)
+
+
+def test_a_commit_that_stays_busy_is_committed_again_by_the_server_under_the_transfer_floor(
+    vault, monkeypatch
+) -> None:
+    """A client that sent every byte and then waits is not asked to read the session again."""
+    from exomem import preserve
+
+    # The boundary stays held past the commit's own wait, so the commit ends retryable.
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 0.1)
+    client = _client(vault, monkeypatch)
+    data = b'{"samples": [{"heart_rate": 61}]}'
+    principals = []
+    real_preserve = preserve.preserve_stream
+
+    def noting_principal(*args, **kwargs):
+        principals.append(principal_module.effective_principal())
+        return real_preserve(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "preserve_stream", noting_principal)
+
+    def record() -> dict:
+        return upload_sessions.open_session(vault, session_id, secret).record
+
+    with held_boundary(vault, monkeypatch, release_when_refused=False) as held:
+        location, secret = _create(client, data)
+        session_id = location.rsplit("/", 1)[1]
+        # The request that sends the last byte starts the commit, in its own context.
+        with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+            assert _patch(client, location, secret, 0, data).status_code == 204
+        # A record carries a code only while it is retryable.
+        _wait_for(lambda: record().get("code") == "MUTATION_BUSY", "the busy commit to end retryable")
+        held.release.set()
+        # No request reads the session from here on: the server commits it.
+        _wait_for(lambda: record()["state"] == upload_sessions.COMMITTED, "the server's own re-attempt")
+
+    stored = vault / record()["receipt"]["path"]
+    assert stored.read_bytes() == data
+    assert [(seen.surface, seen.resolved) for seen in principals] == [("transfer", False)]
+
+
+def test_a_busy_session_has_one_re_attempt_waiting_and_a_cancelled_one_has_none(vault, monkeypatch) -> None:
+    """Two waiting timers would each commit again; a cancelled session must not be committed."""
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 120.0)  # never fires here
+    session, secret = _verified(vault, b"0123456789")
+    prefix = session.id[:8]
+    calls = []
+
+    def busy(_part, record):
+        calls.append(record["id"])
+        raise upload_sessions.CommitFailed("MUTATION_BUSY", "the vault is busy", retryable=True)
+
+    def threads(kind: str) -> list[threading.Thread]:
+        return [t for t in threading.enumerate() if t.name == f"upload-session-{kind}-{prefix}"]
+
+    def commit_again() -> None:
+        upload_sessions.start_commit(upload_sessions.open_session(vault, session.id, secret), busy)
+        _wait_for(lambda: not threads("commit"), "the commit to end")
+
+    commit_again()
+    assert len(threads("reattempt")) == 1
+    # A client reading the session starts a commit while the timer waits.
+    commit_again()
+
+    assert (len(calls), len(threads("reattempt"))) == (2, 1)
+    upload_sessions.delete(upload_sessions.open_session(vault, session.id, secret))
+    _wait_for(lambda: not threads("reattempt"), "the cancelled session's timer to stop")
+    assert len(calls) == 2

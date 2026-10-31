@@ -5047,6 +5047,44 @@ class LeaseManager:
             yield mutation
 
     @contextmanager
+    def absorbing_mutation_guard(
+        self, vault_root: os.PathLike[str] | str, *, operation: str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """`mutation_guard`, waiting out an ordinary busy boundary before the body runs.
+
+        For a caller that reads and writes no vault byte until it holds the boundary, such as
+        an upload commit: a refusal at the acquire has had no effect. Only the acquire is
+        attempted again, through the keyed writes' wait (arrival order, waiter cap and refusal
+        causes). The body runs once, holding the boundary; a busy it raises is never retried,
+        because it may have consumed the request stream. The caller's place in line and its
+        waiter slot end with the acquire: it no longer waits.
+        """
+        if not _writes_absorb_contention():
+            with self.mutation_guard(vault_root, operation=operation) as mutation:
+                yield mutation
+            return
+
+        def refused_before_the_body(error: OpError) -> bool:
+            return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+
+        with ExitStack() as held:
+
+            def acquire() -> VaultMutationCoordinator:
+                with mutation_lock.absorbing_busy():
+                    return held.enter_context(self.mutation_guard(vault_root, operation=operation))
+
+            yield self._absorb_contention(
+                operation,
+                _ContentionWait(
+                    self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+                ),
+                acquire,
+                absorbable=refused_before_the_body,
+                request_id=str(uuid.uuid4()),
+                join_on_arrival=True,
+            )
+
+    @contextmanager
     def projection_guard(
         self, vault_root: os.PathLike[str] | str, *, operation: str
     ) -> Iterator[VaultMutationCoordinator]:
@@ -6576,12 +6614,12 @@ class LeaseManager:
             return True
 
         return self._absorb_contention(
-            command, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
+            command.name, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
         )
 
     def _absorb_contention(
         self,
-        command: Any,
+        command_name: str,
         wait: _ContentionWait,
         attempt: Callable[[], Any],
         *,
@@ -6619,7 +6657,7 @@ class LeaseManager:
                 "contention_refused",
                 level=logging.WARNING,
                 request_id=request_id,
-                command=command.name,
+                command=command_name,
                 cause=cause,
                 waited_ms=error.details["waited_ms"],
             )
@@ -6681,7 +6719,7 @@ class LeaseManager:
                     _log_mutation_event(
                         "contention_absorbed",
                         request_id=request_id,
-                        command=command.name,
+                        command=command_name,
                         attempts=wait.absorbed + 1,
                         waited_ms=wait.waited_ms(),
                     )
@@ -6823,7 +6861,7 @@ class LeaseManager:
                 journal()
 
         return self._absorb_contention(
-            command,
+            command.name,
             wait,
             attempt,
             absorbable=absorbable,
