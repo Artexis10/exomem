@@ -444,7 +444,7 @@ These tasks do not gate P3.6. Existing bounded CSV/JSON query output remains the
   - The journey's `compatible_rollback` step never runs in CI: no workflow supplies `--compatible-python`.
   - Install the earlier release from its published wheel, bound to the index's SHA-256 through a `file://` URL with a `#sha256=` fragment, so the journey's provenance check accepts it. A by-name index install records no `direct_url.json`, which the check refuses.
   - The journey still requires the earlier application to declare no general migration. Every release from 0.140.0 on declares `collections-migrate-v1`, so post-GA rollback applications need that assertion changed with a reason.
-  - Ready pull requests run the full tier, so measure the step's cost against the product E2E budget before enabling it there.
+  - Full runs are the scheduled and dispatched runs (`release_evidence.ci_scope`); measure the step's cost against the product E2E budget before enabling it there.
 
 ## P6. Legacy window close (two minor releases after GA, R7)
 
