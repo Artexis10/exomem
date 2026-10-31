@@ -187,19 +187,21 @@ it. The rehearsal runs the same handoff on a throwaway managed service, so it
 shows what the live switch will do. Install the release only when both checks
 pass:
 
-- The promoted worker does not run a full lexical catalog repair.
+- No `lexical_repair_started` event with `kind` `full` appears in the 45 minutes after the switch.
 - `handoff.ready_after_ms` is under 120000 (two minutes).
 
-A failed check holds the install. A full repair on the live service keeps
-`/health/ready` at `not_ready`, and requests are refused for the whole repair.
+A failed check holds the install. A full repair on the live service can keep
+`/health/ready` at `not_ready`, and requests are refused for that whole time.
+`ready_after_ms` counts from the old worker's stop, so it includes the state
+migrator when `handoff.migration.state` is `ran`.
 
 The copy needs disk for the vault and the state directory, plus one release
 environment. The throwaway service needs memory for two workers during the
-standby warm. Admit it as a bounded local run before you start.
+standby warm. Set its `MemoryMax` from the serving worker's resident size.
 
 The first start on a copy always repairs the catalog once. The freshness
 checkpoint covers each page's absolute path and change time, and a copy keeps
-neither. Let the current release settle on the copy first; only the switch that
+neither. Let the current release settle on the copy first. Only the switch that
 follows tells you about the candidate.
 
 The supervisor verifies its systemd identity, so the throwaway service runs as
@@ -207,33 +209,38 @@ a transient user unit. Keep its paths short: the control sockets under the
 runtime directory have a 104-byte limit.
 
 1. Create the scratch root: `install -d -m 700 /tmp/xr /tmp/xr/{managed,home,logs,lease,cwd,state}`.
-2. Copy the vault to `/tmp/xr/vault` at a quiet moment, with no import or bulk apply running.
-3. Compute the copy's state key with the command below.
-4. Copy the live vault state directory to `/tmp/xr/state/<key>` with the state copy command below.
-5. Set `vault_identity` in the copied `.state-migration.json` to `<key>`.
-6. Create `/tmp/xr/launcher` with `uv venv` and install the serving version with its profile extras.
-7. Write `/tmp/xr/rehearsal.env` with mode 600, as shown below.
-8. Pick a free loopback port, then start the transient unit with the `systemd-run` command below.
-9. Wait for `/health/ready` on the rehearsal port to answer 200 and the catalog repair to finish.
-10. Confirm `--status` reports `phase: ready` with no pending transition.
-11. Note the time, then switch with the `service_upgrade` command below.
-12. Read `last_transition.handoff` in the printed result and the worker log after the noted time.
-13. Stop the unit. Keep the settled copy to rehearse the next release, or remove it with `storage-reap remove /tmp/xr`.
+2. Create the launcher: `uv venv /tmp/xr/launcher`, then install the serving version with its profile extras into it.
+3. When no import or bulk apply is running, copy the vault to `/tmp/xr/vault`.
+4. Compute the copy's state key with the key command below.
+5. Create the state leaf: `install -d -m 700 /tmp/xr/state/KEY`.
+6. Copy the live vault state directory into the state leaf with the state copy command below.
+7. Set `vault_identity` in `/tmp/xr/state/KEY/.state-migration.json` to `KEY` with a JSON editor.
+8. Write `/tmp/xr/rehearsal.env` with mode 600 from the template below.
+9. Pick a free loopback port as `PORT`.
+10. Start the transient unit with the `systemd-run` command below.
+11. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and no `lexical_repair_started` event is newer than its `lexical_repair_finished`.
+12. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
+13. Note the time, then switch with the `service_upgrade` command below.
+14. Read `last_transition.handoff` in the printed result.
+15. Read the log events below in `/tmp/xr/logs/exomem.log` for 45 minutes after the noted time.
+16. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
+17. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
 
-Expect `ready_after_ms` under 120000 and no `scope=full` repair after the noted
-time.
+Expect `ready_after_ms` under 120000 and no `full` repair in the 45 minutes after
+the noted time.
 
 ```sh
 /tmp/xr/launcher/bin/python -c 'from pathlib import Path; from exomem.state_paths import vault_state_key; print(vault_state_key(Path("/tmp/xr/vault")))'
 ```
 
-The service writes its state while you copy it. The state copy command copies each
-SQLite database through SQLite's backup API, so each copy is consistent. It skips
-write-ahead logs, rebuild temporaries and files that disappear during the copy:
+The service writes its state while you copy it. The state copy command copies
+each SQLite database through SQLite's backup API, so each copy is consistent. It
+tells a database by its file header, skips SQLite's side files and rebuild
+temporaries, and skips files that disappear during the copy:
 
 ```sh
 /tmp/xr/launcher/bin/python -I - LIVE_STATE_DIR /tmp/xr/state/KEY <<'PY'
-import shutil, sqlite3, sys
+import contextlib, shutil, sqlite3, sys
 from pathlib import Path
 src, dst = Path(sys.argv[1]), Path(sys.argv[2])
 for path in sorted(src.rglob("*")):
@@ -242,26 +249,28 @@ for path in sorted(src.rglob("*")):
         if path.is_symlink():
             continue
         if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
             continue
         if path.name.endswith(("-wal", "-shm", "-journal")) or ".rebuild-" in path.name:
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if path.name.endswith(".sqlite"):
-            with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=120) as live, sqlite3.connect(target) as copy:
+        with path.open("rb") as handle:
+            database = handle.read(16) == b"SQLite format 3\0"
+        if database:
+            live = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=120)
+            copy = sqlite3.connect(target)
+            with contextlib.closing(live), contextlib.closing(copy):
                 live.backup(copy)
             continue
         shutil.copy2(path, target)
-    except FileNotFoundError:
-        pass
+    except (FileNotFoundError, sqlite3.OperationalError):
+        target.unlink(missing_ok=True)
 PY
 ```
 
-The environment file gives the copy its own paths and disconnects everything
-that reaches a live or external system. Leave out every writer lease, OAuth,
-GitHub, public base URL, local port, upload token and model hub token variable
-from the live file. Keep the live budget and preload values, so the timings
-match:
+Write the environment file from this template, not from a copy of the live
+file. It gives the copy its own paths and leaves out every variable that reaches
+a live or external system. Replace only the marked live values, so the timings
+match. Use the live model cache path for `HF_HOME`; the hub stays offline:
 
 ```sh
 EXOMEM_VAULT_PATH=/tmp/xr/vault
@@ -272,41 +281,46 @@ HOME=/tmp/xr/home
 XDG_STATE_HOME=/tmp/xr/home/.local/state
 XDG_CONFIG_HOME=/tmp/xr/home/.config
 XDG_DATA_HOME=/tmp/xr/home/.local/share
-EXOMEM_REST_API_KEY=<new random value>
+EXOMEM_REST_API_KEY=NEW_RANDOM_VALUE
 EXOMEM_DISABLE_MEDIA_EXTRACTION=1
 EXOMEM_ASR_PREWARM=0
 EXOMEM_DISABLE_CLIP=1
 HF_HUB_OFFLINE=1
-HF_HOME=<live value, read with the hub offline>
-EXOMEM_PRELOAD_MODELS=<live value>
-EXOMEM_STANDBY_WARM_SECONDS=<live value>
-EXOMEM_COLD_START_SECONDS=<live value>
+HF_HOME=LIVE_VALUE
+EXOMEM_PRELOAD_MODELS=LIVE_VALUE
+EXOMEM_STANDBY_WARM_SECONDS=LIVE_VALUE
+EXOMEM_COLD_START_SECONDS=LIVE_VALUE
+```
+
+The worker also inherits the user manager's environment. Run `systemctl --user
+show-environment` first, and add `-p UnsetEnvironment=NAME` to the unit for each
+variable there that reaches a live or external system.
+
+```sh
+systemd-run --user --collect --unit=exomem-rehearsal.service -p Type=simple -p MemoryMax=MEMORY_LIMIT -p KillMode=control-group -p SendSIGKILL=yes -p TimeoutStopSec=30 -p EnvironmentFile=/tmp/xr/rehearsal.env -p WorkingDirectory=/tmp/xr/cwd /tmp/xr/launcher/bin/python -m exomem.service_manager serve --runtime-dir /tmp/xr/managed --worker-python /tmp/xr/launcher/bin/python --host 127.0.0.1 --port PORT --unit-name exomem-rehearsal.service
 ```
 
 ```sh
-systemd-run --user --collect --unit=exomem-rehearsal.service -p Type=simple -p MemoryMax=12G -p KillMode=control-group -p SendSIGKILL=yes -p TimeoutStopSec=30 -p EnvironmentFile=/tmp/xr/rehearsal.env -p WorkingDirectory=/tmp/xr/cwd /tmp/xr/launcher/bin/python -m exomem.service_manager serve --runtime-dir /tmp/xr/managed --worker-python /tmp/xr/launcher/bin/python --host 127.0.0.1 --port PORT --unit-name exomem-rehearsal.service
+HOME=/tmp/xr/home UV_CACHE_DIR=LIVE_UV_CACHE EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH=1 /tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --package-version VERSION --profile standard
 ```
 
-```sh
-HOME=/tmp/xr/home EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH=1 /tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --package-version VERSION --profile standard
-```
+`UV_CACHE_DIR` keeps staging on the existing package cache instead of the empty
+home. For a candidate that is not published, pass `--wheel` and
+`--source-revision` in place of `--package-version`, as for a live upgrade. The
+candidate stages under `/tmp/xr/releases`, never under the live service root.
 
-For a candidate that is not published, pass `--wheel` and `--source-revision`
-in place of `--package-version`, as for a live upgrade. The candidate stages
-under `/tmp/xr/releases`, never under the live service root.
+The log is JSON lines. Read these events and messages after the noted time:
 
-Read these log lines after the noted time in `/tmp/xr/logs/exomem.log`:
-
-- `lexical repair pass starting scope=full` from the promoted worker fails the
-  first check. `scope=targeted` is the expected delta repair.
+- A `lexical_repair_started` event with `fields.kind` `full` fails the first
+  check. `targeted` and `catch_up` are the expected delta repairs.
 - `standby built a detached lexical catalogue` and `adopted retrieval catalog
   healed=` show that promotion adopted the standby's catalog.
 - `managed retrieval catalog delegated to background repair` or `maintained
   retrieval catalog warm-up failed` explain a slow or failed adoption.
 
-The rehearsal runs without other writers. A bulk writer that writes vault files
-outside the service during a live full repair makes every publication of that
-repair abort, so pause bulk writers for the live install window.
+The rehearsal runs without other writers. During a live full repair, a bulk
+writer outside the service makes every publication of that repair abort. Pause
+bulk writers for the live install window.
 
 The rehearsal does not cover a collection store schema change or the move of
 file collections into the store. Both need the writer lease coordinator, and
