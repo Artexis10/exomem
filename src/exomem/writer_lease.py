@@ -6757,7 +6757,7 @@ class LeaseManager:
         wait = _ContentionWait(
             self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
         )
-        routing = False
+        routing = submitted = False
         current: _StoreAttempt | None = None
         refusal_journal: list[Callable[[], None]] = []
 
@@ -6774,10 +6774,10 @@ class LeaseManager:
             return func(command, *injected, **call_kwargs)
 
         def attempt() -> Any:
-            nonlocal routing, current
+            nonlocal routing, submitted, current
             current = _StoreAttempt(
                 holds_ticket=wait.ticket is not None,
-                resubmission=wait.absorbed > 0,
+                resubmission=submitted,
                 deadline=wait.deadline,
             )
             routing = True
@@ -6789,6 +6789,7 @@ class LeaseManager:
             else:
                 server = routed
             routing = False
+            submitted = True
             token = _ACTIVE_STORE_ATTEMPT.set(current)
             try:
                 if server is None:
@@ -6981,7 +6982,13 @@ class LeaseManager:
             if self._stop.is_set() or self._store_refused():
                 from .collection_store import connection as store_connection
 
-                raise store_connection.busy("collection store handoff is in progress")
+                error = store_connection.busy("collection store handoff is in progress")
+                attempt = _ACTIVE_STORE_ATTEMPT.get()
+                if attempt is not None and not self._stop.is_set():
+                    # A request's checkout is refused before its work runs, so its thread may submit
+                    # it again; a checkout inside the work sees no attempt (`_run_store_attempt`).
+                    attempt.handed_off = error
+                raise error
             self._store_bound = True
             self._store_borrowers[thread] = self._store_borrowers.get(thread, 0) + 1
         try:

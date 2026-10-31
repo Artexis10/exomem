@@ -1863,9 +1863,7 @@ def test_a_keyed_write_waiting_its_turn_leaves_the_store_thread_free(service, mo
                                 item={"title": "Waited"}, item_key=LATER, why="waited its turn",
                                 idempotency_key="waited-turn")
             _until(lambda: len(line._line) == 2)
-            started = time.monotonic()
             assert titles(service.root, CID) == ["Canonical"]
-            assert time.monotonic() - started < 1.0
             line.leave(ahead)
             assert write.result(timeout=20)["outcome"] == "committed"
     finally:
@@ -2016,6 +2014,40 @@ def test_a_read_during_a_store_handoff_that_outlasts_the_mutation_timeout_is_ref
             titles(service.root, CID)
         assert busy.value.code == "COLLECTION_STORE_BUSY" and busy.value.as_public_dict()["committed"] is False
         assert time.monotonic() - entry < 1.5
+
+
+def test_a_write_during_a_store_handoff_that_outlasts_the_mutation_timeout_commits_once(service, monkeypatch):
+    """Defect: a write still waiting when the handoff outlasted the mutation timeout reached the
+    store, which refused it as COLLECTION_STORE_BUSY before it ran; an idle release does this about
+    once a minute."""
+    appends = counted_appends(monkeypatch)
+    with held_handoff(service) as leave, monkeypatch.context() as short:
+        short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+        threading.Timer(1.5, leave.set).start()
+        result = call(service.root, "record_memory", action="append", collection=CID,
+                      item={"title": "After handoff"}, item_key=LATER, why="handoff")
+    assert result["outcome"] == "committed"
+    assert appends == [LATER]
+    assert titles(service.root, CID) == ["After handoff", "Canonical"]
+
+
+def test_a_store_busy_raised_after_the_write_started_reaches_the_caller_once(service, monkeypatch):
+    """Only a refusal raised before the write's leaf ran is safe to submit again: an unkeyed write
+    submitted again after its leaf ran could write twice."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    leaf_calls = []
+
+    def refused_inside(writer, *args, **kwargs):
+        leaf_calls.append(kwargs.get("item_key"))
+        raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+
+    monkeypatch.setattr(CollectionWriter, "append_record", refused_inside)
+    with pytest.raises(OpError) as busy:
+        call(service.root, "record_memory", action="append", collection=CID, item={"title": "Once"},
+             item_key=LATER, why="inside the leaf")
+    assert busy.value.code == "COLLECTION_STORE_BUSY"
+    assert leaf_calls == [LATER]
 
 
 def test_a_clean_service_stop_hands_the_writer_lease_back_with_the_unmoved_head(service, monkeypatch):

@@ -300,7 +300,10 @@ authority and can be rolled back independently.
       `tests/test_collection_store_service.py`:
       `test_a_keyed_write_waiting_its_turn_leaves_the_store_thread_free` and
       `test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread`
-      (hold at routing and after routing); `test_queued_mutation_timeout_never_executes`
+      (hold at routing and after routing),
+      `test_a_write_during_a_store_handoff_that_outlasts_the_mutation_timeout_commits_once`;
+      `test_a_store_busy_raised_after_the_write_started_reaches_the_caller_once`,
+      `test_queued_mutation_timeout_never_executes`
       and `test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay`
       keep the refusals that must not run again.
 - [ ] 13.2 Live: after deploy, no `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`

@@ -1196,7 +1196,13 @@ class StoreServer:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 and not self._closed and extend is not None:
                     # Work the store has not taken never ran, so waiting longer cannot repeat it.
-                    later = extend(completion_deadline)
+                    try:
+                        later = extend(completion_deadline)
+                    except BaseException:
+                        # A caller that sees an error must leave nothing queued to run later.
+                        if request in self._requests:
+                            self._requests.remove(request)
+                        raise
                     if later is not None and later > deadline:
                         deadline = later
                         continue

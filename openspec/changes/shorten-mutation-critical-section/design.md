@@ -412,7 +412,7 @@ The store thread now makes each attempt once. It hands a refusal back to the
 request thread only when the refusal proves that nothing committed:
 
 - a `MUTATION_BUSY` that is eligible for absorption and observed no commit;
-- a store handoff that refused the guard before the leaf started;
+- a store handoff that refused the request's checkout or guard before its work ran;
 - a preparation retry that would have had to wait in line;
 - a keyed write that arrived behind waiting writes, which it hands back without running.
 
@@ -426,8 +426,8 @@ writes a journal row.
 Routing proves collection ownership under the boundary and changes nothing.
 Its busy refusal is therefore waited out too. A write that the store queue has
 not taken never ran, so it keeps its place while its request budget leaves room
-for one attempt. The two refusals that may hide a commit still reach the
-caller: `MUTATION_ACKNOWLEDGEMENT_PENDING` and a closed server.
+for one attempt. `MUTATION_ACKNOWLEDGEMENT_PENDING`, which may hide a commit,
+still reaches the caller, and so does the refusal of a closed store server.
 `EXOMEM_CAPTURE_CONTENTION_ABSORB=0` restores the earlier path.
 
 A store read that meets a hold at routing longer than the guard bound is still
