@@ -64,6 +64,8 @@ the unchanged collection. Then a bounded wait for media extraction (`process_med
 
 - `plan` and `apply` repeat while a result carries `continuation`. The next call of the same
   action passes it back, with the same `plan_id` for `apply`.
+- Each `plan` and `apply` page asks for the compact reply. After the last page, one `status` call
+  reads the run for the refusals and the plan. `select` and `finish` ask for the full reply.
 - `start` passes `collection=<folder name>`. If the product refuses it, the log says
   `collection_label: unsupported` and the driver retries without it.
 - `select` first tries folder rules with `source_kind` and `domain`. If the product refuses,
@@ -93,7 +95,7 @@ Each rate is `{numerator, denominator}`. `measurement_gaps` counts scorer reads 
 | `embeds_bound` | Key embeds where the note's page links to the attachment's page or to a vault file with the same sha256. |
 | `fidelity` | Tags, aliases and front-matter properties present on the landed page. |
 | `homes.classified_homes` | Landed pages that sit outside `Knowledge Base/Sources/Imported/`. |
-| `rerun_duplicates` | Pages with `imported_from` that the re-run added, and items with more than one page. |
+| `rerun_duplicates` | Pages with `imported_from` that the re-run added, draft notes with `collection_path` and no `imported_from` that it added, and items with more than one page. |
 | `media.states` | One state per attachment. A job state is copied from `process_media status` as is. Without a job: `text-found-no-job`, or `unknown-no-job-no-text`. Not landed: `not-landed`. |
 | `recall_at_5` | One `search_memory` query (limit 5) per note probe and per distinct media phrase. English and Japanese are separate. |
 | `cost` | Tool calls, wall time per phase and refusals from the drive log. The scorer's own calls are counted apart. |
