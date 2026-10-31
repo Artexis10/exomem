@@ -146,11 +146,12 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
 
 
 def stage_reasons(
-    root: Path, import_id: str, pages: tuple[dict, ...], filed_statuses: tuple[str, ...]
+    import_id: str, files: list[tuple[str, int]], pages: tuple[dict, ...], filed_statuses: tuple[str, ...]
 ) -> list[tuple[str, int, str]]:
-    """Each file of the stage as (path relative to the stage, bytes, why it stays); `pages` are the scans, nearest first.
+    """Each of `files` (path relative to the stage, bytes) as (path, bytes, why it stays); `pages` are the scans, nearest first.
 
     A file that no page scanned (hidden, added after the scan, on a page not yet scanned) is `OUTSIDE_RUN`.
+    A caller passes the staged files, and may add manifest members that are no longer there.
     """
     classifiers = [_page_classifier(page, filed_statuses) for page in pages]
     prefix = f"{import_stage.STAGE_DIR}/{import_id}/"
@@ -162,7 +163,7 @@ def stage_reasons(
                 return reason
         return OUTSIDE_RUN
 
-    return [(path, size, why(path)) for path, size in import_stage.staged_files(root, import_id)]
+    return [(path, size, why(path)) for path, size in files]
 
 
 def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = ()) -> dict | None:
@@ -183,7 +184,8 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
         return None
     folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
     by_reason: dict[str, dict[str, int]] = {}
-    for _path, size, reason in stage_reasons(root, recorded_stage["stage"], (run, *earlier_pages), filed_statuses):
+    staged = import_stage.staged_files(root, recorded_stage["stage"])
+    for _path, size, reason in stage_reasons(recorded_stage["stage"], staged, (run, *earlier_pages), filed_statuses):
         entry = by_reason.setdefault(reason, {"files": 0, "bytes": 0})
         entry["files"] += 1
         entry["bytes"] += size

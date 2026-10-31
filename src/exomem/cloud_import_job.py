@@ -394,8 +394,7 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
         if receipt is not None:
             receipt[import_stage.RENAMES_PENDING_KEY] = pending
             _private_json(import_stage.receipt_path(vault_root, import_id), receipt)
-        elif import_stage.read_residual(vault_root, import_id) is None:
-            # A walk that listed its members keeps them: the contract says a retried walk keeps the first record.
+        else:
             _write_walk(vault_root, import_id, import_stage.renames_pending_record(pending))
         raise ArchiveRefused("IMPORT_RENAMES_PENDING", "renamed members")
     if receipt is None:
@@ -406,9 +405,12 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
         # stage, so it gets none. With neither, an earlier discard has removed what the record would list: it records nothing.
         changed = False
         if import_stage.RESIDUAL_KEY not in receipt and (import_stage.MEMBERS_KEY in receipt or stage.exists()):
-            receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record(
-                adoption_run.unfiled_members(vault_root, import_id))
-            changed = True
+            unfiled = adoption_run.unfiled_members(vault_root, import_id)
+            # The receipt's record outranks a walk's. An empty one would say that every member was filed over the
+            # members that a walk listed, so the walk's record stands.
+            if unfiled or not import_stage.read_walk_members(vault_root, import_id):
+                receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record(unfiled)
+                changed = True
         for key in (import_stage.MEMBERS_KEY, import_stage.RENAMES_PENDING_KEY):
             changed |= receipt.pop(key, None) is not None
         if changed:
@@ -420,9 +422,7 @@ def _walk(vault_root: Path, import_id: str) -> None:
 
     A stage that is gone gets no record: a record with no member would say that every member was filed.
     """
-    if import_stage.read_residual(vault_root, import_id) is not None or not (
-        vault_root / import_stage.STAGE_DIR / import_id
-    ).exists():
+    if not (vault_root / import_stage.STAGE_DIR / import_id).exists():
         return
     _write_walk(vault_root, import_id, import_stage.residual_record([
         import_stage.residual_member(path, size, import_stage.UNREADABLE_CODE)
@@ -432,7 +432,13 @@ def _walk(vault_root: Path, import_id: str) -> None:
 
 
 def _write_walk(vault_root: Path, import_id: str, record: dict) -> None:
-    """Replace the import's walk file whole and durably; the receipt it stands in for stays as it was."""
+    """Replace the import's walk file whole and durably, unless it holds the members of a walk; the receipt stays as it was.
+
+    A walk's members are the only sign of what the stage held, so a retried walk, or a refusal that names pending
+    renames, keeps them.
+    """
+    if import_stage.read_walk_members(vault_root, import_id) is not None:
+        return
     store = private_state.store(vault_root, import_stage.WALK_RECORDS)
     private_state.write_record(store, import_id, record, temp_suffix=".tmp", durable=True)
     private_state.sync_directory(store)

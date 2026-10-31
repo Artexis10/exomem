@@ -242,6 +242,17 @@ def read_walk(vault_root: Path, import_id: str) -> dict | None:
         return None
 
 
+def _members_of(record: object) -> list[dict] | None:
+    """The member list of a residual record, or None for anything else: another version, a damaged list, no list."""
+    entries = record.get(MEMBERS_KEY) if isinstance(record, dict) and record.get("version") == RESIDUAL_VERSION else None
+    return entries if isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries) else None
+
+
+def read_walk_members(vault_root: Path, import_id: str) -> list[dict] | None:
+    """The members that a stage walk recorded, or None when no walk did (a pending-only walk file records none)."""
+    return _members_of(read_walk(vault_root, import_id))
+
+
 def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     """The members of a discarded window's residual record, or None when the window has none.
 
@@ -250,9 +261,5 @@ def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     """
     if not vault.is_import_id(import_id):
         return None
-    walk = read_walk(vault_root, import_id)
-    for record in ((read_receipt(vault_root, import_id) or {}).get(RESIDUAL_KEY), walk):
-        entries = record.get(MEMBERS_KEY) if isinstance(record, dict) and record.get("version") == RESIDUAL_VERSION else None
-        if isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries):
-            return entries
-    return None
+    receipt_members = _members_of((read_receipt(vault_root, import_id) or {}).get(RESIDUAL_KEY))
+    return receipt_members if receipt_members is not None else read_walk_members(vault_root, import_id)

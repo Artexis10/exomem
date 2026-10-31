@@ -88,6 +88,26 @@ def test_a_discard_refuses_while_a_renamed_member_has_no_page_and_names_it_in_th
     assert import_stage.RENAMES_PENDING_KEY not in receipt and not _stage_dir(vault, import_id).exists()
 
 
+def test_a_discard_lists_a_renamed_member_whose_replay_was_refused_once_the_person_moves_it(
+    vault: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Catches a record built from the stage alone: a member that left it by rename and got no page reads as filed."""
+    import_id = _job_stage(vault, {"scan.bin": PDF, "zz.bin": OTHER})
+    run_id, plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
+    (vault / KB_SCAN).write_bytes(PDF + b"changed since the rename")
+    consume._apply(vault, run_id, plan_id)
+    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
+    with pytest.raises(ArchiveRefused) as refused:
+        cloud_import_job.discard(vault, import_id)
+    assert refused.value.code == "IMPORT_RENAMES_PENDING"
+
+    (vault / KB_SCAN).rename(tmp_path / "moved-scan.bin")
+    cloud_import_job.discard(vault, import_id)
+
+    assert import_stage.read_residual(vault, import_id) == [
+        {"path": "Field Notes/scan.bin", "bytes": len(PDF), "code": "failed"}]
+
+
 # 2
 
 
@@ -256,6 +276,38 @@ def test_a_walking_discard_that_a_renamed_member_refuses_names_it_in_the_walk_fi
     assert import_stage.read_residual(vault, import_id) == []
     assert import_stage.RENAMES_PENDING_KEY not in import_stage.read_walk(vault, import_id)
     assert not _stage_dir(vault, import_id).exists()
+
+
+def _walk_then_make_the_receipt_readable_again(vault: Path, import_id: str) -> None:
+    receipt = _receipt_file(vault, import_id)
+    readable = receipt.read_text(encoding="utf-8")
+    receipt.write_text("{ not a receipt", encoding="utf-8")
+    cloud_import_job.discard(vault, import_id, walk_stage=True)
+    receipt.write_text(readable, encoding="utf-8")
+
+
+def test_a_plain_discard_after_a_walk_still_lists_the_walked_members(vault: Path) -> None:
+    """Catches a record built from the removed stage: it is empty, outranks the walk's record and hides its members."""
+    import_id = _job_stage(vault, {"scan.bin": PDF, "other.bin": OTHER})
+    _walk_then_make_the_receipt_readable_again(vault, import_id)
+
+    cloud_import_job.discard(vault, import_id)
+
+    assert sorted(member["path"] for member in import_stage.read_residual(vault, import_id)) == [
+        "Field Notes/other.bin", "Field Notes/scan.bin"]
+
+
+def test_a_plain_discard_after_a_walk_writes_no_empty_record_over_the_walk(vault: Path) -> None:
+    """Catches an empty record for a window that a walk listed: the receipt's record outranks the walk's and says all filed."""
+    import_id = _job_stage(vault, {"plan.md": b"# Plan\n\nInvented plan.\n"})
+    _file_all_but(vault, import_id)
+    _walk_then_make_the_receipt_readable_again(vault, import_id)
+
+    cloud_import_job.discard(vault, import_id)
+
+    assert import_stage.RESIDUAL_KEY not in _receipt(vault, import_id)
+    assert import_stage.read_residual(vault, import_id) == [
+        {"path": "Field Notes/plan.md", "bytes": len(b"# Plan\n\nInvented plan.\n"), "code": "receipt_unreadable"}]
 
 
 def test_a_walking_discard_of_an_import_with_no_stage_records_nothing(vault: Path) -> None:

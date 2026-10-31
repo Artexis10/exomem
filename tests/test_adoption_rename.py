@@ -17,6 +17,7 @@ from test_adoption_consume import PDF
 
 from exomem import (
     adopt,
+    adoption_plan,
     adoption_run,
     backfill,
     import_stage,
@@ -532,12 +533,26 @@ def test_a_run_whose_renamed_file_waits_for_its_page_refuses_to_leave_it_and_app
         _GUARDED[verb](vault, run_id, import_id)
 
     assert refused.value.code == "RENAMES_PENDING"
-    assert run_id in refused.value.reason and "apply" in refused.value.reason
+    assert run_id in refused.value.reason and "Call apply" in refused.value.reason
+    assert "keep the source" in refused.value.reason
     assert rename_journal.is_held(vault, artifact)
 
     consume._apply(vault, run_id, plan_id)
 
     assert _page_of(vault, artifact).is_file() and not rename_journal.pending(vault)
+
+
+def test_a_refusal_tells_the_caller_to_move_the_file_when_apply_cannot_settle_it(vault: Path, monkeypatch) -> None:
+    """Catches a refusal that sends the caller to an apply that cannot settle the file once the receipt is unreadable."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    run_id, _plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
+    import_stage.receipt_path(vault, import_id).write_text("{ not a receipt", encoding="utf-8")
+
+    with pytest.raises(adoption_run.AdoptionRunError) as refused:
+        adoption_run.cancel(vault, run_id=run_id, why=None)
+
+    assert refused.value.code == "RENAMES_PENDING"
+    assert "Call apply" not in refused.value.reason and "keep the source" in refused.value.reason
 
 
 def test_the_journal_record_names_the_import_the_run_the_staged_path_and_the_inode(vault: Path, monkeypatch) -> None:
@@ -864,6 +879,20 @@ def test_a_matched_member_above_the_ceiling_plans_eligible_with_no_byte_read_and
     assert outcome["status"] == "applied" and outcome["consumed"] is True
     assert (vault / outcome["artifact_path"]).stat().st_ino == inode
     assert read.bytes < len(BIG) // 2
+
+
+def test_a_matched_text_member_above_the_inline_limit_is_an_artifact_and_files_by_rename(vault: Path, monkeypatch) -> None:
+    """Catches a refusal of a large vouched text file by the ceiling: it is an artifact, so it files like any other."""
+    notes = b"# Notes\n" + b"x" * adoption_plan.INLINE_TEXT_MAX_BYTES
+    import_id = _job_stage(vault, {"notes.md": notes})
+    inode = _staged(vault, import_id, "notes.md").stat().st_ino
+    monkeypatch.setenv("EXOMEM_ADOPTION_MAX_FILE_BYTES", str(MiB))
+
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
+    reply = consume._apply(vault, run_id, plan_id)
+
+    outcome = reply["outcomes"][_original(import_id, "notes.md")]
+    assert outcome["status"] == "applied" and (vault / outcome["artifact_path"]).stat().st_ino == inode
 
 
 def test_a_member_whose_identity_changed_keeps_the_ceiling_when_the_scan_lists_it(vault: Path, monkeypatch) -> None:

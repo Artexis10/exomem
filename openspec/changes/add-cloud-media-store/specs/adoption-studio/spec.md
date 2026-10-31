@@ -6,7 +6,7 @@ Adoption SHALL file an artifact member of a recorded stage through a Source-writ
 - On a match, the manifest SHA-256 SHALL be the Source's `binary_sha256`, and the primitive SHALL read no byte of the file.
 - On a mismatch, or for a manifest entry without an identity, the primitive SHALL hash the file once between two stat checks. It SHALL rename the file only when the digest equals the manifest SHA-256 and the two stats agree. Otherwise the member SHALL stay in the residual as changed.
 
-The rename SHALL NOT replace an existing file. When a file already exists at the Knowledge Base path, the member SHALL stay unfiled, and adoption SHALL report the conflict. The batch writer SHALL commit the Source page, and the renamed binary SHALL NOT be one of its destinations. A rename that fails with a cross-device error SHALL fall back to the streamed copy. The adoption ceiling SHALL apply to that copy and to the hash of a mismatched member. It SHALL NOT apply to a rename after an identity match. After the rename, adoption SHALL queue the artifact's offload job when the classification rule calls the artifact offloadable.
+The rename SHALL NOT replace an existing file. When a file already exists at the Knowledge Base path, the member SHALL stay unfiled, and adoption SHALL report the conflict. The batch writer SHALL commit the Source page, and the renamed binary SHALL NOT be one of its destinations. A rename that fails with a cross-device error SHALL fall back to the streamed copy. The adoption ceiling SHALL apply to that copy and to the hash of a mismatched member. It SHALL NOT apply to a rename after an identity match. A text-like member above the 4 MiB inline text limit is an artifact, so these rules apply to it and the ceiling does not refuse it. After the rename, adoption SHALL queue the artifact's offload job when the classification rule calls the artifact offloadable.
 
 #### Scenario: A large video files without a byte read
 
@@ -50,6 +50,8 @@ The rename primitive SHALL rename before it commits the Source page, and replay 
 - **Renamed, Source page not committed.** Replay SHALL compare the binary's inode, size and `mtime_ns` with the manifest identity. On a match, it SHALL commit the Source page with the manifest SHA-256. On a mismatch, it SHALL hash the file where it is, within the adoption ceiling. It SHALL commit the Source page when the digest equals the manifest SHA-256. Otherwise it SHALL leave the file unbound at its Knowledge Base path and report it as changed. Replay SHALL NOT move a file back into a stage.
 - **Source page committed.** Replay SHALL settle the member as already applied when the Source's `binary_sha256` equals the manifest SHA-256, without reading bytes. It SHALL queue the offload job if none exists and the member is offloadable.
 
+While a renamed member has no Source page, `cancel`, `select`, `plan` and `start` SHALL refuse with `RENAMES_PENDING` and name the run. The caller SHALL run `apply` again. When `apply` leaves the file unbound, or the receipt cannot be read, the caller SHALL move the file and keep the source.
+
 A rollback of a failed batch SHALL rename each renamed binary back to its staged path, without replacing an existing file. It SHALL recreate a staged parent folder that is gone. When the staged path is taken, the binary SHALL stay unbound at its Knowledge Base path, and the run SHALL report it. Neither replay nor rollback SHALL remove a renamed binary.
 
 #### Scenario: A stop after the rename
@@ -62,6 +64,12 @@ A rollback of a failed batch SHALL rename each renamed binary back to its staged
 - **WHEN** the process stops after a member's rename, and the binary's size no longer matches the manifest identity
 - **THEN** the next `apply` hashes the binary where it is, finds a different digest, and leaves it unbound at its Knowledge Base path
 - **AND** it reports the member as changed and moves nothing into the stage
+
+#### Scenario: A verb meets a renamed member that has no page
+
+- **WHEN** the process stops after a member's rename and before its Source page commits, and the person cancels the run
+- **THEN** `cancel` refuses with `RENAMES_PENDING` and the run stays
+- **AND** after `apply` commits the Source page, `cancel` proceeds
 
 #### Scenario: A stop after the commit
 
@@ -80,7 +88,7 @@ A rollback of a failed batch SHALL rename each renamed binary back to its staged
 
 ### Requirement: A discard refuses while a renamed member has no page
 
-`import_discard` SHALL refuse with `IMPORT_RENAMES_PENDING` while a member of the window is renamed but its Source page is not committed. The discard Job SHALL write the Knowledge Base paths of those members to the receipt's `renames_pending` field, and it SHALL keep the stage and the manifest. It SHALL NOT settle a member itself. The person or agent SHALL then run `apply` again, which settles the member by the replay rule, or move or delete the file, and retry the discard. A discard that proceeds SHALL drop `renames_pending` in the write that drops the manifest. This choice was decided on 2026-10-31 under the operator's standing rule for reversible choices; the operator may revert it.
+`import_discard` SHALL refuse with `IMPORT_RENAMES_PENDING` while a member of the window is renamed but its Source page is not committed. The discard Job SHALL write the Knowledge Base paths of those members to the receipt's `renames_pending` field, and it SHALL keep the stage and the manifest. It SHALL NOT settle a member itself. The person or agent SHALL then run `apply` again, which settles the member by the replay rule, or move the file, keep the source, and retry the discard. A discard that proceeds SHALL drop `renames_pending` in the write that drops the manifest. This choice was decided on 2026-10-31 under the operator's standing rule for reversible choices; the operator may revert it.
 
 #### Scenario: A discard after a stop
 
@@ -92,7 +100,7 @@ A rollback of a failed batch SHALL rename each renamed binary back to its staged
 
 - **WHEN** a renamed but uncommitted member is above the adoption ceiling, and its identity no longer matches
 - **THEN** the discard refuses and names the member's Knowledge Base path in `renames_pending`, and the window's manifest stays
-- **AND** after the person moves or deletes that file, the discard proceeds
+- **AND** after the person moves that file and keeps the source, the discard proceeds
 
 ### Requirement: Links resolve against the whole series
 

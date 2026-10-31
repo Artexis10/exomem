@@ -1079,11 +1079,17 @@ def _refuse_pending_renames(root: Path, verb: str, *, run_id: str | None = None,
     holds = rename_journal.pending(root, run_id=run_id, under=under)
     if holds:
         runs = ", ".join(sorted({hold.run_id for hold in holds}))
+        # Only the receipt's manifest lets `apply` settle a renamed file; without it `apply` cannot, and the source stays the only copy.
+        settled_by_apply = all(import_stage.read(root, hold.import_id) is not None for hold in holds)
+        route = (
+            "Call apply on that run first; if apply reports a file unbound, move it, and keep the source."
+            if settled_by_apply
+            else "The receipt of that import cannot be read, so apply cannot settle them. Move each file, and keep the source."
+        )
         raise AdoptionRunError(
             "RENAMES_PENDING",
             f"{verb} is refused: run {runs} renamed {len(holds)} staged file(s) into the Knowledge Base "
-            "and has not committed their Source pages. Call apply on that run first; "
-            "if apply reports a file unbound, move or delete that file.",
+            f"and has not committed their Source pages. {route}",
         )
 
 
@@ -1425,17 +1431,23 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
 
 
 def unfiled_members(root: Path, import_id: str) -> list[dict]:
-    """The staged members of an import that adoption did not file, as a residual record lists them.
+    """The members of an import that adoption did not file, as a residual record lists them.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
-    The runs that started in the stage classify its files, the most recent first, and a file that no run scanned
-    is `outside_run`. A member that adoption filed, and the series file, are left out. A member that someone
-    removed from the stage by hand is not there to list.
+    The members are the stage manifest's, plus any staged file that the manifest does not list. A member that
+    left the stage, by rename or by hand, keeps the bytes the manifest gives it; the runs that started in the
+    stage classify every member, the most recent first, and one that no run scanned is `outside_run`. A member
+    that adoption filed, and the series file, are left out: filed is what a run's outcome says, not what the
+    stage no longer holds.
     """
     pages = AdoptionRunStore(root).runs_of_stage(import_id)
+    stage = import_stage.read(root, import_id)
+    files = dict(import_stage.staged_files(root, import_id))
+    for path, (size, _digest) in (stage.members if stage is not None else {}).items():
+        files.setdefault(path, size)
     return [
         import_stage.residual_member(path, size, reason)
-        for path, size, reason in adoption_consume.stage_reasons(root, import_id, pages, _APPLIED_STATUSES)
+        for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
         # nosemgrep: ep-word-membership -- `FILED_REASONS` holds closed result keys of `_page_classifier`.
         if reason not in adoption_consume.FILED_REASONS and path != import_stage.SERIES_FILE
     ]
@@ -2092,7 +2104,7 @@ def _apply_chunk(
                 # An earlier call may have renamed the file and stopped before its Source page committed.
                 replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
                 if isinstance(replay, import_rename.Refused):
-                    # The hold stays: the file is unbound with other bytes, and only the person's move or delete
+                    # The hold stays: the file is unbound with other bytes, and only the person's move
                     # lifts it. The scans leave it alone and a discard of its stage refuses until then.
                     outcomes[path] = _failed(replay.code, replay.reason)
                     continue
