@@ -285,6 +285,50 @@ def test_standalone_authenticated_stream_survives_and_disconnect_releases_it(tmp
     asyncio.run(scenario())
 
 
+def test_a_crashed_worker_is_replaced_while_the_listener_stays_up(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        async with live_fixture(tmp_path) as (url, token, supervisor):
+            async with Client(url, auth=token, timeout=30) as client:
+                before = await client.call_tool("counted", {"marker": "before"})
+                escaped = await client.call_tool("escaped_child")
+                # Only the worker dies, as in a native crash; the child it
+                # started in its own session outlives it.
+                os.kill(before.data["pid"], signal.SIGKILL)
+                async with asyncio.timeout(10):
+                    while (await control(tmp_path, "status"))["phase"] != "restarting":
+                        await asyncio.sleep(0.01)
+                during = await client.call_tool("counted", {"marker": "during"})
+                assert supervisor.poll() is None
+                status = await control(tmp_path, "status")
+                assert status["phase"] == "ready"
+                assert during.data["pid"] not in {before.data["pid"], 0}
+                assert status["worker_pid"] == during.data["pid"]
+                assert status["worker_restarts"]["in_window"] == 1
+                assert status["worker_restarts"]["last_exit_code"] == -signal.SIGKILL
+                # The replacement could only spawn once no descendant was left.
+                with pytest.raises(ProcessLookupError):
+                    os.kill(escaped.data["pid"], 0)
+
+    asyncio.run(scenario())
+
+
+def test_a_worker_that_cannot_restart_stops_the_supervisor(tmp_path):
+    async def scenario():
+        async with live_fixture(tmp_path) as (_, _, supervisor):
+            worker = (await control(tmp_path, "status"))["worker_pid"]
+            (tmp_path / "fail-start").touch()
+            os.kill(worker, signal.SIGKILL)
+            async with asyncio.timeout(60):
+                while supervisor.poll() is None:
+                    await asyncio.sleep(0.05)
+            # A failed status, so systemd's Restart= and cgroup cleanup take over.
+            assert supervisor.returncode != 0
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(
     os.environ.get("EXOMEM_RUN_MANAGED_SYSTEMD_TESTS") != "1",
     reason="Explicit isolated systemd user-unit integration run",
