@@ -150,7 +150,8 @@ def evaluate(
     )
     types = semantic_contract.entity_type_registry(corpus.vault_root)
     kept: list[tuple[str, str]] = []
-    refused: list[tuple[Any, list[dict[str, Any]]]] = []
+    # One answer settles every identical bullet, so the caller is asked once per relation and target.
+    refused: dict[tuple[str, str], tuple[Any, list[dict[str, Any]]]] = {}
     offers: list[Offer] = []
     for edge in added.edges:
         fact = edge.fact
@@ -179,12 +180,12 @@ def evaluate(
             continue
         reason = choice.reason_for(fact.raw_relation, fact.logical_target_path) if choice is not None else None
         if reason is None:
-            refused.append((fact, options))
+            refused.setdefault((fact.raw_relation, fact.logical_target_path), (fact, options))
         else:
             kept.append((edge.identity, reason))
     if not refused:
         return Verdict(tuple(kept), None, tuple(offers))
-    fact, options = refused[0]
+    fact, options = next(iter(refused.values()))
     return Verdict(
         tuple(kept), Refusal(options, fact.raw_relation, fact.raw_target, len(refused)), tuple(offers)
     )

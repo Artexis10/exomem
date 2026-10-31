@@ -24,7 +24,7 @@ relations:
   links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, frontmatter, wikilink], presentation_role: association}
   cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation]}
   tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}
-  # A refusal lists at most four fitting relations in this order, so a relation with narrower endpoints comes before one that fits any entity.
+  # A refusal lists at most four fitting relations: those whose endpoints name both pages by type first, then those that need `entity:*`; each group keeps this order.
   member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
   kin_of: {description: Is a relative of, family: kinship, direction: symmetric, origins: [semantic_relation], endpoints: {subject: [entity:person], object: [entity:person]}}
   affiliated_with: {description: Is affiliated with without being a member or owner, family: affiliation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person], object: [entity:organization]}}
@@ -33,6 +33,6 @@ relations:
   contains: {description: Contains as a part, family: composition, direction: directed, inverse: part_of, origins: [semantic_relation]}
   extends: {description: Extends or specializes, family: specialization, direction: directed, origins: [semantic_relation]}
   located_at: {description: Is physically located at, family: location, direction: directed, origins: [semantic_relation]}
-  operates: {description: Operates or runs day to day, family: operation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:*]}}
-  supplies: {description: Supplies goods or services to, family: supply, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:*]}}
+  operates: {description: Operates or runs day to day, family: operation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
+  supplies: {description: Supplies goods or services to, family: supply, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:person, entity:organization]}}
   produces: {description: Produces or makes, family: production, direction: directed, origins: [semantic_relation]}

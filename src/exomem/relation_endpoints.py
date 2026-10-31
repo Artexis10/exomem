@@ -94,6 +94,11 @@ def _every_entity(namespace: str, name: str) -> bool:
     return (namespace == ENTITY and name == ANY) or (namespace == ROLE and name == ENTITY_ROLE)
 
 
+def without_wildcards(tokens: Iterable[str]) -> tuple[str, ...]:
+    """The tokens that name a page by its own type or role, not every entity page."""
+    return tuple(token for token in tokens if not _every_entity(*split(token)))
+
+
 def covers(wider: str, narrower: str, types: EntityTypeRegistry) -> bool:
     """Whether every page `narrower` names is a page `wider` names."""
     if wider == narrower:

@@ -108,7 +108,7 @@ def test_a_candidate_between_a_person_and_an_organization_offers_relations_and_n
     _group, item = _shared_source_item(call, person, organization)
 
     keys = [option["key"] for option in item["options"]]
-    assert "owns" in keys
+    assert "member_of" in keys
     assert len(keys) <= 4
     # The queue authors no relation for the agent: nothing to copy, only the options to choose from.
     assert item["bullet"] is None
@@ -214,9 +214,9 @@ def test_an_offered_relation_the_agent_decided_is_written_as_one_typed_edge(
 ) -> None:
     vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
     group, item = _shared_source_item(call, person, organization)
-    binding = _decided_choice(call, group, item, "owns")
+    binding = _decided_choice(call, group, item, "member_of")
 
-    accepted = _accept_as(call, group, item, "owns", binding)
+    accepted = _accept_as(call, group, item, "member_of", binding)
 
     assert "error" not in accepted, accepted
     relations = [
@@ -224,7 +224,7 @@ def test_an_offered_relation_the_agent_decided_is_written_as_one_typed_edge(
         for line in (vault / person).read_text(encoding="utf-8").splitlines()
         if f"[[{organization.removesuffix('.md')}]]" in line
     ]
-    assert relations == [f"- owns [[{organization.removesuffix('.md')}]]"]
+    assert relations == [f"- member_of [[{organization.removesuffix('.md')}]]"]
 
 
 def test_a_choice_recorded_before_the_registry_changed_is_refused_and_writes_nothing(
@@ -232,11 +232,11 @@ def test_a_choice_recorded_before_the_registry_changed_is_refused_and_writes_not
 ) -> None:
     vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
     group, item = _shared_source_item(call, person, organization)
-    binding = _decided_choice(call, group, item, "owns")
+    binding = _decided_choice(call, group, item, "member_of")
     before = (vault / person).read_bytes()
     _save_extension(call, "vault.keeps", _extension("owns"))
 
-    refused = _accept_as(call, group, item, "owns", binding)
+    refused = _accept_as(call, group, item, "member_of", binding)
 
     assert refused["error"]["code"] == "VOCABULARY_DECISION_STALE", refused
     assert (vault / person).read_bytes() == before
@@ -249,7 +249,7 @@ def test_a_chosen_relation_without_a_recorded_choice_is_refused_and_writes_nothi
     group, item = _shared_source_item(call, person, organization)
     before = (vault / person).read_bytes()
 
-    refused = _accept_as(call, group, item, "owns", {})
+    refused = _accept_as(call, group, item, "member_of", {})
 
     assert refused["error"]["code"] == "VOCABULARY_APPLICATION_INVALID", refused
     assert (vault / person).read_bytes() == before
@@ -269,7 +269,45 @@ def test_suggest_relations_carries_the_fitting_relations_for_the_pair(
         for c in suggested["candidates"]
         if c["to"] == organization and c["method"] == "shared_sources"
     ]
-    assert "owns" in [option["key"] for option in candidate["options"]]
+    assert "member_of" in [option["key"] for option in candidate["options"]]
+
+
+def test_a_pair_the_other_page_already_relates_specifically_is_not_suggested_as_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    person = _entity(call, "person", "Ada Marsh")["path"]
+    # The organization, not the person, authors the specific relation toward the person.
+    typed = _entity(
+        call,
+        "organization",
+        "Birch Works",
+        relations=[
+            {
+                "kind": "supplies",
+                "target": person.removesuffix(".md"),
+                "reason": "Birch Works supplies Ada Marsh with timber.",
+            }
+        ],
+    )
+    assert typed["state"] == "committed", typed
+    untyped = _entity(call, "organization", "Cedar Works")
+    source = call(
+        "capture_source",
+        {"title": "Shared source", "source_kind": "session", "content": "Three pages cite this."},
+    )["path"]
+    for page in (person, typed["path"], untyped["path"]):
+        _cite(vault, page, source)
+    _rebuild(vault, monkeypatch)
+
+    suggested = call(
+        "read_connections", {"operation": {"kind": "suggest-relations", "path": person}}
+    )
+
+    shared = {c["to"] for c in suggested["candidates"] if c["method"] == "shared_sources"}
+    assert untyped["path"] in shared
+    assert typed["path"] not in shared
 
 
 def test_a_candidate_between_two_plain_notes_still_accepts_without_naming_a_relation(
@@ -360,7 +398,7 @@ def test_a_curation_plan_that_leaves_the_generic_relation_where_a_specific_one_f
         _propose(vault, _accept_step(item, expected_hash))
 
     assert refused.value.code == "RELATION_CHOICE_REQUIRED"
-    assert '"key":"owns"' in str(refused.value)
+    assert '"key":"member_of"' in str(refused.value)
     assert (vault / person).read_bytes() == before
 
 

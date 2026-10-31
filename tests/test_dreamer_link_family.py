@@ -397,5 +397,5 @@ def test_a_pair_a_specific_relation_fits_is_left_in_the_queue_for_the_agent(
         for item in group["items"]
         if (item["from"], item["to"], item["method"]) == (person, organization, "shared_sources")
     ]
-    assert "owns" in [option["key"] for option in item["options"]]
+    assert "member_of" in [option["key"] for option in item["options"]]
     assert item["bullet"] is None

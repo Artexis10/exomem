@@ -127,7 +127,7 @@ def test_studio_payloads_carry_the_relations_that_fit_and_settle_once_one_is_wri
         client, "connect_memory", {"operation": "suggest-relations", "path": person, "limit": 10}
     )
     candidate = next(c for c in proposal["candidates"] if c["to"] == organization)
-    assert "owns" in [option["key"] for option in candidate["options"]]
+    assert "member_of" in [option["key"] for option in candidate["options"]]
     assert all(option["label"] for option in candidate["options"])
 
     # The queue item offers the same relations and authors no bullet of its own.

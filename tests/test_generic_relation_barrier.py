@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from test_governance_egress import _external, write_rule, write_scope
-from test_relation_endpoints import _entity, _served
+from test_relation_endpoints import _entity, _extension, _save_extension, _served
 
 from exomem import commands, note
 from exomem import vault as vault_module
@@ -319,6 +319,20 @@ def test_create_entity_commits_a_generic_item_that_carries_a_reason_and_logs_it(
     assert (edge["reason"], edge["reason_recorded"]) == (REASON, True)
 
 
+def test_identical_bullets_to_one_entity_count_as_one_refused_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call, _anchor = _anchored(tmp_path, monkeypatch)
+    ben = _target(_entity(call, "person", "Ben Quay"))
+    cy = _target(_entity(call, "person", "Cy Dock"))
+    twice = f"relates_to [[{ben}]]"
+
+    refused = _create(call, "Crane", _source(call, "Crane"), twice, twice, f"relates_to [[{cy}]]")
+
+    assert refused["error"]["code"] == CODE
+    assert refused["error"]["refused_edges"] == 2
+
+
 def test_a_reason_on_a_specific_item_does_not_answer_a_generic_item_to_the_same_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,19 +348,58 @@ def test_a_reason_on_a_specific_item_does_not_answer_a_generic_item_to_the_same_
     assert committed["state"] == "committed", committed
 
 
-def test_a_person_is_offered_the_relations_that_fit_a_person_or_an_organization_only(
+def _offered(call, source_type: str, target: str) -> list[str]:
+    """The relation keys a refused generic edge from a new `source_type` entity to `target` lists."""
+    refused = _entity(
+        call, source_type, "Cy Dock", relations=[{"kind": "relates_to", "target": target}]
+    )
+    return [option["key"] for option in refused["error"]["options"]]
+
+
+def test_each_pair_of_pages_is_offered_only_the_relations_that_fit_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _vault, call = _served(tmp_path, monkeypatch)
     works = _target(_entity(call, "organization", "Quay Works"))
     ben = _target(_entity(call, "person", "Ben Quay"))
+    ledger = _target(_entity(call, "concept", "Tidal Ledger"))
+    ruling = _target(_entity(call, "decision", "Quay Ruling"))
 
-    def offered(target: str) -> list[str]:
-        refused = _entity(call, "person", "Cy Dock", relations=[{"kind": "relates_to", "target": target}])
-        return [option["key"] for option in refused["error"]["options"]]
+    # Relations whose endpoints name both pages by type come first; `owns` needs `entity:*`.
+    assert _offered(call, "person", works) == ["member_of", "affiliated_with", "operates", "supplies"]
+    assert _offered(call, "person", ben) == ["kin_of", "supplies", "owns"]
+    assert _offered(call, "organization", ben) == ["supplies", "owns"]
+    assert _offered(call, "person", ledger) == ["owns"]
+    assert _offered(call, "person", ruling) == ["owns"]
 
-    assert offered(works) == ["member_of", "affiliated_with", "owns", "operates"]
-    assert offered(ben) == ["kin_of", "owns", "operates", "supplies"]
+
+def test_a_promoted_relation_with_its_own_endpoints_is_offered_ahead_of_its_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call = _served(tmp_path, monkeypatch)
+    works = _target(_entity(call, "organization", "Quay Works"))
+    employed = {"subject": ["entity:person"], "object": ["entity:organization"]}
+    saved = _save_extension(call, "vault.employed_by", _extension("affiliated_with", employed))
+    assert saved["state"] == "committed", saved
+
+    offered = _offered(call, "person", works)
+
+    assert offered[0] == "vault.employed_by"
+    assert offered.index("vault.employed_by") < offered.index("affiliated_with")
+
+
+def test_a_promoted_relation_that_only_inherits_its_parents_endpoints_is_never_offered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call = _served(tmp_path, monkeypatch)
+    ledger = _target(_entity(call, "concept", "Tidal Ledger"))
+    # `owns` and `supplies` reach any entity or a person or organization; neither extension
+    # says what it joins, so neither can claim a concept as its object.
+    for key, parent in (("vault.has_pet", "owns"), ("vault.supplies_parts", "supplies")):
+        saved = _save_extension(call, key, _extension(parent))
+        assert saved["state"] == "committed", saved
+
+    assert _offered(call, "person", ledger) == ["owns"]
 
 
 def test_a_generic_edge_between_two_concepts_commits_without_a_reason(
