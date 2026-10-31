@@ -451,6 +451,17 @@ def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(se
                 plan_id=preview["plan_id"], why="nothing to adopt")["status"] == "in_sync"
 
 
+def test_structured_files_maintenance_reaches_a_store_collection_through_the_service(service):
+    """Defect: maintain_memory structured-files on a store collection runs unbound in the service,
+    falls back to file collections and answers COLLECTION_NOT_FOUND."""
+    # The store writer answers for its collection: summary C keeps one aggregate view, not one per item.
+    with pytest.raises(collections.CollectionError, match="UNSUPPORTED_STORAGE"):
+        call(service.root, "maintain_memory", mode="structured-files", collection=CID)
+    with pytest.raises(collections.CollectionError, match="UNSUPPORTED_STORAGE"):
+        call(service.root, "maintain_memory", mode="structured-files", collection=CID, apply=True,
+             plan_id="0" * 64, source_snapshot="0" * 64, why="apply reaches the store writer")
+
+
 def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote_export_apply_does_not(service):
     """Defect: a remote client cannot apply the reviewed adopt-local plan to the service it talks to
     and is sent to the host, where the CLI refuses while the service runs; or a remote export apply
