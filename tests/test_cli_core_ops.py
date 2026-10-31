@@ -692,8 +692,6 @@ def test_edit_memory_cli_primary_operation_is_normalized_before_invocation(
     assert code == 0, f"{err}\n{out}"
     assert len(calls) == 1
     assert calls[0].pop("idempotency_key") is None
-    # An unkeyed CLI write carries a retry scope of its own so it waits out a busy boundary.
-    assert calls[0].pop("implicit_idempotency_scope").startswith("invocation:")
     assert calls == [
         {
             "path": _INSIGHT,
