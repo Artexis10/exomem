@@ -304,6 +304,20 @@ _TOPOLOGY_CARRY_KEY = "recall_resolver_topology_carry"
 TOPOLOGY_CARRY_LIMIT = 256
 _READ_BARRIER_KEY = "read_barrier"
 _GRAPH_SYNC_CHECKPOINT_KEY = "graph_sync_checkpoint"
+#: Present, with this value, only while `graph_dependency_coverage` and
+#: `graph_dependencies` agree with every file row: the stored answer to
+#: `_dependency_index_complete`, so a check is a lookup instead of a scan of the
+#: whole dependency table (tens of seconds on a cold page cache at 15,000
+#: pages). Triggers delete it on any row change to the three tables, so no
+#: writer can leave a stale one; a writer that keeps the index complete records
+#: it again, in its own transaction, after proving the sources it changed.
+_DEPENDENCY_PROOF_KEY = "dependency_index_complete"
+#: The tables the proof describes, each with whether only its file rows count.
+_DEPENDENCY_PROOF_TABLES = (
+    ("graph_nodes", True),
+    ("graph_dependencies", False),
+    ("graph_dependency_coverage", False),
+)
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -2017,6 +2031,30 @@ def _dependency_records(
     return records
 
 
+def _dependency_proof_triggers() -> list[str]:
+    """Triggers that retire the recorded proof when a row it describes changes.
+
+    A row-level trigger fires for every writer on every connection, including a
+    process of an older release and a repair that edits rows directly, which no
+    list of call sites could promise. Only a file row of `graph_nodes` is read by
+    the proof, so unit rows do not retire it.
+    """
+    retire = f"DELETE FROM graph_meta WHERE key = '{_DEPENDENCY_PROOF_KEY}'"
+    statements: list[str] = []
+    for table, file_rows_only in _DEPENDENCY_PROOF_TABLES:
+        for event, rows in (("INSERT", ("NEW",)), ("UPDATE", ("OLD", "NEW")), ("DELETE", ("OLD",))):
+            when = (
+                "WHEN " + " OR ".join(f"{row}.kind = 'file'" for row in rows)
+                if file_rows_only
+                else ""
+            )
+            statements.append(
+                f"CREATE TRIGGER IF NOT EXISTS trg_{table}_retire_dependency_proof_"
+                f"{event.lower()} AFTER {event} ON {table} {when} BEGIN {retire}; END"
+            )
+    return statements
+
+
 def _dependency_changed_keys(
     rels: set[str], *resolvers: vault_module.WikilinkResolver
 ) -> set[str]:
@@ -2258,7 +2296,8 @@ class EpistemicGraphIndex:
             "activation_provenance_relations",
             "activation_unregistered",
         }
-        if node_columns and not required_node_columns <= node_columns:
+        nodes_dropped = bool(node_columns) and not required_node_columns <= node_columns
+        if nodes_dropped:
             conn.execute("DROP TABLE graph_nodes")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_nodes (
@@ -2316,6 +2355,9 @@ class EpistemicGraphIndex:
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
         )
+        if nodes_dropped:
+            # `DROP TABLE` fires no row trigger, and it took the file rows with it.
+            conn.execute("DELETE FROM graph_meta WHERE key = ?", (_DEPENDENCY_PROOF_KEY,))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)")
         conn.execute(
@@ -2373,6 +2415,8 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
             "ON graph_dependencies(lookup_key, source_path)"
         )
+        for statement in _dependency_proof_triggers():
+            conn.execute(statement)
 
     def _connect_existing(
         self,
@@ -4911,8 +4955,9 @@ class EpistemicGraphIndex:
             if created is None:
                 return False
             with conn:
-                for rel in sorted(created):
-                    self._drop_own_rows(conn, rel)
+                with self._keeping_dependency_proof(conn, created):
+                    for rel in sorted(created):
+                        self._drop_own_rows(conn, rel)
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?", (_AVAILABILITY_FRESHNESS_KEY,)
                 )
@@ -5044,7 +5089,7 @@ class EpistemicGraphIndex:
             indexed = 0
             kb = self.vault_root / kb_dirname()
             type_basis = _producer_type_basis(self.vault_root)
-            with conn:
+            with conn, self._keeping_dependency_proof(conn, None):
                 if kb.is_dir():
                     for md in find_module._walk_md(kb):
                         # The pass writes only its private sidecar, so a
@@ -5850,6 +5895,45 @@ class EpistemicGraphIndex:
         return entries
 
     def _dependency_index_complete(self, conn: sqlite3.Connection) -> bool:
+        """Whether raw dependencies cover every file row, in the caller's snapshot.
+
+        A proof recorded by the writer that left these rows answers from one
+        lookup. Without one (a sidecar older than the record, or rows a repair
+        edited) the whole dependency table is read.
+        """
+        return self._dependency_proof_recorded(conn) or self._prove_dependency_index(conn)
+
+    @staticmethod
+    def _dependency_proof_recorded(conn: sqlite3.Connection) -> bool:
+        try:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM graph_meta WHERE key = ? AND value = ?",
+                    (_DEPENDENCY_PROOF_KEY, str(_DEPENDENCY_FORMAT)),
+                ).fetchone()
+                is not None
+            )
+        except sqlite3.Error:
+            return False
+
+    @staticmethod
+    def _dependency_rows_agree(
+        files: dict[str, str],
+        coverage: dict[str, tuple[str, int, int]],
+        counts: dict[str, int],
+    ) -> bool:
+        """The one rule: each file row has a coverage row for its bytes and as many dependencies."""
+        if set(files) != set(coverage) or not set(counts) <= set(coverage):
+            return False
+        return all(
+            source_hash == files[source_path]
+            and dependency_format == _DEPENDENCY_FORMAT
+            and expected_count >= 0
+            and expected_count == counts.get(source_path, 0)
+            for source_path, (source_hash, dependency_format, expected_count) in coverage.items()
+        )
+
+    def _prove_dependency_index(self, conn: sqlite3.Connection) -> bool:
         """Prove in one snapshot that raw dependencies cover every file row."""
         try:
             files = {
@@ -5873,15 +5957,74 @@ class EpistemicGraphIndex:
             }
         except (sqlite3.Error, TypeError, ValueError):
             return False
-        if set(files) != set(coverage) or not set(counts) <= set(coverage):
+        return self._dependency_rows_agree(files, coverage, counts)
+
+    def _prove_dependency_sources(self, conn: sqlite3.Connection, rels: set[str]) -> bool:
+        """`_prove_dependency_index` restricted to `rels`: the rule, over their rows only."""
+        files: dict[str, str] = {}
+        coverage: dict[str, tuple[str, int, int]] = {}
+        counts: dict[str, int] = {}
+        ordered = sorted(rels)
+        try:
+            for start in range(0, len(ordered), 900):
+                batch = ordered[start : start + 900]
+                marks = ",".join("?" for _ in batch)
+                files.update(
+                    (str(path), str(source_hash))
+                    for path, source_hash in conn.execute(
+                        "SELECT path, source_hash FROM graph_nodes "
+                        f"WHERE kind = 'file' AND path IN ({marks})",
+                        batch,
+                    )
+                )
+                coverage.update(
+                    (str(source_path), (str(source_hash), int(dependency_format), int(expected)))
+                    for source_path, source_hash, dependency_format, expected in conn.execute(
+                        "SELECT source_path, source_hash, dependency_format, expected_count "
+                        f"FROM graph_dependency_coverage WHERE source_path IN ({marks})",
+                        batch,
+                    )
+                )
+                counts.update(
+                    (str(source_path), int(count))
+                    for source_path, count in conn.execute(
+                        "SELECT source_path, COUNT(*) FROM graph_dependencies "
+                        f"WHERE source_path IN ({marks}) GROUP BY source_path",
+                        batch,
+                    )
+                )
+        except (sqlite3.Error, TypeError, ValueError):
             return False
-        return all(
-            source_hash == files[source_path]
-            and dependency_format == _DEPENDENCY_FORMAT
-            and expected_count >= 0
-            and expected_count == counts.get(source_path, 0)
-            for source_path, (source_hash, dependency_format, expected_count) in coverage.items()
-        )
+        return self._dependency_rows_agree(files, coverage, counts)
+
+    @contextmanager
+    def _keeping_dependency_proof(
+        self, conn: sqlite3.Connection, touched: Iterable[str] | None
+    ) -> Iterator[None]:
+        """Write rows of `touched` sources only, and record the proof they leave.
+
+        The write lock comes first, so "was the proof recorded" is read from the
+        state this transaction then changes. Recorded, only `touched` can
+        disagree, and they are proved alone. Otherwise, or when `touched` is None
+        because the writer may change any source, the whole table is proved,
+        which is the cost the record saves a later reader. Recorded last but
+        before any publication hook, so a hook that edited a row outside
+        `touched` would retire it again. A failure leaves nothing recorded, and
+        the rows roll back with the caller's transaction.
+        """
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        was_recorded = touched is not None and self._dependency_proof_recorded(conn)
+        yield
+        if (
+            self._prove_dependency_sources(conn, set(touched or ()))
+            if was_recorded
+            else self._prove_dependency_index(conn)
+        ):
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                (_DEPENDENCY_PROOF_KEY, str(_DEPENDENCY_FORMAT)),
+            )
 
     @staticmethod
     def _dependency_sources_for_keys(
@@ -6895,18 +7038,22 @@ class EpistemicGraphIndex:
         conn = self._connect()
         indexed = 0
         type_basis = _producer_type_basis(self.vault_root)
+        touched = {
+            rel for path in paths if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+        }
         try:
             with conn:
-                for path in paths:
-                    if self._index_path(
-                        conn,
-                        path,
-                        resolver=resolver,
-                        commit=False,
-                        indexed_versions=indexed_versions,
-                        type_basis=type_basis,
-                    ):
-                        indexed += 1
+                with self._keeping_dependency_proof(conn, touched):
+                    for path in paths:
+                        if self._index_path(
+                            conn,
+                            path,
+                            resolver=resolver,
+                            commit=False,
+                            indexed_versions=indexed_versions,
+                            type_basis=type_basis,
+                        ):
+                            indexed += 1
                 if resolver_fingerprint is not None:
                     self._write_resolver_topology(conn, resolver_fingerprint)
                 if before_commit is not None:
@@ -7630,7 +7777,11 @@ class EpistemicGraphIndex:
         *,
         commit: bool = True,
     ) -> int:
-        with conn if commit else nullcontext():
+        with ExitStack() as transaction:
+            if commit:
+                # Inside a caller's transaction (`commit=False`), that caller keeps the proof.
+                transaction.enter_context(conn)
+                transaction.enter_context(self._keeping_dependency_proof(conn, {rel_path}))
             conn.execute(
                 "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_page_key = ?",
                 (rel_path, _file_key(rel_path), _file_key(rel_path)),
