@@ -280,12 +280,14 @@ spec:
             # alert receiver; the Role below lets cellctl read this one Secret.
             - name: CELLCTL_ALERT_DELIVERY_SECRET
               value: {{ printf "%s/%s/%s" .Release.Namespace .Values.observability.alertDeliverySecretName .Values.observability.alertDeliverySecretKey | quote }}
-            # The cell-unavailable and cell-disk-low alerts' thresholds, from
-            # alerts.* in the observability contract (above).
+            # The cell-unavailable, cell-disk-low and cell-recall-lagging alerts'
+            # thresholds, from alerts.* in the observability contract (above).
             - name: CELLCTL_PENDING_OPERATION_WARN_SECONDS
               value: {{ int64 (required "observability contract alerts.pending_operation_warn_seconds is required" $contractAlerts.pending_operation_warn_seconds) | quote }}
             - name: CELLCTL_PVC_RESERVED_FREE_BYTES
               value: {{ int64 (required "observability contract alerts.pvc_reserved_free_bytes is required" $contractAlerts.pvc_reserved_free_bytes) | quote }}
+            - name: CELLCTL_RECALL_LAG_WARN_SECONDS
+              value: {{ int64 (required "observability contract alerts.recall_lag_warn_seconds is required" $contractAlerts.recall_lag_warn_seconds) | quote }}
             # Shared cap and optional local classes (_cell-storage.tpl).
             - name: CELLCTL_KEY_RETENTION_SOURCES
               value: {{ .Values.cellctl.keyRetentionSources | toJson | quote }}
@@ -521,6 +523,24 @@ spec:
         - port: 8769
           protocol: TCP
     {{- end }}
+    # Each cell's readiness for the cell-recall-lagging alert, from the cell's
+    # health-only port alone. cellctl derives every cell bearer, so the cell
+    # port, which carries MCP, stays the gateway's. Selected as the gateway
+    # selects cells (cloud-gateway.yaml): runtime pods, never Job pods.
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: exomem.io/cloud-cell
+                operator: Exists
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+      ports:
+        - port: 8766
+          protocol: TCP
     {{- if $local }}
     {{- $metrics := include "exomem.cellMetrics" . | fromJson }}
     # Tasks 5.5 and 5.6: the host alerts read /metrics from TopoLVM's node plugin
@@ -863,7 +883,7 @@ spec:
               {{ include "exomem.cellctl.egressRule" (dict "index" 0 "namespace" .Values.cellctl.namespace "pod" "exomem-artifact-broker" "port" 8767) }} &&
               {{ include "exomem.cellctl.egressRule" (dict "index" 1 "namespace" .Values.cellctl.namespace "pod" "exomem-media-slot-lease" "port" 8768) }})
           {{- end }}
-          ) && size(variables.np.ingress) == 1 &&
+          ) && size(variables.np.ingress) in [1, 2] &&
           size(variables.np.ingress[0].from) == 1 &&
           !has(variables.np.ingress[0].from[0].ipBlock) &&
           variables.np.ingress[0].from[0].namespaceSelector.matchLabels ==
@@ -875,8 +895,24 @@ spec:
           size(variables.np.ingress[0].ports) == 1 &&
           variables.np.ingress[0].ports[0].protocol == 'TCP' &&
           variables.np.ingress[0].ports[0].port == 8765 &&
-          !has(variables.np.ingress[0].ports[0].endPort))
-      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 and configured selected-cell broker egress on TCP 8767{{ if .Values.mediaEdge.enabled }} and media edge egress on TCP 8769{{ end }}{{ if .Values.mediaSlotLease.enabled }} and media slot egress on TCP 8768{{ end }}.
+          !has(variables.np.ingress[0].ports[0].endPort) &&
+          {{- /* The second rule admits cellctl to the cell's health-only port and nothing else.
+               The one-rule form stays admitted: it is narrower, and the cellctl a chart
+               upgrade replaces still writes it. */}}
+          (size(variables.np.ingress) == 1 ||
+            (size(variables.np.ingress[1].from) == 1 &&
+              !has(variables.np.ingress[1].from[0].ipBlock) &&
+              variables.np.ingress[1].from[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': {{ .Values.cellctl.namespace | quote }}} &&
+              !has(variables.np.ingress[1].from[0].namespaceSelector.matchExpressions) &&
+              variables.np.ingress[1].from[0].podSelector.matchLabels ==
+                {'app.kubernetes.io/name': 'cellctl'} &&
+              !has(variables.np.ingress[1].from[0].podSelector.matchExpressions) &&
+              size(variables.np.ingress[1].ports) == 1 &&
+              variables.np.ingress[1].ports[0].protocol == 'TCP' &&
+              variables.np.ingress[1].ports[0].port == 8766 &&
+              !has(variables.np.ingress[1].ports[0].endPort))))
+      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765, cellctl-to-cell ingress on TCP 8766 and configured selected-cell broker egress on TCP 8767{{ if .Values.mediaEdge.enabled }} and media edge egress on TCP 8769{{ end }}{{ if .Values.mediaSlotLease.enabled }} and media slot egress on TCP 8768{{ end }}.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
         variables.target.metadata.name != 'job-egress' ||

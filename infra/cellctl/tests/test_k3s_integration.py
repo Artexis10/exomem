@@ -1670,6 +1670,27 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     ingress_from_all = _live("networkpolicy", "runtime-ingress")
     ingress_from_all["spec"]["ingress"][0]["from"] = [{"namespaceSelector": {}}]
     forged_writes["runtime-ingress from every namespace"] = ingress_from_all
+    # cellctl derives every cell bearer: it may admit itself to the
+    # health-only port, never to the cell port, and never admit another peer.
+    rendered_ingress = _live("networkpolicy", "runtime-ingress")
+    print("[3.10] scenario: admission admits the rendered gateway and cellctl health-port rules")
+    assert [rule["ports"] for rule in rendered_ingress["spec"]["ingress"]] == [
+        [{"protocol": "TCP", "port": 8765}], [{"protocol": "TCP", "port": 8766}]
+    ]
+    admitted_ingress = _kubectl(
+        k3s.name, ["apply", "--dry-run=server", "--filename=-", f"--as={cellctl_username}"],
+        documents=[rendered_ingress], check=False,
+    )
+    assert admitted_ingress.returncode == 0, admitted_ingress.stderr
+    cellctl_on_cell_port = copy.deepcopy(rendered_ingress)
+    cellctl_on_cell_port["spec"]["ingress"][1]["ports"] = [{"protocol": "TCP", "port": 8765}]
+    forged_writes["runtime-ingress admitting cellctl to the cell port"] = cellctl_on_cell_port
+    third_peer = copy.deepcopy(rendered_ingress)
+    third_peer["spec"]["ingress"].append(copy.deepcopy(third_peer["spec"]["ingress"][1]))
+    third_peer["spec"]["ingress"][2]["from"][0]["podSelector"]["matchLabels"] = {
+        "app.kubernetes.io/name": "exomem-media-edge"
+    }
+    forged_writes["runtime-ingress admitting a third peer to the health port"] = third_peer
     forged_writes["a service-account-token Secret"] = {
         "apiVersion": "v1",
         "kind": "Secret",

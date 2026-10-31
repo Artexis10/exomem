@@ -9,7 +9,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -206,12 +206,14 @@ def register_health_routes(
     *,
     traffic_monitor=None,
     on_liveness: Callable[[], None] | None = None,
-) -> None:
+) -> Callable[[Request], Awaitable[JSONResponse]]:
     """Register the unauthenticated `/health` and `/health/ready` routes only.
 
     Shared by the standalone asset-route bundle below and by Exomem Cloud
     cells (design D1.5), which register nothing else from this module: an
     Exomem Cloud cell registers only MCP, `/health` and `/health/ready`.
+    Returns the `/health/ready` handler, which a Cloud cell also serves on its
+    health-only port (`cloud_health`).
     """
     if traffic_monitor is None:
         traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
@@ -389,6 +391,8 @@ def register_health_routes(
             status_code=status_code,
             headers={"Cache-Control": "no-store"},
         )
+
+    return _runtime_ready
 
 
 def register_asset_routes(

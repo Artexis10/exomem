@@ -377,6 +377,67 @@ def test_cloud_server_exposes_only_mcp_health_and_ready_routes(
         _teardown_activation(mcp)
 
 
+def test_cloud_health_port_answers_readiness_and_nothing_else(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The platform operator derives every cell bearer, so a network policy
+    opens only the cell's health-only port to it. That port must answer what
+    `/health/ready` answers on the MCP port, and refuse every other method and
+    path, MCP included, even with the cell's own bearer."""
+    import socket
+
+    from exomem import readiness
+
+    monkeypatch.setattr(
+        readiness, "retrieval_admission", lambda _vault_root=None: {"state": "ready", "admitted": True}
+    )
+    with socket.create_server(("127.0.0.1", 0)) as probe:
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("EXOMEM_CLOUD_HEALTH_PORT", str(port))
+    _spy_dotenv(monkeypatch)
+    _cloud_env(monkeypatch)
+    mcp = server.build_server(require_auth=True, http_host="127.0.0.1")
+    try:
+        app = mcp.http_app(stateless_http=True, json_response=True)
+
+        async def scenario():
+            async with app.router.lifespan_context(app):
+                async with (
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://cell.local"
+                    ) as main_port,
+                    httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as health_port,
+                ):
+                    on_main = await main_port.get("/health/ready")
+                    on_health = await health_port.get("/health/ready")
+                    refused = {
+                        "GET /health": await health_port.get("/health"),
+                        "POST /mcp": await health_port.post(
+                            "/mcp",
+                            headers=_headers(TOKEN),
+                            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                        ),
+                        "GET /mcp": await health_port.get("/mcp", headers=_headers(TOKEN)),
+                        "HEAD /health/ready": await health_port.head("/health/ready"),
+                        "POST /health/ready": await health_port.post("/health/ready"),
+                        "GET /health/ready/": await health_port.get("/health/ready/"),
+                        "GET /api/ask_memory": await health_port.get("/api/ask_memory"),
+                    }
+                    return on_main, on_health, refused
+
+        on_main, on_health, refused = asyncio.run(scenario())
+        per_probe = {"proof_age_seconds", "traffic"}
+        assert on_health.status_code == on_main.status_code == 200, on_health.text
+        assert {k: v for k, v in on_health.json().items() if k not in per_probe} == {
+            k: v for k, v in on_main.json().items() if k not in per_probe
+        }
+        assert {label: (r.status_code, r.content) for label, r in refused.items()} == {
+            label: (404, b"") for label in refused
+        }
+    finally:
+        _teardown_activation(mcp)
+
+
 def test_cloud_health_routes_disclose_no_vault_content(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

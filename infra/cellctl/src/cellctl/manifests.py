@@ -26,13 +26,20 @@ from .storage_config import LEGACY_CLASS
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
 # already converged.
-RENDER_VERSION = 2
+RENDER_VERSION = 3
 
 NAMESPACE_PREFIX = "exo-cell-"
 GATEWAY_NAMESPACE = "exomem-cloud"
 GATEWAY_POD_LABEL = "app.kubernetes.io/name"
 GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
+# The cell's health-only listener: `GET /health/ready` and nothing else. cellctl
+# derives every cell bearer, so it reads readiness here and never on CELL_PORT.
+CELL_HEALTH_PORT = 8766
+CELL_HEALTH_PORT_ENV = "EXOMEM_CLOUD_HEALTH_PORT"
+CELL_READINESS_PATH = "/health/ready"
+# cellctl runs in GATEWAY_NAMESPACE; the chart schema pins that namespace.
+CELLCTL_POD_LABEL_VALUE = "cellctl"
 ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
 MEDIA_EDGE_PORT = 8769
@@ -391,8 +398,9 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
 
 
 def render_network_policies(spec: CellManifestSpec) -> list[dict]:
-    """Default deny, gateway-only runtime ingress, optional broker and media edge
-    egress, and backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
+    """Default deny, runtime ingress from the gateway to the cell port and from
+    cellctl to the health-only port, optional broker and media edge egress, and
+    backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
 
     default_deny = {
         "apiVersion": "networking.k8s.io/v1",
@@ -430,7 +438,22 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
                         }
                     ],
                     "ports": [{"protocol": "TCP", "port": CELL_PORT}],
-                }
+                },
+                {
+                    "from": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "kubernetes.io/metadata.name": GATEWAY_NAMESPACE
+                                }
+                            },
+                            "podSelector": {
+                                "matchLabels": {GATEWAY_POD_LABEL: CELLCTL_POD_LABEL_VALUE}
+                            },
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": CELL_HEALTH_PORT}],
+                },
             ],
             "egress": [],
         },
@@ -710,6 +733,7 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
             "name": "EXOMEM_CLOUD_CELL_TOKEN",
             "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "cell-token"}},
         },
+        {"name": CELL_HEALTH_PORT_ENV, "value": str(CELL_HEALTH_PORT)},
     ]
     if spec.bearer_previous:
         # Optional: inside a hold the StatefulSet is applied even when this
@@ -915,7 +939,8 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                                 str(CELL_PORT),
                             ]),
                             "ports": [
-                                {"name": "http", "containerPort": CELL_PORT, "protocol": "TCP"}
+                                {"name": "http", "containerPort": CELL_PORT, "protocol": "TCP"},
+                                {"name": "health", "containerPort": CELL_HEALTH_PORT, "protocol": "TCP"},
                             ],
                             "env": _runtime_env(spec),
                             "resources": {
