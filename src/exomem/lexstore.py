@@ -297,7 +297,9 @@ def catalog_selection_scope(
         if lagging:
             # Preserve convergence without handing repair an active SQL reader.
             if lag_dispatch is None:
-                _schedule_runtime_catalog_repair(root, lag_only=True)
+                _schedule_runtime_catalog_repair(
+                    root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
             else:
                 lag_dispatch(root)
 
@@ -960,6 +962,10 @@ class RepairCause(enum.StrEnum):
     TARGETED_UNPROMOTED = "targeted_unpromoted"
     TARGETED_YIELDED = "targeted_yielded"
     STRANDED_SCOPE = "stranded_scope"
+    # Lag-only requests: a read proof found the stored checkpoint behind the
+    # registry, or a bounded apply met a source that moved before its commit.
+    CATALOGUE_LAG = "catalogue_lag"
+    SOURCE_MOVED = "source_moved"
 
 
 class RepairStage(enum.StrEnum):
@@ -1909,7 +1915,7 @@ def runtime_retrieval_catalog_admission(
     admission = _published_catalog_admission(root)
     if admission is not None and schedule_repair:
         # Serving stale is a bridge, not a resting state: keep converging.
-        _schedule_runtime_catalog_repair(root, lag_only=True)
+        _schedule_runtime_catalog_repair(root, lag_only=True, cause=RepairCause.CATALOGUE_LAG)
     return admission
 
 
@@ -2165,7 +2171,7 @@ def request_lag_repair(vault_root: Path) -> None:
     its reads, as `catalog_selection_scope` does, so the repair cannot move
     the catalogue under them.
     """
-    _schedule_runtime_catalog_repair(vault_root, lag_only=True)
+    _schedule_runtime_catalog_repair(vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG)
 
 
 def retry_pending_repair(vault_key: Path) -> bool:
@@ -6608,7 +6614,9 @@ class LexicalStore:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
             # A source read moved under the apply; the worker's catch-up must
             # prove the catalogue exactly current, or the full pass runs.
-            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+            _schedule_runtime_catalog_repair(
+                self.vault_root, lag_only=True, cause=RepairCause.SOURCE_MOVED
+            )
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
@@ -6667,7 +6675,9 @@ class LexicalStore:
             source_moved = True
             applied = False
         if not applied and source_moved:
-            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+            _schedule_runtime_catalog_repair(
+                self.vault_root, lag_only=True, cause=RepairCause.SOURCE_MOVED
+            )
         elif not applied:
             _schedule_runtime_catalog_repair(self.vault_root, deferred_paths=deferred_paths)
         else:
@@ -9960,7 +9970,9 @@ class LexicalStore:
                             # letting the mismatch escape this seam.
                             if schedule_repair:
                                 _schedule_runtime_catalog_repair(
-                                    self.vault_root, lag_only=True
+                                    self.vault_root,
+                                    lag_only=True,
+                                    cause=RepairCause.CATALOGUE_LAG,
                                 )
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
@@ -9973,7 +9985,9 @@ class LexicalStore:
             if schedule_repair:
                 # The stored checkpoint differs from the target; the worker's catch-up
                 # must prove it exactly current, or the full pass runs.
-                _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                _schedule_runtime_catalog_repair(
+                    self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
@@ -10670,7 +10684,9 @@ class LexicalStore:
                     # Only metadata disagrees (view, checkpoint, policy, schema or
                     # identity); the worker's catch-up must prove the catalogue
                     # exactly current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                    _schedule_runtime_catalog_repair(
+                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                    )
                     return CatalogQueryResult(None, readiness)
                 return self._query_within_budget(view.connection, query_fn, readiness)
             except RegistryError:
@@ -10718,7 +10734,9 @@ class LexicalStore:
                     # generation; the repair worker reconciles it. Only metadata
                     # disagrees, so its catch-up must prove the catalogue exactly
                     # current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                    _schedule_runtime_catalog_repair(
+                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                    )
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
