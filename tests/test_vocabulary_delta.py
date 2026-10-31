@@ -238,3 +238,45 @@ def test_a_restricted_session_learns_nothing_of_a_private_promotion(private_inst
     seen = packet_for(full, "full-session")["vocabulary_delta"]
     assert _keys(seen) == ["harbour", "hidden5", "hidden4", "hidden3", "hidden2"]
     assert seen["more"] == 3
+
+
+def test_a_caller_whose_history_is_withheld_is_never_served_rows_read_for_another(
+    vault, monkeypatch
+) -> None:
+    """Rows are kept per admitted digest, but the history admission behind them follows the audience
+    and the policy. Two callers admitted to the same registries can still differ on their
+    history."""
+    from test_governance_egress import EXTERNAL, write_rule, write_scope
+
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    owner, external = owner_principal(), RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
+
+    def packet_for(principal, session: str) -> dict:
+        _as(monkeypatch, session)
+        packet = {"budget": {"limit_chars": 4000, "used_chars": 0}}
+        with request_scope(principal):
+            vocabulary_delta.for_packet(vault, packet)
+        return packet
+
+    with request_scope(owner):
+        inspected = commands.op_schema_memory(vault, "inspect", subject="relations")
+        saved = commands.op_schema_memory(
+            vault, "save", subject="relations", expected_hash=inspected["content_hash"],
+            why="Register a synthetic relation.",
+            proposal={
+                "upsert": {
+                    "vault.hosts": {"parent": "relates_to", "description": "Synthetic relation."}
+                }
+            },
+        )
+        assert saved["valid"], saved
+
+    assert _keys(packet_for(external, "external-before").get("vocabulary_delta")) == ["vault.hosts"]
+
+    # The policy now withholds the registry history from the external audience and nothing else.
+    write_scope(vault, paths="Knowledge Base/_Schema/history/**", name="History")
+    write_rule(vault, ceiling=0)
+
+    assert _keys(packet_for(owner, "owner-session").get("vocabulary_delta")) == ["vault.hosts"]
+    assert "vocabulary_delta" not in packet_for(external, "external-after")

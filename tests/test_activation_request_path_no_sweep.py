@@ -1275,9 +1275,6 @@ def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
     sled = vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
     os.utime(sled, (now - 60, now - 60))
     _warm_activation(vault, warm_managed_cell)
-    # The first keyed conversation after a start reads the registry history once and keeps the
-    # result per admitted digest. That read is warm-up, not the measured request's cost.
-    commands.op_activate_context(vault, turn="continue", session="another-conversation")
     _drain_background_walks()
 
     scheduled = _no_background_walks(monkeypatch)
@@ -1426,9 +1423,6 @@ def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
     _warm_activation(vault, warm_managed_cell)
     # The first request seeds the projection and sets the fold's checkpoint.
     commands.op_activate_context(vault, turn=TURN)
-    # The first keyed conversation after a start reads the registry history once and keeps the
-    # result per admitted digest. That read is warm-up, not the measured request's cost.
-    commands.op_activate_context(vault, turn=TURN, session="another-conversation")
     _drain_background_walks()
 
     now_ns = time.time_ns()
@@ -1600,7 +1594,7 @@ def test_a_keyed_turn_on_a_governed_vault_pays_nothing_for_its_threads(
     vault is enumerated, and the calls stay under the ceiling."""
     from test_governance_egress import write_rule, write_scope
 
-    from exomem import vocabulary_delta, working_set_heat
+    from exomem import working_set_heat
 
     _seed_structure(vault)
     _seed_planning(vault)
@@ -1654,23 +1648,13 @@ def test_a_keyed_turn_on_a_governed_vault_pays_nothing_for_its_threads(
         assert scheduled == [], scheduled
         return calls
 
-    # The first keyed conversation after a start reads the registry history once and keeps the
-    # result per admitted digest. That read is warm-up, not the keyed measurement's cost.
-    commands.op_activate_context(
-        vault, turn="continue", session="primer-conversation", workspace="shared-project", client="claude-code"
-    )
     keyless = measure()
     keyed = measure(session="own-conversation", workspace="shared-project", client="claude-code")
-    # A keyed turn also asks which vocabulary its conversation is owed, and that admission pass
-    # enumerates the governance tree once per registry. It is its own cost, not the threads'.
-    with monkeypatch.context() as patch:
-        owed = _FilesystemCalls(vault)
-        owed.install(patch)
-        vocabulary_delta.pending(vault, session="own-conversation")
 
-    assert _governance_enumerations(keyed) <= (
-        _governance_enumerations(keyless) + _governance_enumerations(owed)
-    ), (keyless.report(), keyed.report(), owed.report())
+    assert _governance_enumerations(keyed) <= _governance_enumerations(keyless), (
+        keyless.report(),
+        keyed.report(),
+    )
     assert keyed.enumerations - _governance_enumerations(keyed) == 0, keyed.report()
     assert keyed.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, keyed.report()
     assert keyed.unattributable == 0, keyed.report()

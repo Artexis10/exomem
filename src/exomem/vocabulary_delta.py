@@ -72,10 +72,22 @@ def _scopes(root: Path) -> list[str | None]:
     return [None] if document is None else [None, *sorted(document["private"])]
 
 
-def _admitted(root: Path) -> list[tuple[Any, Any]]:
+def _plane(root: Path) -> tuple[Any, frozenset[str]]:
+    """The compiled governance policy and the tombstone set, read once for one pass over many paths.
+
+    Each admission check would otherwise read both again, and a read of the policy walks the
+    governance tree. The plane does not move while one request runs.
+    """
+    from .governance import lifecycle, policy
+
+    return policy.load(root), lifecycle.tombstoned_paths(root)
+
+
+def _admitted(root: Path, plane: tuple[Any, frozenset[str]]) -> list[tuple[Any, Any]]:
     """`(spec, snapshot)` of every registry instance this caller is admitted to."""
     from .vocabulary import contract, instances, registry, registry_specs
 
+    policy, tombstones = plane
     admitted = []
     scopes = _scopes(root)
     for base in registry_specs().values():
@@ -83,7 +95,10 @@ def _admitted(root: Path) -> list[tuple[Any, Any]]:
             try:
                 spec = instances.select(root, base, scope)
                 # Admission precedes every read: a refused instance contributes nothing.
-                if contract.admission_refusal(root, spec) is None:
+                refusal = contract.admission_refusal(
+                    root, spec, policy=policy, tombstones=tombstones
+                )
+                if refusal is None:
                     admitted.append((spec, registry.load(spec, root)))
             except registry.RegistryError:
                 continue
@@ -95,32 +110,54 @@ def _digest(admitted: list[tuple[Any, Any]]) -> str:
     return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()[:24]
 
 
-#: Owed rows by (vault, admitted digest, last-told stamp, window start): the digest is the content identity of
-#: everything admitted, so a save, a revert or a different audience reads another key. Bounded, cleared when full.
-_OWED_ROWS: dict[tuple[str, str, str, str], list[tuple[str, str, Any]]] = {}
+#: Owed rows by (vault, admitted digest, last-told stamp, window start, audience, policy,
+#: tombstones). The digest is the content identity of everything admitted, so a save or a revert
+#: reads another key. History admission follows the audience, the policy and the tombstones and
+#: not that digest, so each is part of the key. Bounded, cleared when full.
+_OWED_ROWS: dict[tuple[Any, ...], list[tuple[str, str, Any]]] = {}
 _OWED_ROWS_CAP = 16
 
 
-def _additions(root: Path, admitted: list[tuple[Any, Any]], digest: str, *, after: str) -> list[tuple[str, str, Any]]:
+def _additions(
+    root: Path,
+    admitted: list[tuple[Any, Any]],
+    digest: str,
+    *,
+    after: str,
+    plane: tuple[Any, frozenset[str]],
+) -> list[tuple[str, str, Any]]:
     """`(stamp, registry, entry)` of the admitted additions newer than `after`, newest first."""
+    from .governance.principal import effective_principal
     from .vocabulary import bootstrap
 
+    policy, tombstones = plane
     since = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=bootstrap.NEW_WINDOW_DAYS)
-    key = (str(root), digest, after, since.isoformat())
+    key = (
+        str(root), digest, after, since.isoformat(),
+        effective_principal().audience_id, policy.fingerprint, tombstones,
+    )
     if key not in _OWED_ROWS:
         if len(_OWED_ROWS) >= _OWED_ROWS_CAP:
             _OWED_ROWS.clear()
-        _OWED_ROWS[key] = _read_additions(root, admitted, since=since, after=after)
+        _OWED_ROWS[key] = _read_additions(root, admitted, since=since, after=after, plane=plane)
     return _OWED_ROWS[key]
 
 
-def _read_additions(root: Path, admitted: list[tuple[Any, Any]], *, since: dt.date, after: str) -> list[tuple[str, str, Any]]:
+def _read_additions(
+    root: Path,
+    admitted: list[tuple[Any, Any]],
+    *,
+    since: dt.date,
+    after: str,
+    plane: tuple[Any, frozenset[str]],
+) -> list[tuple[str, str, Any]]:
     from .registry_history import HistoryAdmissionRefused
     from .vocabulary import bootstrap, contract
 
+    policy, tombstones = plane
     found: dict[tuple[str, str], tuple[str, Any]] = {}
     for spec, snapshot in admitted:
-        if contract.history_refusal(root, spec) is not None:
+        if contract.history_refusal(root, spec, policy=policy, tombstones=tombstones) is not None:
             continue
         try:
             rows = bootstrap.added_entries(root, spec, snapshot, since=since, after=after)
@@ -170,12 +207,13 @@ def pending(vault_root: Path, *, session: str | None = None, limit: int = MAX_CH
     root = Path(vault_root)
     if due_state.conversation_session(session) is None:
         return None
-    admitted = _admitted(root)
+    plane = _plane(root)
+    admitted = _admitted(root, plane)
     digest = _digest(admitted)
     held_digest, _, through = (due_state.acknowledged(SCOPE, vault_root=root, session=session) or "").partition("@")
     if held_digest == digest:
         return None
-    rows = _additions(root, admitted, digest, after=through)
+    rows = _additions(root, admitted, digest, after=through, plane=plane)
     claim = f"{digest}@{rows[0][0] if rows else through}"
     block = _fit(rows, min(limit, MAX_CHARS)) if rows else None
     if block is not None:
