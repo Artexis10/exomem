@@ -3124,6 +3124,24 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "maintenance-job",
+                  "type": "string"
+                },
+                "run_id": {},
+                "cursor": {
+                  "type": "string",
+                  "description": "A next_cursor of a maintenance-job receipt."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "structured-files",
                   "type": "string"
                 },
@@ -3438,6 +3456,10 @@
               "type": "boolean",
               "default": false
             },
+            "run_id": {
+              "type": "string",
+              "description": "Curation run or maintenance job identity."
+            },
             "plan_id": {
               "type": "string",
               "description": "Preview identity required to apply."
@@ -3460,10 +3482,6 @@
             "acknowledge_skipped": {
               "type": "boolean",
               "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-            },
-            "run_id": {
-              "type": "string",
-              "description": "Curation run identity."
             }
           }
         }
@@ -8146,6 +8164,123 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "fix",
+                  "type": "string"
+                },
+                "dry_run": {
+                  "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile.",
+                  "enum": [
+                    false
+                  ],
+                  "type": "boolean"
+                },
+                "rebuild_embeddings": {
+                  "description": "fix only.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "plan_id": {},
+                "why": {}
+              },
+              "required": [
+                "kind",
+                "dry_run"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "backfill-ids",
+                  "type": "string"
+                },
+                "dry_run": {
+                  "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile.",
+                  "enum": [
+                    false
+                  ],
+                  "type": "boolean"
+                },
+                "plan_id": {},
+                "why": {}
+              },
+              "required": [
+                "kind",
+                "dry_run"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "reconcile",
+                  "type": "string"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile."
+                },
+                "rebuild_graph": {
+                  "description": "reconcile only; quarantine unavailable derived graph lineage and rebuild it from Markdown.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "plan_id": {},
+                "why": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "properties": {
+                    "dry_run": {
+                      "enum": [
+                        false
+                      ],
+                      "type": "boolean"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "dry_run": {
+                      "enum": [
+                        null
+                      ],
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "dry_run"
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "maintenance-job-cancel",
+                  "type": "string"
+                },
+                "why": {},
+                "run_id": {}
+              },
+              "required": [
+                "kind",
+                "why",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "structured-files",
                   "type": "string"
                 },
@@ -8168,6 +8303,27 @@
               "properties": {
                 "kind": {
                   "const": "tag-variants",
+                  "type": "string"
+                },
+                "collection": {},
+                "apply": {},
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
+              },
+              "required": [
+                "kind",
+                "apply"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "collections-store-adopt-local",
                   "type": "string"
                 },
                 "collection": {},
@@ -8334,6 +8490,18 @@
             "propertyName": "kind"
           },
           "properties": {
+            "plan_id": {
+              "type": "string",
+              "description": "Preview identity required to apply."
+            },
+            "why": {
+              "type": "string",
+              "description": "Audit reason required to apply."
+            },
+            "run_id": {
+              "description": "Curation run or maintenance job identity.",
+              "type": "string"
+            },
             "collection": {
               "type": "string",
               "description": "Planning or Records collection for structured-files."
@@ -8345,17 +8513,9 @@
               ],
               "type": "boolean"
             },
-            "plan_id": {
-              "type": "string",
-              "description": "Preview identity required to apply."
-            },
             "source_snapshot": {
               "type": "string",
               "description": "Preview snapshot required to apply structured-files."
-            },
-            "why": {
-              "type": "string",
-              "description": "Audit reason required to apply."
             },
             "exclude_groups": {
               "items": {
@@ -8367,10 +8527,6 @@
             "acknowledge_skipped": {
               "type": "boolean",
               "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-            },
-            "run_id": {
-              "type": "string",
-              "description": "Curation run identity."
             },
             "expected_plan_fingerprint": {
               "type": "string",

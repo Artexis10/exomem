@@ -11,9 +11,11 @@ A request marks itself with `foreground()`. A bulk loop calls
 GIL, while any foreground request is in flight. The wait is bounded, so a
 stream of requests slows bulk work down but can never stop it.
 
-Every dispatched command, read or write, is a foreground request, and so is
-every wait for and hold of a mutation boundary: a drain or publication that
-holds the boundary keeps every writer queued behind it waiting.
+Every dispatched command, read or write, is a foreground request, except one
+that a maintenance job dispatches from its own thread (`background_job()`): that
+is bulk work. Every wait for and hold of a mutation boundary is a foreground
+request: a drain or publication that holds the boundary keeps every writer
+queued behind it waiting.
 
 The rule that keeps this sound: no foreground thread ever waits on a parked
 bulk pass. Two mechanisms keep it.
@@ -125,6 +127,33 @@ def foreground() -> Iterator[None]:
                 _counted()
                 if _bulk_may_run():
                     _condition.notify_all()
+
+
+@contextmanager
+def background_job() -> Iterator[None]:
+    """Mark this thread as running a governed maintenance job, off the request path.
+
+    A job's dispatch is minutes of bulk work, not a latency-bound request, so
+    `request_foreground` leaves it unmarked and `yield_to_foreground` can park it
+    for a real request. Waits for and holds of a mutation boundary stay
+    foreground: they mark themselves (`mutation_lock`), and a writer queued
+    behind a job's chunk hold must not be parked.
+    """
+    _local.job = getattr(_local, "job", 0) + 1
+    try:
+        yield
+    finally:
+        _local.job -= 1
+
+
+@contextmanager
+def request_foreground() -> Iterator[None]:
+    """`foreground()` for a dispatched command, except inside `background_job()`."""
+    if getattr(_local, "job", 0):
+        yield
+        return
+    with foreground():
+        yield
 
 
 @contextmanager

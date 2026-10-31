@@ -29,7 +29,7 @@ import re
 import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
@@ -4050,7 +4050,9 @@ _versions` describe the whole chain.
     )
 
 
-def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bool = False) -> dict:
+def op_audit_fix(
+    vault_root: Path, dry_run: bool = False, rebuild_embeddings: bool = False, plan_id: str | None = None
+) -> dict:
     """Run audit + auto-apply safe fixes; propose-only for risky categories.
 
     Closes the lint-finds-but-doesn't-fix loop. Safe categories get
@@ -4089,24 +4091,31 @@ def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bo
             (`.embeddings.sqlite` in the machine-local state root) after
             the fix sweep. Use on first run, after a machine swap, or when the
             sidecar has drifted from disk. Ignored when `dry_run=true`.
+        plan_id: Set only by a maintenance job: the `plan_id` of the reviewed
+            preview. The run plans again, writes nothing if the plan changed,
+            and otherwise commits in guarded chunks.
 
     Returns:
         {fixed: [{category, path, detail, action}, ...],
          proposed: [<audit findings>],
          files_rewritten: int,
          summary: {fixed: N, proposed: N, fixed_<category>: N,
-                   embeddings_chunks?: N},
-         dry_run: bool}
+                   embeddings_chunks?: N, embeddings_error?: str},
+         dry_run: bool,
+         plan_id: str, skipped_changed: [path, ...]}
     """
     report = audit_fix_module.audit_fix(
         vault_root,
         dry_run=dry_run,
         rebuild_embeddings=rebuild_embeddings,
+        plan_id=plan_id,
     )
     return report.as_dict()
 
 
-def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False) -> dict:
+def op_reconcile(
+    vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False, plan_id: str | None = None
+) -> dict:
     """Heal vault drift from out-of-band edits in one pass.
 
     The writers keep the embedding sidecar, index.md count rows, and log.md
@@ -4135,9 +4144,13 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
             Default false.
         rebuild_graph: For reconcile only, quarantine unavailable derived graph
             lineage and rebuild it from canonical Markdown. Default false.
+        plan_id: Set only by a maintenance job: the `plan_id` of the reviewed
+            preview. The run reads what it would remove or quarantine again
+            before its first write, and writes nothing if that changed.
 
     Returns:
-        {indexes_updated: [<index path>, ...],
+        {plan_id: str (a preview and a job; the identity of what a run removes or quarantines),
+         indexes_updated: [<index path>, ...],
          embeddings_refreshed: int,
          embeddings_status: "current" | "refreshed" | "disabled",
          remaining_drift: [<audit findings>],
@@ -4160,7 +4173,9 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
         raise ValueError(
             "MUTATION_BOUNDARY_ACTIVE: rebuild_graph must run outside a direct mutation boundary"
         )
-    report = reconcile_module.reconcile(vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph)
+    report = reconcile_module.reconcile(
+        vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph, plan_id=plan_id
+    )
     result = report.as_dict()
     # The due-state projection is drift-prone in exactly the way this command
     # exists to heal: a page edited in Obsidian or on the filesystem never fires
@@ -4170,6 +4185,9 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
     # roughly thirty times a delta and scales with the corpus, which would make
     # write latency a function of vault size.
     if not dry_run:
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        maintenance_jobs_module.checkpoint("projections")
         try:
             from . import due_state as due_state_module
 
@@ -9682,6 +9700,25 @@ def _adopted_paths(result: Any) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _require_job_plan_arguments(mode: str, dry_run: bool | None, plan_id: str | None, why: str | None) -> None:
+    """Refuse a `plan_id` or `why` outside a remote maintenance job's reviewed write.
+
+    A `plan_id` names the plan a job applies, so it comes with `why` and `dry_run=false`, and only
+    inside a job. The local command applies in one call without either.
+    """
+    from . import maintenance_jobs
+
+    if (plan_id is None) != (why is None) or (plan_id is not None and dry_run is not False):
+        raise ValueError(
+            f"INVALID_ARGUMENTS: {mode} applies a reviewed plan with dry_run=false, plan_id and why together"
+        )
+    if plan_id is not None and not maintenance_jobs.active():
+        raise ValueError(
+            "INVALID_ARGUMENTS: plan_id names the plan of a remote maintenance job; "
+            "the local command applies with dry_run=false alone"
+        )
+
+
 def _audit_fix_paths(result: Any) -> list[str]:
     """The pages a `fix` pass actually rewrote, in first-seen order.
 
@@ -10843,6 +10880,8 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "maintenance-job",
+        "maintenance-job-cancel",
         "collections-store",
         "collections-store-adopt-local",
         "collections-store-export",
@@ -10881,12 +10920,18 @@ def op_maintain_memory(
     vocabulary_fingerprint: str | None = None,
     exclude_groups: list[str] | None = None,
     acknowledge_skipped: bool | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    Remote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.
-    Run those writes with exomem maintain on the host; remote dry_run=true works.
+    A remote fix, backfill-ids or reconcile write runs as a maintenance job: preview with
+    dry_run=true, then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
+    maintenance-job reads one job's state and receipt (run_id) or lists them; the receipt's
+    next_cursor, passed as cursor, reads the written paths page by page;
+    maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
+    writes for its run. A remote collections-store-export apply returns
+    MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -10907,7 +10952,7 @@ def op_maintain_memory(
         source_snapshot: Preview snapshot required to apply structured-files.
         why: Audit reason required to apply.
         curation_action: Curation step when mode is curation.
-        run_id: Curation run identity.
+        run_id: Curation run or maintenance job identity.
         plan: Closed agent-authored plan for curation propose.
         refs: Memory refs for curation work-item.
         paths: Vault paths for curation work-item.
@@ -10918,6 +10963,7 @@ def op_maintain_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
         acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
+        cursor: A next_cursor of a maintenance-job receipt.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10929,6 +10975,8 @@ def op_maintain_memory(
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
         raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
+    if cursor is not None and (mode != "maintenance-job" or run_id is None):
+        raise ValueError("INVALID_ARGUMENTS: cursor applies only to maintenance-job with a run_id")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -11133,6 +11181,33 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "maintenance-job" or mode == "maintenance-job-cancel":
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        cancel = mode == "maintenance-job-cancel"
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or apply is not None
+            or plan_id is not None
+            or (why is not None) != cancel
+            or (cancel and run_id is None)
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: maintenance-job takes an optional run_id; "
+                "maintenance-job-cancel takes run_id and why"
+            )
+        if cancel:
+            return maintenance_jobs_module.request_cancel(vault_root, run_id, why)
+        if run_id is None:
+            return maintenance_jobs_module.job_list(vault_root)
+        return maintenance_jobs_module.job_status(vault_root, run_id, cursor)
     if mode == "collections-store":
         if (
             categories is not None
@@ -11202,15 +11277,26 @@ def op_maintain_memory(
     from . import due_state as due_state_module
 
     if mode == "fix":
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
         # A fix pass rewrites every page it can repair, and reconcile rebuilds
         # the whole projection: both are batches, and neither should be able to
         # deliver one counters block per file it touched.
         with due_state_module.batch_scope(vault_root):
-            report = op_audit_fix(
-                vault_root,
-                dry_run=True if dry_run is None else dry_run,
-                rebuild_embeddings=rebuild_embeddings,
-            )
+            try:
+                report = op_audit_fix(
+                    vault_root,
+                    dry_run=True if dry_run is None else dry_run,
+                    rebuild_embeddings=rebuild_embeddings,
+                    plan_id=plan_id,
+                )
+            except BaseException:
+                # A stopped job keeps the chunks it committed, so the projection learns of them too.
+                # Best effort, as in the success path: it must not hide why the job stopped.
+                with suppress(Exception):
+                    _apply_batch_deltas(vault_root, maintenance_jobs_module.committed_paths())
+                raise
             # `fix` has no full recompute of its own — unlike `reconcile`, which
             # heals the whole projection — so without these deltas the block it
             # carries would describe the vault as it was BEFORE the pass that
@@ -11218,27 +11304,40 @@ def op_maintain_memory(
             _apply_batch_deltas(vault_root, _audit_fix_paths(report))
         return _carrying_batch_advisories(vault_root, report)
     if mode == "reconcile":
+        reconcile_dry_run = False if dry_run is None else dry_run
+        _require_job_plan_arguments(mode, reconcile_dry_run, plan_id, why)
         with due_state_module.batch_scope(vault_root):
             # No batch deltas here on purpose: `op_reconcile` already runs
             # `due_state.reconcile`, a full recompute, which is a strictly
             # stronger settlement than a per-path delta (design D3, task 1.5).
             report = op_reconcile(
                 vault_root,
-                dry_run=False if dry_run is None else dry_run,
+                dry_run=reconcile_dry_run,
                 rebuild_graph=rebuild_graph,
+                plan_id=plan_id,
             )
         return _carrying_batch_advisories(vault_root, report)
     if mode == "backfill-ids":
+        from . import maintenance_jobs as maintenance_jobs_module
+
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
         with due_state_module.batch_scope(vault_root):
-            report = memory_refs_module.backfill_ids(
-                vault_root, dry_run=True if dry_run is None else dry_run
-            )
+            try:
+                report = memory_refs_module.backfill_ids(
+                    vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id
+                )
+            except BaseException:
+                # A stopped job keeps the chunks it committed, so the projection learns of them too.
+                # Best effort, as in the success path: it must not hide why the job stopped.
+                with suppress(Exception):
+                    _apply_batch_deltas(vault_root, maintenance_jobs_module.committed_paths())
+                raise
             _apply_batch_deltas(vault_root, list(report.get("updated") or []))
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, tag-variants, collections-store-adopt-local, "
-        "or collections-store-export"
+        "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
+        "maintenance-job-cancel, collections-store-adopt-local, or collections-store-export"
     )
 
 
@@ -13154,6 +13253,19 @@ def _resolved_invocation_selector(command: Command, kwargs: dict[str, Any], sele
     return parameter.default
 
 
+def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Whether this call writes through a leaf that `maintain_memory` supersedes (its `routes`).
+
+    A request-bound surface serves such a write only as a `maintain_memory` job. A leaf call is a
+    dry run when its resolved `dry_run` is true, the leaf signature's default applying when the
+    caller omitted it. Any other call writes. The leaf's own `read_only` flag (`audit`) wins.
+    """
+    owner = next((item for item in PRODUCT_COMMANDS if item.name == "maintain_memory"), None)
+    if owner is None or command.name not in owner.routes or command.read_only:
+        return False
+    return _resolved_invocation_selector(command, kwargs, "dry_run") is not True
+
+
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
@@ -14288,16 +14400,15 @@ def product_commands_for(
     )
     if surface not in {"mcp", "rest"}:
         return selected
-    from .writer_lease import REMOTE_WRITE_MAINTENANCE_MODES
+    from .writer_lease import remote_admitted_maintenance_modes
 
     # Publish only the maintenance writes that remote admission accepts.
+    admitted = remote_admitted_maintenance_modes()
     return tuple(replace(command, renderings=tuple(
         replace(rendering, variants=tuple(variant for variant in rendering.variants
-                                          if variant.effect == "read"
-                                          or variant.action in REMOTE_WRITE_MAINTENANCE_MODES))
+                                          if variant.effect == "read" or variant.action in admitted))
         for rendering in command.renderings
-        if any(variant.effect == "read" or variant.action in REMOTE_WRITE_MAINTENANCE_MODES
-               for variant in rendering.variants)
+        if any(variant.effect == "read" or variant.action in admitted for variant in rendering.variants)
     )) if command.name == "maintain_memory" else command for command in selected)
 
 

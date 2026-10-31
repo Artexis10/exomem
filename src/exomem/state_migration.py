@@ -202,7 +202,11 @@ def _descriptor_ids() -> tuple[str, ...]:
     from . import reserved_paths
 
     return tuple(
-        sorted(descriptor.id for descriptor in reserved_paths.external_state_descriptors())
+        sorted(
+            descriptor.id
+            for descriptor in reserved_paths.external_state_descriptors()
+            if descriptor.migrates_from_vault
+        )
     )
 
 

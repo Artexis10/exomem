@@ -50,6 +50,7 @@ failures restore pre-write content before raising.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import logging
 import os
@@ -57,7 +58,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import access, indexes, temporal
+from . import access, foreground_priority, indexes, temporal
 from . import audit as audit_module
 from . import find as find_module
 from .vault import (
@@ -65,6 +66,7 @@ from .vault import (
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    content_hash,
     document_newline,
     kb_root,
     normalize_body_wikilinks,
@@ -100,12 +102,16 @@ class AuditFixReport:
     fixed: list[FixedFinding] = field(default_factory=list)
     proposed: list[audit_module.AuditFinding] = field(default_factory=list)
     files_rewritten: int = 0
-    summary: dict[str, int] = field(default_factory=dict)
+    summary: dict[str, int | str] = field(default_factory=dict)
     dry_run: bool = False
     # Pages passed over because they sit in a `readonly` subtree. Reported
     # rather than silently dropped: a caller comparing a dry run against the
     # audit's finding count must be able to account for the difference.
     skipped_readonly: int = 0
+    # Names the content rewrites of this plan (`_plan_id`); a remote write applies the plan it names.
+    plan_id: str | None = None
+    # Pages a job passed over because they changed after the plan; none is ever rewritten blind.
+    skipped_changed: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -123,6 +129,8 @@ class AuditFixReport:
             "summary": self.summary,
             "dry_run": self.dry_run,
             "skipped_readonly": self.skipped_readonly,
+            "plan_id": self.plan_id,
+            "skipped_changed": self.skipped_changed,
         }
 
 
@@ -307,9 +315,22 @@ def _convert_singular_project_to_plural(fm_text: str) -> tuple[str, str | None]:
     return new_text, value
 
 
+@dataclass(frozen=True)
+class _Rewrite:
+    """One content rewrite of a fix plan: its guarded write and the hash of the text it replaces."""
+
+    rel: str
+    write: PlannedWrite
+    before_hash: str
+
+    @property
+    def after_hash(self) -> str:
+        return content_hash(self.write.content)
+
+
 def _plan_sidecar_repairs(
     vault_root: Path, report: AuditFixReport
-) -> list[PlannedWrite]:
+) -> list[_Rewrite]:
     """Plan one canonical rewrite per media sidecar that nested copies of itself.
 
     Safe to auto-apply because the rewrite is a pure function of the sidecar and
@@ -320,8 +341,8 @@ def _plan_sidecar_repairs(
     """
     from . import sidecar_repair
 
-    writes: list[PlannedWrite] = []
-    for sidecar in sidecar_repair.iter_media_sidecars(vault_root):
+    rewrites: list[_Rewrite] = []
+    for sidecar in foreground_priority.yielding_in_bulk(sidecar_repair.iter_media_sidecars(vault_root)):
         rel = sidecar.relative_to(vault_root).as_posix()
         # Evidence/ is `append-only`, not `read-write`, and that is the tier these
         # sidecars are supposed to have: the extraction worker rewrites them on
@@ -336,7 +357,7 @@ def _plan_sidecar_repairs(
             report.skipped_readonly += 1
             continue
         try:
-            original, _guard = read_guarded_text(vault_root, sidecar)
+            original, guard = read_guarded_text(vault_root, sidecar)
         except (OSError, UnicodeDecodeError, PathGuardError):
             continue
         damage = sidecar_repair.analyze(original, sidecar)
@@ -375,7 +396,10 @@ def _plan_sidecar_repairs(
                 )
             )
             continue
-        writes.append(PlannedWrite(path=sidecar, content=repaired))
+        # Guarded like a compiled page: a media commit can run between a job's chunks.
+        rewrites.append(
+            _Rewrite(rel, PlannedWrite(path=sidecar, content=repaired, guard=guard), content_hash(original))
+        )
         report.files_rewritten += 1
         report.fixed.append(
             FixedFinding(
@@ -391,7 +415,7 @@ def _plan_sidecar_repairs(
                 ),
             )
         )
-    return writes
+    return rewrites
 
 
 def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
@@ -420,32 +444,16 @@ def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
     return ordered
 
 
-def audit_fix(
-    vault_root: Path,
-    *,
-    dry_run: bool = False,
-    today: dt.date | None = None,
-    rebuild_embeddings: bool = False,
-) -> AuditFixReport:
-    """Run audit + auto-apply safe fixes. Read-only if dry_run=True.
 
-    When `rebuild_embeddings=True`, wipes and rebuilds the vector sidecar
-    (`.embeddings.sqlite` in the machine-local state root) from the current
-    markdown state of every compiled page. Use on first run, after a
-    machine swap, or whenever the sidecar drifts from disk.
-    """
-    today = today or dt.date.today()
-    today_iso = today.isoformat()
+def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> list[_Rewrite]:
+    """Plan every content rewrite: compiled pages (passes 1 and 2) and media sidecars (pass 2b)."""
     kb = kb_root(vault_root)
-
-    report = AuditFixReport(dry_run=dry_run)
 
     # ---- Pass 1: canonicalize wikilinks across all compiled material ----
     resolver = find_module.shared_resolver(vault_root)
-    writes: list[PlannedWrite] = []
-    pending_paths: list[str] = []
+    rewrites: list[_Rewrite] = []
 
-    for md in _walk_compiled_pages(kb):
+    for md in foreground_priority.yielding_in_bulk(_walk_compiled_pages(kb)):
         # A `readonly` subtree refuses every write with no override, so a
         # canonicalisation planned for one can never be applied. Planning it
         # anyway broke this pass twice: the dry run reported the page as
@@ -537,28 +545,41 @@ def audit_fix(
                     detail="non-canonical wikilink(s) in body or frontmatter",
                     action="rewrote to full vault-rooted canonical form",
                 ))
-            writes.append(PlannedWrite(path=md, content=new_text, guard=original_guard))
-            pending_paths.append(rel)
+            rewrites.append(
+                _Rewrite(rel, PlannedWrite(path=md, content=new_text, guard=original_guard), content_hash(original))
+            )
             report.files_rewritten += 1
 
     # ---- Pass 2b: collapse media sidecars that nested copies of themselves ----
     # Evidence/ is skipped by the compiled-page passes above (append-only), so
     # this walks the media sidecars directly.
-    writes.extend(_plan_sidecar_repairs(vault_root, report))
+    rewrites.extend(_plan_sidecar_repairs(vault_root, report))
+    return rewrites
 
-    # ---- Pass 3: sub-folder index refresh + top-index counts ----
+
+def _plan_id(rewrites: list[_Rewrite], rebuild_embeddings: bool) -> str:
+    """The `plan_id` of a fix: its content rewrites as (path, hash before, hash after) and the flag that adds work.
+
+    Index refreshes stay out: they converge derived counts, and any page creation moves them.
+    """
+    from . import maintenance_jobs
+
+    return maintenance_jobs.plan_identity(
+        "fix",
+        {"rebuild_embeddings": bool(rebuild_embeddings)},
+        ((rewrite.rel, rewrite.before_hash, rewrite.after_hash) for rewrite in rewrites),
+    )
+
+
+def _index_refresh_writes(
+    vault_root: Path, kb: Path, planned_index_writes: dict[Path, PlannedWrite]
+) -> list[PlannedWrite]:
+    """Plan the sub-folder and top-index count refreshes.
+
+    ``planned_index_writes`` holds the index pages this fix already rewrites, keyed by
+    resolved path, so the refresh composes over their text. Any other index is read from disk.
+    """
     top_index_path = kb / "index.md"
-    planned_index_writes = {
-        write.path.resolve(): write
-        for write in writes
-        if write.path.resolve()
-        in {
-            top_index_path.resolve(),
-            (kb / "Sources" / "index.md").resolve(),
-            (kb / "Notes" / "index.md").resolve(),
-            (kb / "Entities" / "index.md").resolve(),
-        }
-    }
     top_base_write = planned_index_writes.get(top_index_path.resolve())
     top_guard = top_base_write.guard if top_base_write is not None else None
     if top_base_write is not None:
@@ -577,10 +598,30 @@ def audit_fix(
         refresh_writes.append(
             PlannedWrite(path=top_index_path, content=new_top, guard=top_guard)
         )
+    return refresh_writes
+
+
+def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: AuditFixReport) -> None:
+    """Compose content rewrites with the index refresh and apply them, 100 files per atomic batch.
+
+    This is the local command's path: the caller holds the mutation boundary for the whole call.
+    """
+    # ---- Pass 3: sub-folder index refresh + top-index counts ----
+    writes = [rewrite.write for rewrite in rewrites]
+    index_pages = {
+        (kb / "index.md").resolve(),
+        (kb / "Sources" / "index.md").resolve(),
+        (kb / "Notes" / "index.md").resolve(),
+        (kb / "Entities" / "index.md").resolve(),
+    }
+    planned_index_writes = {
+        write.path.resolve(): write for write in writes if write.path.resolve() in index_pages
+    }
+    refresh_writes = _index_refresh_writes(vault_root, kb, planned_index_writes)
     writes = _compose_writes(writes, refresh_writes)
 
     # ---- Apply ----
-    if writes and not dry_run:
+    if writes and not report.dry_run:
         BATCH = 100
         for i in range(0, len(writes), BATCH):
             batch_atomic_write(writes[i : i + BATCH], vault_root=vault_root)
@@ -589,7 +630,121 @@ def audit_fix(
             len(writes), report.files_rewritten, len(refresh_writes),
         )
 
+
+def _commit_in_chunks(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: AuditFixReport) -> None:
+    """Commit one reviewed plan in guarded chunks, then refresh the indexes in one last short hold.
+
+    Planning read every page before any hold. `maintenance_jobs.commit_pages` then takes the mutation
+    boundary in short holds, re-reads its pages under each and skips any that changed since the plan,
+    so a concurrent edit is never overwritten. A stop keeps the chunks that committed and skips the
+    index refresh; the receipt says so, and the next reconcile heals it.
+    """
+    from . import maintenance_jobs
+
+    root = Path(vault_root)
+    # Colliding destinations are refused before the first write, as `_apply_whole` refuses them.
+    _compose_writes([rewrite.write for rewrite in rewrites])
+    index_started = False
+    planned = {rewrite.rel: rewrite.write.content for rewrite in rewrites}
+    try:
+        kept, skipped = maintenance_jobs.commit_pages(
+            root,
+            "audit_fix_chunk",
+            [(item.rel, item.write.path, item.before_hash) for item in rewrites],
+            # A kept page still has the text the plan was made from, so it gets the planned text.
+            lambda rel, _text: planned[rel],
+        )
+        maintenance_jobs.checkpoint("indexing", done=len(kept) + len(skipped), total=len(rewrites))
+        with maintenance_jobs.chunk_hold(root, "audit_fix_index"):
+            index_started = True
+            failure = None
+            # Planned under the hold from the pages as they now are, so its guards are current.
+            refresh = _compose_writes(_index_refresh_writes(root, kb, {}))
+            refreshed = [write.path.relative_to(root).as_posix() for write in refresh]
+            if refresh:
+                try:
+                    batch_atomic_write(refresh, vault_root=root)
+                except BaseException as error:  # noqa: BLE001 - recorded, then re-raised below
+                    failure = error
+        maintenance_jobs.record_paths(refreshed, committed=failure is None)
+        if failure is not None:
+            raise failure
+    except BaseException as error:
+        if not index_started:
+            # The chunks that committed stay; the index refresh did not run, and the receipt names why.
+            with contextlib.suppress(Exception):
+                maintenance_jobs.note(
+                    index_refresh="skipped", reason=str(getattr(error, "code", None) or type(error).__name__)
+                )
+        raise
+    if skipped:
+        changed = set(skipped)
+        report.fixed = [item for item in report.fixed if item.path not in changed]
+        report.files_rewritten -= len(skipped)
+        report.skipped_changed = skipped
+
+
+def _rebuild_embeddings(vault_root: Path, report: AuditFixReport) -> None:
+    """Rebuild the vector sidecar; a failure is reported in the summary as well as logged.
+
+    A stop is not a failure here: `foreground_priority.BulkCancelled` ends a job's rebuild
+    before it publishes, so the serving vectors stay as they were.
+    """
+    try:
+        from . import embeddings
+
+        count = embeddings.get_embedding_index(vault_root).rebuild_all()
+        report.summary["embeddings_chunks"] = count
+        log.info("audit_fix: rebuilt embedding sidecar (%d chunks)", count)
+    except ImportError as e:
+        log.warning("rebuild_embeddings requested but embeddings unavailable: %s", e)
+        report.summary["embeddings_error"] = f"embeddings unavailable: {e}"
+    except Exception as e:
+        log.exception("rebuild_embeddings failed: %s", e)
+        report.summary["embeddings_error"] = f"{type(e).__name__}: {e}"
+
+
+def audit_fix(
+    vault_root: Path,
+    *,
+    dry_run: bool = False,
+    today: dt.date | None = None,
+    rebuild_embeddings: bool = False,
+    plan_id: str | None = None,
+) -> AuditFixReport:
+    """Run audit + auto-apply safe fixes. Read-only if dry_run=True.
+
+    Every report carries the `plan_id` of the content rewrites it covers. A write that
+    names a `plan_id` is a reviewed one, run by a maintenance job: it plans again, refuses
+    a changed plan, and commits in chunks (`_commit_in_chunks`). Without one, the whole
+    plan applies in one call (`_apply_whole`).
+
+    When `rebuild_embeddings=True`, wipes and rebuilds the vector sidecar
+    (`.embeddings.sqlite` in the machine-local state root) from the current
+    markdown state of every compiled page. Use on first run, after a
+    machine swap, or whenever the sidecar drifts from disk.
+    """
+    from . import maintenance_jobs
+
+    today = today or dt.date.today()
+    today_iso = today.isoformat()
+    kb = kb_root(vault_root)
+    reviewed = plan_id is not None and not dry_run
+
+    report = AuditFixReport(dry_run=dry_run)
+    if reviewed:
+        maintenance_jobs.checkpoint("planning")
+    rewrites = _plan_content(vault_root, report, today_iso)
+    report.plan_id = _plan_id(rewrites, rebuild_embeddings)
+    if reviewed:
+        maintenance_jobs.require_current_plan("fix", plan_id, report.plan_id, "the content rewrites of fix")
+        _commit_in_chunks(vault_root, kb, rewrites, report)
+    else:
+        _apply_whole(vault_root, kb, rewrites, report)
+
     # ---- Re-audit (post-fix) to capture remaining proposed-only findings ----
+    if reviewed:
+        maintenance_jobs.checkpoint("auditing")
     post_report = audit_module.audit(vault_root)
     for f in post_report.findings:
         # broken_wikilink residuals after canonicalization are forward refs
@@ -600,17 +755,9 @@ def audit_fix(
 
     # ---- Optional full rebuild of the embedding sidecar ----
     if rebuild_embeddings and not dry_run:
-        try:
-            from . import embeddings
-            count = embeddings.get_embedding_index(vault_root).rebuild_all()
-            report.summary["embeddings_chunks"] = count
-            log.info("audit_fix: rebuilt embedding sidecar (%d chunks)", count)
-        except ImportError as e:
-            log.warning(
-                "rebuild_embeddings requested but embeddings unavailable: %s", e
-            )
-        except Exception as e:
-            log.exception("rebuild_embeddings failed: %s", e)
+        if reviewed:
+            maintenance_jobs.checkpoint("embeddings")
+        _rebuild_embeddings(vault_root, report)
 
     # ---- Summary ----
     report.summary["fixed"] = len(report.fixed)
@@ -620,5 +767,8 @@ def audit_fix(
         by_cat[f.category] = by_cat.get(f.category, 0) + 1
     for cat, n in by_cat.items():
         report.summary[f"fixed_{cat}"] = n
+    if reviewed:
+        # A job's caller gets the dispatcher's mutation receipt, not this report: the job receipt carries the summary.
+        maintenance_jobs.note(summary=report.summary)
 
     return report
