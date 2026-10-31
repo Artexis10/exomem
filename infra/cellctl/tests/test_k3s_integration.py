@@ -2191,6 +2191,65 @@ def test_artifact_broker_admission_for_an_unlisted_cell_follows_the_fleet_switch
                 all_cells, cell_id, widen.__name__, denied.stderr)
 
 
+# === add-cloud-media-store D12: the media edge peer follows the namespace label. ===
+
+
+def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K3sCluster) -> None:
+    from cellctl.manifests import render_namespace, render_network_policies
+
+    from .test_media_edge import _spec
+
+    labelled_id, unlabelled_id = _cell_id(), _cell_id()
+    image = STANDIN_REPOSITORY + "@sha256:" + "a" * 64
+    endpoint = "http://10.43.0.30:8769"
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set", "artifactBroker.enabled=true",
+        "--set-string", f"artifactBroker.image={image}",
+        "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
+        "--set-json", f'artifactBroker.cellIds=["{labelled_id}"]',
+        "--set", "mediaEdge.enabled=true",
+        "--set-string", f"mediaEdge.endpoint={endpoint}",
+        "--set-string", "mediaEdge.bucket=media-bucket",
+        "--set-json", f'mediaEdge.cellIds=["{labelled_id}"]',
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    served = {cell_id: _spec(cell_id=cell_id, image=image, media_edge_url=endpoint)
+              for cell_id in (labelled_id, unlabelled_id)}
+    # The labelled namespace is rendered as a served cell's; the other as one the edge never served.
+    _apply_server_side(k3s.name, [render_namespace(served[labelled_id]),
+                                  render_namespace(_spec(cell_id=unlabelled_id, image=image, media_edge_url=""))])
+    edge_policy = {cell_id: next(p for p in render_network_policies(spec) if p["metadata"]["name"] == "runtime-ingress")
+                   for cell_id, spec in served.items()}
+    assert any(port["port"] == 8769 for rule in edge_policy[labelled_id]["spec"]["egress"]
+               for port in rule.get("ports", []))
+    cellctl = "--as=system:serviceaccount:exomem-cloud:cellctl"
+
+    def dry_run(policy: dict) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, ["apply", "--dry-run=server", "--filename=-", cellctl],
+                        documents=[policy], check=False)
+
+    def policy_settled() -> bool:
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        # An earlier test's policy refuses the edge peer everywhere; wait for this one to enforce.
+        return dry_run(edge_policy[labelled_id]).returncode == 0
+
+    _wait_for(policy_settled, timeout=60, description="admission to give the edge peer to a labelled namespace")
+    refused = dry_run(edge_policy[unlabelled_id])
+    assert refused.returncode != 0 and "exomem-cellctl-scope" in refused.stderr, refused.stderr
+
+    # cellctl's own order within one render: the namespace with the label, then the policy, back to back
+    # in one client. Admission reads the namespace as it now stands, so the policy is admitted.
+    paired = _kubectl(k3s.name, ["apply", "--server-side", "--field-manager=cellctl", "--filename=-", cellctl],
+                      documents=[render_namespace(served[unlabelled_id]), edge_policy[unlabelled_id]], check=False)
+    assert paired.returncode == 0, paired.stderr
+
+
 # === harden-exomem-cloud-operator-access: the edge, the Cloud issuer and cell
 # connect admission, on the same disposable K3s cluster. ===
 

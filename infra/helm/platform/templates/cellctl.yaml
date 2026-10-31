@@ -832,7 +832,8 @@ spec:
           {{- if .Values.artifactBroker.enabled }}
           {{- $peers = append $peers (dict "name" "exomem-artifact-broker" "port" 8767 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.artifactBroker.cellIds)) .Values.artifactBroker.allCells)) }}
           {{- end }}
-          {{- $peers = append $peers (dict "name" "exomem-media-edge" "port" 8769 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.mediaEdge.cellIds)) .Values.mediaEdge.allCells)) }}
+          {{- /* D12, decided by the operator on 2026-10-31: the edge peer follows the namespace label cellctl keeps while a store is served or draining. */}}
+          {{- $peers = append $peers (dict "name" "exomem-media-edge" "port" 8769 "selected" "(namespaceObject != null && has(namespaceObject.metadata.labels) &&\n          'exomem.io/media-edge-access' in namespaceObject.metadata.labels &&\n          namespaceObject.metadata.labels['exomem.io/media-edge-access'] == 'true')") }}
           {{- if .Values.mediaSlotLease.enabled }}
           {{- $peers = append $peers (dict "name" "exomem-media-slot-lease" "port" 8768 "selected" (ternary "true" (printf "variables.namespaceName.substring(9) in %s" (toJson .Values.mediaSlotLease.cellIds)) .Values.mediaSlotLease.allCells)) }}
           {{- end }}

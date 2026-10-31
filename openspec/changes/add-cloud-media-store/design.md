@@ -545,6 +545,21 @@ The cost on a 20 GiB cell with 5.25 GiB of hydration capacity and `max_hydration
 - Today cellctl does otherwise. It gives a cell that the edge stops serving a retained store at once: the store identity, disabled, with no key, credential or egress. The drain requirement already kept hydration until no original is evicted, so the code and the spec disagreed before task 5.4. Task 5.4.15 changes the code.
 - The cost: a turned-off cell that cannot drain keeps the posture of a served cell. The edge still accepts its credential for writes (see Open questions).
 
+**The network wall follows a namespace label (decided by the operator on 2026-10-31).** In the code, the retained store above is the `draining` mode. The code's `retained` mode is the store identity alone, which a cell keeps after it drains. Before this decision, the edge's ingress and cellctl's admission both followed `mediaEdge.cellIds`, so a draining cell lost its network path to the edge when it left the list.
+- cellctl sets the label `exomem.io/media-edge-access: "true"` on a cell's namespace while the cell's store is served or draining.
+- The edge's ingress admits cellctl and the runtime pods of cell namespaces that carry the label. cellctl's admission lets it give a runtime edge egress only in such a namespace.
+- `mediaEdge.cellIds` and the fleet switch only choose which cells the edge serves.
+- Removal order, in apply order: the label leaves first, then the credential, then the active-set entry. One render drops the label and the credential, and it applies the namespace before the Secret (simplest choice, marked). The active-set entry leaves at the start of the next pass.
+- The cost: the wall holds no operator list. cellctl sets the label, and cellctl already holds the signing key, so the list did not confine a compromised cellctl.
+
+**The label reaches every served cell at once.** The chart keys the wall on the label in the same release that brings the label, so a served cell's namespace can lack it until the cell's next re-render. cellctl therefore applies the label on any pass that finds a served or draining cell's namespace without it, apart from the cell's restart and digest cadence. That apply sends the namespace whole, so it drops none of cellctl's other labels.
+
+**The chart refuses to turn the edge off while the active set lists a cell.** Without the edge settings, cellctl can sign no credential, so a cell that still drains would lose access to its evicted originals.
+- An upgrade with `mediaEdge.enabled=false` reads ConfigMap `exomem-media-edge-active-set` with `lookup`. It fails while `active-set.json` lists any cell, and draining cells stay listed. It also fails when the set exists but cannot be read.
+- The upgrade fails before it changes anything, and the check runs only when someone deploys.
+- `helm template`, a client-side dry run and `helm rollback` skip `lookup`, so they skip the check. The runbook says so.
+- cellctl does not check this at startup. A startup check ran on every reconnect, so one record merged to unknown made a failover crash-loop cellctl for every cell.
+
 Options considered:
 
 | Option | Holds | Agent between windows | Large media | Verdict |

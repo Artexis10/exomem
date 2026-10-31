@@ -275,6 +275,3 @@ class MediaEdgeConfig:
     def epoch(self, cell_id: str) -> int:
         return self.credential_epochs.get(cell_id, 0)
 
-    def selection(self, cell_ids: Iterable[str]) -> dict[str, int]:
-        """The cells among `cell_ids` that the edge serves, each with its credential epoch."""
-        return {cell: self.epoch(cell) for cell in cell_ids if self.selects(cell)}
