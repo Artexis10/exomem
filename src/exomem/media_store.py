@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from . import held_fs, media_allowance, originals, reserved_paths
+from . import held_fs, media_allowance, media_capacity, originals, reserved_paths
 from .media_jobs import OFFLOAD_MEDIA_TYPE, STATUS_JOB_LIMIT, MediaJob, MediaJobStore, pid_alive
 from .originals import OriginalSnapshot, StoredObject, original_state
 
@@ -32,6 +32,16 @@ class MediaStoreError(RuntimeError):
     def __init__(self, code: str, reason: str):
         self.code = code
         super().__init__(f"{code}: {reason}")
+
+
+# The refusal that the classification rule records for an original that stays on the volume (D12).
+RESIDENT_CODE = "MEDIA_ORIGINAL_RESIDENT"
+
+
+def _resident(vault: Path, snapshot: OriginalSnapshot, config: dict[str, object]) -> bool:
+    bounds = media_capacity.bounds_for(config, vault)
+    assert snapshot.binary_size is not None
+    return bounds is not None and bounds.classify(snapshot.binary_size) == media_capacity.RESIDENT
 
 
 class ObjectTooLarge(MediaStoreError):
@@ -408,7 +418,7 @@ def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.Referenc
     if snapshot.state != "local" or snapshot.binary_sha256 is None or not snapshot.offloadable:
         return 0
     store = MediaJobStore(vault)
-    if _refused(store, snapshot, config, usage=usage):
+    if _refused(store, snapshot, config, usage=usage) or _resident(vault, snapshot, config):
         return 0
     current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
@@ -587,6 +597,9 @@ def _refusal_code(
     if row["code"] == "MEDIA_OBJECT_TOO_LARGE":
         bound = config.get("max_object_bytes")
         return row["code"] if bound is not None and row["ciphertext_size"] is not None and row["ciphertext_size"] > int(bound) else None
+    if row["code"] == RESIDENT_CODE:
+        # Larger configured bounds release a resident original without an explicit retry.
+        return row["code"] if _resident(vault, snapshot, config) else None
     if row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES:
         if snapshot.reference is not None:
             return None
@@ -720,6 +733,11 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
             snapshot = original_state(vault, path)
         if snapshot.state != "local":
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original bytes are absent")
+        if _resident(vault, snapshot, config):
+            # Refused before any temporary file exists: the rule needs only the sidecar's size.
+            _refuse(ledger, snapshot, MediaStoreError(RESIDENT_CODE, "the original stays on the volume"),
+                    media_capacity.age_ciphertext_size(snapshot.binary_size))
+            return None
         decision, reuse = _offload_admission(vault, snapshot)
         _require_allowance(ledger, snapshot, decision.code)
         name_key = Path(str(config["name_key_path"])).read_bytes()
@@ -923,6 +941,10 @@ def evict(vault: Path, path: Path) -> bool:
     if (snapshot.state != "cached" or snapshot.reference is None or not snapshot.offloadable
             or not cache_matches(vault, path, snapshot=snapshot)):
         return False
+    bounds = media_capacity.bounds_for(config, vault)
+    assert snapshot.binary_size is not None
+    if bounds is None or not bounds.hydration_fits(snapshot.binary_size):
+        return False  # An original that could not come back stays (D3).
     identity = _identity(vault, path)
     try:
         confirmed = _confirmed(store_for(vault), snapshot.reference)

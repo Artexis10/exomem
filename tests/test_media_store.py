@@ -364,7 +364,7 @@ def test_store_failure_keeps_offload_demand_retryable_through_the_worker(vault: 
 
 @pytest.mark.parametrize("new_bound", [None, 100_000])
 def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, selected_store, new_bound):
-    """A size refusal must park repeated discovery and recover when its bound changes."""
+    """An original above the object bound stays resident through discovery and offloads once the bound allows it."""
     import os
 
     from exomem import media_jobs, media_store, media_worker
@@ -376,9 +376,6 @@ def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, 
     assert originals.original_state(vault, path).state == "local"
     assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
     assert media_store.enqueue_offloads(vault) == 0
-    [refusal] = media_jobs.tool_status(vault)["offload_refusals"]
-    assert refusal["path"] == path.relative_to(vault).as_posix()
-    assert refusal["code"] == "MEDIA_OBJECT_TOO_LARGE" and refusal["ciphertext_size"] > 64
     assert not list((Path(values["root"])).rglob("*"))
     updated = values if new_bound is None else {**values, "max_object_bytes": new_bound}
     config.write_text(json.dumps({"vaults": {str(vault): updated}}))
@@ -1632,3 +1629,48 @@ def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Pat
     assert path.exists() and originals.original_state(vault, path).reference is None
     with sqlite3.connect(ledger.path) as connection:
         assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+
+
+def test_a_resident_original_gets_no_offload_job(vault: Path, selected_store):
+    """Catches filing that queues an offload the store must refuse after encrypting the whole file."""
+    from exomem import media_jobs
+
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_temporary_bytes": 1000}}}))
+
+    path = _preserved(vault)
+
+    assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    assert originals.original_state(vault, path).state == "local"
+
+
+def test_offload_refuses_a_resident_original_before_it_encrypts(vault: Path, selected_store, monkeypatch):
+    """Catches offload writing a ciphertext temporary file for an original that can never leave the volume."""
+    import tempfile
+
+    from exomem import media_store
+
+    path = _preserved(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_temporary_bytes": 1000}}}))
+    monkeypatch.setattr(tempfile, "TemporaryFile", lambda *a, **k: pytest.fail("a resident original needs no temporary file"))
+    monkeypatch.setattr(media_store.subprocess, "run", lambda *a, **k: pytest.fail("a resident original is never encrypted"))
+
+    assert _offload(vault, path) is None
+
+    refusals, _coverage = media_store.offload_refusals(vault)
+    assert [(row["path"], row["code"]) for row in refusals] == [(path.relative_to(vault).as_posix(), "MEDIA_ORIGINAL_RESIDENT")]
+    assert originals.original_state(vault, path).state == "local"
+
+
+def test_eviction_skips_an_original_whose_plaintext_exceeds_the_hydration_capacity(vault: Path, selected_store):
+    """Catches eviction of an original that no hydration could bring back after the capacity shrank."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_temporary_bytes": path.stat().st_size - 1}}}))
+
+    assert not media_store.evict(vault, path)
+    assert path.exists()
