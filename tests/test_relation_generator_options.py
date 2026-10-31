@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client
-from test_curation_execution import _apply, _propose
+from test_curation_execution import _propose
 from test_relation_endpoints import _entity, _extension, _save_extension, _served
 
 from exomem import (
@@ -350,30 +350,29 @@ def _accept_step(item: dict[str, Any], expected_hash: str, **extra: str) -> dict
     }
 
 
-@pytest.mark.parametrize("requested", [None, "relates_to"])
 def test_a_curation_plan_that_leaves_the_generic_relation_where_a_specific_one_fits_is_refused(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, requested: str | None
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     person, _organization, item, expected_hash = _entity_pair_in_fixture_vault(vault, monkeypatch)
     before = (vault / person).read_bytes()
-    extra = {} if requested is None else {"requested_relation": requested}
 
     with pytest.raises(curation.CurationError) as refused:
-        _propose(vault, _accept_step(item, expected_hash, **extra))
+        _propose(vault, _accept_step(item, expected_hash))
 
     assert refused.value.code == "RELATION_CHOICE_REQUIRED"
     assert '"key":"owns"' in str(refused.value)
     assert (vault / person).read_bytes() == before
 
 
-def test_a_curation_plan_that_names_a_fitting_relation_writes_it(
+def test_a_curation_step_cannot_choose_the_relation_itself(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    person, organization, item, expected_hash = _entity_pair_in_fixture_vault(vault, monkeypatch)
+    # The choice is a recorded vocabulary decision; a plan step carries no such binding.
+    person, _organization, item, expected_hash = _entity_pair_in_fixture_vault(vault, monkeypatch)
+    before = (vault / person).read_bytes()
 
-    proposed = _propose(vault, _accept_step(item, expected_hash, requested_relation="owns"))
-    _apply(vault, proposed)
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _accept_step(item, expected_hash, requested_relation="owns"))
 
-    assert f"- owns [[{organization.removesuffix('.md')}]]" in (vault / person).read_text(
-        encoding="utf-8"
-    )
+    assert refused.value.code == "CURATION_UNKNOWN_FIELD"
+    assert (vault / person).read_bytes() == before
