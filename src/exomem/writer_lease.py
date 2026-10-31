@@ -5297,6 +5297,7 @@ class LeaseManager:
         idempotency_principal_scope: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
+        absorb_unkeyed: bool = False,
     ) -> Any:
         t_start = time.perf_counter()
         # Same instant on the clock the acknowledgement's own deadlines use, so
@@ -6335,6 +6336,7 @@ class LeaseManager:
                 # that preparation fetched caller-supplied temporary handles, the
                 # server cannot fetch them again; only the caller can retry.
                 rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
+                absorb_unkeyed=absorb_unkeyed,
             )
             if (
                 vocabulary_replay_terminal is not None
@@ -6519,6 +6521,7 @@ class LeaseManager:
         commit_state: Mapping[str, bool],
         request_id: str,
         rerun_safe: bool = True,
+        absorb_unkeyed: bool = False,
     ) -> Any:
         """Run one keyed write, waiting out an ordinary busy boundary.
 
@@ -6531,8 +6534,13 @@ class LeaseManager:
         key commits exactly once; anything that observed a commit is never
         re-run. A write is attempted again only while the request budget still
         fits another attempt as long as the last one.
+
+        `absorb_unkeyed` is the in-process caller's (CLI, terminal UI) own mark: it has no
+        key and no reply it could lose, so a refusal raised before the commit is waited out
+        the same way and nothing is stored. A remote caller never sets it, because one that
+        gave up during the wait and sent the write again would commit it twice.
         """
-        eligible = key is not None and rerun_safe and _writes_absorb_contention()
+        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _writes_absorb_contention()
         store_attempt = _ACTIVE_STORE_ATTEMPT.get()
         if store_attempt is not None:
             return self._run_store_attempt(
@@ -7906,6 +7914,7 @@ def invoke_command(
     idempotency_principal_scope: str | None = None,
     implicit_idempotency_scope: str | None = None,
     mutation_request_id: str | None = None,
+    absorb_unkeyed: bool = False,
     **kwargs: Any,
 ) -> Any:
     from .commands import invocation_is_read_only, validate_process_media_operation
@@ -8014,6 +8023,7 @@ def invoke_command(
                 idempotency_principal_scope=idempotency_principal_scope,
                 implicit_idempotency_scope=implicit_idempotency_scope,
                 mutation_request_id=mutation_request_id,
+                absorb_unkeyed=absorb_unkeyed,
             )
 
     if not injected or not is_vault_root(injected[0]):
