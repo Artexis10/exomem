@@ -79,7 +79,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
-from . import call_spans, foreground_priority, request_budget, reserved_paths, state_paths
+from . import (
+    __version__,
+    call_spans,
+    foreground_priority,
+    request_budget,
+    reserved_paths,
+    state_paths,
+)
 from .find_types import RankingPage
 from .kbdir import kb_dirname
 from .log_events import log_event
@@ -5764,6 +5771,21 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
+        """Record the schema and the release that derived every page row (caller owns the txn).
+
+        A release can change how rows derive from the same bytes without a
+        schema, parser or identity bump, so `_seed_from_live` reuses rows only
+        from a catalogue that the running release built.
+        """
+        stamps = (("schema_version", str(SCHEMA_VERSION)), ("catalog_release", __version__))
+        for key, value in stamps:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
     def _write_catalog_identity(
         self, conn: sqlite3.Connection, identity: str | None = None
     ) -> None:
@@ -6175,11 +6197,7 @@ class LexicalStore:
                 conn.execute("DELETE FROM unit_fts")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
+            self._stamp_whole_build(conn)
         self._witnessed.clear()
         self._term_frequency_cache = None
         self._filtered_term_frequency_cache = None
@@ -7291,9 +7309,12 @@ class LexicalStore:
            each scope's start freshness checkpoint, and the semantic projection
            identity BEFORE the (potentially long) corpus scan. Any later live
            publication establishes the baseline for later conflict detection.
-        2. Build a fresh temp sidecar from the walk; if the projection identity
+        2. Build the temp sidecar from the walk; if the projection identity
            shifted under the scan, discard it (the parsed units used the old
-           projection).
+           projection). When the live catalogue carries this release's schema
+           and the captured identity, the temp starts as a backup copy of it and
+           only pages whose content, scope or semantic generation moved are
+           re-parsed (`_reconcile_catalog`); otherwise every page is parsed.
         3. Obtain each scope's complete delta from its start checkpoint and
            replay it onto the temp DB WITHOUT the 32-path foreground cap. An
            incomplete/overflowed delta means the exact target checkpoint cannot
@@ -7439,7 +7460,9 @@ class LexicalStore:
                 checkpoint = base._replace(triple=walk_triple)
                 scope_targets[scope] = ("walk", None, checkpoint, walk_triple)
 
-        if not self._materialize_catalog(temp_path, members, signatures, scope_targets):
+        if not self._materialize_catalog(
+            temp_path, members, signatures, scope_targets, reuse_identity=start_identity
+        ):
             return False
 
         # Work observed while the temp rows were being materialized is not part
@@ -7624,15 +7647,25 @@ class LexicalStore:
         scope_targets: dict[str, tuple],
         *,
         cancel: threading.Event | None = None,
+        reuse_identity: str | None = None,
     ) -> bool:
         """Write one walked corpus and its target checkpoints into a temp catalogue.
 
         Shared by the background repair's `rebuild_atomic` and a standby's
-        `build_detached_catalog`. Touches only the temp family: no live file, no
-        publication barrier. True only when the temp is a single self-contained
-        main file that may later replace the live one. A set ``cancel`` stops the
-        build between pages with `_DetachedBuildCancelled`.
+        `build_detached_catalog`. Touches only the temp family and, to copy it,
+        reads the live catalogue: no live write, no publication barrier. True
+        only when the temp is a single self-contained main file that may later
+        replace the live one. A set ``cancel`` stops the build between pages
+        with `_DetachedBuildCancelled`. A ``reuse_identity`` lets the temp start
+        from the live catalogue built under that identity (`_seed_from_live`).
         """
+        started = time.monotonic()
+        counts: tuple[int, int, int, int] | None = None
+        basis = "not_requested"
+        if reuse_identity is not None:
+            counts, basis = self._reuse_live_catalog(
+                temp_path, reuse_identity, members, signatures
+            )
         conn = self._connect_setup(temp_path)
         folded = False
         try:
@@ -7640,17 +7673,28 @@ class LexicalStore:
             with conn:
                 # Only the temp family is open here: a pause holds no live
                 # file, lock or boundary.
-                for path, (in_kb, in_vault) in foreground_priority.yielding_in_bulk(
-                    members.items()
-                ):
-                    if cancel is not None and cancel.is_set():
-                        raise _DetachedBuildCancelled
-                    self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(SCHEMA_VERSION),),
-                )
+                if counts is None:
+                    for path, (in_kb, in_vault) in foreground_priority.yielding_in_bulk(
+                        members.items()
+                    ):
+                        if cancel is not None and cancel.is_set():
+                            raise _DetachedBuildCancelled
+                        self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+                self._stamp_whole_build(conn)
+            reparsed, removed, inserted, unchanged = (
+                counts if counts is not None else (0, 0, len(members), 0)
+            )
+            log.info(
+                "lexical catalogue pages materialized route=%s basis=%s reparsed=%d "
+                "removed=%d inserted=%d unchanged=%d elapsed_ms=%d",
+                "reconciled" if counts is not None else "rebuilt",
+                basis,
+                reparsed,
+                removed,
+                inserted,
+                unchanged,
+                int((time.monotonic() - started) * 1000),
+            )
             with conn:
                 for _scope, (kind, delta, _cp, _tr) in scope_targets.items():
                     if kind == "delta":
@@ -7682,6 +7726,239 @@ class LexicalStore:
             )
             return self._decline_rebuild("fold_failed")
         return True
+
+    def _reuse_live_catalog(
+        self,
+        temp_path: Path,
+        identity: str,
+        members: dict[Path, list[bool]],
+        signatures: dict,
+    ) -> tuple[tuple[int, int, int, int] | None, str]:
+        """Fill an empty temp from the live catalogue, reconciled to the walk.
+
+        Returns the `_reconcile_catalog` counts and "current", or None and the
+        reason the caller parses the whole corpus into the temp instead. On None
+        the temp family has been removed, so the caller starts from empty.
+        Contention propagates, so `rebuild_atomic` declines and the worker retries.
+        """
+        from .vault import VaultLockError
+
+        conn = self._connect_setup(temp_path)
+        try:
+            basis = self._seed_from_live(conn, identity)
+            if basis is None:
+                counts = self._reconcile_catalog(conn, members, signatures)
+                if counts is not None:
+                    return counts, "current"
+                basis = "damaged"
+        except Exception as e:  # noqa: BLE001 - reuse only saves work; parse the corpus instead
+            if isinstance(e, VaultLockError) or (
+                isinstance(e, sqlite3.Error) and classify_sqlite_error(e) == "transient"
+            ):
+                raise
+            log.warning("lexical repair could not reuse the live catalogue (%s)", e)
+            basis = "error"
+        finally:
+            conn.close()
+        self._cleanup_sidecar_files(temp_path)
+        return None, basis
+
+    def _seed_from_live(self, conn: sqlite3.Connection, identity: str) -> str | None:
+        """Copy the live catalogue into the empty temp behind `conn` if it may be reused.
+
+        Returns None when `conn` holds a reusable copy, else the reason it does
+        not: a retired, quarantine-bound or missing live store, a stale schema,
+        identity or release, a failed integrity check, or declarations that
+        differ from a fresh build's (an FTS tokenizer, index or trigger the copy
+        would otherwise keep).
+        """
+        if self._failed:
+            return "failed"
+        # An ordinary connection may discard the WAL of a corrupt set, which the
+        # publication must move aside whole (`_publish_over_quarantined_set`).
+        # Outside the barrier this is advisory: the probe never writes, and the
+        # publication classifies the set again under the barrier.
+        if self._live_set_disposition() == "quarantine":
+            return "quarantine"
+        if not self.path.exists():
+            return "missing"
+        source = self._connect()
+        try:
+            # One backup step copies one consistent snapshot of the live main
+            # and its committed WAL frames; a file copy could tear under a writer.
+            source.backup(conn)
+        finally:
+            source.close()
+        if not self._schema_is_current(conn):
+            return "schema"
+        if self._meta_catalog_identity(conn) != identity:
+            return "identity"
+        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        if release is None or release[0] != __version__:
+            return "release"
+        # A whole-corpus build reads nothing from the live file; a copy would
+        # carry its damage into every later repair, so check the copy once.
+        if conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            return "integrity"
+        fresh = _sqlite_connect(":memory:")
+        try:
+            self._ensure_schema(fresh)
+            if self._catalog_declarations(conn) != self._catalog_declarations(fresh):
+                return "declarations"
+        finally:
+            fresh.close()
+        with conn:
+            # The copied meta rows attest the live rows, not this temp's; the
+            # build writes its own targets. Recreating the defaults also gives
+            # the replacement its own frequency revision.
+            conn.execute("DELETE FROM meta")
+            self._create_catalog_tables(conn)
+        return None
+
+    @staticmethod
+    def _catalog_declarations(conn: sqlite3.Connection) -> list[tuple]:
+        # SQLite reserves the `sqlite_` prefix for its own objects, such as
+        # planner statistics, which no catalogue declaration creates.
+        return sorted(
+            conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+            ).fetchall()
+        )
+
+    @staticmethod
+    def _index_rows_missing(conn: sqlite3.Connection) -> bool:
+        """Whether a page or semantic unit lacks the full-text row a build writes for it.
+
+        A build writes one `fts` and one `tri` row per page and one `unit_fts`
+        row per semantic unit when FTS5 is available. Without FTS5 neither the
+        copy nor a fresh build has those tables, so only present tables are
+        counted. Run after `_delete_orphan_rows`: a count below its owner's is
+        then a missing row, which no page input shows.
+        """
+        tables = {
+            name
+            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # The schema's own full-text tables and their owner tables, as `_ensure_fts_schema`
+        # declares them: a closed set.
+        for index, owner in (("fts", "pages"), ("tri", "pages"), ("unit_fts", "semantic_units")):
+            if index in tables and (
+                conn.execute(f"SELECT count(*) FROM {index}").fetchone()[0]
+                != conn.execute(f"SELECT count(*) FROM {owner}").fetchone()[0]
+            ):
+                return True
+        return False
+
+    def _reconcile_catalog(
+        self,
+        conn: sqlite3.Connection,
+        members: dict[Path, list[bool]],
+        signatures: dict,
+    ) -> tuple[int, int, int, int] | None:
+        """Bring a catalogue's page rows to one walk, parsing only the pages that moved.
+
+        `conn` holds a complete catalogue that the running release built under
+        the catalogue identity the caller captured; it is never the live
+        sidecar, whose writers this does not serialize with. A stored page stays
+        only while every input of its rows still matches: the walk's mtime and
+        scope membership, the content hash of the page's current bytes, and the
+        semantic generation the current parser and registries give those bytes.
+        Every other walked page is deleted and parsed again, stored pages the
+        walk lacks are removed, and new pages are inserted, so the rows of an
+        undamaged catalogue equal a whole-corpus build of the same walk. Damage
+        that leaves a page's inputs intact, such as a changed column or a
+        deleted semantic unit, stays until that page is written or a release
+        builds the catalogue whole. Meta rows are the caller's.
+
+        Returns the (reparsed, removed, inserted, unchanged) page counts, or None
+        when an owner row lacks its full-text row (`_index_rows_missing`).
+        """
+        from . import freshness as freshness_module
+        from . import semantic_index
+
+        parser_version, language_hash, relation_hash = (
+            semantic_index.current_registry_identity(self.vault_root)
+        )
+
+        def generation_current(rel: str, content_hash: str, structure_json: str | None) -> bool:
+            # The core registries enter the generation but not the catalogue
+            # identity, so a registry change must re-parse the pages it moved.
+            try:
+                structure = json.loads(structure_json or "")
+            except ValueError:
+                return False
+            return (
+                isinstance(structure, dict)
+                and structure.get("parser_version") == parser_version
+                and structure.get("parent_source_hash") == content_hash
+                and structure.get("parent_generation")
+                == semantic_index.parent_generation(
+                    parent_path=rel,
+                    parent_ref=structure.get("parent_ref"),
+                    parent_source_hash=content_hash,
+                    language_registry_hash=language_hash,
+                    relation_registry_hash=relation_hash,
+                    parser_version=parser_version,
+                )
+            )
+
+        walk: dict[str, tuple[Path, int, bool, bool]] = {}
+        for path, (in_kb, in_vault) in members.items():
+            rel = self._rel(path)
+            if rel is not None:
+                walk[rel] = (path, signatures[path][0], bool(in_kb), bool(in_vault))
+        # path(rel) -> (rowid, the stored inputs to compare), snapshotted before
+        # writes. A NULL content hash (an unreadable page) or a stale semantic
+        # generation keeps no inputs, so the page is parsed again.
+        stored: dict[str, tuple[int, tuple[int, bool, bool, str] | None]] = {}
+        for rel, rowid, mtime_ns, in_kb, in_vault, content_hash, structure_json in conn.execute(
+            "SELECT path, rowid, mtime_ns, in_kb, in_vault, content_hash, structure_json "
+            "FROM pages"
+        ):
+            inputs = None
+            if content_hash is not None and generation_current(
+                rel, content_hash, structure_json
+            ):
+                inputs = (int(mtime_ns), bool(in_kb), bool(in_vault), str(content_hash))
+            stored[str(rel)] = (int(rowid), inputs)
+
+        reparsed = removed = inserted = unchanged = 0
+        with conn:
+            # External owner-row corruption can leave page and semantic-unit
+            # index rows behind; purge them before SQLite reuses rowids.
+            self._delete_orphan_rows(conn)
+            if self._index_rows_missing(conn):
+                return None
+            for rel, (rowid, _inputs) in stored.items():
+                if rel not in walk:
+                    self._delete_rowid(conn, rowid)
+                    removed += 1
+            # Only the temp family is open here: a pause holds no live file,
+            # lock or boundary.
+            for rel, (path, mtime_ns, in_kb, in_vault) in foreground_priority.yielding_in_bulk(
+                walk.items()
+            ):
+                row = stored.get(rel)
+                if row is None:
+                    self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
+                    inserted += 1
+                    continue
+                rowid, inputs = row
+                # The digest is the one every custody seam compares with
+                # `pages.content_hash`: sha256 of the bytes the parser reads.
+                if (
+                    inputs is not None
+                    and inputs[:3] == (mtime_ns, in_kb, in_vault)
+                    and freshness_module.custody_digests(self.vault_root, (rel,))[rel]
+                    == inputs[3]
+                ):
+                    unchanged += 1
+                    continue
+                self._delete_rowid(conn, rowid)
+                self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
+                reparsed += 1
+        return reparsed, removed, inserted, unchanged
 
     def _replace_live_catalog(self, temp_path: Path) -> bool:
         """Install a folded temp catalogue over the live set.
