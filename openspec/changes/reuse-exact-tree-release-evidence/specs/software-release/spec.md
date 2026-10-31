@@ -6,13 +6,18 @@ Release reviewed source with reusable test evidence and independently qualified 
 
 ## ADDED Requirements
 
-### Requirement: Ready pull requests run historical full coverage
+### Requirement: Pull requests run the partial tier and Full evidence comes from main
 
-CI SHALL run historical Full coverage alongside ordinary checks for each ready non-release PR. This includes both supported Python runtimes and specialized Full jobs. Draft PRs MAY retain partial feedback. Ready docs-only PRs SHALL retain Full coverage. The release PR SHALL retain targeted metadata and integration checks backed by source evidence.
+CI SHALL run the partial tier for each pull request, draft or ready, on the supported floor Python (`requires-python`). Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
 
-#### Scenario: Draft becomes ready
-- **WHEN** a source PR becomes ready for review
-- **THEN** its ordinary and Full-only jobs run against the same PR merge checkout
+#### Scenario: A pull request is opened or updated
+- **WHEN** a source PR, draft or ready, is opened, reopened or updated
+- **THEN** its partial jobs run on the supported floor Python and no Full-only job runs
+- **AND** its run issues no Full receipt
+
+#### Scenario: Full runs only on schedule and dispatch
+- **WHEN** CI runs for a schedule or a manual dispatch
+- **THEN** the Full tier runs both supported Python runtimes and every specialized Full job against the checked-out commit
 - **AND** its receipt claims Full only after every required Full dependency succeeds
 
 #### Scenario: Long jobs keep their cases
@@ -30,12 +35,17 @@ CI SHALL run historical Full coverage alongside ordinary checks for each ready n
 - **THEN** local installation retains a separate allowance and does not download packages
 - **AND** a failed acquisition prevents installation while a failed installation stops without automatic replay
 
+#### Scenario: Advisory measurements run outside release evidence
+- **WHEN** an advisory measurement, such as the MCP read latency comparison, is scheduled or dispatched
+- **THEN** it runs in its own workflow, nightly and on request
+- **AND** the Full run completes, and its receipt is issued, without waiting for it
+
 ### Requirement: Reuse complete evidence for the actual tested tree
 
 Release acceptance SHALL reuse successful full CI when its actual tested tree equals the selected source tree. The evidence SHALL identify the repository, workflow, run, attempt, tested commit, tree, and full scope. Partial or unavailable evidence SHALL select a full run. Release metadata validation and a short integration check SHALL still run.
 
 #### Scenario: Full source proof survives a squash merge
-- **WHEN** a source pull request has successful full CI and its merged tree equals the tested tree
+- **WHEN** a Full run dispatched on the source branch succeeded and its tested tree equals the merged tree
 - **THEN** the release reuses that evidence without running the corpus again
 
 #### Scenario: Partial PR checks do not become full proof

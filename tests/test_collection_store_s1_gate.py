@@ -464,6 +464,68 @@ def test_idle_release_reacquires_its_own_head_without_waiting(abc):
     assert abc.meta()[schema.META_INSTANCE_ID] == instance
 
 
+def _idle_release(found):
+    token = found.manager._fencing_token
+    found.manager._last_activity_monotonic -= found.manager.config.idle_release_seconds + 1
+    assert found.manager._maybe_idle_release(token)
+
+
+def test_an_unchanged_re_admission_keeps_the_replica_the_next_host_adopts(abc, tmp_path):
+    """Defect: re-admitting an unchanged store recopies the replica, or leaves one the next host refuses."""
+    _idle_release(abc)
+    published = replica.replica_path(abc.root).stat()
+    abc.manager.ensure_writer()
+    assert abc.open() == {"status": "admitted"}
+    found = replica.replica_path(abc.root).stat()
+    assert (found.st_ino, found.st_mtime_ns) == (published.st_ino, published.st_mtime_ns)
+    assert abc.write_c(str(uuid.uuid4()), "After re-admission")["outcome"] == "committed"
+    abc.release()
+    status, rows, _ = run_host(tmp_path, tmp_path / "state-b", "host-b", _handoff_on_b)
+    assert status == {"status": "admitted"} and rows == ["After re-admission", "Canonical"]
+
+
+@pytest.mark.parametrize("after_hash", [False, True], ids=["before-takeover", "between-hash-and-boundary"])
+def test_a_replaced_replica_still_diverges_when_the_store_is_unchanged(abc, monkeypatch, after_hash):
+    """Defect: re-admission trusts its publication records, or bytes it hashed before the boundary,
+    over replica bytes that sync replaced."""
+    abc.release()
+    older = replica.replica_path(abc.root).read_bytes()
+    assert abc.write_c(LATER, "Published after the older copy")["outcome"] == "committed"
+    _idle_release(abc)
+    if after_hash:
+        unchanged = takeover.unchanged_replica
+
+        def replaced_after_hashing(*args):
+            found = unchanged(*args)
+            replica.replica_path(abc.root).write_bytes(older)
+            return found
+
+        monkeypatch.setattr(takeover, "unchanged_replica", replaced_after_hashing)
+    else:
+        replica.replica_path(abc.root).write_bytes(older)
+    abc.manager.ensure_writer()
+    assert abc.open()["status"] == "diverged"
+    assert abc.manager.status()["collection_store"]["status"] == "diverged"
+
+
+def test_an_unchanged_re_admission_refuses_a_lease_lost_while_it_settles(abc, monkeypatch):
+    """Defect: a re-admission that publishes nothing admits a token the coordinator handed away."""
+    from exomem.collection_store import legacy_originals
+
+    _idle_release(abc)
+    token = abc.manager.ensure_writer().fencing_token
+    backfill = legacy_originals.backfill
+
+    def hand_away(*args, **kwargs):
+        backfill(*args, **kwargs)
+        abc.manager.client.release_holder("host-a", token)  # the coordinator hands the lease away
+
+    monkeypatch.setattr(legacy_originals, "backfill", hand_away)
+    with pytest.raises(OpError, match="WRITER_FENCED"):
+        abc.open()
+    assert abc.manager.status()["collection_store"]["status"] != "admitted"
+
+
 def _restart_and_publish(found):
     result = _restart(found)
     found.release()

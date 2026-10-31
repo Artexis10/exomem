@@ -619,29 +619,14 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
         for row in rows:
             if not served[row["collection_id"]]:
                 continue
-            relative = str(Path(row["path"]).parent)
             try:
-                if relative not in parents:
-                    opened = fs.parent(relative)
-                    if not opened.ok and opened.error.code != "MISSING":
-                        raise opened.error
-                    parents[relative] = stack.enter_context(opened.require()) if opened.ok else None
-                parent = parents[relative]
-                if parent is None:
+                opened = _open_view(fs, stack, parents, row["path"])
+                if opened is None:
                     found.append(Observation(row["path"], row, None, None))
                     continue
-                opened = fs.file(parent, Path(row["path"]).name)
-                if not opened.ok:
-                    if opened.error.code != "MISSING":
-                        raise opened.error
-                    found.append(Observation(row["path"], row, None, None))
-                    continue
-                with opened.require() as file:
+                with opened as file:
                     before = file.version()
-                    from .legacy_originals import view_basis
-
-                    if row["path"] not in force and _stat(before) == row["stat_identity"] \
-                            and row["state"] in ("current", "held") and view_basis(writer.connection, row) is None:
+                    if row["path"] not in force and unchanged(writer.connection, row, before):
                         continue
                     bound = collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
                         record_formats._MAX_LOG_BYTES if row["kind"] == "log" else record_formats._MAX_ITEM_BYTES)
@@ -654,6 +639,74 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                 continue
             found.append(Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(before), raw))
     return found
+
+
+def _open_view(fs, stack, parents, path):
+    """The view's file as a context manager, or None when it or its directory is missing.
+
+    ``parents`` keeps each directory opened on ``stack``, so a window opens it once."""
+    relative = str(Path(path).parent)
+    if relative not in parents:
+        opened = fs.parent(relative)
+        if not opened.ok and opened.error.code != "MISSING":
+            raise opened.error
+        parents[relative] = stack.enter_context(opened.require()) if opened.ok else None
+    if parents[relative] is None:
+        return None
+    opened = fs.file(parents[relative], Path(path).name)
+    if not opened.ok:
+        if opened.error.code != "MISSING":
+            raise opened.error
+        return None
+    return opened.require()
+
+
+def unchanged(conn, row, version) -> bool:
+    """Whether a view's file is the one the store recorded with its current bytes, by stat alone."""
+    from .legacy_originals import view_basis
+
+    return (_stat(version) == row["stat_identity"] and row["state"] in ("current", "held")
+            and view_basis(conn, row) is None)
+
+
+def changed_views(conn, root, *, after="", limit=None) -> tuple[dict[str, tuple], str | None]:
+    """The views of one page whose file differs from the store's record, found with no writer lease.
+
+    ``conn`` is a plain reader of the store file, so nothing here takes the lease or the mutation
+    boundary. It applies the stat test of ``observe`` to the next ``limit`` views after ``after``
+    and claims no ownership, so a view ``observe`` would skip as unserved can appear here. A
+    pending view is publication work, not an edit, and is skipped. Returns each changed path with
+    what the sweep saw: the file's stat (None for a file that was published and is gone) and the
+    row's ``stat_identity`` and ``published_sha256``, which move when the store writes the view
+    again; and where the next page starts (None at the end of the views).
+    """
+    from .runtime import VIEW_BATCH_PATHS
+
+    limit = VIEW_BATCH_PATHS if limit is None else limit
+    cursor = conn.execute(
+        "SELECT * FROM projection_state WHERE kind IN (SELECT value FROM json_each(?)) "
+        "AND state IN ('current','held') AND path>? ORDER BY path LIMIT ?",
+        (json.dumps(OBSERVED_KINDS), after, limit))
+    names = [column[0] for column in cursor.description]
+    rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+    changed = {}
+    with ExitStack() as stack:
+        fs = stack.enter_context(held_fs.acquire(root).require())
+        parents = {}
+        for row in rows:
+            try:
+                opened = _open_view(fs, stack, parents, row["path"])
+                if opened is None:
+                    if row["published_sha256"] is not None:
+                        changed[row["path"]] = (None, row["stat_identity"], row["published_sha256"])
+                    continue
+                with opened as file:
+                    version = file.version()
+                    if not unchanged(conn, row, version):
+                        changed[row["path"]] = (_stat(version), row["stat_identity"], row["published_sha256"])
+            except (held_fs.HeldFsError, OSError):
+                continue  # a view that cannot be read now is read again by the next sweep
+    return changed, rows[-1]["path"] if len(rows) == limit else None
 
 
 @dataclass

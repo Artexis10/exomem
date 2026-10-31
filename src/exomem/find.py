@@ -7874,6 +7874,7 @@ def writer_resolver_snapshot(
     vault_root: Path,
     *,
     freshness_key: tuple[int, int, str] | None = None,
+    allow_disk: bool = True,
 ):
     """Return a detached resolver snapshot without warming the shared cache.
 
@@ -7882,6 +7883,10 @@ def writer_resolver_snapshot(
     that already measured direct disk freshness may supply that key to bypass
     potentially stale event-registry state. When the corpus route declines,
     the span records why as one closed `declined_<reason>` field.
+
+    A caller that cannot afford a walk of the vault passes `allow_disk=False`:
+    when both cheap routes decline it gets None and the span records
+    `disk_declined`, instead of a resolver built from disk.
     """
     from . import semantic_contract
     from .vault import WikilinkResolver
@@ -7905,6 +7910,9 @@ def writer_resolver_snapshot(
         if entries is not None:
             measured["corpus_entries"] = 1
             return WikilinkResolver.from_entries(root, entries)
+        if not allow_disk:
+            measured["disk_declined"] = 1
+            return None
         measured["disk"] = 1
         return WikilinkResolver(root)
 

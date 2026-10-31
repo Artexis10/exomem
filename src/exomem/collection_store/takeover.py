@@ -23,7 +23,7 @@ from contextlib import ExitStack, closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from .. import held_fs
-from . import authority, chain, connection, replica, schema, snapshot
+from . import authority, chain, connection, legacy_originals, replica, schema, snapshot
 
 RECHECK_SECONDS = 10.0
 ATTENTION_SECONDS = 15 * 60.0
@@ -54,6 +54,63 @@ def replica_signature(root):
         return _signature(os.stat(replica.replica_path(root)))
     except FileNotFoundError:
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class Unchanged:
+    """What a same-head re-admission decided on: the published bookkeeping and the replica it names."""
+
+    evidence: tuple
+    witness: tuple
+
+
+def replica_witness(root):
+    """The vault replica's full path signature, change time included, or None when it is absent."""
+    from ..vault_portability import _source_signature
+
+    try:
+        return _source_signature(os.lstat(replica.replica_path(root)))
+    except FileNotFoundError:
+        return None
+
+
+def unchanged_replica(session, recorded, local):
+    """Evidence that the vault replica already carries this instance's recorded head, else None.
+
+    It holds when the coordinator recorded this instance's live head, the store published
+    that head under its current lease epoch with no pending intent, and the vault replica
+    holds exactly the bytes the store last published. Hashing runs here, outside the
+    mutation boundary; settlement compares the same evidence cheaply under it.
+    """
+    from ..vault_portability import (
+        PortabilityError,
+        _cross_source_signature,
+        _open_regular_source_native,
+        _source_signature,
+    )
+
+    if (recorded is None or local is None or recorded.instance_id != local.instance_id
+            or (recorded.commit_seq, recorded.head_hash) != (local.commit_seq, local.head_hash)
+            # A store that settlement migrates republishes its replica at the new schema.
+            or connection.schema_pending(session.path)):
+        return None
+    with closing(connection.open_head_reader(session.path)) as reader:
+        evidence = replica.published_evidence(legacy_originals.metadata(reader))
+    if evidence is None:
+        return None
+    source = replica.replica_path(session.root)
+    try:
+        descriptor, before = _open_regular_source_native(source)
+        with os.fdopen(descriptor, "rb") as shared:
+            digest = hashlib.file_digest(shared, "sha256").hexdigest()
+            after = os.fstat(shared.fileno())
+        found = source.lstat()
+        if _source_signature(after) != before or _cross_source_signature(found) != _cross_source_signature(after):
+            return None
+    except (OSError, PortabilityError):
+        # An absent, replaced or unsafe replica is the full publication path's to judge.
+        return None
+    return Unchanged(evidence, _source_signature(found)) if digest == evidence[1] else None
 
 
 @dataclass
