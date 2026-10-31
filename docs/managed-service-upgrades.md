@@ -184,14 +184,19 @@ start an older release over migrated state.
 
 Rehearse each release on a copy of the live vault and state before you install
 it. The rehearsal runs the same handoff on a throwaway managed service, so it
-shows what the live switch will do. Install the release only when both checks
-pass:
+shows what the live switch will do. The checks judge what callers see, not
+whether a repair runs. Install the release only when all four pass:
 
-- No `lexical_repair_started` event with `kind` `full` appears in the 45 minutes after the switch.
 - `handoff.ready_after_ms` is under 120000 (two minutes).
+- `/health/ready` stays ready for 45 minutes after the switch.
+- Every full lexical repair in that window publishes.
+- During each repair in that window, one MCP read and one MCP write succeed,
+  and neither returns `MUTATION_BUSY` or `VAULT_LOCK_TIMEOUT`.
 
-A failed check holds the install. A full repair on the live service can keep
-`/health/ready` at `not_ready`, and requests are refused for that whole time.
+A failed check holds the install. A repair that holds `/health/ready` at
+`not_ready` fails, and so does a write refused to its caller. Run the same read
+and write in the live install window; there, use a write that is safe to repeat,
+such as a scratch note.
 `ready_after_ms` counts from the old worker's stop, so it includes the state
 migrator when `handoff.migration.state` is `ran`.
 
@@ -209,7 +214,7 @@ a transient user unit. Keep its paths short: the control sockets under the
 runtime directory have a 104-byte limit.
 
 1. Create the scratch root: `install -d -m 700 /tmp/xr /tmp/xr/{managed,home,logs,lease,cwd,state}`.
-2. Create the launcher: `uv venv /tmp/xr/launcher`, then install the serving version with its profile extras into it.
+2. Create the launcher with `uv venv /tmp/xr/launcher` and the serving version's package and profile extras.
 3. When no import or bulk apply is running, copy the vault to `/tmp/xr/vault`.
 4. Compute the copy's state key with the key command below.
 5. Create the state leaf: `install -d -m 700 /tmp/xr/state/KEY`.
@@ -218,16 +223,16 @@ runtime directory have a 104-byte limit.
 8. Write `/tmp/xr/rehearsal.env` with mode 600 from the template below.
 9. Pick a free loopback port as `PORT`.
 10. Start the transient unit with the `systemd-run` command below.
-11. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and no `lexical_repair_started` event is newer than its `lexical_repair_finished`.
+11. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
 12. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
 13. Note the time, then switch with the `service_upgrade` command below.
 14. Read `last_transition.handoff` in the printed result.
-15. Read the log events below in `/tmp/xr/logs/exomem.log` for 45 minutes after the noted time.
-16. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
-17. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
+15. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
+16. While a repair runs, send one MCP read and one MCP write to `http://127.0.0.1:PORT/mcp`.
+17. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
+18. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
 
-Expect `ready_after_ms` under 120000 and no `full` repair in the 45 minutes after
-the noted time.
+Expect all four checks to pass in the 45 minutes after the noted time.
 
 ```sh
 /tmp/xr/launcher/bin/python -c 'from pathlib import Path; from exomem.state_paths import vault_state_key; print(vault_state_key(Path("/tmp/xr/vault")))'
@@ -263,6 +268,8 @@ for path in sorted(src.rglob("*")):
             continue
         shutil.copy2(path, target)
     except (FileNotFoundError, sqlite3.OperationalError):
+        if path.exists():
+            raise  # a locked or unreadable database must stop the copy, not shorten it
         target.unlink(missing_ok=True)
 PY
 ```
@@ -270,7 +277,9 @@ PY
 Write the environment file from this template, not from a copy of the live
 file. It gives the copy its own paths and leaves out every variable that reaches
 a live or external system. Replace only the marked live values, so the timings
-match. Use the live model cache path for `HF_HOME`; the hub stays offline:
+match, and leave out a marked line that the live file does not set. Use the live
+model cache path for `HF_HOME`, or for `HF_HUB_CACHE` when the live file sets
+that; the hub stays offline:
 
 ```sh
 EXOMEM_VAULT_PATH=/tmp/xr/vault
@@ -311,8 +320,9 @@ candidate stages under `/tmp/xr/releases`, never under the live service root.
 
 The log is JSON lines. Read these events and messages after the noted time:
 
-- A `lexical_repair_started` event with `fields.kind` `full` fails the first
-  check. `targeted` and `catch_up` are the expected delta repairs.
+- A `lexical_repair_started` event with `fields.kind` `full` starts a full
+  repair. Its `lexical_repair_finished` event must report `result` `published`.
+  `targeted` and `catch_up` are the usual delta repairs.
 - `standby built a detached lexical catalogue` and `adopted retrieval catalog
   healed=` show that promotion adopted the standby's catalog.
 - `managed retrieval catalog delegated to background repair` or `maintained
