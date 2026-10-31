@@ -425,3 +425,28 @@ def test_an_owned_drain_counts_no_whole_graph_table(
         if "COUNT(*)" in statement
         and ("FROM graph_edges" in statement or "FROM graph_nodes" in statement)
     ]
+
+
+def test_opening_a_sidecar_with_an_older_proof_trigger_leaves_only_the_current_ones(
+    vault: Path,
+) -> None:
+    """An old trigger would keep retiring the record by its old body after a later narrowing."""
+    older = (
+        "CREATE TRIGGER trg_graph_dependencies_dependency_proof_v0_insert "
+        "AFTER INSERT ON graph_dependencies BEGIN SELECT 1; END;"
+    )
+    _sql(vault, older)
+
+    EpistemicGraphIndex(vault)._connect().close()
+
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(vault))
+    try:
+        names = {
+            name
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            )
+        }
+    finally:
+        connection.close()
+    assert names == {name for name, _statement in epistemic_graph._dependency_proof_triggers()}

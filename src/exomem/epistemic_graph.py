@@ -2428,8 +2428,19 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
             "ON graph_dependencies(lookup_key, source_path)"
         )
-        for _name, statement in _dependency_proof_triggers():
+        current = set()
+        for name, statement in _dependency_proof_triggers():
+            current.add(name)
             conn.execute(statement)
+        # A trigger of an earlier version is not replaced by name, so it would keep retiring the
+        # record by its old body after the current one is narrowed.
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+            f"AND tbl_name IN ({','.join('?' for _ in _DEPENDENCY_PROOF_TABLES)})",
+            [table for table, _file_rows_only in _DEPENDENCY_PROOF_TABLES],
+        ).fetchall():
+            if "dependency_proof" in name and name not in current:
+                conn.execute(f'DROP TRIGGER "{name}"')
 
     def _connect_existing(
         self,
@@ -6212,7 +6223,7 @@ class EpistemicGraphIndex:
                                 self._delete_path(conn, rel)
                     finally:
                         conn.close()
-            return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+            return {"indexed_files": 0, "disabled": 1}
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
         ):
@@ -6275,7 +6286,7 @@ class EpistemicGraphIndex:
                     reason="external_event_covers_these_paths",
                     graph_checkpoint=graph_checkpoint,
                 )
-                report: dict[str, Any] = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+                report: dict[str, Any] = {"indexed_files": 0, "deferred": 1}
                 if queued:
                     report["queued"] = 1
                     report["external_pending"] = 1
@@ -6309,7 +6320,7 @@ class EpistemicGraphIndex:
                     "graph replay left its repair to the drain marker_stands=%s",
                     marker_stands,
                 )
-                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+                return {"indexed_files": 0, "deferred": 1, "queued": 1}
             if not _parent_receipted_graph_handoff_active(
                 self.vault_root, self._mutation_coordinator.state_root
             ):
@@ -6318,7 +6329,7 @@ class EpistemicGraphIndex:
                 index_sync.drain_graph_work(self.vault_root, paths=scope)
                 if not deferred_index.snapshot_graph(self.vault_root, limit=1, paths=scope):
                     # A standing marker drained through its whole-vault pass.
-                    report = {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    report = {"indexed_files": 0}
                     if marker_stands:
                         report["whole_vault"] = 1
                     return report
@@ -6332,7 +6343,7 @@ class EpistemicGraphIndex:
             ) and self._leave_rebuild_to_the_drain(
                 graph_checkpoint, durable_before_rebuild=durable_before_rebuild
             ):
-                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+                return {"indexed_files": 0, "deferred": 1, "queued": 1}
             try:
                 with _logged_whole_vault_rebuild(
                     graph_checkpoint.generation
@@ -6365,8 +6376,6 @@ class EpistemicGraphIndex:
                     )
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "deferred": 1,
                     "queued": 1,
                     "coalesced": 1,
@@ -6477,8 +6486,6 @@ class EpistemicGraphIndex:
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "_rebuild_after_release": 1,
                     "_durable_before_rebuild": 1,
                 }
@@ -6488,7 +6495,7 @@ class EpistemicGraphIndex:
             # may tell the dispatch layer the queue owns this repair; without
             # the distinction that layer reads an unregistered, unacknowledged
             # checkpoint as a missing rebuild and schedules the vault anyway.
-            report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+            report = {"indexed_files": 0, "deferred": 1, "queued": 1}
             if reason == "resolver_snapshot_unavailable":
                 # Dispatch has to tell this pending outcome from the others. A
                 # standalone caller is told pending here, as it is for a fenced
@@ -6529,8 +6536,6 @@ class EpistemicGraphIndex:
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "_rebuild_after_release": 1,
                 }
             self._mark_unavailable()
@@ -6540,7 +6545,7 @@ class EpistemicGraphIndex:
                 lambda checkpoint: _registered_rebuild_outcome(self, checkpoint),
                 state_root=self._mutation_coordinator.state_root,
             )
-            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+            return {"indexed_files": 0, "deferred": 1}
 
         if graph_checkpoint is not None:
             refused = _checkpoint_binding_refusal(
@@ -6603,7 +6608,7 @@ class EpistemicGraphIndex:
                         graph_checkpoint.generation,
                         acknowledged.generation,
                     )
-                    return {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    return {"indexed_files": 0}
                 return fallback("acknowledgement_is_not_the_predecessor")
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
@@ -6674,8 +6679,6 @@ class EpistemicGraphIndex:
                     return fallback("caller_path_outside_delta")
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "_drain_after_release": sorted(deferred_scope),
                 }
             log.info(
@@ -6687,7 +6690,7 @@ class EpistemicGraphIndex:
             if not delta_paths:
                 # Nothing moved since the stored checkpoint and the caller's
                 # pages are already what the rows say: the replay owes nothing.
-                return {"indexed_files": 0, "nodes": 0, "edges": 0}
+                return {"indexed_files": 0}
             paths = [path for path in paths if str(path) in delta_paths]
             # Proved current, so neither a created page outside the delta: left
             # in, it is a created path without a delta row to vouch for it.
@@ -7248,8 +7251,6 @@ class EpistemicGraphIndex:
         """
         report: dict[str, Any] = {
             "indexed_files": 0,
-            "nodes": 0,
-            "edges": 0,
             "published": False,
             "indexed": (),
         }
