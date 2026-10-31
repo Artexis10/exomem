@@ -424,47 +424,60 @@ class LeaseGrant:
     original_size: int
 
 
-def lease_grant(vault_root: Path, job: media_jobs.MediaJob) -> LeaseGrant | None:
-    """What the vault owner reads to grant `job` to a remote worker (D4, D5), or None when it may not have it.
+# Why a grant declines a job: a closed set of internal causes. Only the first two are durable, because they hold
+# until the job's input changes; the rest can lift on their own, so they skip the job without marking it.
+REFUSED_WITHHELD = media_jobs.LeaseRefusal("original_withheld", durable=True)
+REFUSED_NO_DIGEST = media_jobs.LeaseRefusal("no_binary_digest", durable=True)
+REFUSED_RECALL_POLICY = media_jobs.LeaseRefusal("recall_policy")
+REFUSED_COMPLETE = media_jobs.LeaseRefusal("transcript_complete")
+REFUSED_UNREADABLE = media_jobs.LeaseRefusal("sidecar_unreadable")
+REFUSED_ORIGINAL_UNAVAILABLE = media_jobs.LeaseRefusal("original_unavailable")
+REFUSED_GRANT_FAILED = media_jobs.LeaseRefusal("grant_failed")
+
+
+def lease_grant(vault_root: Path, job: media_jobs.MediaJob) -> LeaseGrant | media_jobs.LeaseRefusal:
+    """What the vault owner reads to grant `job` to a remote worker (D4, D5), or the reason it may not have it.
 
     This is the read a local child makes at its claim, plus the release gate of an original download.
     It runs inside the claim transaction, so it is a few small reads and never hashes the original: the
     worker verifies the original against the digest that the sidecar already records for its binary.
     Not granted: a sidecar that recall policy no longer admits, one whose transcript is complete and is
-    not being reprocessed, an original the gate withholds, one without a recorded digest, one that is
-    absent from the volume (an evicted original keeps its local claim, because its identity cannot be
-    read before it is hydrated) and one the sidecar describes differently from the file.
+    not being reprocessed, an unreadable sidecar, an original the gate withholds, one without a recorded
+    digest, one that is absent from the volume (its identity cannot be read before it is hydrated) and one
+    the sidecar describes differently from the file. The withheld original and the missing digest are
+    durable refusals; the rest can lift (see `media_jobs.LeaseRefusal`).
     """
     from . import media_processing
     from .governance import egress
     from .governance import principal as principal_module
 
     if not recall_policy.is_recall_candidate(vault_root, job.sidecar_path):
-        return None
+        return REFUSED_RECALL_POLICY
     try:
         content, guard = read_guarded_text(vault_root, job.sidecar_path)
         fields, _body, _raw = parse_frontmatter(content, strict=True)
     except Exception:  # noqa: BLE001 - safe YAML scalars raise mixed errors; an unreadable sidecar is not granted
-        return None
+        return REFUSED_UNREADABLE
     completed = media_processing.has_completed_transcript(content, media_type=job.media_type)
     reprocessing = completed and job.reprocess and job.do_ocr
     if completed and not reprocessing:
-        return None
-    identity = _binary_identity(job.binary_path)
+        return REFUSED_COMPLETE
     digest, recorded_size = fields.get("binary_sha256"), fields.get("binary_size")
+    if not media_jobs._is_sha256(digest):
+        return REFUSED_NO_DIGEST
+    identity = _binary_identity(job.binary_path)
     if (
         guard.expected_content_hash is None
         or identity is None
-        or not media_jobs._is_sha256(digest)
         or (recorded_size is not None and recorded_size != identity[0][2])
     ):
-        return None
+        return REFUSED_ORIGINAL_UNAVAILABLE
     relative = job.binary_path.relative_to(vault_root).as_posix()
     # The owner's identity: the remote worker computes on the owner's behalf, as an owner's download does.
     if not egress.release_allows_download(
         vault_root, relative, principal=principal_module.owner_principal(surface="transfer")
     ):
-        return None
+        return REFUSED_WITHHELD
     language, multilingual = _language_pin(job, content)
     return LeaseGrant(
         snapshot=media_jobs.LeaseSnapshot(
@@ -1838,10 +1851,7 @@ class MediaWorker:
                 verdict.reason,
                 serving_worker_cuda_hidden=cuda_containment.hidden_from_worker(),
             )
-        if self._gpu_preflight.ok:
-            return env
-        failure = f"GPU preflight {self._gpu_preflight.reason}; media processing runs without the GPU until the service restarts"
-        return cuda_containment.deny_gpu_to_child(env, failure)
+        return cuda_containment.apply_verdict(env, self._gpu_preflight, until="the service restarts")
 
     def _record_status(self, record: Callable[..., Any], *args: object, **kwargs: object) -> Any:
         """Write a status fact; a status record must never keep the supervisor or a child from running."""
@@ -2141,7 +2151,7 @@ class MediaWorker:
         try:
             changed = media_remote_routing.sweep_leases(self._store, self._vault_root) > 0
             if routing.media_types:
-                changed |= self._store.judge_remote_eligibility(self._grantable, routing.media_types) > 0
+                changed |= self._store.judge_remote_eligibility(self._grant, routing.media_types) > 0
             skip = media_remote_routing.local_skip(self._vault_root, self._store)
         except Exception:  # noqa: BLE001 - the sweep retries at the next interval and must not stop the supervisor
             log.warning("media worker: remote lease sweep deferred", exc_info=True)
@@ -2150,13 +2160,13 @@ class MediaWorker:
         self._routed_skip = skip
         return changed
 
-    def _grantable(self, job: media_jobs.MediaJob) -> bool:
-        """Whether a remote claim can take this job. A job the grant cannot read stays with the local worker."""
+    def _grant(self, job: media_jobs.MediaJob) -> object:
+        """The grant read of a remote claim, for the judge pass. A read that raises judges nothing."""
         try:
-            return lease_grant(self._vault_root, job) is not None
+            return lease_grant(self._vault_root, job)
         except Exception:  # noqa: BLE001 - see above
             log.warning("media worker: could not read job %s for remote eligibility", job.id, exc_info=True)
-            return False
+            return REFUSED_GRANT_FAILED
 
     def _ask_slot(self) -> bool:
         """Whether the node lease holds a slot for the job the next child will claim.

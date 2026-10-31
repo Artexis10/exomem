@@ -17,36 +17,37 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import (
-    extract,
     media_brakes,
     media_jobs,
-    media_models,
     media_remote_routing,
     media_store,
     media_types,
-    media_worker,
+    media_worker_client,
     media_worker_credentials,
     reserved_paths,
-    voice_embed,
 )
 from .asr_facts import LANGUAGE_MODE_SINGLE, AsrFacts
 from .governance import egress
 from .governance import principal as principal_module
 from .server_transfer import _hydration_too_large
 
+if TYPE_CHECKING:
+    import numpy as np
+
+    from . import media_worker
+
 log = logging.getLogger(__name__)
 
-#: The one protocol version this service speaks.
-PROTOCOL_VERSION = 1
+#: The one protocol version this service speaks, which the worker speaks too.
+PROTOCOL_VERSION = media_worker_client.PROTOCOL_VERSION
 #: How long an idle claim waits for an eligible job, and how often it looks again.
 CLAIM_WAIT_SECONDS = 25.0
 CLAIM_POLL_SECONDS = 1.0
@@ -63,8 +64,10 @@ _STREAM_CHUNK_BYTES = 1024 * 1024
 _MAX_SLOTS = 64
 # The protocol fixes the reasons a worker gives for a release; no deployment extends them.
 # Space is the one that blocks the job, as for a local claim; the others return it to the queue.
-_INSUFFICIENT_SPACE = "insufficient_space"
-_HAND_BACKS = frozenset({"device_busy", "shutdown", "unsupported_input"})  # nosemgrep: ep-word-set -- protocol-fixed release reasons.
+_INSUFFICIENT_SPACE = media_worker_client.INSUFFICIENT_SPACE
+_HAND_BACKS = frozenset(  # nosemgrep: ep-word-set -- protocol-fixed release reasons.
+    {media_worker_client.DEVICE_BUSY, media_worker_client.SHUTDOWN, media_worker_client.UNSUPPORTED_INPUT}
+)
 # The protocol's two result kinds and the keys of its payloads: a closed wire schema, not data a vault defines.
 _RESULT_KINDS = frozenset({"extraction", "failure"})  # nosemgrep: ep-word-set -- protocol-fixed result kinds.
 _EXTRACTION_KEYS = frozenset({"engine", "asr", "segments", "diarization"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
@@ -86,7 +89,7 @@ def _unauthorized() -> JSONResponse:
 
 
 def _lease_lost() -> JSONResponse:
-    return _error(409, "MEDIA_LEASE_LOST", "this worker does not hold that lease under that revision")
+    return _error(409, media_worker_client.LEASE_LOST_CODE, "this worker does not hold that lease under that revision")
 
 
 def _bad(reason: str) -> JSONResponse:
@@ -123,6 +126,9 @@ async def _json_body(request: Request, limit: int) -> dict[str, Any] | JSONRespo
 
 def _asr_policy() -> dict[str, object]:
     """The decoding policy the worker applies in place of its own configuration (D9), from the model registry data."""
+    # Not at import: the server starts without the embedding stack.
+    from . import media_models
+
     policy = media_models.model_spec("speech")["faster_whisper"]
     return {key: policy[key] for key in ("revision", "options", "batched")}
 
@@ -132,6 +138,10 @@ def _diarization(block: object) -> tuple[list[tuple[float, float, str]], dict[st
 
     The reasons never quote the values: a voiceprint is a biometric, and none reaches a log or a response.
     """
+    import numpy as np  # not at import: the server starts without the numpy stack, which only a diarized result needs
+
+    from . import voice_embed
+
     if not isinstance(block, dict) or set(block) != _DIARIZATION_KEYS:
         return "diarization holds turns and clusters"
     raw_turns, raw_clusters = block["turns"], block["clusters"]
@@ -171,6 +181,9 @@ def _render_extraction(payload: dict[str, Any], vault_root: Path) -> dict[str, o
     that diarized also returns each cluster's voiceprint: the service matches those against the voice profiles
     of this vault and the payload it records holds the names only, never a voiceprint.
     """
+    # Not at import: the server starts without the media extraction stack.
+    from . import extract, media_worker
+
     if set(payload) - _EXTRACTION_KEYS:
         return "an extraction payload holds engine, asr, segments and diarization"
     engine, segments = payload.get("engine"), payload.get("segments")
@@ -222,6 +235,9 @@ def _render_extraction(payload: dict[str, Any], vault_root: Path) -> dict[str, o
 
 
 def _failure_payload(payload: dict[str, Any]) -> dict[str, object] | str:
+    # Not at import: the server starts without the media extraction stack.
+    from . import media_worker
+
     error, retryable = payload.get("error"), payload.get("retryable", True)
     if set(payload) - _FAILURE_KEYS or not isinstance(error, str) or not error.strip() or not isinstance(retryable, bool):
         return "a failure payload holds an error text and an optional retryable flag"
@@ -279,6 +295,9 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
     def try_claim(
         credential: media_worker_credentials.WorkerCredential, declared: dict[str, object], slots: int
     ) -> dict[str, object] | None:
+        # Not at import: the server starts without the media extraction stack.
+        from . import media_worker
+
         routing = media_remote_routing.remote_workers(vault_root)
         if routing is None:
             return None
@@ -288,14 +307,16 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
         config = media_brakes.settings()
         grants: dict[int, media_worker.LeaseGrant] = {}
 
-        def snapshot(job: media_jobs.MediaJob) -> media_jobs.LeaseSnapshot | None:
+        def snapshot(job: media_jobs.MediaJob) -> media_jobs.LeaseSnapshot | media_jobs.LeaseRefusal:
             try:
                 grant = media_worker.lease_grant(vault_root, job)
-            except Exception:  # noqa: BLE001 - a job that cannot be read stays with the local worker; the others go on
+            except Exception:  # noqa: BLE001 - a job that cannot be read is skipped, not marked; the others go on
                 log.warning("media worker lease: could not read job %s", job.id, exc_info=True)
-                return None
-            if grant is None or job.id is None:
-                return None
+                return media_worker.REFUSED_GRANT_FAILED
+            if isinstance(grant, media_jobs.LeaseRefusal):
+                return grant
+            if job.id is None:
+                return media_worker.REFUSED_GRANT_FAILED
             grants[job.id] = grant
             return grant.snapshot
 

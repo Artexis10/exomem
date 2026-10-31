@@ -210,6 +210,64 @@ exomem media-worker credential revoke --name gpu-box
 holds at once). `process_media` status lists each held lease, each credential with the kinds
 it is present for, and the reason a job last came back.
 
+#### Run a worker
+
+On the GPU machine, install Exomem and copy the token file there with mode `0600`. Then run
+the worker:
+
+```bash
+exomem media-worker run --service https://memory.example --credential-file ~/gpu-box.token
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--service` | required | The base URL of the Exomem service. |
+| `--credential-file` | required | The file that `credential issue --out` wrote. |
+| `--slots` | `1` | The jobs this worker runs at once. The service also limits it to the credential's `--max-leases`. |
+| `--work-dir` | a new private temp directory | Where originals are downloaded. The worker creates it with mode `0700`. Give each worker process its own directory. |
+| `--diarize` | off | Also return speaker turns and one voiceprint for each speaker. Needs the diarization sidecar. Without it, the worker logs a warning and returns plain transcripts. |
+
+The worker declares what it can run when it claims a job: the media kinds, the speech
+engine and its device. It downloads each original into the work directory, checks the size
+and SHA-256 that the claim names, computes with the settings that the vault chose for the
+job, and hands in the result. It deletes the original when the lease ends and keeps no copy.
+A busy GPU hands the job back with the reason `device_busy`. The job keeps its place in the
+queue and waits a retry time.
+
+On `SIGTERM` or `SIGINT` the worker hands back every lease it holds with the reason
+`shutdown`, deletes the originals and exits with code 0. A lost connection backs off from one
+second to 60 seconds. Exit code 1 means the service refused the credential (401) or does not
+speak the worker protocol (426). Exit code 2 means the credential file cannot be read or this
+machine has no speech engine. On a machine with an NVIDIA GPU, the command restarts itself once
+so that the CUDA libraries of the `nvidia-*` packages can load, as the service does for its
+media process. The worker logs job numbers, sizes, timings and reasons, and never a token,
+transcript text or voiceprint.
+
+To keep the worker running, use a user systemd unit. Save it as
+`~/.config/systemd/user/exomem-media-worker.service`:
+
+```ini
+[Unit]
+Description=Exomem remote media worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/exomem media-worker run --service https://memory.example --credential-file %h/gpu-box.token
+Restart=on-failure
+RestartSec=10
+# Do not retry a refused credential or a machine without a speech engine.
+RestartPreventExitStatus=1 2
+
+[Install]
+WantedBy=default.target
+```
+
+1. Run `systemctl --user daemon-reload`.
+2. Run `systemctl --user enable --now exomem-media-worker`.
+3. Run `loginctl enable-linger` once, so the worker keeps running after you log out.
+4. Run `journalctl --user -u exomem-media-worker -f` and check for `leased` and `result handed in` lines.
+
 ## 2. Set up a public HTTPS URL
 
 You need a hostname for step 3. Pick **one**:

@@ -155,6 +155,10 @@ class TimestampRenderingUnavailable(Exception):
     """ASR succeeded but the required canonical timestamp rendering did not."""
 
 
+class ExtractionCancelled(Exception):
+    """The caller ended the extraction before it finished, because the work it served is over."""
+
+
 class MediaMemoryExhausted(MemoryError):
     """A native engine could not allocate memory, such as under the media child's limit."""
 
@@ -460,6 +464,11 @@ class TranscriptionSegment(Protocol):
 
 
 class TranscriptionBackend(Protocol):
+    #: The backend's own name, as a worker declares it ("faster-whisper").
+    name: str
+    #: Where the backend always decodes, or None when it chooses at load time.
+    device: str | None
+
     def transcribe(
         self,
         path: Path,
@@ -468,6 +477,7 @@ class TranscriptionBackend(Protocol):
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        policy: dict | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         """Transcribe `path` → ``(segments, engine_label)``.
 
@@ -476,6 +486,9 @@ class TranscriptionBackend(Protocol):
         to force instead of detecting one. ``multilingual`` detects the language per
         decoding window, and a backend that cannot raises `MultilingualUnsupported`.
         ``report`` receives what the engine decided once the segments have been read.
+        ``policy`` replaces the decoding policy of the model registry, as a remote worker
+        applies the policy of the vault it works for; a backend that does not decode
+        with faster-whisper ignores it.
 
         ``segments`` yields objects exposing ``.text`` / ``.start`` / ``.end``;
         ``engine_label`` is the provenance string stored on the sidecar (e.g.
@@ -561,6 +574,9 @@ class FasterWhisperBackend:
     """CTranslate2 faster-whisper — CUDA or CPU (never Metal). Device and compute_type
     live in `_get_whisper`; this wrapper keeps the loader seam that tests patch."""
 
+    name = "faster-whisper"
+    device = None  # CUDA or CPU, decided when the model loads (`asr_runtime.select_asr_runtime`)
+
     def transcribe(
         self,
         path: Path,
@@ -569,6 +585,7 @@ class FasterWhisperBackend:
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        policy: dict | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         # The policy is data (media_models.json): its VAD makes the language be detected
         # on speech rather than on a quiet opening, and it stops one wrong stretch from
@@ -578,13 +595,13 @@ class FasterWhisperBackend:
                 try:
                     from . import media_models
 
-                    policy = media_models.model_spec("speech")["faster_whisper"]
+                    decoding_policy = policy or media_models.model_spec("speech")["faster_whisper"]
                     model = _get_whisper()
                     if language is not None and language not in (supported := model.supported_languages):
                         raise UnsupportedLanguage(language, supported)
                     segments, info, decoding = _start_decoding(
                         model,
-                        policy,
+                        decoding_policy,
                         _decode_audio_float32(path),
                         language=language,
                         multilingual=multilingual,
@@ -595,7 +612,7 @@ class FasterWhisperBackend:
                         report.speech_seconds = _seconds(getattr(info, "duration_after_vad", None))
                         report.duration_seconds = _seconds(getattr(info, "duration", None))
                         report.decoding = decoding
-                        report.policy = policy["revision"]
+                        report.policy = decoding_policy["revision"]
                     yield from segments
                 except Exception as exc:
                     typed = asr_runtime.as_compute_runtime_error(exc)
@@ -627,6 +644,9 @@ class MlxWhisperBackend:
     16 kHz whisper timebase) when faster-whisper is present, else the file path is handed
     to mlx-whisper's own loader. MLX caches the model in memory after the first load."""
 
+    name = "mlx-whisper"
+    device = "metal"
+
     @staticmethod
     def _require_mlx():
         try:
@@ -653,6 +673,7 @@ class MlxWhisperBackend:
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        policy: dict | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         if multilingual:
             raise MultilingualUnsupported("mlx-whisper")
@@ -713,6 +734,26 @@ def get_transcriber() -> TranscriptionBackend:
     return FasterWhisperBackend()
 
 
+@dataclass(frozen=True)
+class DiarizationPrerequisites:
+    """What diarization needs from this machine: the isolated sidecar interpreter and a model-hub token."""
+
+    sidecar_venv: bool
+    hf_token: bool
+
+    @property
+    def ready(self) -> bool:
+        return self.sidecar_venv and self.hf_token
+
+
+def diarization_prerequisites() -> DiarizationPrerequisites:
+    """Whether the sidecar venv and the token are present; the one check behind the boot log and a worker's claim."""
+    return DiarizationPrerequisites(
+        sidecar_venv=_diarizer_sidecar_python() is not None,
+        hf_token=bool(os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")),
+    )
+
+
 def log_diarization_readiness(vault_root: Path | None = None) -> None:
     """One boot-time log line saying whether diarization can actually run.
 
@@ -726,8 +767,7 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         from . import voice_profiles
 
         enabled = _diarize_enabled()
-        sidecar_venv = _diarizer_sidecar_python() is not None
-        hf_token = bool(os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN"))
+        prerequisites = diarization_prerequisites()
         names: list[str] = []
         if vault_root is not None:
             names = sorted(
@@ -737,12 +777,12 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
                 )
             )
         line = (
-            f"diarization readiness: enabled={enabled} sidecar_venv={sidecar_venv} "
-            f"hf_token={hf_token} profiles={len(names)}"
+            f"diarization readiness: enabled={enabled} sidecar_venv={prerequisites.sidecar_venv} "
+            f"hf_token={prerequisites.hf_token} profiles={len(names)}"
         )
         if names:
             line += f" ({', '.join(names)})"
-        level = logging.WARNING if enabled and not (sidecar_venv and hf_token) else logging.INFO
+        level = logging.WARNING if enabled and not prerequisites.ready else logging.INFO
         log.log(level, "%s", line)
     except Exception:  # noqa: BLE001 — a diagnostics line must never break startup
         log.debug("diarization readiness check failed", exc_info=True)
@@ -756,20 +796,28 @@ def language_code(value: str | None) -> str | None:
     return (value or "").strip().lower() or None
 
 
-def _resolve_language(requested: str | None, multilingual: bool) -> tuple[str | None, str]:
+def resolve_language(
+    requested: str | None, multilingual: bool, configured: str | None = None
+) -> tuple[str | None, str]:
     """The language to force and where it came from; `(None, detected)` leaves it to the engine.
 
     A caller's request (or the pin an earlier request left on the sidecar) beats the
-    deployment's `EXOMEM_ASR_LANGUAGE`; with neither, the engine detects on speech. The
+    deployment's configured language; with neither, the engine detects on speech. The
     multilingual mode is a request too: it forces no language, and the engine detects per window.
+    A remote worker passes no configured language: the vault's settings travel with the job.
     """
     if multilingual:
         return None, LANGUAGE_REQUESTED
     if requested := language_code(requested):
         return requested, LANGUAGE_REQUESTED
-    if configured := language_code(os.environ.get(ASR_LANGUAGE_ENV)):
+    if configured := language_code(configured):
         return configured, LANGUAGE_CONFIGURED
     return None, LANGUAGE_DETECTED
+
+
+def _resolve_language(requested: str | None, multilingual: bool) -> tuple[str | None, str]:
+    """`resolve_language` with this deployment's `EXOMEM_ASR_LANGUAGE`."""
+    return resolve_language(requested, multilingual, os.environ.get(ASR_LANGUAGE_ENV))
 
 
 #: The transcript of a timed extraction that found no speech.
@@ -1211,6 +1259,54 @@ def _diarize(
     return render_diarized(
         turns, [_segment_times(seg) for seg in seg_list], resolved, timestamps=timestamps, source=path.name
     )
+
+
+def worker_speech_payload(
+    path: Path,
+    media_type: str,
+    *,
+    language: str | None,
+    multilingual: bool,
+    policy: dict | None = None,
+    diarize: bool = False,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> dict[str, object]:
+    """What a remote worker hands in for one speech original: the ASR segments with their facts and, if asked, who spoke when.
+
+    The settings are the job's: the language and mode the vault declared, and its decoding policy. Nothing comes
+    from this machine's `EXOMEM_ASR_LANGUAGE`. The service renders the text and names the speakers (D8), so the
+    payload holds structure only. With `diarize` it adds the turns and one voiceprint per cluster, and a
+    diarization that fails soft leaves the plain segments, as a local extraction does. `cancelled` is asked
+    between segments; when it answers true, the extraction raises `ExtractionCancelled`.
+    """
+    if media_type == "video" and not _has_audio_stream(path):
+        return {"engine": "no-audio", "segments": []}  # a silent video, as `_transcribe` reports it
+    forced, source = resolve_language(language, multilingual)
+    report = AsrFacts()
+    segments, engine = get_transcriber().transcribe(
+        path, language=forced, multilingual=multilingual, report=report, policy=policy
+    )
+    timed: list[tuple[float, float, str]] = []
+    for segment in segments:
+        if cancelled():
+            raise ExtractionCancelled
+        timed.append(_segment_times(segment))
+    payload: dict[str, object] = {
+        "engine": engine,
+        "segments": [{"start": start, "end": end, "text": text} for start, end, text in timed],
+    }
+    if (asr := _asr_facts(report, forced, source, multilingual)) is not None:
+        payload["asr"] = asr.as_payload()
+    if diarize and timed and (turns := _run_diarization(path)):
+        if cancelled():
+            raise ExtractionCancelled
+        voiceprints = _embed_clusters(path, turns)
+        if voiceprints is not None:  # one failed embedding leaves every speaker unnamed, so none is sent
+            payload["diarization"] = {
+                "turns": [{"start": start, "end": end, "cluster": label} for start, end, label in turns],
+                "clusters": {label: [float(value) for value in vector] for label, vector in voiceprints.items()},
+            }
+    return payload
 
 
 def render_diarized(

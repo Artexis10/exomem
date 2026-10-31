@@ -1098,6 +1098,24 @@ def test_an_original_that_no_remote_claim_can_take_is_processed_locally_even_wit
     assert _local_child(vault, monkeypatch) == ["talk.mp3"]
 
 
+@pytest.mark.parametrize("cause", ["unreadable_sidecar", "missing_original"])
+def test_a_refusal_that_can_lift_does_not_hand_the_routed_job_to_the_local_worker(
+    vault, tmp_path, monkeypatch, cause
+) -> None:
+    client = _serve(vault, tmp_path, monkeypatch, local_fallback=False)
+    _credential(vault)
+    binary, sidecar = _audio(vault)
+    if cause == "unreadable_sidecar":
+        sidecar.write_text("---\ntitle: [unclosed\n---\n", encoding="utf-8")  # unreadable now; a fix can lift it
+    else:
+        binary.unlink()  # an evicted original is absent from the volume until something hydrates it
+    assert _claim(client).status_code == 204
+
+    assert _local_child(vault, monkeypatch) == []
+
+    assert (_row(vault, 1)["state"], _row(vault, 1)["remote_eligible"]) == ("pending", None)
+
+
 def test_the_supervisor_starts_a_local_child_for_an_original_no_worker_can_take_though_none_connects(
     vault, tmp_path, monkeypatch, clock
 ) -> None:

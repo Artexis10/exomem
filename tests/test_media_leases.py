@@ -14,6 +14,9 @@ SIDECAR_HASH = "a" * 64
 REPLACED_DIGEST = "b" * 64
 IDENTITY = {"stat": [1, 2, 3, 4, 5], "sha256": None}
 EXTRACTION = {"text": "a transcript", "engine": "fake-asr"}
+# A grant's two kinds of refusal: one that holds until the job's input changes, and one that can lift.
+DURABLE = media_jobs.LeaseRefusal("original_withheld", durable=True)
+LIFTING = media_jobs.LeaseRefusal("original_unavailable")
 
 
 @pytest.fixture
@@ -97,7 +100,7 @@ def test_a_refused_job_does_not_hold_back_the_jobs_behind_it(vault: Path) -> Non
     released = _enqueue(vault, "released.mp3")
 
     lease = store.claim_lease(
-        _request(snapshot=lambda job: None if job.id == withheld else _snapshot(job)), skip_media_types=()
+        _request(snapshot=lambda job: DURABLE if job.id == withheld else _snapshot(job)), skip_media_types=()
     )
 
     assert lease.job.id == released
@@ -481,7 +484,7 @@ def test_a_job_on_a_live_lease_is_no_work_for_a_local_child_until_the_lease_expi
 def test_the_mark_of_a_job_no_claim_can_take_clears_when_its_input_changes(vault: Path, change: str) -> None:
     store = media_jobs.MediaJobStore(vault)
     job_id = _enqueue(vault)
-    assert store.claim_lease(_request(snapshot=lambda job: None), skip_media_types=()) is None
+    assert store.claim_lease(_request(snapshot=lambda job: DURABLE), skip_media_types=()) is None
     assert _row(vault, job_id)["remote_eligible"] == 0  # the claim marked it: none can take it now
     assert store.claim_lease(_request(), skip_media_types=()) is None  # and the mark holds for the next claim
 
@@ -504,7 +507,7 @@ def test_the_local_claim_leaves_a_routed_job_to_remote_workers_unless_no_claim_c
     store.recover_interrupted()
     assert store.claim_next(routed_media_types=("audio",)).binary_path.name == "film.mp4"  # unjudged audio waits
 
-    store.judge_remote_eligibility(lambda job: job.binary_path.name != "refused.mp3", ["audio"])
+    store.judge_remote_eligibility(lambda job: DURABLE if job.binary_path.name == "refused.mp3" else _snapshot(job), ["audio"])
 
     store.recover_interrupted()
     taken = [store.claim_next(routed_media_types=("audio",)).binary_path.name for _ in range(2)]
@@ -523,11 +526,49 @@ def test_a_verdict_read_from_an_input_that_changed_meanwhile_is_not_recorded(vau
     store = media_jobs.MediaJobStore(vault)
     job_id = _enqueue(vault)
 
-    def grantable(job: media_jobs.MediaJob) -> bool:
+    def grant(job: media_jobs.MediaJob) -> media_jobs.LeaseRefusal:
         clock[0] += 1
         _enqueue(vault)  # the input changes while the grant is read
-        return False
+        return DURABLE
 
-    assert store.judge_remote_eligibility(grantable, ["audio"]) == 0
+    assert store.judge_remote_eligibility(grant, ["audio"]) == 0
 
     assert _row(vault, job_id)["remote_eligible"] is None
+
+
+def test_a_claim_marks_a_job_only_for_a_refusal_that_holds_until_its_input_changes(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    lifting_id, durable_id = _enqueue(vault, "lifting.mp3"), _enqueue(vault, "durable.mp3")
+
+    assert store.claim_lease(
+        _request(snapshot=lambda job: LIFTING if job.id == lifting_id else DURABLE), skip_media_types=()
+    ) is None
+
+    assert _row(vault, lifting_id)["remote_eligible"] is None  # its cause can lift, so no verdict is kept
+    assert _row(vault, durable_id)["remote_eligible"] == 0
+    # The cause lifts: the next claim takes the job.
+    assert store.claim_lease(_request(), skip_media_types=()).job.id == lifting_id
+
+
+def test_the_judge_pass_records_a_refusal_that_holds_and_leaves_a_lifting_one_unjudged(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    lifting_id, durable_id, granted_id = (_enqueue(vault, name) for name in ("lifting.mp3", "durable.mp3", "granted.mp3"))
+    verdicts = {lifting_id: LIFTING, durable_id: DURABLE, granted_id: _snapshot(None)}
+
+    assert store.judge_remote_eligibility(lambda job: verdicts[job.id], ["audio"]) == 2
+
+    assert [_row(vault, job_id)["remote_eligible"] for job_id in (lifting_id, durable_id, granted_id)] == [None, 0, 1]
+
+
+def test_a_persons_retry_clears_the_mark_so_the_job_is_judged_again(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job_id = _enqueue(vault)
+    assert store.claim_lease(_request(snapshot=lambda job: DURABLE), skip_media_types=()) is None
+    claimed = store.claim_next()  # the local worker takes the marked job and it fails
+    store.mark(claimed.id, media_jobs.FAILED, "corrupt container")
+    assert _row(vault, job_id)["remote_eligible"] == 0
+
+    assert store.retry(include_failed=True) == 1
+
+    assert _row(vault, job_id)["remote_eligible"] is None
+    assert store.claim_lease(_request(), skip_media_types=()).job.id == job_id

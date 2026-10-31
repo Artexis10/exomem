@@ -305,6 +305,9 @@ class _SeekBuffer:
 
 
 class OnnxWhisperBackend:
+    name = "onnx-asr"
+    device = "cpu"  # the session loads the CPU execution provider only
+
     def __init__(self) -> None:
         self.spec = media_models.model_spec("speech")
         self._model = None
@@ -425,6 +428,7 @@ class OnnxWhisperBackend:
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        policy: dict | None = None,
     ) -> tuple[Iterator[Segment], str]:
         """Transcribe by seeking through the audio; with a vault, a stopped run resumes at its last seek.
 

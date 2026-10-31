@@ -33,6 +33,8 @@ Subcommands:
   for opt-in diarization (desk-side admin; never an MCP tool)
 - `media-worker credential issue|list|revoke` — manage the credentials of remote media workers
   (desk-side admin; the token goes to a 0600 file and is never printed)
+- `media-worker run` — run a remote media worker: lease speech jobs from a service, compute them on
+  this machine and hand in the result
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import logging
 import math
 import os
 import re
@@ -2150,8 +2153,47 @@ def _remove_speaker_main(argv: list[str]) -> int:
     return 0
 
 
+def _media_worker_run(argv: list[str]) -> int:
+    """`exomem media-worker run`: a remote media worker that leases speech jobs from a service."""
+    parser = argparse.ArgumentParser(
+        prog="exomem media-worker run",
+        description=(
+            "Lease speech jobs from an Exomem service, compute them on this machine and hand in the result. "
+            "The worker keeps no original: it deletes each one when its lease ends."
+        ),
+    )
+    parser.add_argument("--service", required=True, help="the service's base URL, for example https://memory.example")
+    parser.add_argument("--credential-file", required=True, help="the file that holds the worker credential")
+    parser.add_argument("--slots", type=int, default=1, help="jobs to run at once (default 1)")
+    parser.add_argument("--work-dir", help="private directory for downloaded originals (default: a new temp directory)")
+    parser.add_argument("--diarize", action="store_true", help="also return speaker turns and voiceprints, if this machine can")
+    args = parser.parse_args(argv)
+    if args.slots < 1:
+        parser.error("--slots must be at least 1")
+
+    from . import media_worker_client
+
+    # The CLI log file is set up already; a worker under a service manager also needs stderr, which the journal reads.
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(console)
+    try:
+        return media_worker_client.run_command(
+            service=args.service,
+            credential_file=args.credential_file,
+            slots=args.slots,
+            work_dir=args.work_dir,
+            diarize=args.diarize,
+            arguments=argv,
+        )
+    finally:
+        logging.getLogger().removeHandler(console)
+
+
 def _media_worker_main(argv: list[str]) -> int:
     """`exomem media-worker credential issue|list|revoke`: the credentials of remote media workers."""
+    if argv[:1] == ["run"]:
+        return _media_worker_run(argv[1:])
     from . import media_jobs
     from . import media_worker_credentials as credentials
 

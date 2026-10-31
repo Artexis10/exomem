@@ -524,19 +524,31 @@ class LeaseSnapshot:
 
 
 @dataclass(frozen=True)
+class LeaseRefusal:
+    """Why a grant declines a job. A `durable` cause holds until the job's input changes.
+
+    Only a durable refusal marks the job `remote_eligible = 0`, which hands it to the local worker in every
+    configuration. Any other refusal skips the job for this read and marks nothing, because its cause can lift.
+    """
+
+    reason: str
+    durable: bool = False
+
+
+@dataclass(frozen=True)
 class LeaseRequest:
     """A remote worker's claim: who asks, what bounds the lease and which job the caller grants.
 
-    `snapshot` reads the vault for one candidate job. It returns None for a job this worker may not have,
-    because the release gate withholds its original or its input cannot be read; the claim then goes on to the
-    next job. It runs inside the claim transaction, so it must stay a few small reads.
+    `snapshot` reads the vault for one candidate job. It returns a `LeaseRefusal` for a job this worker may not
+    have; the claim then goes on to the next job. It runs inside the claim transaction, so it must stay a few
+    small reads.
     """
 
     worker: str
     max_leases: int
     lease_seconds: float
     deadline_seconds: float
-    snapshot: Callable[[MediaJob], LeaseSnapshot | None]
+    snapshot: Callable[[MediaJob], LeaseSnapshot | LeaseRefusal]
 
 
 @dataclass(frozen=True)
@@ -668,7 +680,8 @@ def _extraction_stage(media_types: Collection[str]) -> tuple[str, tuple[str, ...
 # only the vault owner holds. A claim for a worker, the local skip of routed kinds and the eligibility pass share it.
 _REMOTE_LEASABLE = "do_ocr = 1 AND do_offload = 0"
 # `jobs.remote_eligible` holds the grant's verdict on a pending job: NULL until judged, 1 when a remote claim may
-# take it, 0 when none can. A change to the job's input clears it, so the next judgement reads the new input.
+# take it, 0 when none can for a durable cause (see `LeaseRefusal`). A change to the job's input, or a person's
+# retry, clears it, so the next judgement reads the new input.
 
 
 def _routed_exclusion(media_types: Collection[str]) -> tuple[str, tuple[str, ...]]:
@@ -1505,7 +1518,7 @@ class MediaJobStore:
             if row is None:
                 return None, None
             snapshot = lease.snapshot(self._row_to_job(row))
-            if snapshot is not None:
+            if not isinstance(snapshot, LeaseRefusal):
                 if (
                     not _is_sha256(snapshot.sidecar_before_hash)
                     or (snapshot.sidecar_before_evidence_version is not None
@@ -1515,8 +1528,9 @@ class MediaJobStore:
                 ):
                     raise ValueError("a lease snapshot must hold SHA-256 digests and a validated binary identity")
                 return row, snapshot
-            # No remote claim can take this job now, so the local worker must be free to: record it.
-            conn.execute("UPDATE jobs SET remote_eligible = 0 WHERE id = ?", (row["id"],))
+            if snapshot.durable:
+                # No remote claim can take this job until its input changes, so the local worker must be free to.
+                conn.execute("UPDATE jobs SET remote_eligible = 0 WHERE id = ?", (row["id"],))
             refused.append(int(row["id"]))
         return None, None
 
@@ -1532,13 +1546,15 @@ class MediaJobStore:
         return None if job is None or job.id is None else self.get_lease(job.id)
 
     def judge_remote_eligibility(
-        self, grantable: Callable[[MediaJob], bool], media_types: Collection[str], *, limit: int = _LEASE_SCAN_LIMIT
+        self, grant: Callable[[MediaJob], object], media_types: Collection[str], *, limit: int = _LEASE_SCAN_LIMIT
     ) -> int:
         """Record whether a remote claim can take each pending job of `media_types` that no claim has judged.
 
         A remote claim records its refusals as it meets them, but only a worker's claim meets a job. This
         judges the rest in claim order, so a job that no remote worker can take has the local worker as its
-        executor in every configuration, with no worker present too. `grantable` is the claim's grant read.
+        executor in every configuration, with no worker present too. `grant` is the claim's grant read: it
+        returns a `LeaseRefusal` for a job it declines and anything else for a job it grants. A durable refusal
+        records 0, a grant records 1, and a refusal that can lift, or a read that raises, records nothing.
         It runs outside any write, and a job that changed meanwhile keeps no verdict from the old input.
         Returns the number of jobs judged.
         """
@@ -1553,7 +1569,13 @@ class MediaJobStore:
             ).fetchall()
         finally:
             conn.close()
-        verdicts = [(int(grantable(self._row_to_job(row))), row["id"], row["updated_at"]) for row in rows]
+        verdicts = []
+        for row in rows:
+            granted = grant(self._row_to_job(row))
+            if not isinstance(granted, LeaseRefusal):
+                verdicts.append((1, row["id"], row["updated_at"]))
+            elif granted.durable:
+                verdicts.append((0, row["id"], row["updated_at"]))
         if not verdicts:
             return 0
         conn = self._connect()
@@ -2942,7 +2964,7 @@ class MediaJobStore:
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
                         "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
                         "returns = 0, retry_at = NULL, blocked_reason = NULL, "
-                        "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
+                        "blocked_context = NULL, remote_eligible = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                         "WHERE media_job_results.job_id = jobs.id)",
                         (now, job_id, state, error),

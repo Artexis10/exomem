@@ -142,6 +142,18 @@ def deny_gpu_to_child(env: Mapping[str, str], failure: str) -> dict[str, str]:
     return child
 
 
+def apply_verdict(env: dict[str, str], verdict: Preflight, *, until: str) -> dict[str, str]:
+    """`env` as the media child gets it: with its devices after a passed preflight, without them and with the reason after a failed one.
+
+    `until` names what lifts the denial, in the reason the child reports.
+    """
+    if verdict.ok:
+        return env
+    return deny_gpu_to_child(
+        env, f"GPU preflight {verdict.reason}; media processing runs without the GPU until {until}"
+    )
+
+
 def preflight_failure(env: Mapping[str, str] | None = None) -> str | None:
     """The reason the supervisor denied this media child the GPU, if it did."""
     return (os.environ if env is None else env).get(PREFLIGHT_FAILURE_ENV) or None

@@ -287,6 +287,28 @@ def cuda_runtime_child_env(
     return env
 
 
+#: Set in the environment of a process that `relaunch_with_cuda_runtime` started, so that it relaunches once.
+CUDA_RUNTIME_READY_ENV = "EXOMEM_CUDA_RUNTIME_READY"
+
+
+def relaunch_with_cuda_runtime(arguments: list[str]) -> None:
+    """Run `python -m exomem <arguments>` in place of this process, with the CUDA 12 wheel directories loadable.
+
+    The dynamic loader reads `LD_LIBRARY_PATH` when a process starts, so a path set inside the process comes
+    too late and `libcublas.so.12` stays unfound. The media supervisor starts its child with
+    `cuda_runtime_child_env` for that reason; a command that no supervisor started does the same to itself,
+    after the GPU preflight that the supervisor runs, and `CUDA_RUNTIME_READY_ENV` marks the second run.
+    Returns at once in a process that was relaunched already.
+    """
+    if os.environ.get(CUDA_RUNTIME_READY_ENV):
+        return
+    env = cuda_runtime_child_env(os.environ)
+    verdict = cuda_containment.check_gpu(env, driver_present=resource_status.find_nvidia_smi() is not None)
+    env = cuda_containment.apply_verdict(env, verdict, until="the worker restarts")
+    env[CUDA_RUNTIME_READY_ENV] = "1"
+    os.execve(sys.executable, [sys.executable, "-m", "exomem", *arguments], env)  # noqa: S606 - fixed interpreter and module
+
+
 def _nvidia_roots() -> list[Path]:
     """Find namespace-package roots without importing native CUDA libraries."""
     import importlib.util
