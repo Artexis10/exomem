@@ -1947,6 +1947,8 @@ class _LocalLockState:
     lent: bool = False
     #: The thread that holds the boundary on loan, while it does.
     borrower: int | None = None
+    #: Seconds the owner's current hold has spent on loan, for its release record.
+    lent_seconds: float = 0.0
     #: Over `metadata_guard`: wakes borrowers on an offer or a release, and the owner when a loan ends.
     turn: threading.Condition = field(init=False)
 
@@ -2286,12 +2288,14 @@ class VaultMutationCoordinator:
         with state.metadata_guard:
             return min(state.borrower_deadlines, default=None)
 
-    def lend(self) -> int:
+    def lend(self, *, until: float) -> int:
         """Let each borrower that waits now hold the boundary once; return how many did.
 
         For the owner, between two units of a long hold. The owner keeps the
         local guard and the OS lock, so only a borrower enters (`hold`'s
         `may_borrow`), and the owner has the boundary back when this returns.
+        No offer is made or kept open after `until`, the monotonic time the
+        owner's room ends; a borrower that took the boundary still returns it.
         """
         state = _state_for(self.lock_path)
         owner = threading.get_ident()
@@ -2299,26 +2303,30 @@ class VaultMutationCoordinator:
             raise RuntimeError("only the owner of the boundary can lend it")
         depth = state.depth
         lent = 0
+        began = time.monotonic()
         with state.turn:
             for _ in range(len(state.borrower_deadlines)):
-                if not state.borrower_deadlines:
+                if not state.borrower_deadlines or time.monotonic() >= until:
                     break
                 state.owner_thread, state.depth, state.lent = None, 0, True
                 state.turn.notify_all()
                 try:
-                    # Back when the loan ends, or when every borrower stopped waiting untaken.
+                    # Back when the loan ends, when every borrower stopped waiting untaken,
+                    # or when the room ends with the offer untaken.
                     state.turn.wait_for(
                         lambda: state.borrower is None
-                        and (not state.lent or not state.borrower_deadlines)
+                        and (not state.lent or not state.borrower_deadlines),
+                        timeout=max(0.0, until - time.monotonic()),
                     )
                 finally:
                     taken, state.lent = not state.lent, False
-                    while state.borrower is not None:  # only after an interrupted wait
+                    while state.borrower is not None:  # after the room ended or an interrupted wait
                         state.turn.wait()
                     state.owner_thread, state.depth = owner, depth
                 if not taken:
                     break
                 lent += 1
+            state.lent_seconds += time.monotonic() - began
         return lent
 
     @contextmanager
@@ -2344,9 +2352,9 @@ class VaultMutationCoordinator:
         a drain, a publication or a command holds the boundary, because every
         writer queued on it waits out whatever slows its holder.
 
-        `may_borrow` declares a hold that writes no canonical content. Of a
-        machine kind, it may also take the boundary that its owner lends
-        between two units of a long hold (`lend`).
+        `may_borrow` lets this hold also take the boundary that its owner lends
+        between two units of a long hold (`lend`). Only a brief hold that
+        writes no canonical content opts in; the lender waits for its return.
         """
         with foreground_priority.foreground(), self._hold(
             timeout_seconds=timeout_seconds,
@@ -2412,10 +2420,11 @@ class VaultMutationCoordinator:
             finally:
                 state.depth -= 1
             return
-        if may_borrow and holder_kind in _MACHINE_HOLDER_KINDS:
-            # A machine holder holds briefly and never waits on a lock that a lending command holds.
+        if may_borrow:
             borrowed = _enter_or_borrow(state, deadline)
             if borrowed:
+                lent_at = time.monotonic()
+                _bump_boundary_metric("exomem_boundary_borrowed_total")
                 try:
                     yield
                 finally:
@@ -2423,6 +2432,10 @@ class VaultMutationCoordinator:
                         state.depth = 0
                         state.owner_thread = state.borrower = None
                         state.turn.notify_all()
+                    _observe_boundary_ms(
+                        "exomem_boundary_borrowed_hold_ms",
+                        round((time.monotonic() - lent_at) * 1000, 2),
+                    )
                 return
             entered = borrowed is not None
         else:
@@ -2455,6 +2468,7 @@ class VaultMutationCoordinator:
             state.owner_thread = thread_id
             state.depth = 1
             state.handle = handle
+            state.lent_seconds = 0.0
             with state.metadata_guard:
                 state.request_id = _safe_label(request_id, fallback="untracked")
                 state.operation = _safe_label(operation, fallback="unknown")
@@ -2480,6 +2494,8 @@ class VaultMutationCoordinator:
                 yield
             finally:
                 hold_ms = round((time.monotonic() - acquired_at) * 1000, 2)
+                # The part of `hold_ms` that borrowers held (`lend`), so a long hold reads honestly.
+                lent_ms = round(state.lent_seconds * 1000, 2)
                 _LAST_MUTATION_TIMING.set(
                     {
                         "wait_ms": wait_ms,
@@ -2529,11 +2545,12 @@ class VaultMutationCoordinator:
                 if not already_warned and overdue:
                     logger.warning(
                         "vault mutation boundary held too long request_id=%s operation=%s "
-                        "holder_kind=%s hold_ms=%.2f",
+                        "holder_kind=%s hold_ms=%.2f lent_ms=%.2f",
                         _safe_label(request_id, fallback="untracked"),
                         _safe_label(operation, fallback="unknown"),
                         _safe_label(holder_kind, fallback="unknown"),
                         hold_ms,
+                        lent_ms,
                     )
                     # WARNING, matching the human line immediately above it:
                     # the structured twin of the loudest thing this boundary
@@ -2545,6 +2562,7 @@ class VaultMutationCoordinator:
                         operation=operation,
                         holder_kind=holder_kind,
                         hold_ms=hold_ms,
+                        lent_ms=lent_ms,
                     )
                 if overdue:
                     _bump_boundary_metric("exomem_boundary_overdue_total")
@@ -2570,6 +2588,7 @@ class VaultMutationCoordinator:
                     # paired acquire row may legitimately have been demoted.
                     wait_ms=wait_ms,
                     hold_ms=hold_ms,
+                    lent_ms=lent_ms,
                 )
                 if released_level < logging.INFO:
                     _note_quiet_hold(

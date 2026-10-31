@@ -1105,9 +1105,10 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
         return len(adoption_run._ApplyPacer(vault, budget).next_chunk(pending, first=False))
 
     def measure_handoff(seconds: float) -> None:
-        def handoff(_session) -> None:
+        def handoff(_session) -> int:
             clock["now"] += seconds
             batch.handoff_outcome = "ready"
+            return 1
 
         monkeypatch.setattr(writer_lease, "_handoff_derived_batches", handoff)
         batch.handoff_outcome = None
@@ -1120,8 +1121,8 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
         # A handoff near zero still reserves the floor (2 s), not nothing.
         measure_handoff(0.0)
         assert items_admitted(12) == 5
-        # A 3 s handoff reserves 3 s.
-        measure_handoff(3.0)
+        # A 1.5 s handoff per batch reserves 3 s: the session's batch and the chunk's.
+        measure_handoff(1.5)
         assert items_admitted(12) == 4
         # A 100 s handoff reserves no more than the ceiling (20 s).
         measure_handoff(100.0)

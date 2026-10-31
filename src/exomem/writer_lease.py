@@ -530,12 +530,11 @@ def _pending_handoff_batches(session: _FastAcknowledgementSession) -> int:
 
 
 def _timed_handoff(session: _FastAcknowledgementSession) -> None:
-    """Hand off the session's pending batches and keep the seconds each one took."""
-    pending = _pending_handoff_batches(session)
+    """Hand off the session's pending batches and keep the seconds each batch it proved took."""
     began = _fast_ack_monotonic()
-    _handoff_derived_batches(session)
-    if pending:
-        per_batch = max(0.0, _fast_ack_monotonic() - began) / pending
+    proved = _handoff_derived_batches(session)
+    if proved:
+        per_batch = max(0.0, _fast_ack_monotonic() - began) / proved
         with _handoff_samples_lock:
             _handoff_samples.setdefault(
                 _fast_ack_root_key(session.vault_root), deque(maxlen=_HANDOFF_SAMPLES_KEPT)
@@ -545,8 +544,9 @@ def _timed_handoff(session: _FastAcknowledgementSession) -> None:
 def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> float | None:
     """Seconds the custody handoff will take once `more_batches` more batches have committed.
 
-    The dearest recent per-batch time, times the batches the active session has not handed off yet
-    plus `more_batches`. None when no handoff has been measured for this vault.
+    The dearest recent time per proved batch, times every batch of the active session plus
+    `more_batches`, or nothing when no batch is owed. None when no handoff has been measured for
+    this vault.
     """
     with _handoff_samples_lock:
         samples = _handoff_samples.get(_fast_ack_root_key(vault_root))
@@ -554,11 +554,15 @@ def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> floa
     if dearest is None:
         return None
     session = _ACTIVE_FAST_ACK_SESSION.get()
-    pending = (
-        _pending_handoff_batches(session)
-        if session is not None and active_derived_batch_custody(vault_root) else 0
-    )
-    return dearest * (pending + more_batches)
+    if session is None or not active_derived_batch_custody(vault_root):
+        batches = pending = 0
+    else:
+        batches, pending = len(session.batches), _pending_handoff_batches(session)
+    if not pending and not more_batches:
+        return 0.0
+    # A handoff re-proves each earlier batch that shares a path with a new one, and a batch's
+    # paths are known only once it commits; an import's batches all share its index pages.
+    return dearest * (batches + more_batches)
 
 
 #: What the running leaf declared about its default duplicate/overlap sweep:
@@ -898,22 +902,24 @@ def _acknowledgement_component_names() -> tuple[str, ...]:
     )
 
 
-def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
+def _handoff_derived_batches(session: _FastAcknowledgementSession) -> int:
     """Cache exact custody before releasing canonical writers, without waits.
 
     A newer hold can move a path whose earlier receipt was already handed off.
     Re-prove only those overlapping receipts after publishing the newer custody.
     A failed handoff stays pending and cannot escape into canonical rollback.
+    Returns how many receipts it proved, for the handoff's per-batch time.
     """
+    proved = 0
     if session.handoff_in_progress:
-        return
+        return proved
     pending = [
         batch
         for batch in session.batches
         if batch.handoff_outcome is None and batch.handoff_error is None
     ]
     if not pending:
-        return
+        return proved
     changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
     affected = [
         batch
@@ -950,6 +956,7 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
                     receipt,
                     current_generation=observed_generation,
                 )
+            proved += 1
             where["outcome"] = proof.outcome
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
@@ -988,6 +995,7 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
                 batch.handoff_error = uncertain
     finally:
         session.handoff_in_progress = False
+    return proved
 
 
 def _acknowledge_derived_batches_timed(
@@ -5049,23 +5057,20 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "unknown",
-        writes_canonical: bool = False,
+        may_borrow: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
         """Serialize hosted reads with mutations without requiring writer authority.
 
-        Only `_mutation_boundary` sets `writes_canonical`; every other holder may borrow
-        the boundary that a long mutation lends between its units (`lend_boundary`).
+        `may_borrow` is for a brief derived hold that writes no canonical content: it may
+        also take the boundary that a long mutation lends between its units (`lend_boundary`).
         """
         mutation = self._mutation_coordinator_for(vault_root)
-        if writes_canonical and mutation.current_thread_borrows_boundary():
-            # A loan falls between two units of another mutation, whose reads must stay valid.
-            raise RuntimeError("a canonical write cannot run on a borrowed mutation boundary")
         outermost = not mutation.current_thread_holds_boundary()
         with mutation.hold(
             request_id=request_id,
             operation=operation,
             holder_kind=holder_kind,
-            may_borrow=not writes_canonical,
+            may_borrow=may_borrow,
         ):
             try:
                 yield mutation
@@ -5076,23 +5081,53 @@ class LeaseManager:
                     # receipt custody visible before any waiting writer enters.
                     _timed_handoff(session)
 
-    def lend_boundary(self, vault_root: os.PathLike[str] | str, *, until: float) -> int:
+    def lend_boundary(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        next_unit_seconds: float,
+        next_unit_batches: int,
+        room_seconds: float,
+    ) -> int:
         """Let waiting borrowers hold the boundary between two committed units of a long mutation.
 
-        The holder lends only when a borrower would give up before `until`, the monotonic
-        time its next unit would end: each loan publishes what a release would, the commit
-        generation and the custody of every fast-acknowledged batch so far, and that custody
-        grows with the batches. Returns how many borrowers held the boundary.
+        A loan first publishes what a release would: the custody of the fast-acknowledged
+        batches so far, then the commit generation. The holder lends only when that serves a
+        borrower the next lend could not: the earliest borrower gives up before the next unit
+        and the handoff after it end, yet still waits once this handoff ends, and the handoff
+        fits in `room_seconds`, the time the next unit may take. No offer outlives that room.
+        Returns how many borrowers held the boundary.
         """
         mutation = self._mutation_coordinator_for(vault_root)
         due = mutation.next_borrower_deadline()
-        if due is None or due > until or not mutation.current_thread_holds_boundary():
+        if due is None or not mutation.current_thread_holds_boundary():
+            return 0
+        root = Path(vault_root)
+        session = _ACTIVE_FAST_ACK_SESSION.get()
+        custody = session is not None and active_derived_batch_custody(root)
+        handoff, later = 0.0, 0.0
+        if custody:
+            if any(batch.handoff_error is not None for batch in session.batches):
+                # A failed handoff stays owed to the terminal: a borrower would read
+                # custody that was never published.
+                return 0
+            handoff = owed_custody_handoff_seconds(root, more_batches=0)
+            later = owed_custody_handoff_seconds(root, more_batches=next_unit_batches)
+            if handoff is None or later is None:
+                # Unmeasured, the handoff could take any part of the room.
+                return 0
+        now = time.monotonic()
+        if not now + handoff < due <= now + next_unit_seconds + later or handoff >= room_seconds:
+            return 0
+        if custody:
+            _timed_handoff(session)
+            if any(batch.handoff_error is not None for batch in session.batches):
+                return 0
+        if mutation.next_borrower_deadline() is None:
+            # Every borrower gave up during the handoff, so no reader needs a new generation.
             return 0
         _bump_commit_generation(self.config.state_dir, vault_root)
-        session = _ACTIVE_FAST_ACK_SESSION.get()
-        if session is not None and active_derived_batch_custody(Path(vault_root)):
-            _timed_handoff(session)
-        return mutation.lend()
+        return mutation.lend(until=now + room_seconds)
 
     @contextmanager
     def reserved_identity_guard(
@@ -5233,6 +5268,9 @@ class LeaseManager:
         advance_generation: bool,
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, which advances the commit generation, and `projection_guard`, which does not."""
+        if self._mutation_coordinator_for(vault_root).current_thread_borrows_boundary():
+            # A loan falls between two units of another mutation, whose reads must stay valid.
+            raise RuntimeError("a canonical write cannot run on a borrowed mutation boundary")
         direct_boundary: tuple[str, Path] | None = None
         direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
         outer_direct_boundary = False
@@ -5253,7 +5291,6 @@ class LeaseManager:
                 request_id=request_id,
                 operation=operation,
                 holder_kind=holder_kind,
-                writes_canonical=True,
             ) as mutation:
                 try:
                     with self.writer_authority_guard(

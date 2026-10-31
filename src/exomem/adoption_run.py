@@ -53,6 +53,7 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .kbdir import kb_dirname
 from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
+from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
 RUNS_DIR = "_Adoption/runs"
 SCHEMA_VERSION = 1
@@ -93,7 +94,7 @@ TERMINAL_WORK_RESERVE_SECONDS = 20.0
 # this vault, between two bounds. The floor is the acknowledgement's own wait bound, which a short
 # call's tail can spend whatever the handoff measured; the ceiling is the whole reserve above,
 # which also stands until a handoff has been measured.
-CUSTODY_RESERVE_FLOOR_SECONDS = 2.0
+CUSTODY_RESERVE_FLOOR_SECONDS = _FAST_ACK_DEADLINE_SECONDS
 TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
 REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
@@ -1690,9 +1691,7 @@ class _ApplyPacer:
         """Seconds the end of the call needs to hand off custody of the batches so far and this chunk's."""
         from .writer_lease import owed_custody_handoff_seconds
 
-        measured = owed_custody_handoff_seconds(
-            self._root, more_batches=1 + sum(_owes_note(planned) for planned in chunk)
-        )
+        measured = owed_custody_handoff_seconds(self._root, more_batches=_custody_batches(chunk))
         if measured is None:
             return TERMINAL_WORK_RESERVE_SECONDS
         return min(max(measured, CUSTODY_RESERVE_FLOOR_SECONDS), TERMINAL_WORK_RESERVE_SECONDS)
@@ -1746,9 +1745,10 @@ class _ApplyPacer:
             cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         return chunk if first or cost <= self._room(chunk) else []
 
-    def full_chunk_seconds(self, pending: list[dict]) -> float:
-        """The predicted cost of the next chunk before any trim to the time left."""
-        return self._cost(_take_chunk(pending, APPLY_CHUNK_ITEMS))
+    def next_unit(self, pending: list[dict]) -> tuple[float, int, float]:
+        """The full next chunk, before any trim: its predicted seconds, its batches and its room."""
+        chunk = _take_chunk(pending, APPLY_CHUNK_ITEMS)
+        return self._cost(chunk), _custody_batches(chunk), self._room(chunk)
 
     def note_fits(self, chunk: list[dict], seconds: float) -> bool:
         """Keep the same terminal headroom between the chunk's individual notes."""
@@ -1768,6 +1768,11 @@ class _ApplyPacer:
                 self._extraction_seconds, sum(extractions) / len(extractions)
             )
             self._deferred_artifacts += len(extractions)
+
+
+def _custody_batches(chunk: list[dict]) -> int:
+    """The custody batches a chunk may commit: one for its Sources, at most one per draft note."""
+    return 1 + sum(_owes_note(planned) for planned in chunk)
 
 
 def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
@@ -2460,17 +2465,13 @@ def apply(
         pacer = _ApplyPacer(root, budget)
         stopped = False
         chunks = 0
-        lend_seconds = 0.0
         while pending:
             if chunks:
-                # Each chunk is committed whole. A waiting machine holder, such as a derived proof, that
-                # would give up before the next chunk and the next lend end holds the boundary now. A lend
-                # re-proves every batch the call has committed, so the next one is priced at twice the dearest.
-                lent_at = time.monotonic()
+                # Each chunk is committed whole, so a waiting derived proof may hold the boundary here.
+                seconds, batches, room = pacer.next_unit(pending)
                 active_manager().lend_boundary(
-                    root, until=lent_at + 2 * lend_seconds + pacer.full_chunk_seconds(pending)
+                    root, next_unit_seconds=seconds, next_unit_batches=batches, room_seconds=room
                 )
-                lend_seconds = max(lend_seconds, time.monotonic() - lent_at)
             chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
                 stopped = True

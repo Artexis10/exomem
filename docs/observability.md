@@ -567,6 +567,12 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
   holds that exceeded the long-holder threshold. `exomem_mutation_busy_total`
   counts a busy refusal once, when it reaches a caller. A background holder
   (a graph or derived drain) that is refused and retries does not count.
+- `exomem_boundary_borrowed_total`, `exomem_boundary_borrowed_hold_ms` — holds
+  that ran on a loan: a long mutation, such as an import, lends its boundary
+  between two committed units to a waiting derived proof. A lender's
+  `exomem_boundary_hold_ms` includes the time on loan; its
+  `mutation_lock_released` and `mutation_lock_long_hold` events give that part
+  as `lent_ms`.
 - `exomem_lease_ops_total{op,outcome}`, `exomem_coordinator_errors_total{code}` —
   writer-lease coordination. An `acquire` with outcome `reused` is a collection-store
   write nested in an operation that kept the operation's grant instead of
