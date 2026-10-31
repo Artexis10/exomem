@@ -1,8 +1,8 @@
 ## 1. Retry identity for REST and in-process writes
 
 - [ ] 1.1 REST: when no `Idempotency-Key` header arrives, pass an implicit retry scope from the resolved principal's canonical audience to `invoke_command`; pass none for an unresolved or most-restrictive principal.
-- [ ] 1.2 CLI and terminal UI: when no explicit key is set, pass an implicit retry scope unique to the invocation.
-- [ ] 1.3 Tests: an unkeyed REST write and an unkeyed CLI write each wait out a held boundary and commit once; a REST resend after a dropped reply replays without a second commit; two REST principals do not share a result; a second identical CLI invocation commits again; a credential-issuing command keeps no implicit identity.
+- [ ] 1.2 CLI and terminal UI (after PR #2250, with task 3): when no explicit key is set, wait out ordinary contention inside the invocation through `_absorb_contention` without a replay receipt; commit observation (`commit_state`) keeps an attempt that committed from running again. A per-invocation implicit key was rejected in review: it passed the vocabulary-application identity gate with an identity no retry can reproduce.
+- [ ] 1.3 Tests: an unkeyed REST write waits out a held boundary and commits once; a REST resend after a dropped reply replays without a second commit; two REST principals do not share a result; a credential-issuing command keeps no implicit identity. With 1.2: an unkeyed CLI write waits out a held boundary, leaves no receipt, and a second identical invocation commits again; an unkeyed CLI vocabulary application is still refused.
 
 ## 2. Cross-process waiter signal
 

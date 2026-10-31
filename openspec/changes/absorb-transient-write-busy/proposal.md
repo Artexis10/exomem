@@ -9,7 +9,7 @@ A caller can still get `MUTATION_BUSY` because another writer or background job 
 ## What Changes
 
 - A REST mutation without an `Idempotency-Key` header resolves an implicit retry identity from its authenticated principal and canonical arguments, as an MCP mutation does. It then waits out ordinary contention, and a resend after a lost reply replays or waits on the first attempt.
-- An in-process CLI or terminal UI mutation without an explicit key carries an identity that is unique to that invocation. It waits out ordinary contention inside the invocation. A later identical invocation still runs as a new write.
+- An in-process CLI or terminal UI mutation without an explicit key waits out ordinary contention inside the invocation, with no replay receipt. A later identical invocation still runs as a new write, and a gate that needs a reusable identity still refuses it.
 - A remote mutation with no explicit key and no stable retry scope keeps today's immediate refusal. A client that gave up during a wait and resent the write would otherwise commit it twice.
 - The direct `/upload` commit paths wait out ordinary contention within the request budget, under the same waiter cap and refusal causes as keyed writes. The server re-attempts a tus session commit that met a busy or warming boundary without waiting for the client's next read.
 - A process that waits for the boundary holds a shared advisory lock on a sidecar of the boundary's lock file. A background holder in any process on the host sees that waiter and steps aside at its next unit boundary.
