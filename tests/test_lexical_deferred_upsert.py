@@ -978,51 +978,47 @@ def test_request_arriving_during_current_handoff_proof_is_not_dropped(
 
 
 def test_a_lag_seen_during_a_full_pass_is_caught_up_before_another_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
     """Writes during a whole-corpus pass leave lag, not a reason to scan again.
 
-    A reader sees the catalogue behind while the pass runs and asks for
-    lag-only repair. The pass publishes, but its promotion proof fails because
-    those writes landed after its targets. The next flight must try the bounded
-    catch-up before it pays for a second whole-corpus pass.
+    A write lands after the pass's targets, and a reader asks for lag-only
+    repair while the pass is still promoting. The promotion proof fails. The
+    next flight must catch that one page up, not pay for a second pass.
     """
+    store, changed, removed = live_catalogue
+    changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+    walked = [(str(path), freshness.stat_signature(path)) for path in (changed, removed)]
+    # Only the safety-net walk saw this edit, so the first request needs a pass.
+    for scope in freshness.SCOPES:
+        freshness.reconcile(tmp_path, scope, walked)
+    late = changed.parent / "late.md"
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
 
-    class _LaggingDuringPassStore(_FakeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.catch_ups = 0
+    def rebuild():
+        rebuilds.append(True)
+        published = real_rebuild()
+        if len(rebuilds) == 1:
+            late.write_text("# Late\n\nlatewrite\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[late])
+            lexstore.request_lag_repair(tmp_path)
+        return published
 
-        def catch_up_lagging_delta(self) -> bool:
-            self.catch_ups += 1
-            # The first lag predates the registry's history; later ones replay.
-            return self.catch_ups > 1
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
 
-        def rebuild_atomic(self) -> bool:
-            self.rebuilds += 1
-            if self.rebuilds == 1:
-                lexstore._schedule_repair(tmp_path, lag_only=True)
-            return True
-
-    store = _LaggingDuringPassStore()
-    _install(monkeypatch, store)
-    monkeypatch.setattr(lexstore, "_is_configured_runtime_vault", lambda _root: True)
-    monkeypatch.setattr(
-        lexstore,
-        "_mark_runtime_retrieval_ready_if_current",
-        lambda _root, **_kwargs: store.catch_ups > 1,
-    )
-
-    lexstore._schedule_repair(tmp_path, lag_only=True)
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
     assert _wait_for_flight_end(tmp_path)
-    assert store.rebuilds == 1
-
+    assert rebuilds == [True]
     # The runtime's recovery owner starts the next bounded flight.
     lexstore.retry_pending_repair(tmp_path.resolve())
-    assert _quiesce()
+    assert _wait_for_flight_end(tmp_path)
 
-    assert store.rebuilds == 1, "lag left by a published pass cost a second full pass"
-    assert store.catch_ups == 2
+    assert rebuilds == [True], "lag left by a published pass cost a second full pass"
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "latewrite", k=3, scope="kb")
 
 
 def test_full_request_during_declined_rebuild_survives_a_bounded_idle_boundary(
