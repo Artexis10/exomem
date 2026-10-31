@@ -29,9 +29,8 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
@@ -107,6 +106,8 @@ _APPLIED_STATUSES = ("applied", "already-applied")
 # An own-note item whose Source is on disk and whose draft note is still owed. The item is
 # not complete: `apply` resumes it at the note, and the phase stays `applying` until it is.
 _SOURCE_ONLY = "source-applied"
+# The run-object key for the dearest time per made note of the run's last call that made one.
+_NOTE_PRICE = "note_price_ms"
 # The values of a rule's `adopt_as` are fixed by the rule schema, not by the vault.
 _ADOPT_AS = ("source", "note")  # nosemgrep: ep-word-set -- the closed values of the rule schema's `adopt_as`.
 # Per-item failures that mean "the original is not what the plan read".
@@ -776,7 +777,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope"})
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _present(root: Path, run: dict, **extra) -> dict:
@@ -1647,7 +1648,8 @@ class _ApplyPacer:
     this call has measured, not a past call's, and each rate is the dearest seen so
     far: chunk cost swings several-fold with media artifacts and a contended index,
     so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
-    of this call's chunks and nothing after it.
+    of this call's chunks and nothing after it. Notes are the exception: `_create_notes`
+    sizes a call's first batch of notes on the price that the run's last call recorded.
     """
 
     def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
@@ -2009,14 +2011,16 @@ def _create_notes(
 
     The identity check runs first: an item whose note exists settles as found, and one
     whose note cannot be placed fails. The other items commit in batches through the
-    governed two-phase creation (`adopt.create_draft_notes`). A call makes one note at a
-    time until it has made and timed one; after that a batch holds as many notes as fit in
-    the time left at the dearest cost per made note this call has seen. A refused note does
-    not lower that cost, because a quick refusal would make the next batch look free. A batch
-    that refuses makes its notes alone only while one more note fits at the price that sized
-    it. The items a batch leaves or does not reach keep their `source-applied` outcome and the
-    continuation resumes at them. A call always tries at least one note, so a budget below
-    one note's cost still moves.
+    governed two-phase creation (`adopt.create_draft_notes`). A call's first batch holds as
+    many notes as fit in the time left at the price that the run's last call to make a note
+    recorded; with no such call, it holds one note, to time it. While the call has made no
+    note, it makes one note at a time; after that a batch holds as many notes as fit at the
+    dearest cost per made note this call has seen, which the call records for the next one.
+    A refused note does not lower that cost, because a quick refusal would make the next
+    batch look free. A batch that refuses makes its notes alone only while one more note fits
+    at the price that sized it. The items a batch leaves or does not reach keep their
+    `source-applied` outcome and the continuation resumes at them. A call always tries at
+    least one note, so a budget below one note's cost still moves.
     """
     outcomes = run["outcomes"]
     owed = [
@@ -2029,25 +2033,23 @@ def _create_notes(
         if _note_due(root, planned, outcomes[planned["original_path"]], label=label, notes=notes, stats=stats)
     ]
     while due:
-        if not stats["notes_started"]:
-            size = 1
+        first_try = not stats["notes_started"]
+        if first_try:
+            price_ms = run.get(_NOTE_PRICE) or 0
+            size = max(1, _notes_that_fit(pacer, chunk, price_ms, len(due))) if price_ms else 1
         elif not stats["notes_created"]:
             # No note made yet, so nothing prices a batch: one note, paced on the dearest try.
-            size = 1 if pacer.note_fits(chunk, stats["note_try_ms_max"] / 1000) else 0
+            price_ms = stats["note_try_ms_max"]
+            size = 1 if pacer.note_fits(chunk, price_ms / 1000) else 0
         else:
-            size = len(due)
-            while size and not pacer.note_fits(chunk, stats["note_ms_max"] * size / 1000):
-                size -= 1
+            price_ms = stats["note_ms_max"]
+            size = _notes_that_fit(pacer, chunk, price_ms, len(due))
         if not size:
             stats["notes_deferred"] += 1
             break
         batch, due = due[:size], due[size:]
         # A refused batch makes its notes alone; each must still fit at the price that sized it.
-        # A call's first note always runs, so a budget below one note's cost still moves.
-        price_ms = stats["note_ms_max"] if stats["notes_created"] else stats["note_try_ms_max"]
-        fits_one_note = (
-            partial(pacer.note_fits, chunk, price_ms / 1000) if stats["notes_started"] else None
-        )
+        fits_one_note = _fallback_pace(pacer, chunk, price_ms, first_note_free=first_try)
         started = time.monotonic()
         results = adopt_module.create_draft_notes(
             root,
@@ -2069,6 +2071,7 @@ def _create_notes(
         if made:
             # The dearest cost per made note: a batch's time, its refusals included, over the notes it made.
             stats["note_ms_max"] = max(stats["note_ms_max"], int(elapsed_ms / made))
+            run[_NOTE_PRICE] = stats["note_ms_max"]
         for planned, result in zip(batch, results, strict=True):
             if result.reached:
                 _settle_draft_note(
@@ -2083,6 +2086,32 @@ def _create_notes(
         # The outcomes are committed with the chunk's Sources and again here, so a
         # crash costs the identity check at most one chunk of notes.
         store.save(run)
+
+
+def _notes_that_fit(pacer: _ApplyPacer, chunk: list[dict], price_ms: int, most: int) -> int:
+    """How many notes, up to `most`, fit in the time the call has left at `price_ms` each."""
+    size = most
+    while size and not pacer.note_fits(chunk, price_ms * size / 1000):
+        size -= 1
+    return size
+
+
+def _fallback_pace(
+    pacer: _ApplyPacer, chunk: list[dict], price_ms: int, *, first_note_free: bool
+) -> Callable[[], bool]:
+    """Whether the per-note fallback may make one more note at `price_ms`.
+
+    On a call's first batch the first note always runs, so a budget below one note's cost
+    still moves.
+    """
+    asked = 0
+
+    def fits_one_note() -> bool:
+        nonlocal asked
+        asked += 1
+        return (first_note_free and asked == 1) or pacer.note_fits(chunk, price_ms / 1000)
+
+    return fits_one_note
 
 
 def _found_note(
