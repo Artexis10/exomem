@@ -278,8 +278,9 @@ def test_a_page_saved_during_catch_up_converges_without_a_whole_corpus_pass(
 
     The rows roll back and the catalogue stays unproven, as before. Nothing
     about the store is wrong, though, and the save's own event asks for the
-    page again, so a catch-up that meets a second save keeps its claim for a
-    later attempt instead of rebuilding the corpus while the editor is busy.
+    page again. A catch-up that meets a save rolls back only that step and
+    replays the page within its own steps, instead of rebuilding the corpus
+    or leaving the catalogue unadmitted until a later flight.
     """
     store, changed, _removed = live_catalogue
     saves = ["# Edited\n\nsecondsave\n", "# Edited again\n\nthirdsave\n"]
@@ -307,17 +308,9 @@ def test_a_page_saved_during_catch_up_converges_without_a_whole_corpus_pass(
     # lag-only catch-up that batch's failure scheduled.
     assert store.apply_watcher_batch([changed], []) is False
     assert _wait_for_flight_end(tmp_path)
+
     assert saves == []
     assert rebuilds == [], "a page saved during catch-up rebuilt the entire catalogue"
-    assert lexstore.runtime_retrieval_catalog_proof(
-        tmp_path, require_live_projection=True, schedule_repair=False
-    ) is None, "a catalogue missing the latest save proved current"
-
-    # The editor has stopped; the runtime's recovery retries the kept claim.
-    assert lexstore.retry_pending_repair(tmp_path.resolve()) is True
-    assert _wait_for_flight_end(tmp_path)
-
-    assert rebuilds == []
     assert lexstore.runtime_retrieval_catalog_proof(
         tmp_path, require_live_projection=True, schedule_repair=False
     ) is not None

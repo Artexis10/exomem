@@ -6736,17 +6736,16 @@ class LexicalStore:
         Returns whether the catalogue then stores the registry's checkpoints
         (trivially, when nothing lags). A retired or stale store, a foreign or
         adopted origin, lost history or a reconcile-tainted delta returns False,
-        logs which refusal it was and keeps the full pass. A source that moves
-        under the replay raises `_SourceMoved`, and the worker keeps the
-        lag-only claim.
+        logs which refusal it was and keeps the full pass.
 
         A lag larger than the foreground cap replays in steps of at most the
         cap, each under its own publication barrier, so writers wait no longer
         than for one watcher batch. Only a round's last step can stamp the
         checkpoints, and only when every lagging path is in that step or was
         settled by an earlier one (`_settled_catch_up_paths`, re-read under the
-        last step's barrier). A lag that keeps growing past
-        `_CATCH_UP_SLACK_STEPS` extra steps returns False.
+        last step's barrier). A step whose source moves rolls back and settles
+        nothing; its paths stay in the lag. Steps beyond the first lag's need
+        come from `_CATCH_UP_SLACK_STEPS`; a lag that outgrows them returns False.
         """
         from . import freshness as freshness_module
 
@@ -6755,6 +6754,7 @@ class LexicalStore:
             return False
         cap = CATALOG_FOREGROUND_DELTA_CAP
         budget = -(-len(lagging) // cap) + _CATCH_UP_SLACK_STEPS
+        taken = 0
         steps: list[_CatchUpStep] = []
         while lagging:
             # A round replays what no earlier step settled. When every path is
@@ -6762,10 +6762,9 @@ class LexicalStore:
             pending = sorted(lagging - self._settled_catch_up_paths(steps))
             pending = pending or sorted(lagging)[:cap]
             while pending:
-                if len(steps) >= budget:
-                    return _log_catch_up_decline(
-                        "outpaced", paths=len(lagging), steps=len(steps)
-                    )
+                if taken >= budget:
+                    return _log_catch_up_decline("outpaced", paths=len(lagging), steps=taken)
+                taken += 1
                 chunk, pending = pending[:cap], pending[cap:]
                 # Taken before the step reads any file: an edit after it has an
                 # event after this mark, so the path is not settled by this step.
@@ -6773,10 +6772,16 @@ class LexicalStore:
                     scope: freshness_module.recall_checkpoint(self.vault_root, scope)
                     for scope in freshness_module.SCOPES
                 }
-                if not self.retry_deferred_upsert(
-                    [Path(path) for path in chunk],
-                    earlier_steps=() if pending else tuple(steps),
-                ):
+                try:
+                    applied = self.retry_deferred_upsert(
+                        [Path(path) for path in chunk],
+                        earlier_steps=() if pending else tuple(steps),
+                    )
+                except _SourceMoved:
+                    # The step rolled back, so it settles nothing and its paths
+                    # stay in the lag that the next round re-reads.
+                    continue
+                if not applied:
                     return _log_catch_up_decline("replay_failed", paths=len(chunk))
                 steps.append(_CatchUpStep(marks, frozenset(chunk)))
             lagging = self._lagging_catch_up_paths()
