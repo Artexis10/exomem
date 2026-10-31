@@ -82,10 +82,6 @@ def test_a_released_store_takes_the_lease_only_for_an_edited_view_or_a_request(i
          item_key=ROW, why="first row")
     view = root / "Knowledge Base/Records/Work/_collection.md"  # a summary collection's editable view
     _until(lambda: rows(root, "SELECT count(*) FROM projection_state WHERE state!='current'") == [(0,)])
-    # Edit-back records each published view's file identity under the lease. A view released before
-    # that looks edited to the lease-free sweep, so the release waits for every view to be observed.
-    _until(lambda: rows(root, "SELECT count(*) FROM projection_state "
-                              "WHERE state IN ('current','held') AND stat_identity IS NULL") == [(0,)])
     grants, ticks = watching(monkeypatch, manager)
     release_on_idle(manager)
     granted, head = len(grants), rows(root, "SELECT value FROM store_meta WHERE key='commit_seq'")
