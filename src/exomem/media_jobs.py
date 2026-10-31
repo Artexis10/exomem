@@ -16,8 +16,8 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Collection
-from dataclasses import dataclass
+from collections.abc import Callable, Collection
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -481,6 +481,50 @@ class MediaJobResult:
     receipt_revision: int | None = None
 
 
+@dataclass(frozen=True)
+class LeaseSnapshot:
+    """What the vault owner read when it granted a lease. A remote result is recorded against it (D4)."""
+
+    sidecar_before_hash: str
+    binary_identity: dict[str, Any]
+    sidecar_before_evidence_version: str | None = None
+    # The language pin and mode the extraction decodes with, resolved from the request or the sidecar.
+    language: str | None = None
+    language_mode: str | None = None
+    # For a reprocess, the digest of the extraction the result replaces.
+    replaces: str | None = None
+
+
+@dataclass(frozen=True)
+class LeaseRequest:
+    """A remote worker's claim: who asks, what bounds the lease and which job the caller grants.
+
+    `snapshot` reads the vault for one candidate job. It returns None for a job this worker may not have,
+    because the release gate withholds its original or its input cannot be read; the claim then goes on to the
+    next job. It runs inside the claim transaction, so it must stay a few small reads.
+    """
+
+    worker: str
+    max_leases: int
+    lease_seconds: float
+    deadline_seconds: float
+    snapshot: Callable[[MediaJob], LeaseSnapshot | None]
+
+
+@dataclass(frozen=True)
+class MediaLease:
+    job: MediaJob
+    worker: str
+    claim_revision: int
+    # The job's OCR generation at the grant. `job` is read now, and a newer request may have raised it since.
+    ocr_generation: int
+    granted_at: float
+    expires_at: float
+    deadline_at: float
+    snapshot: LeaseSnapshot
+    result_recorded: bool = False
+
+
 def pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
@@ -571,6 +615,10 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
 # A returned job waits 1 minute, doubling with each return, up to 15 minutes (D3, M4).
 RETRY_FIRST_SECONDS = 60
 RETRY_LIMIT_SECONDS = 15 * 60
+# Sets the retry time of a returning job and counts the return; binds (now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS).
+_RETURN_WAIT = "retry_at = ? + MIN(?, ? * (1 << MIN(returns, 4))), returns = returns + 1"
+# A remote claim passes over at most this many jobs the caller refuses, so its write transaction stays short.
+_LEASE_SCAN_LIMIT = 32
 _CLAIMABLE = "state = 'pending' AND (retry_at IS NULL OR retry_at <= ?)"
 _FRESH = "NOT EXISTS (SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)"
 # The cache flag only orders the claim; the hydration itself reads the original's real state.
@@ -589,7 +637,8 @@ def _extraction_stage(media_types: Collection[str]) -> tuple[str, tuple[str, ...
 
 
 def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, migrated: bool = True,
-                      skip_media_types: Collection[str] = ()) -> sqlite3.Row | None:
+                      skip_media_types: Collection[str] = (), remote: bool = False,
+                      exclude: Collection[int] = ()) -> sqlite3.Row | None:
     """The job to claim next, in the order of D3 (M4).
 
     Offload jobs come first. Then come jobs whose original is on the volume, then jobs
@@ -601,17 +650,23 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
 
     `skip_media_types` leaves out the extraction stage of those media types in every group, so the
     caller can pass over work whose engine cannot run now without holding back the jobs queued behind it.
+    `remote` selects what a remote worker may lease: an extraction stage and no offload, which needs the
+    store credential that only the vault owner holds. `exclude` leaves out jobs by ID.
     """
     skip, skipped = "", ()
     if skip_media_types:
         clause, skipped = _extraction_stage(skip_media_types)
         skip = f" AND NOT {clause}"
+    if remote:
+        skip += " AND do_offload = 0 AND do_ocr = 1"
+    if exclude:
+        skip += f" AND id NOT IN ({','.join('?' * len(exclude))})"
     # A ledger from before this order's columns keeps the earlier order until the next write adds them.
     if not migrated:
-        claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], skipped
+        claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], (*skipped, *exclude)
     else:
-        # Placeholders bind in text order: the retry time in `_CLAIMABLE`, then the skipped media types.
-        claimable, needs_hydration, parameters = _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped)
+        # Placeholders bind in text order: the retry time in `_CLAIMABLE`, the skipped media types, the excluded IDs.
+        claimable, needs_hydration, parameters = _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped, *exclude)
         groups = ["do_offload = 1", f"NOT {_NEEDS_HYDRATION} AND {_FRESH}", f"NOT {_NEEDS_HYDRATION}"]
         if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
             groups += [_FRESH, "1"]
@@ -799,6 +854,31 @@ class MediaJobStore:
                     """
                 )
                 self._migrate_result_schema(conn)
+                # A remote worker's lease on a running job, with what the vault owner read at the grant (D4).
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_leases (
+                        job_id INTEGER PRIMARY KEY,
+                        worker TEXT NOT NULL,
+                        claim_revision INTEGER NOT NULL,
+                        ocr_generation INTEGER NOT NULL,
+                        granted_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        deadline_at REAL NOT NULL,
+                        sidecar_before_hash TEXT NOT NULL,
+                        sidecar_before_evidence_version TEXT,
+                        binary_identity_json TEXT NOT NULL,
+                        pin_language TEXT,
+                        pin_language_mode TEXT,
+                        replaces TEXT,
+                        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+                # A lease never outlives the running state, whichever transition leaves it.
+                conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_end_lease AFTER UPDATE OF state ON jobs "
+                             "WHEN NEW.state != 'running' "
+                             "BEGIN DELETE FROM media_leases WHERE job_id = NEW.id; END")
                 # How far the engine had transcribed a speech job at its last stop; the row goes with the job.
                 conn.execute(
                     """
@@ -1241,22 +1321,35 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def claim_next(self, admit: Any = None, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
+    def claim_next(
+        self, admit: Any = None, *, skip_media_types: Collection[str] = (), lease: LeaseRequest | None = None
+    ) -> MediaJob | None:
         """Claim the oldest pending job.
 
         `admit`, when given, sees that job before the claim and may refuse it, so a
         job the memory brakes do not admit stays pending and unclaimed.
         `skip_media_types` passes over the extraction stage of those media types (see `_next_pending_row`).
+        `lease` claims for a remote worker: the claim then takes the first job whose `lease.snapshot` the
+        caller grants and records the lease in the same transaction, unless the worker holds
+        `lease.max_leases` already. Callers use `claim_lease`.
         """
         max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = _next_pending_row(conn, max_hydrations=max_hydrations, skip_media_types=skip_media_types)
+            now = time.time()
+            snapshot = None
+            if lease is not None and self._leases_held(conn, lease.worker, now) >= lease.max_leases:
+                row = None
+            elif lease is not None:
+                row, snapshot = self._next_leasable(
+                    conn, lease, max_hydrations=max_hydrations, skip_media_types=skip_media_types
+                )
+            else:
+                row = _next_pending_row(conn, max_hydrations=max_hydrations, skip_media_types=skip_media_types)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
-            now = time.time()
             # A job that stays pinned across a slice keeps the flag from its first claim.
             changed = conn.execute(
                 """
@@ -1269,6 +1362,21 @@ class MediaJobStore:
                 """,
                 (int(row["needs_hydration"]), now, row["id"]),
             ).rowcount
+            if changed == 1 and lease is not None:
+                assert snapshot is not None
+                deadline = now + lease.deadline_seconds
+                conn.execute(
+                    "INSERT INTO media_leases(job_id, worker, claim_revision, ocr_generation, granted_at, "
+                    "expires_at, deadline_at, sidecar_before_hash, sidecar_before_evidence_version, "
+                    "binary_identity_json, pin_language, pin_language_mode, replaces) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["id"], lease.worker, row["claim_revision"] + 1, row["ocr_generation"], now,
+                        min(now + lease.lease_seconds, deadline), deadline, snapshot.sidecar_before_hash,
+                        snapshot.sidecar_before_evidence_version, _canonical_json(snapshot.binary_identity),
+                        snapshot.language, snapshot.language_mode, snapshot.replaces,
+                    ),
+                )
             conn.commit()
             if changed != 1:
                 return None
@@ -1285,6 +1393,206 @@ class MediaJobStore:
             raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _leases_held(conn: sqlite3.Connection, worker: str, now: float) -> int:
+        """The leases a worker still holds. One that expired holds nothing, and one with its result in is done."""
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM media_leases WHERE worker = ? AND expires_at > ? AND NOT EXISTS "
+            "(SELECT 1 FROM media_job_results WHERE media_job_results.job_id = media_leases.job_id)",
+            (worker, now),
+        ).fetchone()[0])
+
+    def _next_leasable(
+        self, conn: sqlite3.Connection, lease: LeaseRequest, *, max_hydrations: int | None,
+        skip_media_types: Collection[str],
+    ) -> tuple[sqlite3.Row | None, LeaseSnapshot | None]:
+        """The first job in claim order that the caller grants, with its snapshot.
+
+        A refused job stays pending and unclaimed, and the jobs behind it still get their turn.
+        """
+        refused: list[int] = []
+        while len(refused) < _LEASE_SCAN_LIMIT:
+            row = _next_pending_row(
+                conn, max_hydrations=max_hydrations, skip_media_types=skip_media_types, remote=True,
+                exclude=refused,
+            )
+            if row is None:
+                return None, None
+            snapshot = lease.snapshot(self._row_to_job(row))
+            if snapshot is not None:
+                if (
+                    not _is_sha256(snapshot.sidecar_before_hash)
+                    or (snapshot.sidecar_before_evidence_version is not None
+                        and not _is_sha256(snapshot.sidecar_before_evidence_version))
+                    or (snapshot.replaces is not None and not _is_sha256(snapshot.replaces))
+                    or _validated_binary_identity(snapshot.binary_identity) is None
+                ):
+                    raise ValueError("a lease snapshot must hold SHA-256 digests and a validated binary identity")
+                return row, snapshot
+            refused.append(int(row["id"]))
+        return None, None
+
+    def claim_lease(self, request: LeaseRequest, *, skip_media_types: Collection[str]) -> MediaLease | None:
+        """Lease the next job a remote worker may take, or None when it may take none now.
+
+        The caller sets `skip_media_types` to every kind that is not routed to remote workers or that
+        this worker does not cover. The claim is `claim_next`'s: it keeps the claim order and the hydration cap,
+        and the job is pinned, with `hydrated` set when its original must be hydrated. The worker holds at most
+        `request.max_leases` leases. The lease expires after `lease_seconds` and never lives past `deadline_seconds`.
+        """
+        job = self.claim_next(skip_media_types=skip_media_types, lease=request)
+        return None if job is None or job.id is None else self.get_lease(job.id)
+
+    def get_lease(self, job_id: int) -> MediaLease | None:
+        """The lease on a job, or None when no remote worker holds it."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT jobs.*, l.worker AS lease_worker, l.claim_revision AS lease_revision, "
+                "l.ocr_generation AS lease_ocr_generation, l.granted_at, l.expires_at, l.deadline_at, "
+                "l.sidecar_before_hash, l.sidecar_before_evidence_version, l.binary_identity_json, "
+                "l.pin_language, l.pin_language_mode, l.replaces, EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id) AS result_recorded "
+                "FROM media_leases AS l JOIN jobs ON jobs.id = l.job_id WHERE l.job_id = ?",
+                (job_id,),
+            ).fetchone()
+            return None if row is None else MediaLease(
+                job=self._row_to_job(row),
+                worker=str(row["lease_worker"]),
+                claim_revision=int(row["lease_revision"]),
+                ocr_generation=int(row["lease_ocr_generation"]),
+                granted_at=float(row["granted_at"]),
+                expires_at=float(row["expires_at"]),
+                deadline_at=float(row["deadline_at"]),
+                snapshot=LeaseSnapshot(
+                    sidecar_before_hash=str(row["sidecar_before_hash"]),
+                    binary_identity=json.loads(row["binary_identity_json"]),
+                    sidecar_before_evidence_version=row["sidecar_before_evidence_version"],
+                    language=row["pin_language"],
+                    language_mode=row["pin_language_mode"],
+                    replaces=row["replaces"],
+                ),
+                result_recorded=bool(row["result_recorded"]),
+            )
+        finally:
+            conn.close()
+
+    def _held_lease(self, job_id: int, claim_revision: int, worker: str) -> MediaLease | None:
+        """The lease if this worker holds it under this revision and has handed in no result."""
+        lease = self.get_lease(job_id)
+        if lease is None or lease.worker != worker or lease.claim_revision != claim_revision or lease.result_recorded:
+            return None
+        return lease
+
+    def heartbeat_lease(self, job_id: int, claim_revision: int, worker: str, *, lease_seconds: float) -> bool:
+        """Extend a live lease to `lease_seconds` from now, never past its hard deadline.
+
+        The deadline is the job timeout that bounds a local child, so a lease cannot hold a hydration slot
+        without limit. A lease that already expired is not revived: the sweep returns its job, and a worker
+        that is late learns it by this refusal. Returns False for another revision or worker too.
+        """
+        now = time.time()
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE media_leases SET expires_at = MIN(? + ?, deadline_at) "
+                    "WHERE job_id = ? AND claim_revision = ? AND worker = ? AND expires_at > ? "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                    "WHERE media_job_results.job_id = media_leases.job_id)",
+                    (now, lease_seconds, job_id, claim_revision, worker, now),
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def release_lease(
+        self, job_id: int, claim_revision: int, worker: str, reason: str, *, error: str | None = None
+    ) -> bool:
+        """Take a job back from the worker that holds its lease, for a reason that worker gives.
+
+        The hand-back follows `defer` with `return_reason`: the job keeps its pin, frees its hydration slot,
+        counts a return and waits a retry time, and status shows `reason`. A worker that cannot hold the
+        original at all gives `HYDRATION_TOO_LARGE`, which blocks the job instead, with `error` as its text.
+        Returns False when this worker does not hold the lease under this revision.
+        """
+        lease = self._held_lease(job_id, claim_revision, worker)
+        if lease is None:
+            return False
+        if reason == HYDRATION_TOO_LARGE:
+            return self.mark(lease.job, BLOCKED, error or reason, blocked_reason=HYDRATION_TOO_LARGE)
+        return self.defer(lease.job, free_hydration_slot=True, return_reason=reason)
+
+    def expire_leases(self, *, stop_limit: int, context: str) -> list[tuple[MediaJob, str]]:
+        """Return the jobs whose lease expired to pending, in one write per sweep.
+
+        Each job also loses its pin and `hydrated` flag: a worker that vanished may not come back, and the job
+        must not hold a hydration slot meanwhile. The expiry counts as a timeout stop, so a job that keeps
+        losing its worker is over budget after `stop_limit` of them (see `record_timeout_stop`). A job whose
+        result is in is left to the parent. Returns each job with `PENDING` or the reason that blocked it.
+        """
+        assignments, params = self._timeout_stop(stop_limit, context)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT jobs.* FROM media_leases JOIN jobs ON jobs.id = media_leases.job_id "
+                "WHERE media_leases.expires_at <= ? ORDER BY jobs.id",
+                (time.time(),),
+            ).fetchall()
+            expired = []
+            for row in rows:
+                job = self._row_to_job(row)
+                verdict = self._apply_stop(conn, job, assignments, params, None, release_pin=True)
+                if verdict is not None:
+                    expired.append((job, verdict))
+            conn.commit()
+            return expired
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def record_remote_result(
+        self,
+        job_id: int,
+        claim_revision: int,
+        worker: str,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        terminal_state: str | None = None,
+        blocked_reason: str | None = None,
+        blocked_context: str | None = None,
+    ) -> bool:
+        """Record the result of the worker that holds the lease, against the snapshot taken at the grant (D4).
+
+        The worker supplies the payload only. The sidecar hash, the evidence version and the binary identity
+        come from the lease, and so does `replaces`: the worker cannot name the extraction a result replaces.
+        The lease stays until the parent publishes the result, as a local claim does. A result that arrives
+        after the lease expired but before the sweep still records, because the claim revision fences it.
+        Returns False when this worker does not hold the lease under this revision, or `record_result` refuses.
+        """
+        lease = self._held_lease(job_id, claim_revision, worker)
+        if lease is None or not isinstance(payload, dict):
+            return False
+        snapshot = lease.snapshot
+        if kind == "extraction":
+            payload = {key: value for key, value in payload.items() if key != "replaces"}
+            if snapshot.replaces is not None:
+                payload["replaces"] = snapshot.replaces
+        return self.record_result(
+            replace(lease.job, claim_revision=lease.claim_revision, ocr_generation=lease.ocr_generation),
+            kind=kind,
+            sidecar_before_hash=snapshot.sidecar_before_hash,
+            sidecar_before_evidence_version=snapshot.sidecar_before_evidence_version,
+            binary_identity=snapshot.binary_identity,
+            payload=payload,
+            terminal_state=terminal_state,
+            blocked_reason=blocked_reason,
+            blocked_context=blocked_context,
+        )
 
     def complete(self, job: MediaJob) -> None:
         """Clear stages this claim processed, preserving stages added mid-flight."""
@@ -1378,18 +1686,28 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def defer(self, job: MediaJob | int, *, free_hydration_slot: bool = False) -> bool:
+    def defer(
+        self, job: MediaJob | int, *, free_hydration_slot: bool = False, return_reason: str | None = None
+    ) -> bool:
         """Return a claimed job to pending after transient coordination refusal.
 
         The job keeps its pin, so its original stays on the volume and the retry hydrates nothing (D3, M4).
         `free_hydration_slot` stops the job counting against `max_hydrations`, for a wait with no known end,
         so other jobs can hydrate their originals during it.
+        `return_reason` also counts the return: the job waits a retry time that doubles with each return,
+        and status shows the reason until the next claim.
         """
         job_id = job.id if isinstance(job, MediaJob) else job
         if job_id is None:
             return False
+        now = time.time()
+        assignments = "last_error = NULL"
+        params: list[object] = []
+        if return_reason is not None:
+            assignments = f"last_error = ?, {_RETURN_WAIT}"
+            params = [return_reason[:1000] or None, now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS]
+        params += [now, job_id]
         revision_clause = ""
-        params: list[object] = [time.time(), job_id]
         if isinstance(job, MediaJob):
             revision_clause = " AND claim_revision = ?"
             params.append(job.claim_revision)
@@ -1397,11 +1715,9 @@ class MediaJobStore:
         try:
             with conn:
                 changed = conn.execute(
-                    """
-                    UPDATE jobs
-                    SET state = 'pending', attempts = MAX(0, attempts - 1),
-                        last_error = NULL, updated_at = ?""" + (", hydrated = 0" if free_hydration_slot else "") + """
-                    WHERE id = ? AND state = 'running'""" + revision_clause,
+                    f"UPDATE jobs SET state = 'pending', attempts = MAX(0, attempts - 1), {assignments}, "
+                    "updated_at = ?" + (", hydrated = 0" if free_hydration_slot else "")
+                    + " WHERE id = ? AND state = 'running'" + revision_clause,
                     tuple(params),
                 ).rowcount
                 return changed == 1
@@ -1424,7 +1740,7 @@ class MediaJobStore:
                 now = time.time()
                 return conn.execute(
                     "UPDATE jobs SET state = 'pending', attempts = MAX(0, attempts - 1), pinned = 0, "
-                    "hydrated = 0, retry_at = ? + MIN(?, ? * (1 << MIN(returns, 4))), returns = returns + 1, "
+                    f"hydrated = 0, {_RETURN_WAIT}, "
                     "last_error = ?, updated_at = ? WHERE id = ? AND state = 'running' AND claim_revision = ?",
                     (now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS, (reason or "")[:1000] or None, now, job.id,
                      job.claim_revision),
@@ -1594,8 +1910,12 @@ class MediaJobStore:
         recording that advances each time finishes. Returns PENDING, OVER_BUDGET, or
         None when the claim is no longer this job's.
         """
-        return self._record_stop(
-            job,
+        return self._record_stop(job, *self._timeout_stop(stop_limit, context), progress)
+
+    @staticmethod
+    def _timeout_stop(stop_limit: int, context: str) -> tuple[str, tuple[object, ...]]:
+        """The counter assignments of a timeout stop (see `record_timeout_stop`), as SQL and parameters."""
+        return (
             """
             timeout_stops = timeout_stops + 1,
             state = CASE WHEN timeout_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
@@ -1609,7 +1929,6 @@ class MediaJobStore:
                 stop_limit, OVER_BUDGET_ERROR,
                 stop_limit, context,
             ),
-            progress,
         )
 
     def _record_stop(
@@ -1626,39 +1945,51 @@ class MediaJobStore:
         leaves the job pending. Returns PENDING or the blocked reason the
         stop left, or None when the claim is no longer this job's.
         """
-        if job.id is None:
-            return None
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            previous = conn.execute(
-                "SELECT stop_offset FROM speech_progress WHERE job_id = ?", (job.id,)
-            ).fetchone()
-            if progress is not None and progress > (0 if previous is None else int(previous[0])):
-                assignments, params = _UNCOUNTED_STOP, ()
-            changed = conn.execute(
-                "UPDATE jobs SET attempts = MAX(0, attempts - 1), updated_at = ?, "
-                + assignments
-                + " WHERE id = ? AND state = 'running' AND claim_revision = ? "
-                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                "WHERE media_job_results.job_id = jobs.id)",
-                (time.time(), *params, job.id, job.claim_revision),
-            ).rowcount
-            if changed == 1 and progress is not None:
-                conn.execute(
-                    "INSERT INTO speech_progress(job_id, stop_offset) VALUES (?, ?) "
-                    "ON CONFLICT(job_id) DO UPDATE SET stop_offset = excluded.stop_offset",
-                    (job.id, progress),
-                )
-            row = conn.execute(
-                "SELECT state, blocked_reason FROM jobs WHERE id = ?", (job.id,)
-            ).fetchone()
+            verdict = self._apply_stop(conn, job, assignments, params, progress)
             conn.commit()
+            return verdict
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _apply_stop(
+        conn: sqlite3.Connection,
+        job: MediaJob,
+        assignments: str,
+        params: tuple[object, ...],
+        progress: int | None,
+        *,
+        release_pin: bool = False,
+    ) -> str | None:
+        """`_record_stop` inside the caller's transaction. `release_pin` also frees the job's pin and hydration slot."""
+        if job.id is None:
+            return None
+        previous = conn.execute("SELECT stop_offset FROM speech_progress WHERE job_id = ?", (job.id,)).fetchone()
+        if progress is not None and progress > (0 if previous is None else int(previous[0])):
+            assignments, params = _UNCOUNTED_STOP, ()
+        if release_pin:
+            assignments += ", pinned = 0, hydrated = 0"
+        changed = conn.execute(
+            "UPDATE jobs SET attempts = MAX(0, attempts - 1), updated_at = ?, "
+            + assignments
+            + " WHERE id = ? AND state = 'running' AND claim_revision = ? "
+            "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+            "WHERE media_job_results.job_id = jobs.id)",
+            (time.time(), *params, job.id, job.claim_revision),
+        ).rowcount
+        if changed == 1 and progress is not None:
+            conn.execute(
+                "INSERT INTO speech_progress(job_id, stop_offset) VALUES (?, ?) "
+                "ON CONFLICT(job_id) DO UPDATE SET stop_offset = excluded.stop_offset",
+                (job.id, progress),
+            )
+        row = conn.execute("SELECT state, blocked_reason FROM jobs WHERE id = ?", (job.id,)).fetchone()
         if changed != 1 or row is None:
             return None
         if row["state"] == PENDING:
@@ -1666,12 +1997,16 @@ class MediaJobStore:
         return str(row["blocked_reason"])
 
     def running_jobs(self) -> list[MediaJob]:
-        """Claimed jobs whose result the child has not handed to the parent."""
+        """Claimed jobs whose result the child has not handed to the parent.
+
+        A job on a remote lease is no child's: only its lease expires or ends it.
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
                 "SELECT * FROM jobs WHERE state = 'running' AND NOT EXISTS "
                 "(SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id) "
+                "AND NOT EXISTS (SELECT 1 FROM media_leases WHERE media_leases.job_id = jobs.id) "
                 "ORDER BY id"
             ).fetchall()
             return [self._row_to_job(row) for row in rows]
@@ -2216,19 +2551,34 @@ class MediaJobStore:
             )
 
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
+        """Return the jobs no live holder has to pending.
+
+        A local child cannot outlive the service, so every running job without a lease returns. A remote worker
+        keeps running across a restart, so a job on an unexpired lease stays. A job whose lease expired returns
+        and frees its pin and hydration slot, as the expiry sweep does (without the sweep's timeout count).
+        """
         states = [RUNNING]
         if retry_blocked:
             states.append(BLOCKED)
         placeholders = ",".join("?" for _ in states)
+        now = time.time()
         conn = self._connect()
         try:
             with conn:
+                conn.execute(
+                    "UPDATE jobs SET pinned = 0, hydrated = 0 WHERE state = 'running' AND EXISTS "
+                    "(SELECT 1 FROM media_leases WHERE media_leases.job_id = jobs.id AND expires_at <= ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id)",
+                    (now,),
+                )
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', updated_at = ? "
                     f"WHERE state IN ({placeholders}) "
                     "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                    "WHERE media_job_results.job_id = jobs.id)",
-                    (time.time(), *states),
+                    "WHERE media_job_results.job_id = jobs.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM media_leases "
+                    "WHERE media_leases.job_id = jobs.id AND expires_at > ?)",
+                    (now, *states, now),
                 ).rowcount
                 return int(changed)
         finally:
@@ -2530,13 +2880,15 @@ class MediaJobStore:
         conn = self._connect()
         try:
             clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
+            now = time.time()
             # A returned job is no work before its retry time; the supervisor's forced
-            # recheck finds it within a minute after.
+            # recheck finds it within a minute after. A job on a live remote lease is no child's work.
             work = conn.execute(
-                "SELECT 1 FROM jobs WHERE (state = 'running' OR " + _CLAIMABLE + ") "
+                "SELECT 1 FROM jobs WHERE ((state = 'running' AND NOT EXISTS (SELECT 1 FROM media_leases "
+                "WHERE media_leases.job_id = jobs.id AND expires_at > ?)) OR " + _CLAIMABLE + ") "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id) LIMIT 1",
-                (time.time(),),
+                (now, now),
             ).fetchone()
             if work is None:
                 candidates = conn.execute(
