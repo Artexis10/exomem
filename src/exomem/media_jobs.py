@@ -123,6 +123,21 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+#: The one outcome of a remote result so far: the ledger took it.
+OUTCOME_ACCEPTED = "accepted"
+#: How long the ledger remembers a remote result's hash after it took the result (24 hours).
+DEFAULT_OUTCOME_SECONDS = 86400.0
+
+
+def submission_hash(kind: str, submitted: object) -> str:
+    """The hash of what a worker posted as a result: the key by which a retried post is recognised.
+
+    It covers the whole post, so it does not change when the vault owner renders the post differently
+    on a retry (a voice profile enrolled in between, for one). Only the hash is kept, never the post.
+    """
+    return hashlib.sha256(_canonical_json({"kind": kind, "payload": submitted}).encode("utf-8")).hexdigest()
+
+
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
@@ -885,6 +900,21 @@ class MediaJobStore:
                     )
                     """
                 )
+                # What a remote result's hash was, kept after the lease and the job are gone so that a retried
+                # post of the same result still succeeds. No foreign key: publication deletes the job. Hashes only.
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_lease_outcomes (
+                        job_id INTEGER NOT NULL,
+                        claim_revision INTEGER NOT NULL,
+                        worker TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        recorded_at REAL NOT NULL,
+                        PRIMARY KEY (job_id, claim_revision)
+                    )
+                    """
+                )
                 # A lease never outlives the running state, whichever transition leaves it.
                 conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_end_lease AFTER UPDATE OF state ON jobs "
                              "WHEN NEW.state != 'running' "
@@ -1574,6 +1604,7 @@ class MediaJobStore:
         kind: str,
         payload: dict[str, Any],
         *,
+        submitted: object = None,
         terminal_state: str | None = None,
         blocked_reason: str | None = None,
         blocked_context: str | None = None,
@@ -1584,21 +1615,34 @@ class MediaJobStore:
         come from the lease, and so does `replaces`: the worker cannot name the extraction a result replaces.
         The lease stays until the parent publishes the result, as a local claim does. A result that arrives
         after the lease expired but before the sweep still records, because the claim revision fences it.
-        Returns False when this worker does not hold the lease under this revision, or `record_result` refuses.
+        `submitted` is what the worker posted, when `payload` is the service's rendering of it; its hash is
+        kept as the outcome of the revision (see `remote_result_outcome`). Returns False when this worker
+        does not hold the lease under this revision, or `record_result` refuses.
         """
         lease = self.held_lease(job_id, claim_revision, worker)
         if lease is None or not isinstance(payload, dict):
             return False
         snapshot = lease.snapshot
+        outcome = (worker, submission_hash(kind, payload if submitted is None else submitted))
         payload = _lease_payload(snapshot, kind, payload)
         if kind == "failure" and snapshot.replaces is not None and terminal_state is not None:
             # A failed re-extraction must not damage the transcript it would replace, so the job fails on the
             # ledger alone, as a local one does.
             validated = _validated_result_payload(kind, payload)
-            return validated is not None and self.mark(
+            if validated is None or not self.mark(
                 lease.job, terminal_state, str(validated["error"]),
                 blocked_reason=blocked_reason, blocked_context=blocked_context,
-            )
+            ):
+                return False
+            # The one result with no row of its own to share a transaction with: a crash between the two
+            # commits leaves a worker that retries to learn the lease is lost, and the job is failed either way.
+            conn = self._connect()
+            try:
+                with conn:
+                    self._insert_outcome(conn, job_id, claim_revision, *outcome, time.time())
+            finally:
+                conn.close()
+            return True
         return self.record_result(
             replace(lease.job, claim_revision=lease.claim_revision, ocr_generation=lease.ocr_generation),
             kind=kind,
@@ -1609,29 +1653,44 @@ class MediaJobStore:
             terminal_state=terminal_state,
             blocked_reason=blocked_reason,
             blocked_context=blocked_context,
+            outcome=outcome,
         )
 
-    def remote_result_matches(
-        self, job_id: int, claim_revision: int, worker: str, kind: str, payload: dict[str, Any]
-    ) -> bool:
-        """Whether this worker's lease already holds exactly this result, so a retried post can succeed.
+    @staticmethod
+    def _insert_outcome(
+        conn: sqlite3.Connection, job_id: int, claim_revision: int, worker: str, payload_hash: str, now: float
+    ) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO media_lease_outcomes(job_id, claim_revision, worker, payload_hash, outcome, "
+            "recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, claim_revision, worker, payload_hash, OUTCOME_ACCEPTED, now),
+        )
 
-        A result is idempotent while the parent has not yet published it: the lease and the stored result
-        outlive the post. Once the parent publishes, the lease is gone and a late retry is a lost lease.
+    def remote_result_outcome(self, job_id: int, claim_revision: int, worker: str) -> str | None:
+        """The hash of the result that the ledger took from this worker under this revision, or None.
+
+        It outlives the lease and the job until `prune_outcomes`, so a worker that did not see the answer to a
+        post can ask again and learn its result is in, instead of mistaking that for a lost lease.
         """
-        lease = self.get_lease(job_id)
-        if lease is None or lease.worker != worker or lease.claim_revision != claim_revision or not lease.result_recorded:
-            return False
-        validated = _validated_result_payload(kind, _lease_payload(lease.snapshot, kind, payload))
-        if validated is None:
-            return False
-        digest = hashlib.sha256(_canonical_json(validated).encode("utf-8")).hexdigest()
         conn = self._connect(readonly=True)
         try:
-            return conn.execute(
-                "SELECT 1 FROM media_job_results WHERE job_id = ? AND claim_revision = ? AND payload_hash = ?",
-                (job_id, claim_revision, digest),
-            ).fetchone() is not None
+            row = conn.execute(
+                "SELECT payload_hash FROM media_lease_outcomes WHERE job_id = ? AND claim_revision = ? "
+                "AND worker = ? AND outcome = ?",
+                (job_id, claim_revision, worker, OUTCOME_ACCEPTED),
+            ).fetchone()
+            return None if row is None else str(row["payload_hash"])
+        finally:
+            conn.close()
+
+    def prune_outcomes(self, retention_seconds: float) -> int:
+        """Forget the outcomes older than `retention_seconds` and return how many."""
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "DELETE FROM media_lease_outcomes WHERE recorded_at <= ?", (time.time() - retention_seconds,)
+                ).rowcount
         finally:
             conn.close()
 
@@ -1801,8 +1860,12 @@ class MediaJobStore:
         terminal_state: str | None = None,
         blocked_reason: str | None = None,
         blocked_context: str | None = None,
+        outcome: tuple[str, str] | None = None,
     ) -> bool:
-        """Atomically hand child computation to the parent under one claim fence."""
+        """Atomically hand child computation to the parent under one claim fence.
+
+        `outcome` is the (worker, submission hash) of a remote result, recorded in the same transaction.
+        """
         if job.id is None or kind not in _RESULT_KINDS:
             return False
         if terminal_state is not None and terminal_state not in {BLOCKED, FAILED}:
@@ -1888,6 +1951,8 @@ class MediaJobStore:
                     if changed != 1:
                         conn.rollback()
                         return False
+            if changed == 1 and outcome is not None:
+                self._insert_outcome(conn, job.id, job.claim_revision, *outcome, now)
             conn.commit()
             return changed == 1
         except Exception:

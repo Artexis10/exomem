@@ -44,7 +44,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -848,7 +848,7 @@ def _transcribe(
             # gate) so a soft-failed timed render can never mislabel the engine —
             # the marker is backfill's idempotency key. Order matters:
             # `_needs_rediarize` matches endswith("+diarized").
-            timed = "+timed" if _is_timed_text(text) else ""
+            timed = "+timed" if is_timed_text(text) else ""
             if timestamps and not timed:
                 log.warning(
                     "timed diarized rendering unavailable for %s; using timed plain transcript",
@@ -928,7 +928,7 @@ def _asr_facts(
     return report
 
 
-def _is_timed_text(text: str) -> bool:
+def is_timed_text(text: str) -> bool:
     """True when the transcript's first line carries a `[m:ss]` marker."""
     first = text.split("\n", 1)[0] if text else ""
     m = _TIMED_LINE_RE.match(first)
@@ -1106,21 +1106,47 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
             pass
 
 
-def _resolve_named_labels(
-    path: Path, turns: list[tuple[float, float, str]], vault_root: Path | None = None
+def _embed_clusters(path: Path, turns: list[tuple[float, float, str]]) -> dict[str, object] | None:
+    """The embed seam: the audio of each cluster's turns → one voiceprint per raw cluster, or None.
+
+    The local path and a remote worker both do this step, on the machine that holds the audio. None means
+    one embedding failed, so the whole attribution stays anonymous (never partially named).
+    """
+    from . import voice_embed
+
+    spans_by_label: dict[str, list[tuple[float, float]]] = {}
+    for t_start, t_end, raw in turns:
+        spans_by_label.setdefault(raw, []).append((t_start, t_end))
+    # NOTE: embeds per cluster (each call decodes the file once). A load-once
+    # embed_clusters() is a tracked follow-up — acceptable here since diarization is
+    # opt-in and runs off the request path in the async media worker.
+    centroids: dict[str, object] = {}
+    for raw, spans in spans_by_label.items():
+        vec = voice_embed.embed_spans(path, spans)
+        if vec is None:
+            return None
+        centroids[raw] = vec
+    return centroids
+
+
+def resolve_named_labels(
+    turns: list[tuple[float, float, str]],
+    embed: Callable[[], dict[str, object] | None],
+    *,
+    vault_root: Path | None = None,
 ) -> _ResolvedSpeakerLabels | None:
-    """Resolve raw diarization labels → enrolled speaker names, or None to stay anonymous.
+    """The attribute seam: raw diarization labels → enrolled speaker names, or None to stay anonymous.
 
     Optional named-attribution layer over the anonymous turns (default-OFF, soft-fail). When
-    ≥1 voice profile is enrolled AND voice embedding is available, each raw cluster's spans are
-    ECAPA-embedded into a centroid and matched against the profiles by cosine
-    (`speaker_attribution.attribute_clusters`). Returns labels plus explicit match provenance:
-    a matched cluster gets the profile name and the rest get stable `Speaker A/B…` (by first
-    onset). Returns None — falling through to today's anonymous output — when there are no
-    profiles, the embedder is unavailable, or anything fails. Never raises.
+    ≥1 voice profile is enrolled in this vault, `embed()` gives each raw cluster's voiceprint and the
+    clusters are matched against the profiles by cosine (`speaker_attribution.attribute_clusters`).
+    `embed` runs only when someone is enrolled, so no embedding model loads for nobody. Returns labels plus
+    explicit match provenance: a matched cluster gets the profile name and the rest get stable
+    `Speaker A/B…` (by first onset). Returns None — falling through to today's anonymous output — when there
+    are no profiles, `embed` gives nothing, or anything fails. Never raises.
     """
     try:
-        from . import vault, voice_embed, voice_profiles
+        from . import vault, voice_profiles
         from .speaker_attribution import attribute_clusters
 
         # Prefer the caller's vault (worker/backfill know it); env resolution is the
@@ -1132,21 +1158,12 @@ def _resolve_named_labels(
         if not profiles:
             return None  # nobody enrolled → anonymous, no embedding model loaded
 
-        spans_by_label: dict[str, list[tuple[float, float]]] = {}
+        centroids = embed()
+        if centroids is None:
+            return None  # embed soft-fail → wholly anonymous (never partially name)
         first_onset: dict[str, float] = {}
-        for t_start, t_end, raw in turns:
-            spans_by_label.setdefault(raw, []).append((t_start, t_end))
+        for t_start, _t_end, raw in turns:
             first_onset[raw] = min(first_onset.get(raw, float("inf")), t_start)
-
-        # NOTE: embeds per cluster (each call decodes the file once). A load-once
-        # embed_clusters() is a tracked follow-up — acceptable here since diarization is
-        # opt-in and runs off the request path in the async media worker.
-        centroids: dict[str, object] = {}
-        for raw, spans in spans_by_label.items():
-            vec = voice_embed.embed_spans(path, spans)
-            if vec is None:
-                return None  # embed soft-fail → wholly anonymous (never partially name)
-            centroids[raw] = vec
 
         attributions = attribute_clusters(centroids, first_onset, profiles)
         return _ResolvedSpeakerLabels(
@@ -1158,6 +1175,19 @@ def _resolve_named_labels(
         return None
 
 
+def _resolve_named_labels(
+    path: Path, turns: list[tuple[float, float, str]], vault_root: Path | None = None
+) -> _ResolvedSpeakerLabels | None:
+    """Embed the audio of each cluster here, then resolve the names (`resolve_named_labels`)."""
+    return resolve_named_labels(turns, lambda: _embed_clusters(path, turns), vault_root=vault_root)
+
+
+def _segment_times(seg) -> tuple[float, float, str]:
+    """An ASR segment object → (start, end, text)."""
+    start = float(getattr(seg, "start", 0.0) or 0.0)
+    return start, float(getattr(seg, "end", start) or start), seg.text
+
+
 def _diarize(
     path: Path,
     seg_list: list,
@@ -1167,13 +1197,9 @@ def _diarize(
 ) -> tuple[str, list[dict], str] | None:
     """Label ASR segments with speakers and render `[Speaker A]: …` (or `[<name>]: …`) turns.
 
-    Maps each whisper segment to the diarization speaker whose turn overlaps it most, relabels
-    raw `SPEAKER_00/01/…` to first-appearance `Speaker A/B/…`, and merges consecutive
-    same-speaker segments into one turn. When voice profiles are enrolled and embedding succeeds
-    (`_resolve_named_labels`), matched clusters render with the enrolled name instead; everything
-    else (no profiles / soft-fail) is byte-identical to the anonymous output. Returns
-    `(labeled_text, speakers, speaker_verification)` where `speakers` is the structured turn
-    list and verification comes from resolver provenance, or None on soft-fail (no diarization
+    Runs the diarizer, embeds the clusters when voice profiles are enrolled
+    (`_resolve_named_labels`) and renders (`render_diarized`). Returns
+    `(labeled_text, speakers, speaker_verification)`, or None on soft-fail (no diarization
     output / no segments) so the caller uses the plain transcript.
     """
     turns = _run_diarization(path)
@@ -1182,6 +1208,29 @@ def _diarize(
 
     # Optional named layer: raw cluster label → enrolled name (or None → stay anonymous).
     resolved = _resolve_named_labels(path, turns, vault_root=vault_root)
+    return render_diarized(
+        turns, [_segment_times(seg) for seg in seg_list], resolved, timestamps=timestamps, source=path.name
+    )
+
+
+def render_diarized(
+    turns: list[tuple[float, float, str]],
+    segments: list[tuple[float, float, str]],
+    resolved: _ResolvedSpeakerLabels | dict[str, str] | None,
+    *,
+    timestamps: bool = False,
+    source: str = "the transcript",
+) -> tuple[str, list[dict], str] | None:
+    """The attribute-and-render seam: turns, ASR segments and resolved names → the labelled transcript.
+
+    Maps each segment to the diarization speaker whose turn overlaps it most, relabels
+    raw `SPEAKER_00/01/…` to first-appearance `Speaker A/B/…`, and merges consecutive
+    same-speaker segments into one turn. A cluster that `resolved` names renders with its enrolled name;
+    everything else (no profiles / soft-fail) is anonymous. A local extraction and a remote result render
+    through here, so the two transcripts are the same. Returns `(labeled_text, speakers, speaker_verification)`
+    where `speakers` is the structured turn list and verification comes from resolver provenance, or None
+    when no segment holds text.
+    """
     if isinstance(resolved, _ResolvedSpeakerLabels):
         resolved_labels = resolved.labels
         verification = "profile-matched" if resolved.profile_matched else "anonymous"
@@ -1213,12 +1262,10 @@ def _diarize(
 
     merged: list[dict] = []
     timed_segs: list[tuple[float, float, str, str | None]] = []
-    for seg in seg_list:
-        seg_text = seg.text.strip()
+    for start, end, text in segments:
+        seg_text = text.strip()
         if not seg_text:
             continue
-        start = float(getattr(seg, "start", 0.0) or 0.0)
-        end = float(getattr(seg, "end", start) or start)
         speaker = _speaker_for(start, end) or "Speaker A"
         timed_segs.append((start, end, seg_text, speaker))
         if merged and merged[-1]["speaker"] == speaker:
@@ -1243,7 +1290,7 @@ def _diarize(
             if timestamps:
                 raise RuntimeError("timed diarized rendering produced no output")
         except Exception:  # noqa: BLE001 — diarization is optional and soft-failing
-            log.warning("timed diarized rendering failed for %s; using merged turns", path.name)
+            log.warning("timed diarized rendering failed for %s; using merged turns", source)
     labeled_text = "\n".join(f"[{m['speaker']}]: {m['text']}" for m in merged).strip()
     return labeled_text, merged, verification
 

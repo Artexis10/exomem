@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -36,6 +37,7 @@ from . import (
     media_worker,
     media_worker_credentials,
     reserved_paths,
+    voice_embed,
 )
 from .asr_facts import LANGUAGE_MODE_SINGLE, AsrFacts
 from .governance import egress
@@ -54,6 +56,10 @@ _MAX_CONTROL_BYTES = 4 * 1024
 # A transcript of several hours is some hundreds of kilobytes of segments.
 _MAX_RESULT_BYTES = 4 * 1024 * 1024
 _MAX_SEGMENTS = 100_000
+_MAX_TURNS = 100_000
+# The diarizer's own ceiling for a recording is far below this; it bounds the matching and the attribution.
+_MAX_CLUSTERS = 64
+_MAX_CLUSTER_NAME_CHARS = 64
 _STREAM_CHUNK_BYTES = 1024 * 1024
 _MAX_SLOTS = 64
 # The protocol fixes the reasons a worker gives for a release; no deployment extends them.
@@ -62,7 +68,9 @@ _INSUFFICIENT_SPACE = "insufficient_space"
 _HAND_BACKS = frozenset({"device_busy", "shutdown", "unsupported_input"})  # nosemgrep: ep-word-set -- protocol-fixed release reasons.
 # The protocol's two result kinds and the keys of its payloads: a closed wire schema, not data a vault defines.
 _RESULT_KINDS = frozenset({"extraction", "failure"})  # nosemgrep: ep-word-set -- protocol-fixed result kinds.
-_EXTRACTION_KEYS = frozenset({"engine", "asr", "segments"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
+_EXTRACTION_KEYS = frozenset({"engine", "asr", "segments", "diarization"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
+_DIARIZATION_KEYS = frozenset({"turns", "clusters"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
+_TURN_KEYS = frozenset({"start", "end", "cluster"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
 _FAILURE_KEYS = frozenset({"error", "retryable"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
 _SEGMENT_KEYS = frozenset({"start", "end", "text"})  # nosemgrep: ep-word-set -- protocol-fixed payload keys.
 # A single `bytes=first-last` range, the form of RFC 9110 that a resuming client sends.
@@ -90,8 +98,12 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _is_time(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    return _is_finite_number(value) and value >= 0
 
 
 async def _json_body(request: Request, limit: int) -> dict[str, Any] | JSONResponse:
@@ -116,13 +128,52 @@ def _asr_policy() -> dict[str, object]:
     return {key: policy[key] for key in ("revision", "options", "batched")}
 
 
-def _render_extraction(payload: dict[str, Any]) -> dict[str, object] | str:
+def _diarization(block: object) -> tuple[list[tuple[float, float, str]], dict[str, np.ndarray]] | str:
+    """The turns and the cluster voiceprints of a worker's diarization, or the reason they are invalid.
+
+    The reasons never quote the values: a voiceprint is a biometric, and none reaches a log or a response.
+    """
+    if not isinstance(block, dict) or set(block) != _DIARIZATION_KEYS:
+        return "diarization holds turns and clusters"
+    raw_turns, raw_clusters = block["turns"], block["clusters"]
+    if not isinstance(raw_turns, list) or not isinstance(raw_clusters, dict):
+        return "diarization needs a list of turns and an object of clusters"
+    if len(raw_turns) > _MAX_TURNS or len(raw_clusters) > _MAX_CLUSTERS:
+        return f"diarization holds at most {_MAX_CLUSTERS} clusters and {_MAX_TURNS} turns"
+    clusters: dict[str, np.ndarray] = {}
+    for name, vector in raw_clusters.items():
+        if not name or len(name) > _MAX_CLUSTER_NAME_CHARS:
+            return f"a cluster name is 1-{_MAX_CLUSTER_NAME_CHARS} characters"
+        if (
+            not isinstance(vector, list)
+            or len(vector) != voice_embed.VOICE_EMBED_DIM
+            or not all(_is_finite_number(value) for value in vector)
+        ):
+            return f"each cluster needs {voice_embed.VOICE_EMBED_DIM} finite numbers"
+        clusters[name] = np.asarray(vector, dtype=float)
+    turns: list[tuple[float, float, str]] = []
+    for turn in raw_turns:
+        if (
+            not isinstance(turn, dict)
+            or set(turn) != _TURN_KEYS
+            or not _is_time(turn["start"])
+            or not _is_time(turn["end"])
+            or turn["cluster"] not in clusters
+        ):
+            return "each turn needs a start, an end and the name of a declared cluster"
+        turns.append((float(turn["start"]), float(turn["end"]), turn["cluster"]))
+    return turns, clusters
+
+
+def _render_extraction(payload: dict[str, Any], vault_root: Path) -> dict[str, object] | str:
     """The recorded payload of a worker's extraction, or the reason the worker's payload is invalid.
 
-    The worker returns structure; the service renders it with the renderer of the local path (D8).
+    The worker returns structure; the service renders it with the renderer of the local path (D8). A worker
+    that diarized also returns each cluster's voiceprint: the service matches those against the voice profiles
+    of this vault and the payload it records holds the names only, never a voiceprint.
     """
     if set(payload) - _EXTRACTION_KEYS:
-        return "an extraction payload holds engine, asr and segments"
+        return "an extraction payload holds engine, asr, segments and diarization"
     engine, segments = payload.get("engine"), payload.get("segments")
     if not isinstance(engine, str) or not engine or len(engine) > 128 or not isinstance(segments, list):
         return "an extraction needs an engine name and a list of segments"
@@ -143,6 +194,23 @@ def _render_extraction(payload: dict[str, Any]) -> dict[str, object] | str:
         asr = None if payload.get("asr") is None else AsrFacts.from_payload(payload["asr"])
     except ValueError as error:
         return str(error)
+    diarization = None if payload.get("diarization") is None else _diarization(payload["diarization"])
+    if isinstance(diarization, str):
+        return diarization
+    if diarization is not None and diarization[0] and timed:
+        turns, voiceprints = diarization
+        resolved = extract.resolve_named_labels(turns, lambda: voiceprints, vault_root=vault_root)
+        labeled = extract.render_diarized(turns, timed, resolved, timestamps=True, source="a remote result")
+        # The local path's rule: a diarized render that is not timed gives way to the plain timed transcript.
+        if labeled is not None and extract.is_timed_text(labeled[0]):
+            text, speakers, verification = labeled
+            return media_worker.extraction_payload(
+                text=text.strip() or extract.NO_TEXT_PLACEHOLDER,
+                engine=f"{engine}+timed+diarized",
+                speakers=speakers,
+                speaker_verification=verification,
+                asr=asr,
+            )
     if not timed:
         text = extract.NO_SPEECH_TIMED_TEXT  # a recording with no speech, rendered as the local path renders it
     else:
@@ -305,9 +373,13 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
             await asyncio.sleep(min(CLAIM_POLL_SECONDS, remaining))
 
     def _sweep() -> None:
-        """Return the jobs whose lease expired, so that this claim can take them."""
+        """Return the jobs whose lease expired, so that this claim can take them, and forget old result outcomes."""
         config = media_brakes.settings()
         get_store().expire_leases(stop_limit=config.stop_limit, context=media_brakes.timeout_context(config))
+        routing = media_remote_routing.remote_workers(vault_root)
+        get_store().prune_outcomes(
+            routing.outcome_seconds if routing is not None else media_jobs.DEFAULT_OUTCOME_SECONDS
+        )
 
     @mcp_app.custom_route("/media-worker/v1/leases/{job}/heartbeat", methods=["POST"])
     async def heartbeat(request: Request) -> Response:
@@ -355,23 +427,31 @@ def register_media_worker_routes(mcp_app: FastMCP, *, vault_root: Path) -> None:
         kind, payload = body.get("kind"), body.get("payload")
         if kind not in _RESULT_KINDS or not isinstance(payload, dict):
             return _bad("kind must be extraction or failure, with an object payload")
-        recorded = _render_extraction(payload) if kind == "extraction" else _failure_payload(payload)
+        recorded = (
+            await run_in_threadpool(_render_extraction, payload, vault_root)
+            if kind == "extraction"
+            else _failure_payload(payload)
+        )
         if isinstance(recorded, str):
             return _bad(recorded)
         revision, ledger = body["claim_revision"], get_store()
         terminal = {"terminal_state": media_jobs.FAILED} if kind == "failure" else {}
         if await run_in_threadpool(
-            lambda: ledger.record_remote_result(job_id, revision, credential.id, kind, recorded, **terminal)
+            lambda: ledger.record_remote_result(
+                job_id, revision, credential.id, kind, recorded, submitted=payload, **terminal
+            )
         ):
             return JSONResponse({"recorded": True}, headers=_NO_STORE)
-        # A retried post of the same result is the same success; a different one for this lease is a conflict.
-        if await run_in_threadpool(ledger.remote_result_matches, job_id, revision, credential.id, kind, recorded):
-            return JSONResponse({"recorded": True}, headers=_NO_STORE)
+        # The ledger remembers a taken result after its lease is gone, so a worker that lost the answer asks
+        # again: the same post is the same success, and a different one for this revision is a conflict.
+        known = await run_in_threadpool(ledger.remote_result_outcome, job_id, revision, credential.id)
+        if known is not None:
+            if known == media_jobs.submission_hash(kind, payload):
+                return JSONResponse({"recorded": True}, headers=_NO_STORE)
+            return _error(409, "MEDIA_RESULT_CONFLICT", "this lease already holds a different result")
         lease = await run_in_threadpool(ledger.get_lease, job_id)
         if lease is None or lease.worker != credential.id or lease.claim_revision != revision:
             return _lease_lost()
-        if lease.result_recorded:
-            return _error(409, "MEDIA_RESULT_CONFLICT", "this lease already holds a different result")
         return _bad("the result was refused: it exceeds the result size limit or is not valid for this job")
 
     def open_held(stack: contextlib.ExitStack, relative: str):

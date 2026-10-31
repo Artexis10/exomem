@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 from key_value.aio.stores.memory import MemoryStore
 from starlette.testclient import TestClient
@@ -32,6 +34,8 @@ from exomem import (
     preserve,
     server,
     server_media_worker,
+    voice_embed,
+    voice_profiles,
 )
 from exomem.asr_facts import AsrFacts
 from exomem.auth_sessions import SessionAuthority
@@ -129,6 +133,23 @@ def _original(client: TestClient, lease: dict, token: str = TOKEN, **headers: st
         params={"claim_revision": lease["claim_revision"]},
         headers={**_auth(token), **headers},
     )
+
+
+def _voiceprint(axis: int, scale: float = 1.0) -> list[float]:
+    """A synthetic voiceprint: orthogonal axes are different speakers, and the scale marks the values in a leak check."""
+    return [scale if index == axis else 0.0 for index in range(voice_embed.VOICE_EMBED_DIM)]
+
+
+def _enrol(vault: Path, name: str, axis: int) -> None:
+    voice_profiles.save_profile(
+        voice_profiles.voice_profiles_path(vault), name, np.asarray(_voiceprint(axis)), vault_root=vault
+    )
+
+
+# The first speaker talks in the first segment, the second in the second; their voiceprints are far apart.
+VOICEPRINTS = {"c0": _voiceprint(0, 0.8123456789), "c1": _voiceprint(1, 0.6123456789)}
+TURNS = [{"start": 0.0, "end": 10.0, "cluster": "c0"}, {"start": 60.0, "end": 70.0, "cluster": "c1"}]
+DIARIZED = {**EXTRACTION, "diarization": {"turns": TURNS, "clusters": VOICEPRINTS}}
 
 
 def _row(vault: Path, job_id: int) -> sqlite3.Row:
@@ -733,6 +754,7 @@ def test_the_cli_lists_the_last_time_each_worker_was_seen_and_revokes_by_name(
         {"lease_seconds": 60, "heartbeat_seconds": 60},
         {"local_fallback": "yes"},
         {"presence_sec": 30},
+        {"outcome_seconds": 0},
     ],
 )
 def test_an_invalid_remote_workers_block_is_reported_not_applied(block) -> None:
@@ -744,3 +766,208 @@ def test_a_remote_workers_block_gets_the_documented_defaults() -> None:
         media_types=frozenset({"audio"}), local_fallback=True, lease_seconds=120.0, heartbeat_seconds=30.0,
         presence_seconds=90.0,
     )
+
+
+# ---- result outcomes -------------------------------------------------------------------------------
+
+
+def _published(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload=EXTRACTION):
+    """A leased job whose result is posted and published, so that its lease and its job are gone."""
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    _binary, sidecar = _audio(vault)
+    lease = _lease(client)
+    assert _post(client, lease, "result", kind="extraction", payload=payload).status_code == 200
+    _publish(vault)
+    assert media_jobs.MediaJobStore(vault).get_lease(lease["job_id"]) is None
+    return client, lease, sidecar
+
+
+def test_an_identical_result_retried_after_publication_succeeds(vault, tmp_path, monkeypatch, clock) -> None:
+    client, lease, sidecar = _published(vault, tmp_path, monkeypatch)
+    published = sidecar.read_text(encoding="utf-8")
+    clock[0] += 3600
+    assert _claim(client).status_code == 204  # a claim sweeps, and an hour is inside the retention
+
+    retried = _post(client, lease, "result", kind="extraction", payload=EXTRACTION)
+
+    assert retried.status_code == 200 and retried.json() == {"recorded": True}
+    _publish(vault)
+    assert sidecar.read_text(encoding="utf-8") == published  # the retry published nothing more
+
+
+def test_a_different_result_for_a_published_revision_gets_409(vault, tmp_path, monkeypatch) -> None:
+    client, lease, sidecar = _published(vault, tmp_path, monkeypatch)
+    other = {**EXTRACTION, "segments": [{"start": 0.0, "end": 2.0, "text": "a different transcript"}]}
+
+    refused = _post(client, lease, "result", kind="extraction", payload=other)
+
+    assert (refused.status_code, refused.json()["code"]) == (409, "MEDIA_RESULT_CONFLICT")
+    assert "a different transcript" not in sidecar.read_text(encoding="utf-8")
+
+
+def test_another_workers_retry_of_a_published_revision_is_a_lost_lease(vault, tmp_path, monkeypatch) -> None:
+    client, lease, _sidecar = _published(vault, tmp_path, monkeypatch)
+    _credential(vault, OTHER_TOKEN, name="worker-two")
+
+    refused = _post(client, lease, "result", OTHER_TOKEN, kind="extraction", payload=EXTRACTION)
+
+    assert (refused.status_code, refused.json()["code"]) == (409, "MEDIA_LEASE_LOST")
+
+
+def test_an_outcome_older_than_the_retention_is_forgotten_by_the_next_claim(vault, tmp_path, monkeypatch, clock) -> None:
+    client, lease, _sidecar = _published(vault, tmp_path, monkeypatch)
+    clock[0] += 24 * 3600 + 1
+
+    assert _claim(client).status_code == 204
+    retried = _post(client, lease, "result", kind="extraction", payload=EXTRACTION)
+
+    assert (retried.status_code, retried.json()["code"]) == (409, "MEDIA_LEASE_LOST")
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as connection:
+        assert connection.execute("SELECT count(*) FROM media_lease_outcomes").fetchone() == (0,)
+
+
+def test_the_retention_of_outcomes_is_the_configured_one(vault, tmp_path, monkeypatch, clock) -> None:
+    _route(tmp_path, monkeypatch, vault, {"remote_workers": {"media_types": ["audio"], "outcome_seconds": 600}})
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    _credential(vault)
+    _audio(vault)
+    lease = _lease(client)
+    assert _post(client, lease, "result", kind="extraction", payload=EXTRACTION).status_code == 200
+    _publish(vault)
+    clock[0] += 601
+
+    assert _claim(client).status_code == 204
+
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as connection:
+        assert connection.execute("SELECT count(*) FROM media_lease_outcomes").fetchone() == (0,)
+
+
+def test_an_outcome_holds_a_hash_and_never_the_post(vault, tmp_path, monkeypatch) -> None:
+    _published(vault, tmp_path, monkeypatch)
+
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as connection:
+        (row,) = connection.execute("SELECT * FROM media_lease_outcomes").fetchall()
+
+    assert media_jobs.submission_hash("extraction", EXTRACTION) in row
+    assert "tere maailm" not in " ".join(str(value) for value in row)
+
+
+# ---- remote diarisation ----------------------------------------------------------------------------
+
+
+def test_a_diarized_cluster_that_matches_an_enrolled_voice_is_published_under_its_name(
+    vault, tmp_path, monkeypatch
+) -> None:
+    _enrol(vault, "Alex", axis=0)
+    _client, _lease_, sidecar = _published(vault, tmp_path, monkeypatch, DIARIZED)
+
+    content = sidecar.read_text(encoding="utf-8")
+    facts = parse_frontmatter(content)[0]
+    assert "[0:01] [Alex]: tere maailm" in content
+    assert "[1:05] [Speaker A]: head aega" in content  # the cluster that nobody enrolled stays anonymous
+    assert facts["extracted_by"] == "faster-whisper:test+timed+diarized"
+    assert facts["speaker_verification"] == "profile-matched"
+    assert facts["speakers"] == ["Alex", "Speaker A"]
+
+
+def test_a_diarized_result_with_no_enrolled_voice_is_published_with_anonymous_speakers(
+    vault, tmp_path, monkeypatch
+) -> None:
+    _client, _lease_, sidecar = _published(vault, tmp_path, monkeypatch, DIARIZED)
+
+    content = sidecar.read_text(encoding="utf-8")
+    facts = parse_frontmatter(content)[0]
+    assert "[0:01] [Speaker A]: tere maailm" in content and "[1:05] [Speaker B]: head aega" in content
+    assert facts["speaker_verification"] == "anonymous"
+    assert facts["extracted_by"].endswith("+timed+diarized")
+
+
+def test_a_voice_profile_store_that_cannot_be_read_leaves_the_speakers_anonymous(
+    vault, tmp_path, monkeypatch
+) -> None:
+    _enrol(vault, "Alex", axis=0)
+    monkeypatch.setattr(voice_profiles, "load_profiles", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
+    _client, _lease_, sidecar = _published(vault, tmp_path, monkeypatch, DIARIZED)
+
+    content = sidecar.read_text(encoding="utf-8")
+    assert "[0:01] [Speaker A]: tere maailm" in content
+    assert parse_frontmatter(content)[0]["speaker_verification"] == "anonymous"
+
+
+def test_a_remote_diarized_transcript_is_the_transcript_the_local_path_renders(
+    vault, tmp_path, monkeypatch
+) -> None:
+    """The same segments, turns and voiceprints give the same text, speakers and verification either way."""
+
+    class Segment:
+        def __init__(self, item: dict) -> None:
+            self.start, self.end, self.text = item["start"], item["end"], item["text"]
+
+    class Whisper:
+        def transcribe(self, audio, **options):
+            return iter([Segment(item) for item in SEGMENTS]), None
+
+    _enrol(vault, "Alex", axis=0)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    monkeypatch.setattr(extract, "_decode_audio_float32", lambda _path: [0.0])
+    monkeypatch.setattr(extract, "_get_whisper", lambda: Whisper())
+    monkeypatch.setattr(extract, "_run_diarization", lambda _path: [(0.0, 10.0, "c0"), (60.0, 70.0, "c1")])
+    monkeypatch.setattr(
+        voice_embed, "embed_spans", lambda _path, spans: np.asarray(VOICEPRINTS["c0" if spans[0][0] < 30 else "c1"])
+    )
+    local = extract._transcribe(Path("talk.mp3"), "audio", vault, timestamps=True)
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    _audio(vault)
+    lease = _lease(client)
+
+    assert _post(client, lease, "result", kind="extraction", payload=DIARIZED).status_code == 200
+
+    [result] = media_jobs.MediaJobStore(vault).pending_results()
+    assert result.payload["text"] == local.text
+    assert result.payload["speaker_verification"] == local.speaker_verification == "profile-matched"
+    assert result.payload["speakers"] == [{"speaker": turn["speaker"]} for turn in local.speakers]
+    assert result.payload["engine"].endswith("+timed+diarized") and local.engine.endswith("+timed+diarized")
+
+
+def test_no_voiceprint_reaches_the_ledger_the_sidecar_or_a_log(vault, tmp_path, monkeypatch, caplog) -> None:
+    _enrol(vault, "Alex", axis=0)
+    caplog.set_level(logging.DEBUG)
+    _client, _lease_, _sidecar = _published(vault, tmp_path, monkeypatch, DIARIZED)
+
+    leaked = [str(value) for value in (0.8123456789, 0.6123456789)]
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as connection:
+        ledger = "\n".join(connection.iterdump())
+    stored = ledger + "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore") for path in vault.rglob("*") if path.is_file()
+    )
+    assert not [value for value in leaked if value in stored or value in caplog.text]
+
+
+@pytest.mark.parametrize(
+    "diarization",
+    [
+        {"turns": TURNS, "clusters": {"c0": VOICEPRINTS["c0"][:191], "c1": VOICEPRINTS["c1"]}},
+        {"turns": TURNS, "clusters": {"c0": [float("nan")] * 192, "c1": VOICEPRINTS["c1"]}},
+        {"turns": [*TURNS, {"start": 0.0, "end": 1.0, "cluster": "c9"}], "clusters": VOICEPRINTS},
+        {"turns": TURNS, "clusters": {f"c{n}": VOICEPRINTS["c0"] for n in range(65)}},
+    ],
+    ids=["wrong dimension", "nan", "turn of an unknown cluster", "more than 64 clusters"],
+)
+def test_a_malformed_diarization_block_gets_400_and_records_nothing(vault, tmp_path, monkeypatch, diarization) -> None:
+    client = _serve(vault, tmp_path, monkeypatch)
+    _credential(vault)
+    _audio(vault)
+    lease = _lease(client)
+    body = {"claim_revision": lease["claim_revision"], "kind": "extraction", "payload": {**EXTRACTION, "diarization": diarization}}
+
+    refused = client.post(
+        f"{BASE}/leases/{lease['job_id']}/result", content=json.dumps(body),
+        headers={**_auth(), "content-type": "application/json"},
+    )
+
+    assert refused.status_code == 400
+    assert "0.8123456789" not in refused.text
+    assert media_jobs.MediaJobStore(vault).get_lease(lease["job_id"]).result_recorded is False

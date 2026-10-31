@@ -103,6 +103,15 @@ def test_no_profiles_is_byte_identical_to_anonymous(monkeypatch: pytest.MonkeyPa
     assert [t["speaker"] for t in r.speakers] == ["Speaker A", "Speaker B"]
 
 
+def test_nobody_enrolled_means_the_embedder_is_never_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `resolve_named_labels` swallows what the embedder raises, so a raising stub cannot show this: count the calls.
+    asked: list[object] = []
+    _wire(monkeypatch, profiles={}, embed=lambda _p, spans: asked.append(spans))
+    extract._transcribe(Path("x.wav"), "audio")
+
+    assert asked == []
+
+
 def test_embed_soft_fail_falls_back_to_anonymous(monkeypatch: pytest.MonkeyPatch) -> None:
     # Embedder unavailable / errors → None → wholly anonymous (never partially named).
     _wire(monkeypatch, profiles={"Alex": Profile("Alex", _OWNER)}, embed=lambda _p, _s: None)

@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_engines, originals
+from . import media_engines, media_jobs, originals
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,9 @@ DEFAULT_PRESENCE_SECONDS = 90.0
 
 
 # The keys of the block, which this module's schema fixes. An unknown key is a typo to report, not a vocabulary.
-_KEYS = frozenset({"media_types", "local_fallback", "lease_seconds", "heartbeat_seconds", "presence_seconds"})  # nosemgrep: ep-word-set -- the block's own schema keys.
+_KEYS = frozenset(  # nosemgrep: ep-word-set -- the block's own schema keys.
+    {"media_types", "local_fallback", "lease_seconds", "heartbeat_seconds", "presence_seconds", "outcome_seconds"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,7 @@ class RemoteWorkers:
     lease_seconds: float
     heartbeat_seconds: float
     presence_seconds: float
+    outcome_seconds: float = media_jobs.DEFAULT_OUTCOME_SECONDS
 
 
 def _number(value: object) -> float | None:
@@ -66,7 +69,10 @@ def parse(block: object) -> RemoteWorkers | str:
     presence = _number(block.get("presence_seconds", DEFAULT_PRESENCE_SECONDS))
     if presence is None:
         return "remote_workers.presence_seconds must be a positive number"
-    return RemoteWorkers(frozenset(kinds), fallback, lease, heartbeat, presence)
+    outcome = _number(block.get("outcome_seconds", media_jobs.DEFAULT_OUTCOME_SECONDS))
+    if outcome is None:
+        return "remote_workers.outcome_seconds must be a positive number"
+    return RemoteWorkers(frozenset(kinds), fallback, lease, heartbeat, presence, outcome)
 
 
 def remote_workers(vault: Path) -> RemoteWorkers | None:
