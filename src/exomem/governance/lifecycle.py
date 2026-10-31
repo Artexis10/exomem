@@ -1483,33 +1483,33 @@ def _entry_signature(path: Path) -> tuple[Any, ...]:
 
 
 def _tombstone_generation(vault_root: Path) -> tuple[tuple[Any, ...], ...]:
-    roots = (
-        _tombstone_root(vault_root),
-        _recovery_root(vault_root),
-        _governance_root(vault_root) / "events",
-    )
-    entries: list[tuple[Any, ...]] = [_entry_signature(path) for path in roots]
-    tombstone_root, recovery_root, events_root = roots
-    try:
-        if not stat.S_ISLNK(os.lstat(tombstone_root).st_mode):
-            entries.extend(
-                _entry_signature(path)
-                for path in sorted(tombstone_root.glob("*.json"))
-            )
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        entries.append((str(tombstone_root), "scan-error", type(exc).__name__))
-    try:
-        if not stat.S_ISLNK(os.lstat(recovery_root).st_mode):
-            entries.extend(
-                _entry_signature(path)
-                for path in sorted(recovery_root.glob("*.json"))
-            )
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        entries.append((str(recovery_root), "scan-error", type(exc).__name__))
+    tombstone_root, recovery_root = _tombstone_root(vault_root), _recovery_root(vault_root)
+    governance_root = _governance_root(vault_root)
+    # Every directory _validated_operational_directory walks to a marker root: a link swapped in
+    # for one of them fails the state closed, with no marker file to show for it.
+    entries: list[tuple[Any, ...]] = [
+        _entry_signature(path)
+        for path in (governance_root.parent, governance_root, tombstone_root, recovery_root)
+    ]
+    markers = False
+    for root in (tombstone_root, recovery_root):
+        try:
+            if not stat.S_ISLNK(os.lstat(root).st_mode):
+                found = sorted(root.glob("*.json"))
+                markers = markers or bool(found)
+                entries.extend(_entry_signature(path) for path in found)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            # An unscannable marker directory keeps the full evidence, as it always did.
+            markers = True
+            entries.append((str(root), "scan-error", type(exc).__name__))
+    if not markers:
+        # With no marker file the answer is the empty set whatever the event log or sidecar hold:
+        # _compute_tombstoned_paths reads them only to validate a marker. They are no evidence here.
+        return tuple(entries)
+    events_root = governance_root / "events"
+    entries.append(_entry_signature(events_root))
     try:
         if not stat.S_ISLNK(os.lstat(events_root).st_mode):
             entries.extend(
@@ -1557,9 +1557,10 @@ def _compute_tombstoned_paths(vault_root: Path) -> frozenset[str]:
 
 def tombstoned_paths(vault_root: Path) -> frozenset[str]:
     # Only the path resolution is memoised for the request. The generation
-    # below stats every tombstone, recovery marker and event file on each call
-    # and must keep doing so: it is the evidence that decides whether the
-    # cached answer is still true.
+    # below stats the marker directories and every marker file on each call
+    # (and, while a marker exists, the event files that validate it) and must
+    # keep doing so: it is the evidence that decides whether the cached answer
+    # is still true.
     from .. import state_paths
 
     root = state_paths.resolved_vault_path(vault_root, expanduser=False)
