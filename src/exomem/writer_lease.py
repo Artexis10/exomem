@@ -5135,8 +5135,9 @@ class LeaseManager:
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, waiting out an ordinary busy boundary before the body runs.
 
-        For a caller that reads and writes no vault byte until it holds the boundary, such as
-        an upload commit: a refusal at the acquire has had no effect. Only the acquire is
+        For a caller whose writes before it holds the boundary are none, or content-addressed
+        bytes a retry reuses, such as an upload commit: a refusal at the acquire has had no
+        effect. Only the acquire is
         attempted again, through the keyed writes' wait (arrival order, waiter cap and refusal
         causes). The body runs once, holding the boundary; a busy it raises is never retried,
         because it may have consumed the request stream. The caller's place in line and its

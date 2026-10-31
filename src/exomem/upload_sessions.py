@@ -590,7 +590,7 @@ def _reattempt(store: Path, session_id: str, committer: Committer) -> None:
         expired = record is None or float(record["expires"]) <= _now()
     except (KeyError, TypeError, ValueError):
         expired = True
-    if expired or record["state"] != RETRYABLE:
+    if expired or record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
         return
     # An empty context: nothing of the request that began the session, its principal included,
     # reaches the commit, which binds the transfer principal itself.

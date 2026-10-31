@@ -183,7 +183,8 @@ def _reconcile_under_guard(
     media_processing = _media_processing_module()
     if media_processing.classify_media(binary_path) is None:
         return None
-    with manager.absorbing_mutation_guard(vault_root, operation="upload_reconcile"):
+    # The upload has committed and a failed reconcile only logs, so it does not wait out contention.
+    with manager.mutation_guard(vault_root, operation="upload_reconcile"):
         return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
 
 
