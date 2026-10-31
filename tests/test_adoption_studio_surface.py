@@ -206,7 +206,8 @@ def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert approved["applied"] is True
     assert (vault / approved["result_path"]).is_file()
 
-    # A resubmitted apply-proposal is now applied (idempotent), not re-applied.
+    # A resubmitted apply-proposal is not re-applied. Without an Idempotency-Key,
+    # the identical REST resend replays the first result within the implicit window.
     replayed = _post(
         client,
         "adoption_studio",
@@ -217,7 +218,8 @@ def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) ->
             "why": "Looks correct, approving",
         },
     )
-    assert replayed.get("already_applied") is True
+    assert replayed["applied"] is True
+    assert replayed["result_path"] == approved["result_path"]
 
 
 # --- 28 ---
