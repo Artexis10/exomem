@@ -663,6 +663,7 @@ class MediaJobStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 self._migrate_offload_columns(conn)
+                self._migrate_eviction_columns(conn)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -822,6 +823,10 @@ class MediaJobStore:
         hydration failure returned the job, which sets its `retry_at`.
         """
         cache = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
+        access = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_access)").fetchall()}
+        jobs = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if not (cache and access and jobs):
+            return  # A ledger without these tables gets them from `_initialize`, which then runs this again.
         if "size" not in cache:
             conn.execute("ALTER TABLE media_cache ADD COLUMN size INTEGER")
         if "owner_read" not in cache:
@@ -831,12 +836,10 @@ class MediaJobStore:
             conn.execute("ALTER TABLE media_cache ADD COLUMN evicted INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS media_cache_candidates ON media_cache(evicted, size)")
         # A reservation names its process by ID and start time, and its temporary file by name (D12, choice 3).
-        access = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_access)").fetchall()}
         if "pid_start" not in access:
             conn.execute("ALTER TABLE media_access ADD COLUMN pid_start TEXT")
         if "temporary_name" not in access:
             conn.execute("ALTER TABLE media_access ADD COLUMN temporary_name TEXT")
-        jobs = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "pinned" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         # Whether the worker hydrated the original when it claimed the job.

@@ -49,19 +49,20 @@ def _sharing_failure(job: media_jobs.MediaJob, *, winerror: int = 5) -> str:
     )
 
 
-def test_old_ledger_read_stays_pure_and_the_next_write_adds_offload_columns(vault: Path) -> None:
+def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     job_id = store.enqueue(_job(vault))
     with sqlite3.connect(store.path) as connection:
         connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
         connection.execute("ALTER TABLE jobs DROP COLUMN do_offload")
+        connection.execute("ALTER TABLE jobs DROP COLUMN retry_at")
 
     retained = media_jobs.MediaJobStore(vault, create=False)
     pending = retained.next_pending()
     assert pending.id == job_id and not pending.do_offload and pending.offload_generation == 0
     with sqlite3.connect(store.path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
-        assert "do_offload" not in columns and "offload_generation" not in columns
+        assert not {"do_offload", "offload_generation", "retry_at"} & columns
     claimed = retained.claim_next()
     assert claimed.id == job_id and claimed.do_ocr and not claimed.do_offload
 
