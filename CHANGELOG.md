@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.154.0](https://github.com/Artexis10/exomem/compare/v0.153.1...v0.154.0) (2026-10-31)
+
+
+### Features
+
+* **adoption:** file imported media by rename, so imports can exceed the cell's free space ([#2284](https://github.com/Artexis10/exomem/issues/2284)) ([dd039a8](https://github.com/Artexis10/exomem/commit/dd039a8bad0ae1cb3dd69bcde4a21808d1ed4592))
+* **cellctl:** alert on a cell whose recall catalogue stops advancing ([#2272](https://github.com/Artexis10/exomem/issues/2272)) ([17e8a64](https://github.com/Artexis10/exomem/commit/17e8a6493c5be06e4122eaaff659d364c23af889))
+* **media:** keep a turned-off cell's stored media readable until it drains ([#2271](https://github.com/Artexis10/exomem/issues/2271)) ([085b4d4](https://github.com/Artexis10/exomem/commit/085b4d4cccde9c50d0813e56d9741d24d4074e2c))
+
+
+### Performance
+
+* **adoption:** file large imports faster and let custody proofs in between apply chunks ([#2281](https://github.com/Artexis10/exomem/issues/2281)) ([eef0fd8](https://github.com/Artexis10/exomem/commit/eef0fd8d6abcb90b7b2eb02ab7669f5324783082))
+
 ## [0.153.1](https://github.com/Artexis10/exomem/compare/v0.153.0...v0.153.1) (2026-10-31)
 
 
