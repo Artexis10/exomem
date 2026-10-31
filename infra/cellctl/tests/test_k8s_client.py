@@ -249,7 +249,8 @@ def test_a_failed_backup_reports_only_its_value_free_code(message: str, reported
     "-1 0 2026-01-01T00:04:00+00:00",
     "0 0 yesterday",
     "0 0 2026-01-01T00:04:00",
-], ids=["absent", "no capture time", "a negative count", "an unreadable time", "a time with no zone"])
+    "0 unknown 2026-01-01T00:04:00+00:00",
+], ids=["absent", "no capture time", "a negative count", "an unreadable time", "a time with no zone", "a mixed census"])
 def test_an_unreadable_media_census_counts_as_no_report_and_the_backup_still_counts(census: str) -> None:
     # A census read as 0 evicted would let cellctl remove a turned-off cell's key and edge access.
     current_backup = hold_job_name("cell-backup", CURRENT_HOLD)

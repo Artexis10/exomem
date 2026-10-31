@@ -45,6 +45,7 @@ from .manifests import (
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
+    MEDIA_CENSUS_UNKNOWN,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
     PREVIOUS_IMAGE_ANNOTATION,
@@ -1245,8 +1246,10 @@ def _backup_report(message: str | None) -> tuple[str | None, int | None, int | N
 
 
 # add-cloud-media-store D12: the backup Job's second line, "<evicted count> <evicted bytes>
-# <capture time>", a format manifests.render_backup_job fixes. "unknown" is an incomplete census.
-_MEDIA_CENSUS = re.compile(r"(?P<evicted>[0-9]{1,19}|unknown) (?P<bytes>[0-9]{1,19}|unknown) (?P<captured>\S+)")
+# <capture time>", a format manifests.render_backup_job fixes. MEDIA_CENSUS_UNKNOWN is an incomplete census;
+# a line with one count known and one unknown is no census, since a known 0 beside it would read as drained.
+_MEDIA_CENSUS = re.compile(
+    rf"(?:(?P<evicted>[0-9]{{1,19}}) (?P<bytes>[0-9]{{1,19}})|{re.escape(MEDIA_CENSUS_UNKNOWN)}) (?P<captured>\S+)")
 
 
 def _media_census(message: str | None) -> MediaCensus | None:
@@ -1262,7 +1265,7 @@ def _media_census(message: str | None) -> MediaCensus | None:
         return None
     if captured_at.tzinfo is None:
         return None
-    evicted, evicted_bytes = (None if match[key] == "unknown" else int(match[key]) for key in ("evicted", "bytes"))
+    evicted, evicted_bytes = (None if match[key] is None else int(match[key]) for key in ("evicted", "bytes"))
     return MediaCensus(evicted=evicted, evicted_bytes=evicted_bytes, captured_at=captured_at)
 
 

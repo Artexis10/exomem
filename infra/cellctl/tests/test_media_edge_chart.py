@@ -142,7 +142,7 @@ def test_the_fleet_switch_selects_every_cell_beside_the_canary_list() -> None:
 def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> None:
     documents = _helm_template(
         *EDGE, "--set-json", f'mediaEdge.credentialEpochs={{"{CANARY}":2}}',
-        "--set-json", 'mediaEdge.storePolicy={"evict_after_days":30}')
+        "--set-json", 'mediaEdge.storePolicy={"evict_after_days":30,"max_temporary_bytes":5637144576,"max_hydrations":1}')
     cellctl = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in cellctl["env"]}
     role = _find(documents, "Role", "cellctl-media-edge-active-set")
@@ -150,7 +150,8 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
     assert env["CELLCTL_MEDIA_EDGE_URL"] == "http://10.43.0.30:8769"
     assert json.loads(env["CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS"]) == {CANARY: 2}
     default_policy = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())["mediaEdge"]["storePolicy"]
-    assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {**default_policy, "evict_after_days": 30}
+    assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {
+        **default_policy, "evict_after_days": 30, "max_temporary_bytes": 5637144576, "max_hydrations": 1}
     assert role["metadata"]["namespace"] == NAMESPACE
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["exomem-media-edge-active-set"],
@@ -187,6 +188,12 @@ def test_the_default_object_bound_admits_a_5_gib_file_at_the_edge_and_in_cellctl
         ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=true'),
         ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=-1'),
         ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=1.5'),
+        # The hydration capacity is a pair of positive whole numbers: both or neither.
+        ("--set-json", 'mediaEdge.storePolicy={"max_hydrations":1}'),
+        ("--set-json", 'mediaEdge.storePolicy={"max_temporary_bytes":5637144576}'),
+        ("--set-json", 'mediaEdge.storePolicy={"max_temporary_bytes":5637144576,"max_hydrations":0}'),
+        ("--set-json", 'mediaEdge.storePolicy={"max_temporary_bytes":1.5,"max_hydrations":1}'),
+        ("--set-json", 'mediaEdge.storePolicy={"max_temporary_bytes":5637144576,"max_hydrations":true}'),
         ("--set-json", f'mediaEdge.credentialEpochs={{"{CANARY}":-1}}'),
     ],
 )

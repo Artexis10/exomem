@@ -63,7 +63,8 @@ MEDIA_STORE_OWNED_KEYS = frozenset(
     {"store", "enabled", "adapter", "key_version", "name_key_path", "identity_path", "recipient",
      "max_object_bytes", "root", "growth_threshold"}
 )
-# D12: the hydration capacity the cell reads from the policy, a pair the store protocol fixes.
+# D12: the hydration capacity the cell reads from the policy, a pair the store protocol fixes. The cell's
+# copy is `_HYDRATION_KEYS` in src/exomem/media_capacity.py; cellctl cannot import the cell, so change both.
 MEDIA_HYDRATION_KEYS = ("max_temporary_bytes", "max_hydrations")
 MEDIA_STORE_CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
 MEDIA_EDGE_URL_ENV = "EXOMEM_MEDIA_EDGE_URL"

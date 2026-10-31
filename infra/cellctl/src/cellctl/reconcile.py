@@ -1321,6 +1321,13 @@ MEDIA_KEYED = (MEDIA_SERVED, MEDIA_DRAINING)
 MEDIA_STORE_RECORD = "media_store"
 
 
+def _media_store_of(row: CellRow) -> object:
+    """D12: the row's turned-off store record, or None. A custody observation that is not an object,
+    such as a jsonb null, holds none; the pass-wide active set reads every row, so it must not raise."""
+    custody = json.loads(row.custody_observation or "{}")
+    return custody.get(MEDIA_STORE_RECORD) if isinstance(custody, dict) else None
+
+
 def _media_store_drained(record: object) -> bool:
     """D12: a report that the cell captured after cellctl turned its store off shows no evicted
     original. No report, an unknown count and an earlier capture each keep the store."""
@@ -1343,9 +1350,9 @@ def _media_mode(cluster_config: ClusterConfig, row: CellRow) -> str | None:
         return MEDIA_SERVED
     if row.media_key_wrapped is None:
         return None
-    # Without edge settings cellctl can sign no credential, so the store identity alone is left.
-    record = json.loads(row.custody_observation or "{}").get(MEDIA_STORE_RECORD)
-    if edge is not None and not _media_store_drained(record):
+    # Without edge settings cellctl can sign no credential, so the store identity alone is left. Startup
+    # refuses edge settings that are gone while a store is still undrained (MediaStoreNotDrained).
+    if edge is not None and not _media_store_drained(_media_store_of(row)):
         return MEDIA_DRAINING
     # The identity alone keeps an evicted original evicted; without it the runtime reads it as deleted.
     return MEDIA_RETAINED
@@ -1354,8 +1361,8 @@ def _media_mode(cluster_config: ClusterConfig, row: CellRow) -> str | None:
 def _media_store_record(cluster_config: ClusterConfig, row: CellRow, census: MediaCensus | None) -> dict | None:
     """D12: a turned-off store's record, with the newest report the cell captured since. A cell the
     edge serves again forgets it, so a report from while it was served never counts for a later turn-off."""
-    record = json.loads(row.custody_observation or "{}").get(MEDIA_STORE_RECORD)
-    if record is None or _media_mode(cluster_config, row) == MEDIA_SERVED:
+    record = _media_store_of(row)
+    if not isinstance(record, dict) or _media_mode(cluster_config, row) == MEDIA_SERVED:
         return None
     if census is None:
         return record
@@ -2947,12 +2954,27 @@ class MediaKeyColumnsMissing(RuntimeError):
     """The media edge is configured, but the schema has no column to hold a cell's media key bundle."""
 
 
+class MediaStoreNotDrained(RuntimeError):
+    """D12: the media edge is off, but a live cell's store has not drained."""
+
+
 async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_config: ClusterConfig) -> ClusterConfig:
     present = await db.has_media_key_columns(connection)
     if cluster_config.media_edge is not None and not present:
         raise MediaKeyColumnsMissing(
             "the media edge is configured, but exomem_cloud_cells has no media key columns: apply Substrate "
             f"migration {db.MEDIA_KEY_MIGRATION} and its grants, or turn the media edge off")
+    if cluster_config.media_edge is None and present:
+        # D12: without edge settings cellctl signs no credential, so an undrained cell would keep its store
+        # identity alone and every evicted original would be unreadable. Stopping fails the deploy instead.
+        undrained = sorted(row.cell_id for row in await db.select_all_rows(connection, media_keys=True)
+                           if row.desired_state != "deleted" and row.media_key_wrapped is not None
+                           and not _media_store_drained(_media_store_of(row)))
+        if undrained:
+            raise MediaStoreNotDrained(
+                f"the media edge is off, but {len(undrained)} cell(s) have not drained their media store: "
+                f"{', '.join(undrained)}. Turn the edge on with them off mediaEdge.cellIds, and turn it off "
+                "once each record shows no evicted original")
     return dataclass_replace(cluster_config, media_key_columns=present)
 
 
@@ -3001,7 +3023,7 @@ async def run_loop(
                         raise RuntimeError("cellctl advisory lock is held by another writer")
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
-                except MediaKeyColumnsMissing:
+                except (MediaKeyColumnsMissing, MediaStoreNotDrained):
                     # A deploy-order fault, not an outage: stop, so the rollout fails where it started.
                     raise
                 except Exception as error:  # noqa: BLE001

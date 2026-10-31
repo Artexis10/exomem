@@ -17,6 +17,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from kubernetes.client.rest import ApiException
 
 from cellctl import db, main, manifests, media_edge, reconcile
 from cellctl.decide import GROWTH_THRESHOLD_PERCENT
@@ -26,6 +27,7 @@ from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_reconcile import (
+    IMAGE_A,
     FakeClusterGateway,
     _cluster_config,
     _converged_cell,
@@ -470,36 +472,6 @@ async def test_a_selected_cell_waits_when_the_active_set_cannot_be_published(cel
         await fleet.close()
 
 
-async def test_with_the_edge_turned_off_a_cell_keeps_its_store_disabled_with_no_credential_or_egress(cell_db) -> None:
-    # Without its store identity the runtime reads every evicted original as deleted, and its
-    # reconcile then removes their derived data. With no edge settings cellctl can sign no credential.
-    fleet = await _fleet(cell_db, CANARY)
-    try:
-        await fleet.run()
-        assert "media-edge-credential" in fleet.cluster.secret(CANARY)
-        # The chart's mediaEdge.enabled=false: no edge settings, on a schema that has the columns.
-        fleet.config = dataclasses.replace(fleet.config, media_edge=None, media_key_columns=True)
-        await fleet.run(NOW + timedelta(minutes=5))
-
-        namespace = namespace_name(CANARY)
-        secret = fleet.cluster.secret(CANARY)
-        pod = fleet.cluster.applied[(namespace, "StatefulSet", "cell")]["spec"]["template"]["spec"]
-        env = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}
-        mounted = [v["secret"]["items"] for v in pod["volumes"] if v["name"] == "media"]
-        policy = fleet.cluster.applied[(namespace, "NetworkPolicy", "runtime-ingress")]
-
-        assert json.loads(secret.get(MEDIA_STORE_CONFIG_KEY, b"null")) == {"vaults": {"/data/vault": {
-            "store": f"media-edge:{CANARY}", "enabled": False, "adapter": "media-edge"}}}
-        assert not {"media-edge-credential", "media-age-identity", "media-name-key"} & secret.keys()
-        assert env.get("EXOMEM_MEDIA_STORE_CONFIG") == "/run/exomem/media/store.json"
-        assert not {"EXOMEM_MEDIA_EDGE_URL", "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"} & env.keys()
-        assert mounted == [[{"key": MEDIA_STORE_CONFIG_KEY, "path": "store.json"}]]
-        assert policy["spec"]["egress"] == []
-        assert (await fleet.rows())[CANARY].media_key_wrapped is not None
-    finally:
-        await fleet.close()
-
-
 # -- the retained store (D12): a turned-off cell keeps its key until a later report shows none evicted --
 
 
@@ -559,14 +531,18 @@ async def test_a_turned_off_cell_with_no_report_keeps_its_key_credential_egress_
         await fleet.close()
 
 
-async def test_a_report_captured_before_the_turn_off_keeps_them_even_with_no_evicted_original(cell_db) -> None:
+# The turn-off is recorded at NOW + 5 minutes; a capture at that instant may still predate it.
+@pytest.mark.parametrize("captured_minutes", [1, 5], ids=["before the turn-off", "at the turn-off"])
+async def test_a_report_captured_before_or_at_the_turn_off_keeps_them_even_with_no_evicted_original(
+    cell_db, captured_minutes: int,
+) -> None:
     # Eviction ran on until the store was turned off, so an earlier census can miss what it evicted.
     fleet = await _fleet(cell_db, CANARY)
     try:
         await fleet.run()
         _turn_off(fleet)
         await fleet.run(NOW + timedelta(minutes=5))
-        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=1))
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=captured_minutes))
         await fleet.run(NOW + timedelta(minutes=10))
         await fleet.run(NOW + timedelta(minutes=15))
 
@@ -646,13 +622,16 @@ async def test_a_cell_served_again_forgets_its_earlier_turn_off(cell_db) -> None
         await fleet.close()
 
 
-async def test_a_deleted_turned_off_cell_leaves_the_set_and_retires_its_keys_without_a_report(cell_db) -> None:
+@pytest.mark.parametrize("turned_off", [True, False], ids=["turned off", "still selected"])
+async def test_a_deleted_cell_leaves_the_set_and_retires_its_keys_without_a_report(cell_db, turned_off: bool) -> None:
     # Waiting for a report that a deleted cell never sends would keep its keys and edge access forever.
+    # A cell the edge still selects is the case where only the deletion keeps it out of the set.
     fleet = await _fleet(cell_db, CANARY)
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     try:
         await fleet.run()
-        _turn_off(fleet)
+        if turned_off:
+            _turn_off(fleet)
         await fleet.run(NOW + timedelta(minutes=5))
         assert CANARY in fleet.cluster.published()["cells"]
         await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", CANARY)
@@ -664,6 +643,108 @@ async def test_a_deleted_turned_off_cell_leaves_the_set_and_retires_its_keys_wit
         assert retired.media_key_wrapped is None and retired.content_keys_retired_at is not None
     finally:
         await app.close()
+        await fleet.close()
+
+
+async def test_a_refused_offload_off_secret_records_no_turn_off(cell_db) -> None:
+    # The cell still offloads under its old Secret, so a report it captures next must not count for a drain.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        _turn_off(fleet)
+        # Inside a hold cellctl applies the StatefulSet even when the cluster refuses the Secret.
+        fleet.cluster.observations[CANARY] = ClusterObservation(
+            statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_hold_kind="import",
+            statefulset_hold_started_at=NOW)
+        apply_all = fleet.cluster.apply_all
+
+        def refuse_the_secret(manifests: list[dict]) -> None:
+            if (manifests[0]["kind"], manifests[0]["metadata"]["name"]) == ("Secret", "cell-credentials"):
+                raise ApiException(status=422, reason="refused by the test")
+            apply_all(manifests)
+
+        fleet.cluster.apply_all = refuse_the_secret
+        before = len(fleet.cluster.events)
+        await fleet.run(NOW + timedelta(minutes=5))
+
+        assert [event[0] for event in fleet.cluster.events[before:]] == ["apply_statefulset"]
+        custody = json.loads((await fleet.rows())[CANARY].custody_observation or "{}")
+        assert "media_store" not in custody
+    finally:
+        await fleet.close()
+
+
+async def test_one_unreadable_custody_observation_does_not_stop_the_pass_for_every_cell(cell_db) -> None:
+    # The active set reads every cell's record before any row's own error boundary.
+    fleet = await _fleet(cell_db, CANARY, OTHER, cell_ids=(CANARY, OTHER))
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await fleet.run()
+        await owner.execute("UPDATE exomem_cloud_cells SET custody_observation='null'::jsonb WHERE cell_id=$1", OTHER)
+        fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
+            cell_ids=(CANARY,), signing_key=fleet.config.media_edge.signing_key))
+        await fleet.run(NOW + timedelta(minutes=5))
+
+        # OTHER keeps its entry, as a cell with no readable record does.
+        assert set(fleet.cluster.published()["cells"]) == {CANARY, OTHER}
+    finally:
+        await owner.close()
+        await fleet.close()
+
+
+async def test_with_the_edge_off_cellctl_stops_at_startup_until_every_keyed_cell_has_drained(cell_db, tmp_path) -> None:
+    # Started with the edge off, cellctl would take an undrained cell to its store identity alone and
+    # leave every evicted original unreadable. Stopping fails the deploy, so the edge stays on.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        edge_off = dataclasses.replace(fleet.config, media_edge=None)
+
+        with pytest.raises(reconcile.MediaStoreNotDrained, match=CANARY):
+            await asyncio.wait_for(reconcile.run_loop(
+                cell_db.dsn(role="exomem_cellctl"), EdgeCluster(), FakeB2(), FakeHetznerVolumeProvider(),
+                _secrets_config(), edge_off, heartbeat_path=str(tmp_path / "heartbeat")), timeout=20)
+
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+        assert (await reconcile._observe_media_key_columns(fleet.connection, edge_off)).media_edge is None
+    finally:
+        await fleet.close()
+
+
+async def test_with_the_edge_turned_off_after_a_drain_a_cell_keeps_its_store_identity_alone(cell_db) -> None:
+    # Without its store identity the runtime reads every evicted original as deleted, and its
+    # reconcile then removes their derived data. With no edge settings cellctl can sign no credential.
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        assert "media-edge-credential" in fleet.cluster.secret(CANARY)
+        _turn_off(fleet)
+        await fleet.run(NOW + timedelta(minutes=5))
+        _report(fleet, evicted=0, evicted_bytes=0, captured_at=NOW + timedelta(minutes=10))
+        await fleet.run(NOW + timedelta(minutes=15))
+        # The chart's mediaEdge.enabled=false: no edge settings, on a schema that has the columns.
+        fleet.config = dataclasses.replace(fleet.config, media_edge=None, media_key_columns=True)
+        await fleet.run(NOW + timedelta(minutes=20))
+
+        namespace = namespace_name(CANARY)
+        secret = fleet.cluster.secret(CANARY)
+        pod = fleet.cluster.applied[(namespace, "StatefulSet", "cell")]["spec"]["template"]["spec"]
+        env = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}
+        mounted = [v["secret"]["items"] for v in pod["volumes"] if v["name"] == "media"]
+        policy = fleet.cluster.applied[(namespace, "NetworkPolicy", "runtime-ingress")]
+
+        assert json.loads(secret.get(MEDIA_STORE_CONFIG_KEY, b"null")) == {"vaults": {"/data/vault": {
+            "store": f"media-edge:{CANARY}", "enabled": False, "adapter": "media-edge"}}}
+        assert not {"media-edge-credential", "media-age-identity", "media-name-key"} & secret.keys()
+        assert env.get("EXOMEM_MEDIA_STORE_CONFIG") == "/run/exomem/media/store.json"
+        assert not {"EXOMEM_MEDIA_EDGE_URL", "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"} & env.keys()
+        assert mounted == [[{"key": MEDIA_STORE_CONFIG_KEY, "path": "store.json"}]]
+        assert policy["spec"]["egress"] == []
+        assert (await fleet.rows())[CANARY].media_key_wrapped is not None
+    finally:
         await fleet.close()
 
 
