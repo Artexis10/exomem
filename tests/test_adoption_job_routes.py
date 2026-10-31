@@ -4,7 +4,7 @@ import pytest
 import test_single_purpose_tools_mcp as pilot_mcp
 from test_single_purpose_tools_mcp import _call, _session
 
-from exomem import commands, find, operation_entries, request_budget, writer_lease
+from exomem import adoption_run, commands, find, operation_entries, request_budget, writer_lease
 from exomem.command_surface import resolve_invocation
 from exomem.vault import parse_frontmatter
 
@@ -19,6 +19,7 @@ build = pilot_mcp.build
          {"selected_paths": ["Legacy/source.md"]}),
         ("read_import", "adoption_studio", "action", "status", {}),
         ("import_memory", "adoption_studio", "action", "start", {"collection": "Example collection"}),
+        ("import_memory", "adoption_studio", "action", "start", {"after": "run-1:after-0001-ab12cd34", "consume": False}),
         ("import_memory", "adoption_studio", "action", "select", {
             "run_id": "run", "include": [{"path": "Legacy", "source_kind": "article", "domain": "science"}],
         }),
@@ -122,3 +123,28 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
         assert {relative: (vault / relative).read_bytes() for relative in originals} == originals
     finally:
         request_budget.reset_resolution_cache()
+
+
+def test_mcp_start_takes_the_next_page_by_its_cursor_keeps_staged_copies_on_request_and_refuses_a_malformed_cursor(
+        vault, build):
+    for number in range(3):
+        (vault / "Legacy").mkdir(exist_ok=True)
+        (vault / "Legacy" / f"note-{number}.md").write_text(f"# Note {number}\n\nInvented note {number}.\n")
+    find.clear_cache()
+    first = adoption_run.start(vault, path="Legacy", max_candidates=2)
+
+    async def scenario(client):
+        async def start(**fields):
+            result = await _call(client, "import_memory", {
+                "operation": {"kind": "start", **fields}, "response_detail": "full"})
+            diagnostics = result.get("diagnostics", result)
+            return diagnostics.get("leaf_result", diagnostics)
+
+        malformed = await start(after="not-a-cursor")
+        assert "INVALID_CONTINUATION" in str(malformed)
+        second = await start(after=first["next_after"])
+        assert (second["paging"]["previous"], len(second["inventory"])) == (first["run_id"], 1)
+        kept = await start(path="Legacy", consume=False)
+        assert kept["consume"] is False
+
+    _session(build(), scenario)

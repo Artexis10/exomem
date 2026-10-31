@@ -22,7 +22,14 @@ from test_media_slot_lease import (
 )
 from test_media_worker import _cloud_brakes, _preserve_media_stub, _run_supervisor_for, _wait_until
 
-from exomem import extract, media_jobs, media_slot_lease, media_worker, media_worker_child
+from exomem import (
+    cuda_containment,
+    extract,
+    media_jobs,
+    media_slot_lease,
+    media_worker,
+    media_worker_child,
+)
 from exomem.media_slot_client import CELL_ID_ENV, URL_ENV, SlotClient
 
 TOWER = 512  # MiB the CLIP tower reserves beside the stage's engine
@@ -239,6 +246,7 @@ def test_the_child_is_started_with_the_bytes_its_slot_reserves(vault, monkeypatc
     monkeypatch.setattr(media_worker.subprocess, "Popen", lambda args, **_kw: started.append(args))
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     worker._leased_anon_bytes = BIG << 20
+    worker._gpu_preflight = cuda_containment.Preflight(True)  # the host's GPU is not under test
 
     worker._launch_child()
 

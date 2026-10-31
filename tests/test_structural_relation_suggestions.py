@@ -1031,3 +1031,37 @@ def test_accepted_lift_bullet_reenters_as_a_core_page_level_edge(
     ]
     assert page_level
     assert all(edge["registry_status"] == "core" for edge in page_level)
+
+
+@pytest.mark.parametrize("seed", ["page", "draft"])
+def test_wikilink_candidates_resolve_a_dense_page_with_one_vault_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: str
+) -> None:
+    # Each bare link used to build its own resolver, one vault walk per link;
+    # a link-dense page made one suggest-relations call run for over an hour.
+    from exomem import vault
+
+    names = [f"Target {index}" for index in range(12)]
+    for name in names:
+        _page(tmp_path, name, "Plain target page.")
+    body = " ".join(f"[[{name} note]]" for name in names)
+    _page(tmp_path, "Dense", body)
+    _build(tmp_path)
+    walks: list[Path] = []
+    walk = vault.walk_vault_md
+
+    def counted(root: Path, *args, **kwargs):
+        walks.append(root)
+        return walk(root, *args, **kwargs)
+
+    monkeypatch.setattr(vault, "walk_vault_md", counted)
+    if seed == "page":
+        result = epistemic_graph.suggest_relations(tmp_path, path=f"{KB}/Dense.md", limit=50)
+    else:
+        result = epistemic_graph.suggest_relations(
+            tmp_path, draft_title="Dense", draft_body=body, limit=50
+        )
+
+    linked = {candidate["to"] for candidate in _by_method(result["candidates"], "wikilink")}
+    assert linked == {f"{KB}/{name}.md" for name in names}
+    assert len(walks) <= 1

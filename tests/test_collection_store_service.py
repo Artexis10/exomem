@@ -1806,11 +1806,19 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
         occupied = executor.submit(server.call, occupy)
         try:
             assert entered.wait(2)
-            # The short budget belongs to the queued request, after setup owns the thread.
-            with monkeypatch.context() as queue_timeout, pytest.raises(OpError) as busy:
-                queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
-                call(service.root, "record_memory", action="append", collection=CID,
-                     item={"title": "Never accepted"}, item_key=LATER, why="queue timeout")
+            # The short budgets belong to the queued request, after setup owns the thread. A write
+            # keeps its place past the mutation timeout only while its request budget allows.
+            from exomem import request_budget
+
+            token = request_budget.set_current(request_budget.RequestBudget(
+                seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.5))
+            try:
+                with monkeypatch.context() as queue_timeout, pytest.raises(OpError) as busy:
+                    queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                    call(service.root, "record_memory", action="append", collection=CID,
+                         item={"title": "Never accepted"}, item_key=LATER, why="queue timeout")
+            finally:
+                request_budget.reset_current(token)
             assert busy.value.code == "COLLECTION_STORE_BUSY"
             assert busy.value.details["status"] == "retryable"
             assert busy.value.details["committed"] is False
@@ -1825,6 +1833,95 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
             release.set()
             occupied.result(timeout=5)
     assert titles(service.root, CID) == ["Canonical"]
+
+
+def counted_appends(monkeypatch):
+    from exomem.collection_store.writer import CollectionWriter
+
+    calls = []
+    append = CollectionWriter.append_record
+
+    def counted(writer, *args, **kwargs):
+        calls.append(kwargs.get("item_key"))
+        return append(writer, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "append_record", counted)
+    return calls
+
+
+def test_a_keyed_write_waiting_its_turn_leaves_the_store_thread_free(service, monkeypatch):
+    """Defect: a store-routed write that had to wait for its turn behind another write waited on the
+    store thread, so a read queued behind it was refused as COLLECTION_STORE_BUSY."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    appends = counted_appends(monkeypatch)
+    line = service.manager._capture_queue
+    ahead = line.enter_line()  # another write already waiting for its turn
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            write = pool.submit(call, service.root, "record_memory", action="append", collection=CID,
+                                item={"title": "Waited"}, item_key=LATER, why="waited its turn",
+                                idempotency_key="waited-turn")
+            _until(lambda: len(line._line) == 2)
+            assert titles(service.root, CID) == ["Canonical"]
+            line.leave(ahead)
+            assert write.result(timeout=20)["outcome"] == "committed"
+    finally:
+        line.leave(ahead)
+    assert appends == [LATER]
+    assert titles(service.root, CID) == ["Canonical", "Waited"]
+
+
+@pytest.mark.parametrize("held", ["at_routing", "after_routing"])
+def test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread(service, monkeypatch, held):
+    """Routing proves ownership under the boundary, so a hold met there reached the caller as
+    MUTATION_BUSY. A hold met after routing was waited out on the store thread. Both now wait on
+    the request thread, and the write commits once."""
+    from exomem import mutation_lock
+
+    appends = counted_appends(monkeypatch)
+    holding, refusals = threading.Event(), []
+    refused = mutation_lock.VaultMutationCoordinator._refused
+
+    def noted(coordinator, wait_start):
+        refusals.append(wait_start)
+        return refused(coordinator, wait_start)
+
+    monkeypatch.setattr(mutation_lock.VaultMutationCoordinator, "_refused", noted)
+
+    def hold():
+        with service.manager.consistency_guard(service.root, operation="test hold"):
+            holding.set()
+            time.sleep(1.0)
+
+    holder = threading.Thread(target=hold)
+    if held == "at_routing":
+        holder.start()
+        assert holding.wait(5)
+    else:
+        route = runtime.route
+
+        def route_then_hold(*args):
+            server = route(*args)
+            if server is not None and not holding.is_set():
+                holder.start()
+                assert holding.wait(5)
+            return server
+
+        monkeypatch.setattr(runtime, "route", route_then_hold)
+    try:
+        # A short guard bound, so the write meets the hold several times; the service stops with the default.
+        with monkeypatch.context() as short:
+            short.setattr(service.manager, "_mutation_timeout_seconds", 0.2)
+            result = call(service.root, "record_memory", action="append", collection=CID,
+                          item={"title": "Waited"}, item_key=LATER, why="held boundary",
+                          idempotency_key="held-boundary")
+    finally:
+        holder.join(10)
+    assert result["outcome"] == "committed"
+    assert refusals, "the write never met the held boundary"
+    assert appends == [LATER]
+    assert titles(service.root, CID) == ["Canonical", "Waited"]
 
 
 def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypatch):
@@ -1917,6 +2014,40 @@ def test_a_read_during_a_store_handoff_that_outlasts_the_mutation_timeout_is_ref
             titles(service.root, CID)
         assert busy.value.code == "COLLECTION_STORE_BUSY" and busy.value.as_public_dict()["committed"] is False
         assert time.monotonic() - entry < 1.5
+
+
+def test_a_write_during_a_store_handoff_that_outlasts_the_mutation_timeout_commits_once(service, monkeypatch):
+    """Defect: a write still waiting when the handoff outlasted the mutation timeout reached the
+    store, which refused it as COLLECTION_STORE_BUSY before it ran; an idle release does this about
+    once a minute."""
+    appends = counted_appends(monkeypatch)
+    with held_handoff(service) as leave, monkeypatch.context() as short:
+        short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+        threading.Timer(1.5, leave.set).start()
+        result = call(service.root, "record_memory", action="append", collection=CID,
+                      item={"title": "After handoff"}, item_key=LATER, why="handoff")
+    assert result["outcome"] == "committed"
+    assert appends == [LATER]
+    assert titles(service.root, CID) == ["After handoff", "Canonical"]
+
+
+def test_a_store_busy_raised_after_the_write_started_reaches_the_caller_once(service, monkeypatch):
+    """Only a refusal raised before the write's leaf ran is safe to submit again: an unkeyed write
+    submitted again after its leaf ran could write twice."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    leaf_calls = []
+
+    def refused_inside(writer, *args, **kwargs):
+        leaf_calls.append(kwargs.get("item_key"))
+        raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+
+    monkeypatch.setattr(CollectionWriter, "append_record", refused_inside)
+    with pytest.raises(OpError) as busy:
+        call(service.root, "record_memory", action="append", collection=CID, item={"title": "Once"},
+             item_key=LATER, why="inside the leaf")
+    assert busy.value.code == "COLLECTION_STORE_BUSY"
+    assert leaf_calls == [LATER]
 
 
 def test_a_clean_service_stop_hands_the_writer_lease_back_with_the_unmoved_head(service, monkeypatch):

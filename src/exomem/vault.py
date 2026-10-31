@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import Context, ContextVar, copy_context
@@ -237,6 +238,9 @@ _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 
 
+# The vault folder that holds staged imports, one `<import_id>` folder each.
+IMPORT_STAGE_DIRNAME = "_Imports"
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
@@ -341,6 +345,29 @@ def is_lexical_rebuild_runtime_file_name(name: str) -> bool:
     return _LEXICAL_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
+def is_import_id(value: object) -> bool:
+    """True for a canonical lowercase UUID string, the only spelling an import id takes."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def in_import_stage(rel_path: str) -> bool:
+    """True when a vault-relative path is, or lies inside, a staged import `_Imports/<import_id>`.
+
+    A stage is transient input that adoption files into the Knowledge Base and then discards;
+    indexing it doubles every filed note and, after a large import lands offline, makes readiness
+    wait on a whole-catalogue rebuild over the stage. Only the vault root holds stages, each under
+    an import id, so a person's own `_Imports` folder elsewhere, or a named one at the root, stays
+    indexed.
+    """
+    segments = rel_path.replace("\\", "/").strip("/").split("/")
+    return len(segments) >= 2 and segments[0] == IMPORT_STAGE_DIRNAME and is_import_id(segments[1])
+
+
 def in_excluded_scan_dir(rel_path: str) -> bool:
     """True when any segment of `rel_path` is a reserved scan directory.
 
@@ -353,6 +380,8 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
+    if in_import_stage(rel_path):
+        return True
     segments = rel_path.replace("\\", "/").split("/")
     if (
         len(segments) >= 2
@@ -6626,6 +6655,9 @@ def in_append_only_tree(rel_path: str) -> str | None:
 # parse_frontmatter, scalar rendering + find's page parser) — one-off config
 # loads keep safe_load.
 _YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# The emitter counterpart, for text that is only parsed again. Its bytes can
+# differ from SafeDumper's, so never use it for text that is hashed or stored.
+_YAML_SAFE_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 
 class _DuplicateYamlKey(yaml.YAMLError):
@@ -6683,6 +6715,15 @@ def yaml_safe_load(text: str):
     Pinned by tests/test_yaml_loader_safety.py — do not widen the loader.
     """
     return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
+
+
+def yaml_safe_dump_for_parse(value: Any) -> str:
+    """`yaml.safe_dump` via libyaml, for text that only `yaml_safe_load` reads back.
+
+    Loading the result gives the same value as loading `yaml.safe_dump`'s, but
+    the bytes may differ, so a fingerprint or stored text keeps `yaml.safe_dump`.
+    """
+    return yaml.dump(value, Dumper=_YAML_SAFE_DUMPER)
 
 
 def read_frontmatter_header(

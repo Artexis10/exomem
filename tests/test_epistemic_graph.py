@@ -451,6 +451,7 @@ def test_similarity_suggestions_are_neutral_evidenced_and_read_only(
         "from": CURRENT,
         "to": RELATED,
         "relation_type": "relates_to",
+        "relation_label": "relates_to",
         "method": "embedding_proximity",
         "evidence": {"cosine": 0.9123},
     }
