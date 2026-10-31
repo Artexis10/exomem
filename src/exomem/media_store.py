@@ -1196,11 +1196,31 @@ def _live_demand(ledger: MediaJobStore) -> tuple[int, int] | None:
     return None if row is None else (int(row["demand_bytes"]), int(row["budget_offset"]))
 
 
+def _fill_missing_sizes(conn, ledger: MediaJobStore) -> None:
+    """Give a bounded batch of rows from before the size column their size (D3, M3).
+
+    Without it, an upgrade would keep every original cached before it on the volume.
+    The size is only a candidate hint: `evict` verifies each original again.
+    """
+    for row in conn.execute("SELECT binary_rel FROM media_cache WHERE size IS NULL AND evicted = 0 LIMIT ?",
+                            (_EVICTION_BATCH,)).fetchall():
+        try:
+            size = os.lstat(ledger.vault_root / row["binary_rel"]).st_size
+        except FileNotFoundError:
+            # An earlier eviction kept the row; the flag only orders the claim.
+            conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (row["binary_rel"],))
+        except OSError:
+            continue  # The next pass tries again; this row only stays out of the candidates.
+        else:
+            conn.execute("UPDATE media_cache SET size = ? WHERE binary_rel = ?", (size, row["binary_rel"]))
+
+
 def _eviction_candidates(ledger: MediaJobStore, parameters: dict[str, object]) -> tuple[list[str], int]:
     conn = ledger._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
         _clear_dead_access(conn, ledger, conn.execute("SELECT * FROM media_access").fetchall())
+        _fill_missing_sizes(conn, ledger)
         conn.commit()
         eligible = conn.execute("SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE, parameters).fetchone()[0]
         rows = conn.execute("SELECT binary_rel " + _ELIGIBLE + " " + _EVICTION_ORDER + " LIMIT :batch",

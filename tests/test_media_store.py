@@ -1703,6 +1703,19 @@ def _configure(selected_store, vault: Path, **changes):
     config.write_text(json.dumps({"vaults": {str(vault): {**values, **changes}}}))
 
 
+def test_an_original_cached_before_the_size_column_still_leaves_under_pressure(vault: Path, selected_store, monkeypatch):
+    """Catches an upgrade that keeps every original cached before it on the volume for good."""
+    from exomem import media_jobs, media_store
+
+    path = _stored(vault, "cached-before-the-upgrade", 300)
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_cache SET size = NULL")
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, path))
+
+    assert media_store.evict_to_target(vault) == 1
+    assert originals.original_state(vault, path).state == "evicted"
+
+
 def test_a_never_read_original_leaves_under_pressure_and_an_owner_read_one_stays(vault: Path, selected_store, monkeypatch):
     """Catches idle time that counts processing as a read, or that ignores an owner's recent read."""
     from exomem import media_store
