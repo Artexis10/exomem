@@ -31,6 +31,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
@@ -799,9 +800,33 @@ def _present(root: Path, run: dict, **extra) -> dict:
         out["verified_total"] = verify.get("verified_total")
         out["consumed"] = verify.get("consumed", 0)
     if isinstance(out.get("finish"), dict):
-        out["finish"] = {**out["finish"], "handoff": _handoff(run)}
+        out["finish"] = _presented_finish(run)
     out.update(extra)
     return out
+
+
+def _presented_finish(run: dict) -> dict:
+    """The stored finish with its handoff and routes spelled for the surface reading it.
+
+    `finish` stores each route in the grouped spelling that the command registry runs, so a
+    run finished on one surface and read on another names tools that the reader lists.
+    """
+    finish = {**run["finish"], "handoff": _handoff(run)}
+    if "route" in finish:
+        finish["route"] = _spelled_route(finish["route"])
+    recall = finish.get("recall_check")
+    if isinstance(recall, dict) and "next_action" in recall:
+        finish["recall_check"] = {**recall, "next_action": _spelled_route(recall["next_action"])}
+    return finish
+
+
+def _spelled_route(route: dict) -> dict:
+    """A stored grouped `{"tool", "args"}` route, spelled for the serving surface, else as stored."""
+    try:
+        return capabilities.active_call_route(route["tool"], route["args"])
+    except ValueError:
+        # A route this surface cannot spell must not fail the whole read of the run.
+        return route
 
 
 def _next_actions(run: dict) -> list[dict]:
@@ -1982,73 +2007,129 @@ def _create_notes(
 ) -> None:
     """Create the draft note of every own-note item in `chunk` whose Source is on disk.
 
-    One note at a time, each through the governed two-phase creation. The call stops
-    between two notes when the next would not fit in the time left; the items it leaves
-    keep their `source-applied` outcome and the continuation resumes at them. A call
-    always makes at least one note, so a budget below one note's cost still moves.
+    The identity check runs first: an item whose note exists settles as found, and one
+    whose note cannot be placed fails. The other items commit in batches through the
+    governed two-phase creation (`adopt.create_draft_notes`). A call makes one note at a
+    time until it has made and timed one; after that a batch holds as many notes as fit in
+    the time left at the dearest cost per made note this call has seen. A refused note does
+    not lower that cost, because a quick refusal would make the next batch look free. A batch
+    that refuses makes its notes alone only while one more note fits at the price that sized
+    it. The items a batch leaves or does not reach keep their `source-applied` outcome and the
+    continuation resumes at them. A call always tries at least one note, so a budget below
+    one note's cost still moves.
     """
     outcomes = run["outcomes"]
-    created_any = False
-    for planned in chunk:
-        path = planned["original_path"]
-        if path not in outcomes or outcomes[path]["status"] != _SOURCE_ONLY:
-            continue
-        if stats["notes_started"] and not pacer.note_fits(chunk, stats["note_ms_max"] / 1000):
+    owed = [
+        planned for planned in chunk
+        if planned["original_path"] in outcomes
+        and outcomes[planned["original_path"]]["status"] == _SOURCE_ONLY
+    ]
+    due = [
+        planned for planned in owed
+        if _note_due(root, planned, outcomes[planned["original_path"]], label=label, notes=notes, stats=stats)
+    ]
+    while due:
+        if not stats["notes_started"]:
+            size = 1
+        elif not stats["notes_created"]:
+            # No note made yet, so nothing prices a batch: one note, paced on the dearest try.
+            size = 1 if pacer.note_fits(chunk, stats["note_try_ms_max"] / 1000) else 0
+        else:
+            size = len(due)
+            while size and not pacer.note_fits(chunk, stats["note_ms_max"] * size / 1000):
+                size -= 1
+        if not size:
             stats["notes_deferred"] += 1
             break
-        started = time.monotonic()
-        _create_note(
-            root, planned, texts[path], outcomes[path],
-            label=label, notes=notes, date_iso=run["plan"]["date"], stats=stats, written=written,
+        batch, due = due[:size], due[size:]
+        # A refused batch makes its notes alone; each must still fit at the price that sized it.
+        # A call's first note always runs, so a budget below one note's cost still moves.
+        price_ms = stats["note_ms_max"] if stats["notes_created"] else stats["note_try_ms_max"]
+        fits_one_note = (
+            partial(pacer.note_fits, chunk, price_ms / 1000) if stats["notes_started"] else None
         )
-        stats["notes_started"] += 1
-        stats["note_ms_max"] = max(stats["note_ms_max"], int((time.monotonic() - started) * 1000))
-        created_any = True
-    if created_any:
+        started = time.monotonic()
+        results = adopt_module.create_draft_notes(
+            root,
+            [
+                adopt_module.DraftNote(
+                    planned, texts[planned["original_path"]],
+                    outcomes[planned["original_path"]]["target_path"],
+                )
+                for planned in batch
+            ],
+            collection=label, date_iso=run["plan"]["date"], fits_one_note=fits_one_note,
+        )
+        elapsed_ms = (time.monotonic() - started) * 1000
+        reached = sum(result.reached for result in results)
+        stats["notes_started"] += size
+        if reached:
+            stats["note_try_ms_max"] = max(stats["note_try_ms_max"], int(elapsed_ms / reached))
+        made = sum(result.created is not None for result in results)
+        if made:
+            # The dearest cost per made note: a batch's time, its refusals included, over the notes it made.
+            stats["note_ms_max"] = max(stats["note_ms_max"], int(elapsed_ms / made))
+        for planned, result in zip(batch, results, strict=True):
+            if result.reached:
+                _settle_draft_note(
+                    root, planned, result, outcomes[planned["original_path"]],
+                    label=label, notes=notes, stats=stats, written=written,
+                )
+        if reached < size:
+            # The fallback ran out of time: the notes it did not reach stay `source-applied`.
+            stats["notes_deferred"] += 1
+            break
+    if owed:
         # The outcomes are committed with the chunk's Sources and again here, so a
         # crash costs the identity check at most one chunk of notes.
         store.save(run)
 
 
-def _create_note(
-    root: Path, planned: dict, text: str, outcome: dict, *,
-    label: str | None, notes: adoption_plan.NoteIndex, date_iso: str, stats: Counter,
-    written: list[str],
-) -> None:
-    """Find or create one item's draft note, then settle the item on the result."""
-    from . import note as note_module
+def _found_note(
+    root: Path, planned: dict, *, label: str | None, notes: adoption_plan.NoteIndex
+) -> str | None:
+    """The note an earlier run, a retry or a crashed call made for this item, or None."""
+    return adoption_plan.find_note(
+        root, notes, collection=label, collection_path=planned["collection_path"],
+        frozen=(planned.get("note") or {}).get("target_path"),
+    )
 
+
+def _note_due(
+    root: Path, planned: dict, outcome: dict, *,
+    label: str | None, notes: adoption_plan.NoteIndex, stats: Counter,
+) -> bool:
+    """Settle an item whose note exists or cannot be placed; True when its note is still owed."""
     frozen = (planned.get("note") or {}).get("target_path")
-    source_page = outcome["target_path"]
-
-    def found() -> str | None:
-        return adoption_plan.find_note(
-            root, notes, collection=label, collection_path=planned["collection_path"],
-            frozen=frozen,
-        )
-
-    existing = found()
+    existing = _found_note(root, planned, label=label, notes=notes)
     if existing is not None:
         _settle_note(outcome, {"status": "already-applied", "target_path": existing, "at": _now_iso()})
         stats["notes_found"] += 1
-        return
+        return False
     if frozen is None:
         _fail_note(outcome, "PLAN_STALE", "the note an earlier run made is gone; re-plan this import")
         stats["notes_failed"] += 1
-        return
+        return False
     if os.path.lexists(root / frozen):
         _fail_note(
             outcome, "TARGET_OCCUPIED", f"{frozen} already exists and is not an import of this file"
         )
         stats["notes_failed"] += 1
-        return
-    try:
-        created = adopt_module.create_draft_note(
-            root, planned, text, source_path=source_page, collection=label, date_iso=date_iso
-        )
-    except Exception as error:  # noqa: BLE001 - a refused note is this item's outcome; its Source stays
+        return False
+    return True
+
+
+def _settle_draft_note(
+    root: Path, planned: dict, result: adopt_module.DraftNoteOutcome, outcome: dict, *,
+    label: str | None, notes: adoption_plan.NoteIndex, stats: Counter, written: list[str],
+) -> None:
+    """Settle one item on what `adopt.create_draft_notes` reported for its note."""
+    from . import note as note_module
+
+    error = result.error
+    if error is not None:
         # A failure after the commit still left the note: the identity check records it.
-        existing = found()
+        existing = _found_note(root, planned, label=label, notes=notes)
         if existing is not None:
             _settle_note(outcome, {"status": "already-applied", "target_path": existing, "at": _now_iso()})
             stats["notes_found"] += 1
@@ -2062,6 +2143,7 @@ def _create_note(
         _fail_note(outcome, failure["code"], failure["reason"])
         stats["notes_failed"] += 1
         return
+    created = result.created
     _settle_note(
         outcome,
         {"status": "applied", "target_path": created.path, "note_ref": created.ref, "at": _now_iso()},
@@ -2589,9 +2671,6 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
             "unresolved": sum(len((item.get("links") or {}).get("unresolved") or []) for item in applied_text),
         },
         "recall": _recall_sample(root, run),
-        "limits": [
-            "Inline #tags in a note body are not read; only front-matter tags and aliases are kept."
-        ],
     }
 
 
@@ -2630,12 +2709,20 @@ def finish(
                 verified_total=verified_total, today=run_date,
             )
         title = recall["query"]
+        # A question is ready only once the search finds the page it asks about.
+        ready = (
+            {
+                "first_question": f'What do my notes say about "{title}"?',
+                "route": {"tool": "search_memory", "args": {"query": title}},
+            }
+            if recall["ok"] is True
+            else {"indexing": _indexing(recall, coverage["recall"])}
+        )
         run["finish"] = {
             "at": _now_iso(),
             "recall_check": recall,
             "coverage": coverage,
-            "first_question": f'What do my notes say about "{title}"?',
-            "route": {"tool": "search_memory", "args": {"query": title}},
+            **ready,
             "handoff": _handoff(run),
             "verified_unchanged": verified_unchanged,
             "verified_total": verified_total,
@@ -2646,6 +2733,22 @@ def finish(
         run["phase"] = "done"
         store.save(run)
     return _present(root, run, coverage=coverage)
+
+
+def _indexing(recall: dict, sample: dict) -> dict:
+    """Why finish offers no first question: the recall check's state and the recall sample's counts.
+
+    The state is `pending` or `failed` when the search could not answer, and `missed` when it
+    answered without the page. `found` is None when no sampled search answered.
+    """
+    return {
+        "state": recall.get("status") or "missed",
+        "sampled": sample["sampled"],
+        "found": sample["found"],
+        "missed": len(sample["missed"]),
+        "pending": sample.get("pending", 0),
+        "failed": sample.get("failed", 0),
+    }
 
 
 def _write_run_manifest(
