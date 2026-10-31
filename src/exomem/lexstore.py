@@ -907,8 +907,9 @@ _FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
 #: exact live recall generation pair the caller observed. They are acknowledged
 #: only when the pass's promotion proof covers that pair. The sentinel is used
 #: by the explicit event-index rollback, where no live generation exists.
+#: Each observation also keeps whether every request that made it was lag-only.
 _UNKNOWN_REPAIR_GENERATION = object()
-_FULL_REBUILD_REOBSERVED: dict[Path, set[object]] = {}
+_FULL_REBUILD_REOBSERVED: dict[Path, dict[object, bool]] = {}
 # A successful publish+promotion may still preserve one uncovered generation at
 # the bounded idle handoff. The next flight may cheaply prove that a foreground
 # delta already covered it. Failed/unpromoted passes never enter this set.
@@ -2426,7 +2427,8 @@ def _schedule_repair(
         elif deferred_paths:
             _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
         elif key in _FULL_REBUILDS_IN_FLIGHT:
-            _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
+            observed = _FULL_REBUILD_REOBSERVED.setdefault(key, {})
+            observed[observation] = observed.get(observation, True) and lag_only
         else:
             _request_full_rebuild(key, lag_only=lag_only)
         if key in _REPAIRS_IN_FLIGHT:
@@ -2599,6 +2601,10 @@ def _schedule_repair(
                         # A failed targeted retry escalates to the same full pass
                         # a queued request asked for. Consume that level here so
                         # it cannot become a redundant pass immediately after.
+                        # The pass stays lag-only only if that request was too.
+                        lag_only = lag_only and (
+                            key not in _FULL_REBUILD_REQUESTED or key in _LAG_ONLY_REBUILDS
+                        )
                         _FULL_REBUILD_REQUESTED.discard(key)
                         _LAG_ONLY_REBUILDS.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
@@ -2665,7 +2671,7 @@ def _schedule_repair(
                         covered_generation = _repair_generation_from_proof(
                             promotion_proof
                         )
-                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, set())
+                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, {})
                         uncovered = {
                             generation
                             for generation in reobserved
@@ -2680,6 +2686,10 @@ def _schedule_repair(
                                 )
                             )
                         }
+                        # A published replacement, or a declined pass that only
+                        # lag asked for, leaves nothing but checkpoint lag, so
+                        # the next flight tries the bounded catch-up first.
+                        residual_lag_only = bool(repaired) or lag_only
                         if not (repaired and promoted):
                             # A consumed full request is acknowledged only after
                             # both publication and the exact-current promotion
@@ -2688,6 +2698,7 @@ def _schedule_repair(
                             # re-observe staleness while it was running.
                             _request_full_rebuild(
                                 key,
+                                lag_only=residual_lag_only,
                                 cause=RepairCause.PUBLISH_UNPROMOTED
                                 if repaired
                                 else RepairCause.PASS_DECLINED,
@@ -2695,7 +2706,12 @@ def _schedule_repair(
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
-                            _request_full_rebuild(key, cause=RepairCause.REOBSERVED_DURING_PASS)
+                            _request_full_rebuild(
+                                key,
+                                lag_only=residual_lag_only
+                                and all(reobserved[generation] for generation in uncovered),
+                                cause=RepairCause.REOBSERVED_DURING_PASS,
+                            )
                         if repaired and key in _FULL_REBUILD_REQUESTED:
                             # Another proof can win admission during promotion.
                             # Re-prove this publication before rebuilding it.
