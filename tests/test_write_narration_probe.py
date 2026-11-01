@@ -103,12 +103,14 @@ def test_the_reference_gives_the_judge_the_request_id_the_arm_returned() -> None
     assert filled == "The id is 8c1f0a52-3d7e-4b6a-9f10-2e5a7c4d9b31."
 
 
-def row(arm: str, model: str, r2: str, exact: str, error: str | None = None) -> dict:
+def row(
+    arm: str, model: str, r2: str, exact: str, error: str | None = None, repeat: int = 0
+) -> dict:
     return {
         "arm": arm,
         "model": model,
         "scenario": "01",
-        "repeat": 0,
+        "repeat": repeat,
         "error": error,
         "verdict": "pass",
         "judge_model": "j",
@@ -130,11 +132,11 @@ def test_the_report_subtracts_the_baseline_from_the_candidate_and_skips_unknown_
 ) -> None:
     """Catches a sign error (a reduction read as a rise) and an unknown run counted as a clean one."""
     rows = [
-        row("old", "m", "fail", "pass"),
-        row("old", "m", "fail", "pass"),
-        row("new", "m", "pass", "pass"),
-        row("new", "m", "pass", "pass"),
-        row("new", "m", "pass", "pass", error="timeout"),
+        row("old", "m", "fail", "pass", repeat=0),
+        row("old", "m", "fail", "pass", repeat=1),
+        row("new", "m", "pass", "pass", repeat=0),
+        row("new", "m", "pass", "pass", repeat=1),
+        row("new", "m", "pass", "pass", error="timeout", repeat=2),
     ]
     runs = tmp_path / "runs.jsonl"
     runs.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
@@ -143,3 +145,21 @@ def test_the_report_subtracts_the_baseline_from_the_candidate_and_skips_unknown_
 
     assert "| 01 | m | 2/2 | 0/2 | -1.00 |" in text
     assert "**-1.000**" in text
+
+
+def test_a_rerun_replaces_the_earlier_row_of_the_same_run_and_the_report_lists_it(
+    tmp_path: Path,
+) -> None:
+    """Catches an errored run kept beside its rerun: it would count twice, or hide that it ever failed."""
+    rows = [
+        row("old", "m", "pass", "pass", error="timeout"),
+        row("old", "m", "fail", "pass"),
+        row("new", "m", "pass", "pass"),
+    ]
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    text = report.build([runs], baseline="old", candidate="new")
+
+    assert "| 01 | m | 1/1 | 0/1 | -1.00 |" in text
+    assert "Rows replaced by a later run" in text

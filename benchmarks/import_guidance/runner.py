@@ -454,8 +454,10 @@ def run_all(
     repeats: int,
     out: Path,
     arms: Sequence[Arm] = (),
+    repeat_offset: int = 0,
 ) -> list[dict]:
-    """Every scenario `repeats` times. With `arms`, each repeat runs the arms one after the other, so a slow
+    """Every scenario `repeats` times, numbered from `repeat_offset` so a later call adds repeats to the same
+    folder without reusing a number. With `arms`, each repeat runs the arms one after the other, so a slow
     hour of the provider falls on both. Each arm is recorded first, once per out folder."""
     out = refuse_unsafe_out_dir(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -475,7 +477,7 @@ def run_all(
     rows = []
     with (out / "runs.jsonl").open("a", encoding="utf-8") as sink:
         for scenario in scenarios:
-            for repeat in range(repeats):
+            for repeat in range(repeat_offset, repeat_offset + repeats):
                 for arm in arms or (None,):
                     row = run_once(
                         scenario,

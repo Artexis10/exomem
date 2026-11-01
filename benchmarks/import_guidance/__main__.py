@@ -25,6 +25,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument(
+        "--repeat-offset",
+        type=int,
+        default=0,
+        help="number the repeats from here, to add runs to an existing --out folder",
+    )
+    run.add_argument(
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
     )
     run.add_argument(
@@ -97,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         repeats=args.repeats,
         out=args.out,
         arms=arms,
+        repeat_offset=args.repeat_offset,
     )
     print(runner.summary_table(rows))
     return 0

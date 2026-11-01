@@ -22,15 +22,21 @@ BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 20261102
 
 
-def read_rows(paths: Sequence[Path]) -> list[dict]:
-    rows = []
+def read_rows(paths: Sequence[Path]) -> tuple[list[dict], list[dict]]:
+    """The rows, and the rows that a later run of the same arm, model, case and repeat replaced.
+    A run that ended in a provider or harness error is run again; its row is kept in the second list, not dropped."""
+    latest: dict[tuple, dict] = {}
+    replaced: list[dict] = []
     for path in paths:
-        rows.extend(
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        )
-    return rows
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            key = (row.get("arm"), row["model"], row["scenario"], row["repeat"])
+            if key in latest:
+                replaced.append(latest[key])
+            latest[key] = row
+    return list(latest.values()), replaced
 
 
 def _verdict_of(entries: list[dict], name: str) -> str | None:
@@ -118,7 +124,7 @@ def _diff(base: tuple[int, int], cand: tuple[int, int]) -> str:
 
 
 def build(paths: Sequence[Path], *, baseline: str, candidate: str) -> str:
-    rows = read_rows(paths)
+    rows, replaced = read_rows(paths)
     arms = (baseline, candidate)
     rows = [r for r in rows if r.get("arm") in arms]
     models = sorted({r["model"] for r in rows})
@@ -252,4 +258,12 @@ def build(paths: Sequence[Path], *, baseline: str, candidate: str) -> str:
             )
     else:
         out.append("None.")
+    if replaced:
+        out += ["", "Rows replaced by a later run of the same arm, model, case and repeat:", ""]
+        out += ["| arm | model | case | repeat | reason |", "|---|---|---|---|---|"]
+        for r in replaced:
+            reason = (r["error"] or "ended without an error").replace("|", "/")[:160]
+            out.append(
+                f"| {r['arm']} | {r['model']} | {r['scenario']} | {r['repeat']} | {reason} |"
+            )
     return "\n".join(out) + "\n"
