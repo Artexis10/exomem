@@ -3406,8 +3406,8 @@ class EpistemicGraphIndex:
                 if movement.resolver_membership is None or movement.indexed_membership is None:
                     return declined("recall_membership_unreadable")
                 moved: set[str] = set()
-                for rel, error in movement.failed:
-                    if not _proof_page_moved(self.vault_root, rel, error):
+                for rel, failure in movement.failed:
+                    if not _proof_page_moved(self.vault_root, rel, failure):
                         return declined("source_unsafe")
                     moved.add(rel)
                 rounds += 1
