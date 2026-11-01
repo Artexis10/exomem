@@ -67,10 +67,12 @@ when its leaf's validation reports a fully governed page that needs none,
 because the leaf refuses that review at commit; it ignores a review on any
 other page. Proposal SHALL also refuse with `SEMANTIC_CONTRACT_BLOCKED` a step
 whose leaf validation reports a blocking finding that the step does not answer,
-because the leaf refuses that step at commit. The step's own relation review
-answers a relation-disposition finding. A link to a page that an earlier step
-of the plan creates answers it too, because the leaf can judge that relation
-only once the page exists.
+because the leaf refuses that step at commit. This covers create, supersede
+and edit steps. The step's own relation review answers a relation-disposition
+finding. When the step writes a link to a page that an earlier step of the plan
+creates, the relation-disposition judgement moves to execution, because the leaf
+can judge that link only once the page exists; if the link does not qualify, the
+leaf still refuses the step there.
 
 #### Scenario: Plan requests an arbitrary command
 

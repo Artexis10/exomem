@@ -1295,31 +1295,37 @@ def _require_committable(
     )
 
 
-# The contract's identity for the relation-disposition element, which a review or a link answers.
-_RELATION_DISPOSITION_ELEMENT = ["relations", "disposition"]
-
-
 def _refuse_blocked(contract_result: Any, *, relation_answered: bool) -> None:
     """Refuse at proposal a step whose leaf validation says its commit will block.
 
-    A relation-disposition finding is set aside when the step answers it: with a
-    review the leaf could not see, or with a link to a page an earlier step creates,
-    which the leaf can judge only once that page exists.
+    A relation-disposition finding is set aside when the step answers it with a
+    review the leaf could not see, and deferred to execution when the step links to
+    a page an earlier step creates, which the leaf can judge only once that page
+    exists. A truncated finding list cannot show that nothing else blocks.
     """
-    findings = [
-        finding
-        for finding in dict(contract_result or {}).get("blocking_findings") or []
-        if not (
-            relation_answered
-            and finding.get("governed_element_identity") == _RELATION_DISPOSITION_ELEMENT
-        )
-    ]
-    if findings:
-        detail = "; ".join(
-            f"{finding.get('code')} at {finding.get('path')}: {finding.get('detail')}"
+    from . import semantic_contract
+
+    result = dict(contract_result or {})
+    if not result.get("should_block"):
+        return
+    findings = list(result.get("blocking_findings") or [])
+    if relation_answered:
+        findings = [
+            finding
             for finding in findings
-        )
-        raise _error("SEMANTIC_CONTRACT_BLOCKED", f"the step would block at commit: {detail}")
+            if tuple(finding.get("resolved_rule") or ())
+            != semantic_contract.RELATION_DISPOSITION_RULE
+        ]
+        if not findings and not dict(result.get("omitted_counts") or {}).get("blocking_findings"):
+            return
+    detail = "; ".join(
+        f"{finding.get('code')} at {finding.get('path')}: {finding.get('detail')}"
+        for finding in findings
+    )
+    raise _error(
+        "SEMANTIC_CONTRACT_BLOCKED",
+        f"the step would block at commit: {detail or 'blocking findings were truncated'}",
+    )
 
 
 def _prepare_step(
@@ -1771,10 +1777,15 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     return manifest
 
 
+# Fields of the closed step argument schema whose text never reaches the page, so a link
+# there is neither a relation nor a rendered link.
+_UNWRITTEN_ARGUMENTS = frozenset({"why", "reason", "relation_review_reason", "old_string"})
+
+
 def _planned_link_targets(
     vault_root: Path, args: Mapping[str, Any], pages: Sequence[tuple[str, str | None]]
 ) -> list[str]:
-    """The `pages` that a step's authored wikilinks resolve to, by path or by title."""
+    """The `pages` that the wikilinks a step writes resolve to, by path or by title."""
     from .vault import (
         WikilinkError,
         WikilinkResolver,
@@ -1790,7 +1801,7 @@ def _planned_link_targets(
     while texts:
         value = texts.pop()
         if isinstance(value, Mapping):
-            texts.extend(value.values())
+            texts.extend(item for key, item in value.items() if key not in _UNWRITTEN_ARGUMENTS)
         elif isinstance(value, list):
             texts.extend(value)
         elif isinstance(value, str):

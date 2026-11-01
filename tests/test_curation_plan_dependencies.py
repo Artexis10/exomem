@@ -383,3 +383,21 @@ def test_an_edit_that_stales_the_saved_relation_review_needs_a_review_at_proposa
     assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
     assert "RELATION_DISPOSITION_STALE" in str(refused.value)
     assert _apply(vault, _propose(vault, reviewed))["phase"] == "completed"
+
+
+def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_review(
+    vault: Path,
+) -> None:
+    target = _seed_note(vault, "curation-target", "## Observations\n\n- [finding] Keeps the record. ^target\n")
+    _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
+    edit = _edit_step(
+        vault, target, {"kind": "replace_string", "old_string": "Keeps the record", "new_string": "Keeps the whole record"}
+    )
+    for key in ("relation_disposition", "relation_review_reason"):
+        edit["args"]["operation"].pop(key)
+    edit["args"]["why"] = "Follow-up to [[Curation curation-home]]."
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _home_step(), edit)
+
+    assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
