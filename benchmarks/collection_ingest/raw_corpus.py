@@ -14,7 +14,8 @@ as a whole. The names are legal on Linux; generate on a Linux filesystem.
 Each file is one item of the key:
 
 - ``outcome``: ``filed`` (a page exists for it) or ``filed-or-refused`` (a page, or a refusal
-  that names a code in ``refusal_codes``). An item that has neither is lost.
+  that carries a code; the key names no code, and the scorer reports the one it observed).
+  An item that has neither is lost.
 - ``form``: ``text`` when the contract keeps the text in the page, ``artifact`` when it keeps
   the bytes as a stored file. The contract is in ``openspec/specs/adoption-studio/spec.md``.
 - ``probe``: an ASCII phrase inside the file. ``promised`` says whether the contract promises
@@ -40,17 +41,17 @@ FILED = "filed"
 FILED_OR_REFUSED = "filed-or-refused"
 # A text file larger than this is stored as an artifact, not held in a page. It mirrors
 # adoption_plan.INLINE_TEXT_MAX_BYTES, which an instrument that reads no product internals
-# cannot import; it only sizes the huge text file and labels its contract form.
+# cannot import; it only sizes the huge text file and labels its contract form. If the product
+# bound drifts, the run fails loudly: the huge text file reads bytes_missing and form_as_key fails.
 INLINE_TEXT_BOUND = 4 * 1024 * 1024
 DEFAULT_HUGE_BYTES = 16 * 1024 * 1024
+MIN_HUGE_BYTES = 1024  # the smallest total that still holds a text file with its probe line and a binary file
 # The huge text file takes this share of --huge-bytes, which puts it above the inline bound.
 HUGE_TEXT_SHARE = (5, 16)
 CHUNK = 1024 * 1024  # the import path streams in blocks of this size
 # The documented limits of one import: bytes per name, bytes per relative path.
 NAME_MAX_BYTES = 255
 PATH_MAX_BYTES = 4096
-# The vault refuses a name with a backslash with one of these codes (a closed set that the import path fixes).
-UNSAFE_NAME_CODES = ("INVALID_PATH", "UNSAFE_PATH")
 
 CLASS_CONTRACT = {
     "plain-md": "Markdown without front matter. Filed as a Source, and as an own note when an include rule asks for one. Text is searchable.",
@@ -68,7 +69,7 @@ CLASS_CONTRACT = {
     "deep-path": "Files 1 to 24 folders deep. Filed.",
     "long-name": "File and folder names near 200 bytes. Filed.",
     "odd-name": "Names with spaces, punctuation, symbols, emoji and other scripts. Filed.",
-    "unsafe-name": "A name with a backslash, which the vault refuses. Filed, or refused with a code.",
+    "unsafe-name": "A name with a backslash. Filed, or refused with a code; any code counts and the scorer reports the one it saw. Never lost.",
     "unicode-twin": "Two files whose names differ only in Unicode normalisation. Both are filed.",
     "case-twin": "Two files whose names differ only in letter case. Both are filed.",
     "flat-dump": "Many small snippets in one folder. Every one is filed.",
@@ -87,7 +88,6 @@ class RawItem:
     probe: str | None = None
     promised: bool = False
     outcome: str = FILED
-    refusal_codes: tuple[str, ...] = ()
     dup_group: str = ""
 
     @property
@@ -135,7 +135,7 @@ def key_row(item: RawItem, written: tuple[str, int] | None) -> dict:
         "bytes": size, "sha256": sha256, "streamed": item.streamed,
         "probe": ({"text": item.probe, "lang": "en", "promised": item.promised}
                   if item.probe else None),
-        "outcome": item.outcome, "refusal_codes": list(item.refusal_codes),
+        "outcome": item.outcome,
         "dup_group": item.dup_group or None,
     }
 
@@ -164,9 +164,11 @@ def key_block(corpus: RawCorpus, huge_bytes: int) -> dict:
 def existing_vault_block(corpus: RawCorpus) -> dict:
     """What the finished vault must show when the pages of ``vault_pages_spec`` were there first."""
     return {
-        "contract": (
-            "An import never replaces a page that the vault already holds. An item whose planned "
-            "page name is taken gets the next free name, and the page that was there stays as written."
+        "contract": "The spec promises that an import never edits or moves a page that the vault already holds.",
+        "renaming": (
+            "A colliding item takes the next free name, <name>-2. The spec does not state this rule; "
+            "it comes from the page-name allocator in the code. The spec promise is that the page "
+            "already there stays as written."
         ),
         "pages": [
             {"id": page.id, "path": page.path, "role": page.role, "collides_with": page.collides_with,
@@ -211,7 +213,7 @@ def _require_invalid_utf8(data: bytes, label: str) -> bytes:
         data.decode("utf-8")
     except UnicodeDecodeError:
         return data
-    raise AssertionError(f"{label} must not be valid UTF-8")
+    raise ValueError(f"{label} must not be valid UTF-8")
 
 
 def build(
@@ -223,6 +225,8 @@ def build(
     probe_words: tuple[Sequence[str], Sequence[str]],
 ) -> RawCorpus:
     """Every raw item and every existing-vault page for one seed."""
+    if huge_bytes < MIN_HUGE_BYTES:
+        raise ValueError(f"--huge-bytes must be at least {MIN_HUGE_BYTES}, not {huge_bytes}")
     numbers = iter(rng.sample(range(10_000, 100_000), 400 + flat_files))
     items: list[RawItem] = []
 
@@ -236,10 +240,9 @@ def build(
         return f"Reference code {phrase} applies to this entry."
 
     def add(path: str, cls: str, form: str, data: bytes, *, phrase: str | None = None,
-            promised: bool = False, outcome: str = FILED, codes: tuple[str, ...] = (),
-            group: str = "") -> None:
+            promised: bool = False, outcome: str = FILED, group: str = "") -> None:
         items.append(RawItem(path, cls, form, data, len(data), phrase, promised and phrase is not None,
-                             outcome, codes, group))
+                             outcome, group))
 
     def text(path: str, cls: str, body: str, *, phrase: str | None, promised: bool = True,
              encoding: str = "utf-8", form: str = "text", **extra) -> None:
@@ -394,7 +397,7 @@ def build(
         text(f"odd names/{name}", "odd-name", body, phrase=p)
     p = probe()
     text("odd names/back\\slash note.md", "unsafe-name", markdown("Back slash note", p), phrase=p,
-         promised=False, outcome=FILED_OR_REFUSED, codes=UNSAFE_NAME_CODES)
+         promised=False, outcome=FILED_OR_REFUSED)
 
     # ---- names that differ only by normalisation or case ---------------------------------------
     for number, form in enumerate(("NFC", "NFD"), start=1):
@@ -424,15 +427,22 @@ def build(
 
 
 def check_paths(items: Sequence[RawItem]) -> None:
-    """Fail the generator when a name would break the import as a whole, not just one file."""
+    """Raise when a name would break the import as a whole, not just one file."""
     paths = [item.path for item in items]
-    assert len(paths) == len(set(paths)), "a raw path repeats"
+    if len(paths) != len(set(paths)):
+        raise ValueError("a raw path repeats")
     for item in items:
-        parts = item.path.split("/")
-        assert all(0 < len(part.encode("utf-8")) <= NAME_MAX_BYTES for part in parts), item.path
-        assert len(item.path.encode("utf-8")) <= PATH_MAX_BYTES, item.path
-        assert not any(ord(char) < 32 or char == "\x7f" for char in item.path), item.path
-        assert ("\\" in item.path) == (item.raw_class == "unsafe-name"), item.path
+        broken = {
+            f"a name is empty or over {NAME_MAX_BYTES} bytes":
+                not all(0 < len(part.encode("utf-8")) <= NAME_MAX_BYTES for part in item.path.split("/")),
+            f"the path is over {PATH_MAX_BYTES} bytes": len(item.path.encode("utf-8")) > PATH_MAX_BYTES,
+            "the path holds a control character": any(ord(char) < 32 or char == "\x7f" for char in item.path),
+            "only the unsafe-name class may hold a backslash":
+                ("\\" in item.path) != (item.raw_class == "unsafe-name"),
+        }
+        for reason, hit in broken.items():
+            if hit:
+                raise ValueError(f"raw path {item.path!r}: {reason}")
 
 
 def _seed_pages(items: Sequence[RawItem], probe: Callable[[], str]) -> list[SeedPage]:
@@ -468,7 +478,8 @@ def _seed_pages(items: Sequence[RawItem], probe: Callable[[], str]) -> list[Seed
 
     text_item = "dump/Harbor tide ledger.md"
     artifact_item = "legacy/latin1 river survey.txt"
-    assert text_item in by_path and artifact_item in by_path
+    if text_item not in by_path or artifact_item not in by_path:
+        raise ValueError("a collider page names an item that the raw corpus does not hold")
     return [
         page("collide-text", f"{day_dir}/{{today}}-harbor-tide-ledger.md", "Earlier Harbor tide ledger",
              role="collider", collides_with=text_item, stem="{today}-harbor-tide-ledger"),

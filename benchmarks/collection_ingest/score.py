@@ -112,7 +112,10 @@ def counterparts(scan: dict[str, Any], collection: str) -> dict[str, dict[str, l
         value = page["front"].get("imported_from")
         if isinstance(value, str):
             by_value.setdefault(value, []).append(rel)
-    return {"exact": by_value, "nfc": {nfc(k): v for k, v in by_value.items()}, "prefix": collection}
+    by_nfc: dict[str, list[str]] = {}
+    for value, pages in by_value.items():
+        by_nfc.setdefault(nfc(value), []).extend(pages)  # two names equal after NFC keep both pages
+    return {"exact": by_value, "nfc": by_nfc, "prefix": collection}
 
 
 def find_pages(index: dict[str, Any], key_path: str) -> tuple[list[str], str | None]:
@@ -204,12 +207,13 @@ class Probe:
 
 
 def refusal_lookup(refusals: list[dict[str, Any]], collection: str) -> dict[str, str]:
-    """Map each refused original path (NFC, with and without the collection prefix) to its code."""
+    """Map each refused original path (NFC, with and without the collection prefix) to its code.
+    A refusal that carries no code reads ``NO_CODE``: it is a refusal, but not a coded one."""
     out: dict[str, str] = {}
     for row in refusals:
         path = str(row["path"])
         for form in (path, path.removeprefix(collection + "/")):
-            out[nfc(form)] = str(row["code"])
+            out[nfc(form)] = str(row.get("code") or NO_CODE)
     return out
 
 
@@ -227,14 +231,18 @@ def recall_table(probes: list[Probe], kind: str, flag: str, *, landed: bool = Fa
 # raw items and the existing vault
 # --------------------------------------------------------------------------- #
 LOST_SAMPLES = 25
+NO_CODE = "UNKNOWN"  # what a refusal reads when the reply names no code; drive.py uses the same label
 
 
-def raw_pages(item: dict[str, Any], index: dict[str, Any], scan: dict[str, Any]) -> list[str]:
-    """Pages for a raw item. Names that are equal after NFC share one ``imported_from``, so keep the
-    pages that carry this item's bytes when there are any."""
+def raw_pages(item: dict[str, Any], index: dict[str, Any], scan: dict[str, Any],
+              twinned: set[str]) -> list[str]:
+    """Pages for a raw item. Names that are equal after NFC (``twinned``) can share one
+    ``imported_from`` or fall back to each other's page, so a twin counts only the pages that carry
+    its own bytes: the page of a missing twin never stands in for it. Any other item keeps the
+    pages found by name when no page names its bytes."""
     found, _ = find_pages(index, item["path"])
     same = [p for p in found if scan["pages"][p]["front"].get("original_sha256") == item["sha256"]]
-    return same or found
+    return same if nfc(item["path"]) in twinned else same or found
 
 
 def original_bytes_held(item: dict[str, Any], pages: list[str], scan: dict[str, Any], vault: Path,
@@ -271,11 +279,14 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
         pages = pages_of[item["path"]]
         code = refused.get(nfc(item["path"]))
         state = "filed" if pages else ("refused" if code else "lost")
-        allowed = item["outcome"] == "filed-or-refused" and code in item["refusal_codes"]
+        # The key names no refusal code: any coded refusal meets a filed-or-refused item, and the code seen is reported.
+        allowed = item["outcome"] == "filed-or-refused" and code != NO_CODE
         meets = state == "filed" or (state == "refused" and allowed)
         row = classes.setdefault(item["raw_class"], Counter())
         row["items"] += 1
         row[state] += 1
+        if state == "refused":
+            row["code:" + str(code)] += 1
         row["meets_key"] += meets
         if not meets:
             problems.append({"path": item["path"], "class": item["raw_class"], "state": state,
@@ -284,7 +295,9 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
         if pages:
             held = original_bytes_held(item, pages, scan, vault, collection, inline_bound)
             row["bytes_" + ("held" if held in ("artifact", "text") else held)] += 1
-            row["form_as_key"] += held == item["form"]
+            if held != "unknown":
+                row["form_checked"] += 1
+                row["form_as_key"] += held == item["form"]
             if probe is not None and probe.failed:
                 row["probe_unknown"] += 1
             elif probe is not None:
@@ -300,11 +313,14 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
             "items": row["items"],
             "filed": frac(row["filed"], row["items"]),
             "refused": row["refused"],
+            "refused_by_code": {k.removeprefix("code:"): n for k, n in sorted(row.items())
+                                if k.startswith("code:")},
             "lost": row["lost"],
             "meets_key": frac(row["meets_key"], row["items"]),
             "original_bytes_held_of_filed": {**frac(row["bytes_held"], checked),
                                              "unknown": row["bytes_unknown"]},
-            "form_as_key_of_filed": frac(row["form_as_key"], row["filed"]),
+            "form_as_key_of_filed": {**frac(row["form_as_key"], row["form_checked"]),
+                                     "unknown": row["bytes_unknown"]},
             "readable_observed_of_filed": {**frac(row["found"], row["probed"]),
                                            "unknown": row["probe_unknown"]},
             "readable_promised_of_filed": frac(row["promised_found"], row["promised"]),
@@ -332,6 +348,17 @@ def raw_gaps(section: dict[str, Any]) -> dict[str, int]:
     row = section["all"]
     return {"probe_searches_failed": row["readable_observed_of_filed"]["unknown"],
             "originals_not_comparable": row["original_bytes_held_of_filed"]["unknown"]}
+
+
+def first_journey_state(log: dict[str, Any]) -> str:
+    """Whether the first journey ran to its end. A stopped run lists every item it never reached
+    as lost, so the stop is named beside the count, and a log without a first journey is not a clean run."""
+    journey = next((j for j in log["journeys"] if j["name"] == "first"), None)
+    if journey is None:
+        return "no first journey in the drive log"
+    if "stopped_at" not in journey:
+        return "the drive log does not record whether the first journey stopped"
+    return f"stopped at {journey['stopped_at']}" if journey["stopped_at"] else "ran to the end"
 
 
 def collided_name(page: str, stem: str) -> bool:
@@ -438,10 +465,11 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     refused_by_key = {i["path"]: refused_codes[nfc(i["path"])]
                       for i in notes + atts if nfc(i["path"]) in refused_codes}
     absent = [i for i in notes + atts if i["path"] not in landed and i["path"] not in refused_by_key]
-    raw_pages_of = {i["path"]: raw_pages(i, index, scan) for i in raw}
+    nfc_names = Counter(nfc(i["path"]) for i in raw)
+    twinned = {name for name, n in nfc_names.items() if n > 1}
+    raw_pages_of = {i["path"]: raw_pages(i, index, scan, twinned) for i in raw}
     raw_lost = [i for i in raw if not raw_pages_of[i["path"]] and nfc(i["path"]) not in refused_codes]
     lost = [*absent, *raw_lost]
-    first_journey = next((j for j in log["journeys"] if j["name"] == "first"), {})
 
     def landing(items: list[dict[str, Any]]) -> dict[str, Any]:
         return frac(sum(1 for i in items if i["path"] in landed), len(items))
@@ -463,12 +491,11 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         "items_refused": frac(len(refused_by_key), len(notes) + len(atts)),
         "items_refused_by_code": dict(sorted(Counter(refused_by_key.values()).items())),
         "items_silently_absent": frac(len(absent), len(notes) + len(atts)),
-        # An item with no page and no refusal recorded by the first journey. A stopped run lists
-        # every item it never reached, so the stop is named beside the count.
+        # An item with no page and no refusal recorded by the first journey.
         "lost": {**frac(len(lost), len(notes) + len(atts) + len(raw)),
                  "by_kind": dict(Counter(i["kind"] for i in lost)),
                  "paths": [i["path"] for i in lost[:LOST_SAMPLES]],
-                 "first_journey_stopped_at": first_journey.get("stopped_at")},
+                 "first_journey": first_journey_state(log)},
         "items_silently_absent_by_kind": dict(Counter(i["kind"] for i in absent)),
         "items_silently_absent_by_extension": dict(
             Counter(i.get("ext", ".md") for i in absent).most_common()),
@@ -805,6 +832,7 @@ def headline(m: dict[str, Any]) -> dict[str, Any]:
         "refused": m["landing"]["items_refused_by_code"],
         "silently_absent": pair(m["landing"]["items_silently_absent"]),
         "lost": pair(m["landing"]["lost"]),
+        "first_journey": m["landing"]["lost"]["first_journey"],
         "links_preserved": pair(m["links_preserved"]["of_all_resolvable_links"]),
         "embeds_bound": pair(m["embeds_bound"]["of_all_embeds"]),
         "tags_carried": pair(m["fidelity"]["tags_carried"]),

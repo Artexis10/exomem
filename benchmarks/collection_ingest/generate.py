@@ -849,10 +849,13 @@ def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_byte
     corpus = None
     huge_total = raw_corpus.DEFAULT_HUGE_BYTES if huge_bytes is None else huge_bytes
     if profile.raw_snippets is not None:
-        corpus = raw_corpus.build(
-            random.Random(f"collection-ingest/{GENERATOR_VERSION}/{profile_name}/{seed}/raw"),
-            flat_files=profile.raw_snippets, huge_bytes=huge_total,
-            prose=sentence, probe_words=(PHRASE_ADJ, PHRASE_NOUN))
+        try:
+            corpus = raw_corpus.build(
+                random.Random(f"collection-ingest/{GENERATOR_VERSION}/{profile_name}/{seed}/raw"),
+                flat_files=profile.raw_snippets, huge_bytes=huge_total,
+                prose=sentence, probe_words=(PHRASE_ADJ, PHRASE_NOUN))
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         for item in corpus.items:
             if item.path in contents:
                 raise SystemExit(f"raw path {item.path!r} collides with a collection path")

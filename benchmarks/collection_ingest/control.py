@@ -10,7 +10,8 @@ compares each planted count with the metric the scorer printed. Any mismatch exi
 With a key from a ``raw`` profile the control also plants, among the raw items, a lost item
 (no page, no refusal), a refused item, a page with the wrong bytes, a page whose phrase
 search cannot find, an original the scorer cannot compare, an existing page that an import
-overwrote and one that went missing. The scorer must report each one by its count.
+overwrote and one that went missing, and a Unicode twin whose page is gone while the other
+twin's page stays. The scorer must report each one by its count.
 
     python control.py --collection C --key K --workdir W --python PY --out METRICS.json
 """
@@ -22,6 +23,7 @@ import asyncio
 import datetime as dt
 import json
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,7 @@ DROPPED_LINK, DROPPED_EMBED, STRIPPED_NOTE, FILE_EMBED_ATT = 6, 5, (13, 2), 7
 # Planted rules over the raw items, by their index in the key (sorted by path).
 RAW_LOST, RAW_REFUSED, RAW_WRONG_BYTES, RAW_NO_PHRASE = (11, 3), (13, 5), (7, 2), (5, 1)
 OVERWRITTEN_COLLIDER, DELETED_BYSTANDER = "collide-artifact", "bystander-source"
+UNSAFE_NAME_REFUSAL = "NOT_FOUND"  # a code that an importer gives a name it cannot read; the key names none
 JOB_STATES = ("blocked", "failed", "running")
 COLLECTION = "Collection"
 
@@ -82,21 +85,27 @@ def build_raw(key: dict[str, Any], collection: Path, vault: Path,
     day = existing.get("day", "")
     count: Counter[str] = Counter()
     lost_by_class: Counter[str] = Counter()
+    codes: Counter[str] = Counter()
     refusals: list[dict[str, Any]] = []
     altered = False
     for n, item in enumerate(raw):
         path, cls, form = item["path"], item["raw_class"], item["form"]
         spec = colliders.get(path)
-        refuse = (item["refusal_codes"] or [None])[0] if item["outcome"] == "filed-or-refused" else None
-        if spec is None and hit(n, RAW_LOST):
+        refuse = UNSAFE_NAME_REFUSAL if item["outcome"] == "filed-or-refused" else None
+        # The twin whose name is not in NFC loses its page; the other twin is kept, so the scorer
+        # must not let the kept twin's page stand in for the lost one.
+        gone_twin = cls == "unicode-twin" and unicodedata.normalize("NFC", path) != path
+        kept_twin = cls == "unicode-twin" and not gone_twin
+        if gone_twin or (spec is None and not kept_twin and hit(n, RAW_LOST)):
             lost_by_class[cls] += 1
             count["lost"] += 1
             continue
-        if spec is None and (refuse or hit(n, RAW_REFUSED)):
+        if spec is None and not kept_twin and (refuse or hit(n, RAW_REFUSED)):
             code = refuse or "PLANTED_REFUSAL"
             refusals.append({"stage": "select.rejected", "path": f"{COLLECTION}/{path}", "code": code,
                              "reason": "planted"})
             count["refused"] += 1
+            codes[code] += 1
             count["meets"] += bool(refuse)
             continue
         original = (collection / path).read_bytes()
@@ -138,7 +147,8 @@ def build_raw(key: dict[str, Any], collection: Path, vault: Path,
                 count["promised_found"] += phrase in body
     seeded_gone = vault / seeded[DELETED_BYSTANDER]["path"]
     seeded_gone.unlink()
-    return {"count": count, "total": len(raw), "lost_by_class": dict(lost_by_class), "refusals": refusals}
+    return {"count": count, "total": len(raw), "lost_by_class": dict(lost_by_class), "codes": dict(codes),
+            "refusals": refusals}
 
 
 def build(key: dict[str, Any], collection: Path, vault: Path,
@@ -293,7 +303,7 @@ def run(args: argparse.Namespace) -> int:
         "existing_vault": existing,
         "tool_calls_total": 0, "total_wall_s": 0.0, "call_failures": {}, "folder_kind_rules": "n/a",
         "collection_label": "n/a",
-        "journeys": [{"name": "first", "refusals": refusals, "phase_wall_ms": {}},
+        "journeys": [{"name": "first", "stopped_at": None, "refusals": refusals, "phase_wall_ms": {}},
                      {"name": "rerun", "refusals": [], "phase_wall_ms": {}}],
         "media": {"after_first_run": {"converged": True},
                   "after_rerun": {"converged": True, "final_status": {"counts": {}, "jobs": built["jobs"]}}},
@@ -330,7 +340,14 @@ def raw_checks(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any]) ->
          (c["held"], c["held"] + c["missing"])),
         ("raw original not comparable (unknown)", r["original_bytes_held_of_filed"]["unknown"], c["unknown"]),
         ("raw gap reported for it", m["measurement_gaps"].get("raw_originals_not_comparable", 0), c["unknown"]),
-        ("raw held in the form the key states", pairs(r["form_as_key_of_filed"]), (c["form_as_key"], c["filed"])),
+        ("raw held in the form the key states", pairs(r["form_as_key_of_filed"]),
+         (c["form_as_key"], c["filed"] - c["unknown"])),
+        ("raw form not compared (unknown)", r["form_as_key_of_filed"]["unknown"], c["unknown"]),
+        ("raw refusal reports the code seen", r["refused_by_code"],
+         built["raw"]["codes"]),
+        ("unicode twin with no page is lost, the kept twin is filed",
+         (m["raw"]["by_class"]["unicode-twin"]["lost"], m["raw"]["by_class"]["unicode-twin"]["filed"]["numerator"]),
+         (1, 1)),
         ("raw phrase found by search", pairs(r["readable_observed_of_filed"]),
          (c["found"], c["probed"])),
         ("raw phrase found, promised items", pairs(r["readable_promised_of_filed"]),
@@ -373,6 +390,11 @@ def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: 
     checks = [
         ("notes landed", pairs(m["landing"]["notes_landed"]), (built["notes_landed"], len(notes))),
         ("attachments landed", pairs(m["landing"]["attachments_landed"]), (built["atts_landed"], len(atts))),
+        ("first journey ran to the end", m["landing"]["lost"]["first_journey"], "ran to the end"),
+        ("a stopped first journey names its stop",
+         score.first_journey_state({"journeys": [{"name": "first", "stopped_at": "plan"}]}), "stopped at plan"),
+        ("a log without a first journey is not a clean run",
+         score.first_journey_state({"journeys": []}), "no first journey in the drive log"),
         ("refused by code", m["landing"]["items_refused_by_code"], {"PLANTED_REFUSAL": len(built["refused"])}),
         ("silently absent", m["landing"]["items_silently_absent"]["numerator"],
          len(notes) + len(atts) - built["notes_landed"] - built["atts_landed"] - len(built["refused"])),
