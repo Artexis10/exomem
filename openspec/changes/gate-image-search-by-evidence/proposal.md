@@ -9,7 +9,7 @@ A plain question can return screenshots and video frames ahead of the notes that
 ## What Changes
 
 - Image OCR keeps the words Tesseract reads with confidence at or above a floor in `## Extracted text`. The other words move to a `## Low-confidence OCR` section of the same sidecar, and every search field omits that section. The sidecar records the mean word confidence as `ocr_confidence`. The floor is a setting with a default of 70 on Tesseract's 0-100 scale.
-- The CLIP lane admits an image only when its similarity to the query clears the chance level of the whole image population. The lane reuses the median-and-MAD band that the working set already uses for vectors, so no cosine value is fixed in code. A population too small to calibrate keeps today's behaviour.
+- The CLIP lane in `find` admits an image or video keyframe only when its similarity to the query clears the chance level of every row of the CLIP index. The lane reuses the median-and-MAD band that the working set already uses for vectors, so no cosine value is fixed in code. A population too small to calibrate keeps today's behaviour. The governed projected CLIP lane is not changed.
 - Intent routing no longer reads leading question words. Quotes and wikilinks still mark an exact lookup; temporal and relationship routing are unchanged.
 
 Out of scope: re-extracting existing sidecars (an explicit `reprocess` per item, run as a separate operation), PDF page OCR, video transcripts, and the recall source lane (`surface-captured-sources`).
@@ -26,6 +26,6 @@ Out of scope: re-extracting existing sidecars (an explicit `reprocess` per item,
 
 ## Impact
 
-- Code: `src/exomem/ocr_models.py`, `src/exomem/extract.py`, `src/exomem/preserve.py`, `src/exomem/find_types.py`, `src/exomem/clip_index.py`, `src/exomem/find_candidates.py`, `src/exomem/find_policy.py`, `src/exomem/ranking_config.py`.
+- Code: `src/exomem/ocr_models.py`, `src/exomem/extract.py`, `src/exomem/preserve.py`, `src/exomem/find_types.py`, `src/exomem/chance_band.py`, `src/exomem/clip_index.py`, `src/exomem/find_candidates.py`, `src/exomem/find_policy.py`, `src/exomem/ranking_config.py`.
 - Behaviour: newly extracted image and video-frame sidecars carry `ocr_confidence` and may carry a `## Low-confidence OCR` section. Existing sidecars keep their text until they are reprocessed. Text questions see fewer unrelated images.
-- Undo: set the OCR floor to 0, which keeps every word searchable; set the CLIP band alpha to 1, which admits every CLIP hit; revert the intent change on its own.
+- Undo: set `EXOMEM_OCR_WORD_CONFIDENCE_FLOOR=0`, which keeps every word of each image that OCR reads from then on (a sidecar that already has a `## Low-confidence OCR` section keeps it until an explicit `reprocess`); set the ranking setting `clip_semantic_alpha` to 0 or 1, which has no chance level and so switches the band off (trace `band: off`); revert the intent change on its own.

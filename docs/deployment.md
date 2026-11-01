@@ -138,6 +138,10 @@ Tesseract's default language. To read Japanese, install the `jpn` and
 `jpn_vert` packs and the Japanese script models (Debian: `tesseract-ocr-jpn`,
 `tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
 
+OCR leaves each word with a confidence under `EXOMEM_OCR_WORD_CONFIDENCE_FLOOR`
+(default `70`, scale 0 to 100) out of search. The sidecar keeps those words in a
+`## Low-confidence OCR` section. Set the variable to `0` to keep every word searchable in each image that OCR reads from then on.
+
 `EXOMEM_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
 Unset, a personal install runs every engine and a Cloud cell runs none. cellctl
 renders the variable into a Cloud cell, for one cell or as the fleet default.

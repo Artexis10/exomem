@@ -10,7 +10,7 @@ Whole-image mean confidence separates photos (33-44) from screenshots (67-93), b
 
 ### D2. Keep low-confidence words in the sidecar
 
-The operator chose to keep low-confidence text in the file and out of the index. The words move to a named sidecar section. `find_types.RankingPage.search_body` is the one place every search field reads, so it omits the section for media sidecars. The section heading is defined once and imported where it is read.
+The operator chose to keep low-confidence text in the file and out of the index. The words move to a named sidecar section. `find_types.RankingPage.search_body` is the one place every search field reads, so it omits the section for media sidecars. The section heading and the `exomem:sidecar-low-confidence-ocr` marker that precedes it are defined once and imported where they are read. A heading proves no ownership, since OCR text can hold any line, so the reader cuts on the marker. A re-rendered sidecar drops the section instead of moving it into the preserved notes, so the withheld words do not become searchable there; a reprocess reads them again.
 
 ### D3. Keep Tesseract's own spacing
 
@@ -18,7 +18,7 @@ Rebuilding lines from TSV words would lose the CJK spacing that `preserve_interw
 
 ### D4. Gate CLIP by a corpus-relative band
 
-On text questions the CLIP lane added 0.31 unrelated media per top 8 (CI 0.12 to 0.56) and changed no visual hit. CLIP cosines for text and visual queries overlap (medians 0.254 and 0.280), so a fixed cosine separates them poorly and would belong to one model. `working_set_resolve.semantic_band` already finds the chance maximum from the population's median and MAD. The brute-force CLIP path scores every image, so it applies the band to that population before taking the top k.
+On text questions the CLIP lane added 0.31 unrelated media per top 8 (CI 0.12 to 0.56) and changed no visual hit. CLIP cosines for text and visual queries overlap (medians 0.254 and 0.280), so a fixed cosine separates them poorly and would belong to one model. `working_set_resolve.semantic_band` already finds the chance maximum from the population's median and MAD. The brute-force CLIP path scores every row of the index, video keyframes included, so it applies the band to that population before the request's filters and before it takes the top k. The KNN backend returns only k rows, so the band never uses it. An alpha outside (0, 1) has no chance level, so the lane runs without the band and traces `off`. The trace counts the distinct pages the band withheld from the results the lane would return without it.
 
 ### D5. Drop leading-word intent
 
@@ -28,3 +28,10 @@ A word regex that decides what a person meant is an unsound pattern. On top of D
 
 - CJK and vertical text may score lower confidence. The sample held no Japanese screenshot. The floor is a setting, and the post-release check includes the operator's own queries.
 - The CLIP band is not replayable offline. The post-release check reruns the visual queries plus queries for textless photos.
+- The CLIP population is every index row, so a vault with many video keyframes calibrates on a mostly-keyframe distribution. The post-release check reads the `withheld_pages` count on both kinds of query.
+
+## Follow-ups
+
+- The governed projected CLIP lane (`governance/projected_retrieval.py`, reached through `projection_runtime.py`) ranks its projected image vectors without the band. It needs its own decision, since its population is the projected set that a reader may see.
+- Display readers (`memory_context.py`, `context_pack.py`) still show a sidecar's `## Low-confidence OCR` section as page text. They are not search fields.
+- One non-finite CLIP row makes the band report `uncalibrated` for the whole lane.
