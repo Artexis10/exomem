@@ -1150,10 +1150,10 @@ def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path
 
     alive_when_tesseract_starts: list[int] = []
 
-    def read_image(_cmd: str, image: Path) -> str:
+    def read_image(_cmd: str, image: Path) -> ocr_models.OcrReading:
         gc.collect()
         alive_when_tesseract_starts.append(sum(ref() is not None for ref in rendered))
-        return "harbour lantern was repaired"
+        return ocr_models.OcrReading("harbour lantern was repaired", ())
 
     monkeypatch.setattr(fitz.Page, "get_pixmap", get_pixmap)
     monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
@@ -1176,12 +1176,12 @@ def test_dark_text_on_a_transparent_image_reaches_tesseract_dark_on_white(tmp_pa
     source.save(tmp_path / "label.png")
     seen: dict[str, tuple[int, int, int]] = {}
 
-    def read_image(_cmd: str, image: Path) -> str:
+    def read_image(_cmd: str, image: Path) -> ocr_models.OcrReading:
         with PIL.Image.open(image) as page:
             rgb = page.convert("RGB")
             seen["background"] = rgb.getpixel((150, 50))
             seen["text"] = rgb.getpixel((40, 30))
-        return "label"
+        return ocr_models.OcrReading("label", ())
 
     monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
     monkeypatch.setattr(ocr_models, "read_image", read_image)
@@ -1224,7 +1224,7 @@ def test_tesseract_4_without_a_tessdata_path_still_reads_the_image(tmp_path) -> 
     image = tmp_path / "page.png"
     image.write_bytes(b"png")
 
-    assert ocr_models.read_image(tesseract, image) == "harbour lantern was repaired"
+    assert ocr_models.read_image(tesseract, image).text == "harbour lantern was repaired"
 
 
 def _traineddata(path: Path, script: str) -> None:

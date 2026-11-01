@@ -1823,6 +1823,7 @@ def _material_lane(
     from . import (
         bm25,
         find,
+        find_types,
         lexstore,
         provenance,
         relation_registry,
@@ -1964,15 +1965,17 @@ def _material_lane(
         if not _is_current_page(vault_root, path, status_basis=status_basis):
             continue
         call_spans.measure(call_spans.PAGES_PARSED)
+        # The OCR words a sidecar withheld from search do not pick a page for a turn either.
+        page_body = find_types.without_low_confidence_ocr(page.body, page.frontmatter)
         with call_spans.measure_ms(call_spans.HYDRATION_MS):
             document = semantic_units.parse_semantic_units(
-                page.body, path=path, validate=False,
+                page_body, path=path, validate=False,
                 language_registry=semantic_language_registry.for_attached_projects(
                     language, tuple(find._all_projects(page.frontmatter)),
                 ),
                 relation_registry=relations, page_type=page.page_type,
             )
-        prose = page.body
+        prose = page_body
         for unit in sorted(document.units, key=lambda unit: unit.span.start_offset, reverse=True):
             prose = prose[:unit.span.start_offset] + "\n" + prose[unit.span.end_offset:]
         prose = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith("#"))

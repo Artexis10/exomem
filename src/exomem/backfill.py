@@ -424,7 +424,7 @@ def backfill_media(
                     preserve.update_sidecar_extraction(
                         vault_root, sidecar,
                         text=res.text.strip() or "(no text detected)", engine=res.engine,
-                        speakers=res.speakers,
+                        speakers=res.speakers, ocr=res.ocr,
                     )
                     if need_ocr:
                         stats.extracted += 1
@@ -519,6 +519,7 @@ def _ocr_new_scene_frames(
             preserve.update_sidecar_extraction(
                 vault_root, frame_sidecar,
                 text=res.text.strip() or "(no text detected)", engine=res.engine,
+                ocr=res.ocr,
             )
             stats.extracted += 1
         except extract.ExtractionUnavailable as e:

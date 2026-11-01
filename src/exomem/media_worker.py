@@ -69,6 +69,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
+from .ocr_facts import OcrFacts
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -850,6 +851,7 @@ class MediaWorker:
                     speakers=result.speakers,
                     speaker_verification=result.speaker_verification or "unavailable",
                     asr=result.asr,
+                    ocr=result.ocr,
                     replaces=replaces,
                 )
             except preserve.PreserveError as exc:
@@ -1181,6 +1183,7 @@ class MediaWorker:
         speakers: list[dict] | None = None,
         speaker_verification: str | None = None,
         asr: AsrFacts | None = None,
+        ocr: OcrFacts | None = None,
         replaces: str | None = None,
     ) -> bool:
         if self._store is not None:
@@ -1192,6 +1195,10 @@ class MediaWorker:
             }
             if asr is not None and asr.reported:
                 payload["asr"] = asr.as_payload()
+            if ocr is not None:
+                payload["ocr"] = OcrFacts(
+                    ocr.confidence, preserve._cap_extracted_text(ocr.low_confidence_text)
+                ).as_payload()
             if replaces is not None:
                 payload["replaces"] = replaces
             return self._store.record_result(
@@ -1240,6 +1247,7 @@ class MediaWorker:
                 speakers=speakers,
                 speaker_verification=speaker_verification,
                 asr=asr,
+                ocr=ocr,
                 reprocessing=replaces is not None,
             )
             receipts = deferred_index.add_full_receipts(
@@ -1274,6 +1282,7 @@ class MediaWorker:
         speakers: list[dict] | None,
         speaker_verification: str | None,
         asr: AsrFacts | None,
+        ocr: OcrFacts | None,
         reprocessing: bool,
     ) -> tuple[PlannedWrite, ...]:
         """The sidecar write for a finished extraction; a reprocess adds the page for the old one.
@@ -1290,6 +1299,7 @@ class MediaWorker:
                 speaker_verification=speaker_verification,
                 attempts=max(1, job.attempts),
                 asr=asr,
+                ocr=ocr,
             )
             return (
                 PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
@@ -1312,6 +1322,7 @@ class MediaWorker:
             speaker_verification=speaker_verification,
             attempts=max(1, job.attempts),
             asr=asr,
+            ocr=ocr,
             prior_extractions=(
                 *prior_extraction.links_of(before),
                 prior_extraction.link_to(self._vault_root, page),
@@ -2236,6 +2247,7 @@ class MediaWorker:
             try:
                 if result.kind == "extraction":
                     asr = result.payload.get("asr")
+                    ocr = result.payload.get("ocr")
                     writes = self._extraction_writes(
                         job,
                         before,
@@ -2245,6 +2257,7 @@ class MediaWorker:
                         speakers=list(result.payload.get("speakers", [])),
                         speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
                         asr=AsrFacts.from_payload(asr) if asr is not None else None,
+                        ocr=OcrFacts.from_payload(ocr) if ocr is not None else None,
                         reprocessing=replaces is not None,
                     )
                     target = writes[0].content

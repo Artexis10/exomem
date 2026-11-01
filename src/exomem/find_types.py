@@ -40,6 +40,19 @@ class GraphProvenance:
         }
 
 
+def without_low_confidence_ocr(body: str, frontmatter: Mapping[str, Any]) -> str:
+    """`body` without the OCR words a sidecar withheld from search.
+
+    Only a page that records OCR output has the section: a media sidecar, or the prior-extraction
+    page that keeps its `ocr_confidence`. A note an author titled the same way keeps its text.
+    """
+    if not (frontmatter.get("media_type") or "ocr_confidence" in frontmatter):
+        return body
+    from . import preserve
+
+    return preserve.without_low_confidence_ocr(body)
+
+
 @dataclass
 class ParsedPage:
     path: Path
@@ -189,11 +202,14 @@ class ParsedPage:
         """The body every search field reads: origin carriers are not prose.
 
         Every audience is served from these fields, so a carrier a hand edit
-        pushed into code is withheld too (`provenance.withheld_prose`).
+        pushed into code is withheld too (`provenance.withheld_prose`). A media
+        sidecar keeps the OCR words under the confidence floor in a section of its
+        own, which no search field reads.
         """
         from . import provenance
 
-        return provenance.withheld_prose(self.body, owner_path=self.rel_path)
+        body = without_low_confidence_ocr(self.body, self.frontmatter)
+        return provenance.withheld_prose(body, owner_path=self.rel_path)
 
     @cached_property
     def body_stripped(self) -> str:
