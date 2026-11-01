@@ -12,6 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION = ROOT / "infra/terraform/foundation"
 DURABILITY = ROOT / "infra/terraform/durability"
+CELL_DATA = ROOT / "infra/terraform/cell-data"
 BOOTSTRAP = ROOT / "infra/terraform/bootstrap"
 HCP_BOOTSTRAP = ROOT / "infra/terraform/hcp-bootstrap"
 TERRAFORM = Path(os.environ["TERRAFORM_BIN"]) if "TERRAFORM_BIN" in os.environ else None
@@ -46,6 +47,19 @@ def test_foundation_and_durability_are_disjoint_lifecycle_domains() -> None:
     assert "use_lockfile" not in foundation
     assert "use_lockfile" not in durability
     assert 'backend "s3"' not in _all_tf(BOOTSTRAP)
+
+
+def test_cell_data_is_a_b2_only_domain_with_its_own_state_workspace() -> None:
+    cell_data = _all_tf(CELL_DATA).lower()
+    assert "backblaze/b2" in cell_data
+    assert "hetznercloud/hcloud" not in cell_data
+    assert "cloudflare/cloudflare" not in cell_data
+    assert re.search(
+        r'cloud\s*{.*workspaces\s*{\s*name\s*=\s*"exomem-hosted-cell-data"',
+        cell_data,
+        re.S,
+    )
+    assert 'backend "s3"' not in cell_data
 
 
 def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_never_global() -> None:
@@ -240,16 +254,17 @@ def test_hcp_bootstrap_manages_exact_state_only_workspaces() -> None:
     assert 'source  = "hashicorp/tfe"' in bootstrap
     assert 'version = "= 0.78.0"' in bootstrap
     assert 'resource "tfe_project" "hosted"' in bootstrap
-    assert bootstrap.count('resource "tfe_workspace"') == 3
+    assert bootstrap.count('resource "tfe_workspace"') == 4
     assert '"foundation"' in bootstrap
     assert '"durability"' in bootstrap
+    assert '"cell_data"' in bootstrap
     assert '"backend_proof"' in bootstrap
-    assert bootstrap.count('resource "tfe_workspace_settings"') == 3
-    assert len(re.findall(r'execution_mode\s*=\s*"local"', bootstrap)) == 3
-    assert len(re.findall(r"global_remote_state\s*=\s*false", bootstrap)) == 3
-    assert len(re.findall(r"project_remote_state\s*=\s*false", bootstrap)) == 3
-    assert len(re.findall(r"auto_apply\s*=\s*false", bootstrap)) == 3
-    assert len(re.findall(r"assessments_enabled\s*=\s*false", bootstrap)) == 3
+    assert bootstrap.count('resource "tfe_workspace_settings"') == 4
+    assert len(re.findall(r'execution_mode\s*=\s*"local"', bootstrap)) == 4
+    assert len(re.findall(r"global_remote_state\s*=\s*false", bootstrap)) == 4
+    assert len(re.findall(r"project_remote_state\s*=\s*false", bootstrap)) == 4
+    assert len(re.findall(r"auto_apply\s*=\s*false", bootstrap)) == 4
+    assert len(re.findall(r"assessments_enabled\s*=\s*false", bootstrap)) == 4
     assert "var.terraform_version" in bootstrap
     assert 'resource "b2_bucket" "terraform_state"' not in bootstrap
     assert 'resource "b2_application_key"' not in bootstrap
@@ -259,6 +274,7 @@ def test_hcp_bootstrap_manages_exact_state_only_workspaces() -> None:
         "hcp_project_id",
         "foundation_workspace_id",
         "durability_workspace_id",
+        "cell_data_workspace_id",
         "backend_proof_workspace_id",
     ):
         assert f'output "{output_name}"' in outputs
@@ -278,6 +294,38 @@ def test_plan_wrapper_binds_exact_hcp_workspace_and_environment_only_token() -> 
         assert "AWS_ACCESS_KEY_ID" not in script
         assert "AWS_SECRET_ACCESS_KEY" not in script
         assert "-backend-config" not in script
+
+
+def test_plan_wrappers_accept_each_state_root_and_refuse_an_unknown_one() -> None:
+    # A wrapper that drops a root fails closed with the usage line. One that accepts it
+    # reaches the next guard, the missing HCP organization.
+    benchmark_capabilities.require_posix_executable_scripts()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"TF_CLOUD_ORGANIZATION", "TF_TOKEN_app_terraform_io", "TF_WORKSPACE"}
+    }
+    for script_name in ("plan.sh", "apply_saved_plan.sh"):
+        script = str(ROOT / f"infra/scripts/{script_name}")
+        for root_name in ("foundation", "durability", "cell-data"):
+            accepted = subprocess.run(
+                [script, root_name, "unused.tfplan"],
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert accepted.returncode == 2
+            assert "TF_CLOUD_ORGANIZATION" in accepted.stderr, (script_name, root_name)
+        refused = subprocess.run(
+            [script, "bootstrap", "unused.tfplan"],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert refused.returncode == 2
+        assert "usage:" in refused.stderr
 
 
 def test_backend_bootstrap_seals_local_state_and_uses_saved_plans() -> None:
@@ -376,7 +424,7 @@ def test_terraform_roots_format_and_validate_offline() -> None:
     if TERRAFORM is None:
         pytest.skip("set TERRAFORM_BIN to run the pinned-provider validation")
     assert TERRAFORM.is_file(), "TERRAFORM_BIN must name the pinned Terraform binary"
-    for root in (FOUNDATION, DURABILITY, BOOTSTRAP, HCP_BOOTSTRAP):
+    for root in (FOUNDATION, DURABILITY, CELL_DATA, BOOTSTRAP, HCP_BOOTSTRAP):
         formatted = subprocess.run(
             [str(TERRAFORM), "fmt", "-check", "-recursive"],
             cwd=root,

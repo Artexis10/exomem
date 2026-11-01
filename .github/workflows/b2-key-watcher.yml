@@ -1,0 +1,49 @@
+name: B2 key watcher
+
+# Lists the application keys and buckets of each pinned object-store account and
+# reports drift to a receiver outside the cluster. The pinned set, the receiver URL
+# and the list-only credentials are repository secrets: this public repository
+# holds none of them, and the script prints only labels, reason tokens and counts.
+# The script exits non-zero on an empty or invalid pinned set, so a missing secret
+# fails the run instead of passing it silently.
+
+on:
+  schedule:
+    # An off-minute avoids the top-of-hour queue.
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# A queued run must finish: cancelling one would skip its heartbeat.
+concurrency:
+  group: b2-key-watcher
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13.5"
+
+jobs:
+  watch:
+    # A fork has none of the secrets, and a scheduled run there would only fail.
+    if: github.repository == 'Artexis10/exomem'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Check keys and buckets against the pinned set
+        env:
+          KEY_WATCHER_PINNED_SET: ${{ secrets.KEY_WATCHER_PINNED_SET }}
+          KEY_WATCHER_ALERT_URL: ${{ secrets.KEY_WATCHER_ALERT_URL }}
+          B2_WATCHER_FOUNDER_KEY_ID: ${{ secrets.B2_WATCHER_FOUNDER_KEY_ID }}
+          B2_WATCHER_FOUNDER_KEY: ${{ secrets.B2_WATCHER_FOUNDER_KEY }}
+          B2_WATCHER_CELL_DATA_KEY_ID: ${{ secrets.B2_WATCHER_CELL_DATA_KEY_ID }}
+          B2_WATCHER_CELL_DATA_KEY: ${{ secrets.B2_WATCHER_CELL_DATA_KEY }}
+        run: python3 infra/scripts/b2_key_watcher.py
