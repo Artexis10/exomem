@@ -3097,6 +3097,22 @@ def dynamic_retry_after_ms(snapshot: dict[str, object] | None) -> int:
     return retry_after_ms
 
 
+def planned_write_moved_busy() -> OpError:
+    """The retryable refusal for a write whose own planned auxiliary moved.
+
+    This write holds the boundary, so the message must not call the boundary busy:
+    a writer outside the line changed a file this write planned, and a re-run re-plans it.
+    """
+    busy = _mutation_busy(None)
+    busy.details["cause"] = "auxiliary_changed"
+    return OpError(
+        "MUTATION_BUSY",
+        "a file this write planned changed while it waited",
+        "The write did not commit. Retry it: the retry plans the changed file again.",
+        details=busy.details,
+    )
+
+
 def _mutation_busy(
     snapshot: dict[str, object] | None = None, *, wait_ms: float | None = None
 ) -> OpError:

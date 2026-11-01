@@ -5,6 +5,7 @@ loading — turn 3 (C3): guard narrowing + pre-warm + telemetry for `remember`.
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -19,7 +20,6 @@ from exomem import (
     semantic_writes,
     writer_lease,
 )
-from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember, product_commands_for
 from exomem.vault import content_hash
@@ -394,19 +394,11 @@ def _write_existing_page(vault: Path, rel: str, *, page_id: str, body: str = "Be
 def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     vault: Path,
 ) -> None:
-    """Two `edit_memory` calls on different primary pages both complete under
-    the narrow boundary, with no deadlock and no corruption.
+    """Two `edit_memory` calls on different pages commit, each without a retry by its caller.
 
-    Both edits share auxiliary write targets (`log.md`, the top/sub indexes)
-    whose guards `edit.commit_edit` captures before `commit_existing`'s own
-    (now narrow) boundary is acquired — a genuinely new race this change
-    introduces for that shared auxiliary specifically (the wide boundary
-    used to serialize guard-capture and commit together for every caller on
-    one manager; the narrow boundary only serializes the commit). A losing
-    guard is refused honestly (`PATH_GUARD_CHANGED`), never silently
-    dropped, so a single immediate retry is the correct, expected recovery —
-    the same "semantically honest interleaving" class already accepted for
-    `STALE_SEMANTIC_WRITE` (see this change's write-latency spec delta).
+    Both share auxiliary targets (`log.md`, the indexes) that are planned before the narrow
+    boundary is taken. A loser's auxiliary changed while it waited, so the server runs it
+    again; the caller sees one success, never a staleness error to retry by hand.
     """
     rel_a = "Knowledge Base/Notes/Insights/narrow-edit-a.md"
     rel_b = "Knowledge Base/Notes/Insights/narrow-edit-b.md"
@@ -418,33 +410,18 @@ def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     errors: list[BaseException] = []
 
     def edit(rel: str, new_body: str) -> None:
-        for attempt in range(2):
-            try:
-                results.append(
-                    _invoke_edit_memory(
-                        vault,
-                        manager,
-                        path=rel,
-                        why="narrow-boundary interleaving check",
-                        new_body=new_body,
-                    )
+        try:
+            results.append(
+                _invoke_edit_memory(
+                    vault,
+                    manager,
+                    path=rel,
+                    why="narrow-boundary interleaving check",
+                    new_body=new_body,
                 )
-                return
-            except (vault_module.PathGuardError, ValueError) as error:
-                # A losing auxiliary guard now surfaces as the documented
-                # retryable STALE_SEMANTIC_WRITE (translated at the commit
-                # seam) rather than a raw PathGuardError; one retry is the
-                # correct, expected recovery either way.
-                retryable = isinstance(
-                    error, vault_module.PathGuardError
-                ) or "STALE_SEMANTIC_WRITE" in str(error)
-                if attempt == 0 and retryable:
-                    continue
-                errors.append(error)
-                return
-            except BaseException as error:  # noqa: BLE001 - inspect thread outcome
-                errors.append(error)
-                return
+            )
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
 
     threads = [
         threading.Thread(target=edit, args=(rel_a, "Updated A.")),
@@ -453,13 +430,181 @@ def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=10.0)
+        thread.join(timeout=30.0)
 
     assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert len(results) == 2
     assert "Updated A." in (vault / rel_a).read_text(encoding="utf-8")
     assert "Updated B." in (vault / rel_b).read_text(encoding="utf-8")
+
+
+def _pause_first_attempt_after_planning(monkeypatch: pytest.MonkeyPatch):
+    """Hold a keyed write after it planned and before it acquires the boundary.
+
+    Returns (planned, resume, attempts): `planned` is set when the first attempt reaches the
+    pause, `resume` lets it go, and `attempts` gets one entry per attempt that reached it.
+    """
+    planned = threading.Event()
+    resume = threading.Event()
+    attempts: list[int] = []
+    real_prewarm = semantic_writes._prewarm_embeddings
+
+    def pause() -> None:
+        attempts.append(1)
+        if len(attempts) == 1:
+            planned.set()
+            assert resume.wait(30)
+        real_prewarm()
+
+    monkeypatch.setattr(semantic_writes, "_prewarm_embeddings", pause)
+    return planned, resume, attempts
+
+
+def _run_in_thread(run):
+    outcome: list[dict] = []
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            outcome.append(run())
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    return thread, outcome, errors
+
+
+@pytest.mark.parametrize("operation", ["remember", "remember_draft", "edit_memory"])
+def test_a_write_whose_navigation_changed_while_it_waited_commits_once_without_a_stale_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """An upload rewrites log.md and the index between a write's planning and its acquire.
+
+    The caller used to get STALE_SEMANTIC_WRITE for a change it did not make. The server now
+    plans again and the write commits once, with one log entry, and a resend replays. The
+    three cases reach the three commit seams: full creation, structural creation, existing page.
+    """
+    import io
+
+    from exomem import preserve
+
+    manager = _standalone_manager(vault.parent / "state")
+    rel = "Knowledge Base/Notes/Insights/navigation-race.md"
+    if operation == "remember":
+        kwargs = _validated_kwargs(vault, title="Navigation race", slug="navigation-race")
+        run = lambda: manager.invoke(  # noqa: E731
+            _remember_command(), (vault,), kwargs, idempotency_key="navigation-race-key"
+        )
+        marker = "Navigation race"
+    elif operation == "remember_draft":
+        kwargs = dict(TODAY_KWARGS, title="Navigation draft", slug="navigation-draft", status="draft")
+        run = lambda: manager.invoke(  # noqa: E731
+            _remember_command(), (vault,), kwargs, idempotency_key="navigation-race-key"
+        )
+        marker = "Navigation draft"
+    else:
+        _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000d1")
+        kwargs = {"path": rel, "why": "navigation race marker", "new_body": "After."}
+        run = lambda: manager.invoke(  # noqa: E731
+            _edit_memory_command(), (vault,), kwargs, idempotency_key="navigation-race-key"
+        )
+        marker = "navigation race marker"
+
+    planned, resume, attempts = _pause_first_attempt_after_planning(monkeypatch)
+    thread, outcome, errors = _run_in_thread(run)
+    assert planned.wait(30)
+    with manager.mutation_guard(vault, request_id="competitor", operation="upload_preserve"):
+        preserve.preserve_stream(
+            vault,
+            scope="Race",
+            category="Navigation",
+            filename="race.bin",
+            stream=io.BytesIO(b"bytes that move the log and the index"),
+        )
+    resume.set()
+    thread.join(60)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert len(attempts) >= 2, "the write was not run again after its navigation changed"
+    log = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
+    assert log.count(marker) == 1
+    assert "race.bin" in log
+    attempted = len(attempts)
+    assert run() == outcome[0]
+    assert len(attempts) == attempted, "the resend ran the write again instead of replaying"
+    assert (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8").count(marker) == 1
+
+
+def test_an_external_edit_of_the_page_while_the_write_waited_is_stale_not_busy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write whose own page changed keeps its staleness error, and the outside text survives.
+
+    Only a moved auxiliary is absorbed; absorbing this one would re-run the caller's edit over
+    text it never saw.
+    """
+    manager = _standalone_manager(vault.parent / "state")
+    rel = "Knowledge Base/Notes/Insights/basis-race.md"
+    page = _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000e1")
+    kwargs = {"path": rel, "why": "basis race marker", "new_body": "Mine."}
+    planned, resume, attempts = _pause_first_attempt_after_planning(monkeypatch)
+    thread, outcome, errors = _run_in_thread(
+        lambda: manager.invoke(
+            _edit_memory_command(), (vault,), kwargs, idempotency_key="basis-race-key"
+        )
+    )
+    assert planned.wait(30)
+    page.write_text(page.read_text(encoding="utf-8").replace("Before.", "Theirs."), encoding="utf-8")
+    resume.set()
+    thread.join(60)
+
+    assert not thread.is_alive()
+    assert outcome == []
+    assert len(errors) == 1
+    assert "STALE_SEMANTIC_WRITE" in str(getattr(errors[0], "code", "")) + str(errors[0])
+    assert getattr(errors[0], "code", None) != "MUTATION_BUSY"
+    assert len(attempts) == 1
+    text = page.read_text(encoding="utf-8")
+    assert "Theirs." in text
+    assert "Mine." not in text
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_a_refusal_with_no_moved_guard_is_not_absorbed_as_busy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder the server cannot write into refuses the batch with no guard moved.
+
+    That is no race: re-running cannot help, and absorbing it holds a request worker for the
+    whole wait. The write must end at once with its old error and one attempt.
+    """
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "3")
+    manager = _standalone_manager(vault.parent / "state")
+    rel = "Knowledge Base/Notes/Insights/unwritable.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000f1")
+    attempts: list[int] = []
+    real_prewarm = semantic_writes._prewarm_embeddings
+    monkeypatch.setattr(
+        semantic_writes, "_prewarm_embeddings", lambda: (attempts.append(1), real_prewarm())[1]
+    )
+    folder = vault / "Knowledge Base"
+    folder.chmod(0o555)
+    try:
+        with pytest.raises(Exception) as refused:  # noqa: B017 - the old code of this refusal is not the subject
+            manager.invoke(
+                _edit_memory_command(),
+                (vault,),
+                {"path": rel, "why": "unwritable folder", "new_body": "After."},
+                idempotency_key="unwritable-key",
+            )
+    finally:
+        folder.chmod(0o755)
+
+    assert getattr(refused.value, "code", None) != "MUTATION_BUSY"
+    assert len(attempts) == 1
 
 
 def test_commit_existing_revalidates_on_census_mismatch_and_surfaces_stale_write(
