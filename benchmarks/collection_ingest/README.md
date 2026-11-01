@@ -1,7 +1,9 @@
 # Collection ingest rehearsal
 
 A dev-only instrument. It measures what Exomem keeps when an agent adopts an existing
-Obsidian-style collection of about 1,000 notes with mixed media through Adoption Studio.
+collection through Adoption Studio. The `small`, `standard` and `heavy` profiles write an
+Obsidian-style collection of notes with mixed media. The `raw` profiles add messy real-world
+input: files with no front matter, other encodings, copies, huge files, deep and odd paths.
 It is not shipped and not part of CI.
 
 The instrument sees the product only through public behaviour: files in the vault and MCP
@@ -12,6 +14,7 @@ tool results. It reads no product internals, so the same run can score a changed
 | File | Job |
 | --- | --- |
 | `generate.py` | Write an invented collection and its answer key from a seed. |
+| `raw_corpus.py` | Build the messy files, their key rows and the existing-vault pages of the `raw` profiles. |
 | `drive.py` | Run the Adoption Studio journey through one stdio MCP session. |
 | `score.py` | Compare the finished vault, the drive log and the key. Write one metrics JSON. |
 | `control.py` | Prove `score.py` can see success. Score a vault with planted, counted losses. |
@@ -31,6 +34,15 @@ tool results. It reads no product internals, so the same run can score a changed
    `python control.py --collection $SCRATCH/small --key $SCRATCH/small.key.json --workdir $SCRATCH/control --python $SCRATCH/venv/bin/python --out $SCRATCH/control.metrics.json`
    Every line must print `ok`.
 
+To score messy input, and an import into a vault that already holds pages, use a `raw` profile:
+
+1. Generate it. The page spec of the existing vault goes beside the key, as `raw.key.vault-pages.json`:
+   `python generate.py --seed 7 --profile raw --out $SCRATCH/raw --key $SCRATCH/raw.key.json`
+2. Drive it with `--existing-pages`, then score it as before:
+   `$SCRATCH/venv/bin/python drive.py --collection $SCRATCH/raw --workdir $SCRATCH/run-raw --python $SCRATCH/venv/bin/python --existing-pages $SCRATCH/raw.key.vault-pages.json --log $SCRATCH/run-raw.drive.json`
+3. Check the scorer on the raw key (about 1 minute). Every line must print `ok`:
+   `python control.py --collection $SCRATCH/raw --key $SCRATCH/raw.key.json --workdir $SCRATCH/control-raw --python $SCRATCH/venv/bin/python --out $SCRATCH/control-raw.metrics.json`
+
 `--workdir` must be empty. All server state, logs and bytecode go under it. Nothing is written
 to the repository. Use `umask 022`: permission checks fail under `0002`.
 
@@ -47,6 +59,55 @@ imports the collection's Markdown files as draft notes with a registered note ty
 Explicit rules replace the default selection and legacy folder probe. A refusal stops the journey instead of retrying without the rule.
 The log records the rules and every Knowledge Base page after each journey, including notes, to detect duplicates.
 The driver skips optional Markdown manifests for each run, so those snapshots measure item creation.
+
+### Raw profiles
+
+`raw` (the `small` collection plus 111 raw files) and `raw-standard` (the `standard` collection
+plus 371) are new profiles, not options on `standard`. A profile has its own random stream and
+its own key, so the bytes and the key of `small`, `standard` and `heavy` do not change, and an old
+result stays comparable. The messy files sit beside the notes, in folders that the notes do not
+use (`dump`, `legacy`, `types`, `copies`, `deep`, `long names`, `odd names`, `twins`,
+`snippets`, `bulk`). The generator needs a Linux file system: it writes names that are legal
+there and not on every system.
+
+`--huge-bytes` sets the byte total of the two huge files (default 16 MiB, so the `raw` collection
+is about 18 MiB). The text file takes 5/16 of it and stays above the 4 MiB inline-text bound at the
+default; below about 13 MiB the text file is small enough to be held as text, and the key says so.
+The generator checks every name against the documented limits (255 bytes per name, 4,096 per path)
+and writes no control character, so one archive of the tree is never refused as a whole.
+
+Every raw file is a key item with `kind: raw`, a class, the form the contract gives it, its
+sha256 and a probe phrase. The key states one outcome per item:
+
+- `filed`: the item has a page. The Source page is the page that the scorer counts, also when an include rule makes an own note.
+- `filed-or-refused`: the item has a page, or a refusal that carries a code. The key names no code. The scorer accepts any code and reports the one it saw in `raw.by_class.<class>.refused_by_code`. Only the backslash name has this outcome.
+
+An item with neither is `lost`. "Readable" means that `search_memory` with the probe phrase
+returns the item's own page in the top 5. The key marks a probe `promised` when the contract
+keeps the text in a page. For the other items the scorer reports what it observed.
+
+The key holds the list of classes. `raw.classes` in the key gives each class with its file count and
+what the contract promises for it, and each key row names its class and form. Read the contract there;
+it has no second copy in this file. The classes cover:
+
+- notes without front matter: `plain-md`, `same-title`, `plain-txt`, `broken-frontmatter`;
+- encodings: `line-endings`, `utf8-bom`, `latin-1`, `utf-16-bom`, `shift-jis`, `invalid-utf8`;
+- many types and copies: `mixed-types`, `duplicate`, `flat-dump`;
+- paths: `deep-path`, `long-name`, `odd-name`, `unsafe-name`, `unicode-twin`, `case-twin`;
+- huge files: `huge-text`, `huge-binary`.
+
+### Existing vault
+
+`--existing-pages` makes `drive.py` write four pages into the new vault before the first journey,
+dated with the day of the drive. Two take the page name that an incoming item plans: one for a
+text original and one for an artifact original. Two take no planned name: an earlier Source of
+another collection and a hand-written note.
+
+The spec promises that an import never edits or moves a page that the vault holds. The key adds
+one expectation that the spec does not state: an item whose planned name is taken gets the next
+free name (`<name>-2`). That rule comes from the page-name allocator in the code. The drive log
+records the bytes of each seeded page, so the scorer compares them without the spec. A drive
+without `--existing-pages` leaves `existing_vault` `unknown`.
 
 The collection has 23 nested folders, about 10 percent Japanese notes (some with NFD file
 names), wikilinks in every written form (path, basename, alias, heading, front-matter
@@ -90,7 +151,10 @@ Each rate is `{numerator, denominator}`. `measurement_gaps` counts scorer reads 
 | `landing.attachments_landed` | Same, for attachments. Also given by extension. |
 | `landing.items_refused_by_code` | Key items the drive log shows refused, by error code. |
 | `landing.items_silently_absent` | Key notes and attachments that neither landed nor appear in any refusal. |
+| `landing.lost` | Key notes, attachments and raw items with no page and no refusal recorded by the first journey. `first_journey` says whether the first journey ran to the end, stopped at a step, or is absent from the log, so the items a stopped run never reached are not read as lost by the product. |
 | `landing.junk_landed` | Junk files (conflict copies, empty files) that landed. Lower is better. |
+| `raw` | Per class and in total: items filed, refused, lost and meeting the key; filed items whose original bytes are held (a stored file with the same sha256, or the original text inside a page file); filed items held in the form the key states (items whose original cannot be compared are shown as `unknown`, not as a mismatch); probe phrases found by search, for all probed items and for the promised ones. State `unknown` when the key has no raw items. |
+| `existing_vault` | Seeded pages unchanged, changed and missing; colliding items filed and given a numbered name; bystander pages unchanged; seeded pages found by search. State `unknown` when the key or the drive log has no seeded pages, `partial` when the log lacks a page. |
 | `links_preserved` | Resolvable key links where `read_memory(links=true)` shows an outbound link from the note's page to the target's page. Unit: distinct (note, target) pairs. |
 | `embeds_bound` | Key embeds where the note's page links to the attachment's page or to a vault file with the same sha256. |
 | `fidelity` | Tags, aliases and front-matter properties present on the landed page. |
@@ -114,4 +178,9 @@ Each rate is `{numerator, denominator}`. `measurement_gaps` counts scorer reads 
 - The media wait is bounded (`--media-deadline`, default 300 seconds). `media.queue_converged_*` says whether the queue drained.
 - One seed and one run per profile. Do not read small differences as signal.
 - `heavy` is not exercised by default. It writes gigabytes of filler.
-- `control.py` proves the scorer's matching logic, not the product. Its vault is hand-made from the key.
+- `control.py` proves the scorer's matching logic, not the product. Its vault is hand-made from the key. With a raw key it plants a lost item, a refused item, wrong bytes, a missing phrase, an original that cannot be compared, an overwritten page, a deleted page and a Unicode twin whose page is gone.
+- `raw` counts a refusal only from the journey log (`select.rejected`, `plan.skipped`, `apply.failed`). The residual list of a staged `_Imports/` run is not read, so an item that only that list names reads as lost.
+- A text original is held when its bytes appear inside the page file. The check proves the bytes are there. It does not prove the fence around them. It needs the vault's own copy of the original, which the scorer accepts only when its hash equals the key's. Otherwise the item counts under `unknown`, and `measurement_gaps.raw_originals_not_comparable` says how many.
+- A rate with denominator 0 means that no item of that class qualifies. It does not mean a perfect or a zero score.
+- The seeded pages carry the drive day. A drive that crosses midnight plans some names on the next day. Those items are filed and the seeded pages stay, but they take no numbered name, and `existing_vault.colliding_items.item_took_a_numbered_name` shows it.
+- Two names that are equal after Unicode NFC can share one `imported_from`. A twin counts only a page whose `original_sha256` equals its own, so the page of the other twin never stands in for it. A twin page with no `original_sha256` reads as lost.

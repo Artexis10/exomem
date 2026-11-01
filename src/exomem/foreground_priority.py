@@ -253,32 +253,49 @@ def wait_for_retry(seconds: float) -> None:
 
 
 class PassBudget:
-    """How long one `bulk()` pass has run, waited, and may still run unyielded."""
+    """How long one `bulk()` pass has run, waited, and may still run unyielded.
 
-    __slots__ = ("started", "waited", "work_until")
+    ``wait_share``, in [0, 1), replaces `MAX_WAIT_SHARE` for this pass. A pass
+    that may wait most of its time sets ``max_waited`` too: the total seconds it
+    may wait, so it still finishes within that delay beyond its work.
+    """
 
-    def __init__(self) -> None:
+    __slots__ = ("started", "waited", "work_until", "wait_share", "max_waited")
+
+    def __init__(self, *, wait_share: float | None = None, max_waited: float | None = None) -> None:
         self.started = time.monotonic()
         self.waited = 0.0
         self.work_until = 0.0
+        self.wait_share = wait_share
+        self.max_waited = max_waited
 
     def allowance(self, now: float) -> float:
         """Seconds this pass may still wait without breaking the floor."""
         work = max(0.0, now - self.started - self.waited)
         # Charge the initial grace once. Counting previous waits as elapsed
         # work would let those waits buy more waiting and double the grace.
-        wait_per_work = MAX_WAIT_SHARE / (1.0 - MAX_WAIT_SHARE)
-        return MAX_YIELD_SECONDS + wait_per_work * work - self.waited
+        share = MAX_WAIT_SHARE if self.wait_share is None else self.wait_share
+        wait_per_work = share / (1.0 - share)
+        allowed = MAX_YIELD_SECONDS + wait_per_work * work
+        if self.max_waited is not None:
+            allowed = min(allowed, self.max_waited)
+        return allowed - self.waited
 
     def after_capped_wait(self, now: float, waited: float) -> None:
         self.work_until = now + min(waited, MAX_BULK_WORK_SECONDS)
+
+
+def pass_waited() -> float:
+    """Seconds this thread's current `bulk()` pass has waited at its yields; 0.0 outside one."""
+    budget: PassBudget | None = getattr(_local, "budget", None)
+    return budget.waited if budget is not None else 0.0
 
 
 def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """Wait while a foreground request runs, at most `max_wait`; return the wait.
 
     Inside a `bulk()` pass the wait is also held to the pass's progress floor
-    (`MAX_WAIT_SHARE`).
+    (`MAX_WAIT_SHARE`, unless its `PassBudget` sets its own).
     """
     check_cancelled()
     budget: PassBudget | None = getattr(_local, "budget", None)

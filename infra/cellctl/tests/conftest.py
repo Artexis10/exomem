@@ -249,3 +249,4 @@ def alert_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", str(CONTRACT_ALERTS["pending_operation_warn_seconds"]))
     monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", str(CONTRACT_ALERTS["pvc_reserved_free_bytes"]))
+    monkeypatch.setenv("CELLCTL_RECALL_LAG_WARN_SECONDS", str(CONTRACT_ALERTS["recall_lag_warn_seconds"]))

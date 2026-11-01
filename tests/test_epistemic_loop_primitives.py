@@ -567,7 +567,9 @@ def test_a_governed_key_is_recognized_through_label_normalization(
     tmp_path: Path, authored: str, normalized: str
 ) -> None:
     """The inverse guard: a real governed key spelled loosely is still governed."""
-    value = "refuted" if normalized == "verdict" else "2026-11-01"
+    # A date no run falls on: the write stamps today's date into the page, so a
+    # check_by equal to today would be counted twice.
+    value = "refuted" if normalized == "verdict" else "2099-02-03"
     page, unit = _rich_page_with_rows(tmp_path, f"- {authored}: {value}\n")
 
     assert getattr(unit, normalized) == value
@@ -587,8 +589,9 @@ def test_a_governed_key_is_recognized_through_label_normalization(
     # Re-emitted under its canonical spelling, and never duplicated as an
     # unowned row alongside the governed one.
     source = page.read_text(encoding="utf-8")
-    assert f"- {normalized}: {value}" in source
-    assert source.count(value) == 1
+    # Count unit rows, not the bare value: the page's `updated:` date can equal the fixture date.
+    rows = [line for line in source.splitlines() if line.startswith("- ") and value in line]
+    assert rows == [f"- {normalized}: {value}"]
     assert updated["unit"][normalized] == value
 
 

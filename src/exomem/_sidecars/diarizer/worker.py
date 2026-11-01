@@ -9,7 +9,7 @@ venv) maps that to ``None`` → plain transcript. This file MUST NOT import ``kb
 under a *different* interpreter/venv.
 
 Why a separate venv: the main service runs a custom torch-2.12+cu132 (Blackwell) build that is
-incompatible with the pyannote/torchaudio ecosystem. This sidecar pins Q's proven stack
+incompatible with the pyannote/torchaudio ecosystem. This sidecar pins a proven stack
 (pyannote 4 package loading the 3.1 model, torch 2.9.1+cu130 → sm_120) where pyannote runs on the
 GPU. ``KB_MCP_DIARIZE_DEVICE`` = ``cpu`` | ``cuda`` | ``auto`` (default auto → cuda if available).
 
@@ -75,17 +75,23 @@ def _load_pipeline():
     """Load the pretrained pyannote diarization pipeline (model + HF token from env)."""
     from pyannote.audio import Pipeline
 
-    model = os.environ.get("KB_MCP_DIARIZE_MODEL", "pyannote/speaker-diarization-3.1")
+    model = (
+        os.environ.get("EXOMEM_DIARIZE_MODEL")
+        or os.environ.get("KB_MCP_DIARIZE_MODEL")
+        or "pyannote/speaker-diarization-3.1"
+    )
     token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
     # pyannote 4.x uses `token`; 3.x used `use_auth_token`. Support both.
     try:
         pipeline = Pipeline.from_pretrained(model, token=token)
     except TypeError:
         pipeline = Pipeline.from_pretrained(model, use_auth_token=token)
-    # Optional clustering-threshold override (mirrors Q's PYANNOTE_CLUSTERING_THRESHOLD). Applied
+    # Optional clustering-threshold override (pyannote's clustering threshold). Applied
     # only when set, so default pyannote behaviour is unchanged. Higher → fewer clusters (merge
     # similar voices); lower → more sensitive. Tune to curb over-splitting on conversational audio.
-    thr = os.environ.get("KB_MCP_DIARIZE_CLUSTERING_THRESHOLD")
+    thr = os.environ.get("EXOMEM_DIARIZE_CLUSTERING_THRESHOLD") or os.environ.get(
+        "KB_MCP_DIARIZE_CLUSTERING_THRESHOLD"
+    )
     if thr and pipeline is not None:
         try:
             clustering = getattr(pipeline, "clustering", None)

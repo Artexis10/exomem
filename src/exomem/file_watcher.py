@@ -637,6 +637,27 @@ def _verify_publication_intents_after_publish(
     return verified, failed
 
 
+def publication_in_flight(vault_root: Path, paths: Iterable[Path | str]) -> bool:
+    """Whether a write in this process has reserved a page of `paths` and not yet published it.
+
+    An intent is reserved before the canonical replacement and closes once the
+    registry holds the write's event, so it spans the gap in which the disk is
+    ahead of the registry. An intent past its deadline no longer counts: a
+    writer that died leaves no event to wait for.
+    """
+    now = time.monotonic()
+    root = _canon_root(vault_root)
+    with _SUPPRESS_LOCK:
+        reserved = {
+            key[1]
+            for key, intent in _PUBLICATION_INTENTS.items()
+            if key[0] == root and intent.disposition == "active" and intent.deadline > now
+        }
+    if not reserved:
+        return False
+    return any(_rel_posix(vault_root, Path(path)) in reserved for path in paths)
+
+
 def finalize_publication_intents(
     intents: Iterable[_PublicationIntent],
     *,

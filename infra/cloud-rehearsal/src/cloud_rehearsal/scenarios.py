@@ -63,6 +63,7 @@ from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
     from .large_import import LargeImportPlan
+    from .raw_import import RawImportPlan
 
 WARM_ITERATIONS = 20
 LATENCY_ITERATIONS = 10
@@ -141,6 +142,8 @@ class Context:
     # The large-import mode (large_import.py): the plan to run after provisioning, which
     # also sets the cell's volume size on the local storage class.
     large_import: LargeImportPlan | None = None
+    # The raw-data import mode (raw_import.py): what to run after provisioning.
+    raw_import: RawImportPlan | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -427,11 +430,27 @@ async def step_1_invite(ctx: Context, record: StepRecord) -> None:
     )
 
 
+async def redeem_invite(ctx: Context, tenant: Tenant, token: str) -> None:
+    """The person redeems an invite: a session, then the tenant, user and cell it admitted."""
+    tenant.session = await ctx.browser.redeem_invite(token)
+    await ctx.identify(tenant)
+    _require(tenant.cell_id and tenant.tenant_id and tenant.user_id)
+
+
+async def activate_subscription(ctx: Context, tenant: Tenant) -> None:
+    """Checkout, then the signed `subscription.activated` that Paddle sends for it."""
+    tenant.transaction_id = await substrate_mod.bind_checkout(ctx.substrate, tenant.tenant_id)
+    tenant.subscription_id = substrate_mod.paddle_id("sub")
+    await ctx.paddle(
+        substrate_mod.paddle_event(
+            event_type="subscription.activated", status="active", user_id=tenant.user_id, tenant_id=tenant.tenant_id,
+            subscription_id=tenant.subscription_id, transaction_id=tenant.transaction_id,
+        )
+    )
+
+
 async def step_2_provision(ctx: Context, record: StepRecord) -> None:
-    token = ctx.a.notes.pop(0)
-    ctx.a.session = await ctx.browser.redeem_invite(token)
-    await ctx.identify(ctx.a)
-    _require(ctx.a.cell_id and ctx.a.tenant_id and ctx.a.user_id)
+    await redeem_invite(ctx, ctx.a, ctx.a.notes.pop(0))
     # The owner's cell is the canary (D6): the lowest rollout_priority.
     await ctx.execute("UPDATE exomem_cloud_cells SET rollout_priority = 0 WHERE cell_id = $1", ctx.a.cell_id)
     if ctx.large_import is not None:
@@ -444,15 +463,8 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
     if admitted["desired_state"] != "stopped":
         raise StepFailure(f"a paid invite must admit a stopped cell awaiting checkout, got {admitted['desired_state']}")
 
-    ctx.a.transaction_id = await substrate_mod.bind_checkout(ctx.substrate, ctx.a.tenant_id)
-    ctx.a.subscription_id = substrate_mod.paddle_id("sub")
     started = time.monotonic()
-    await ctx.paddle(
-        substrate_mod.paddle_event(
-            event_type="subscription.activated", status="active", user_id=ctx.a.user_id, tenant_id=ctx.a.tenant_id,
-            subscription_id=ctx.a.subscription_id, transaction_id=ctx.a.transaction_id,
-        )
-    )
+    await activate_subscription(ctx, ctx.a)
     activated = await ctx.cell(ctx.a.cell_id)
     if activated["desired_state"] != "running":
         raise CrossLaneDefect(
@@ -1219,6 +1231,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the large import needs the provisioned cell, and step 2 did not pass")
                 await run_large_import(ctx, ctx.large_import)
+        if number == 2 and ctx.raw_import is not None:
+            from .raw_import import run_raw_import
+
+            with stage(ctx.report, "raw_import"):
+                if record.status != PASSED:
+                    raise StepFailure("the raw-data import needs the provisioned cell, and step 2 did not pass")
+                await run_raw_import(ctx, ctx.raw_import)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
@@ -1228,6 +1247,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.large_import is not None and "large_import" not in ctx.report.stages:
         with stage(ctx.report, "large_import"):
             raise StepFailure("the requested large import stage requires provisioning at step 2")
+    if ctx.raw_import is not None and "raw_import" not in ctx.report.stages:
+        with stage(ctx.report, "raw_import"):
+            raise StepFailure("the requested raw-data import stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

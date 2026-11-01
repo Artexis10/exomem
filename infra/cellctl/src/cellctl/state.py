@@ -258,6 +258,8 @@ class ClusterObservation:
     # with exit code 0. The init deadline applies only while it has not.
     pod_init_completed: bool = False
     ready_pod_image: str | None = None
+    # The ready pod's own address: cellctl reads the cell's health-only port there.
+    ready_pod_ip: str | None = None
     init_running: bool = False
     # N5/D4: this pod's cell-init already completed once, in an earlier pod
     # sandbox (a node reboot recreates the sandbox and re-runs it), and

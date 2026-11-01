@@ -32,6 +32,7 @@ from .capacity import (
     parse_budget_frame,
     quantity,
 )
+from .cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH
 from .manifests import (
     BACKUP_FAMILY_ANNOTATION,
     BACKUP_JOB_NAME,
@@ -92,35 +93,45 @@ API_REQUEST_TIMEOUT = (5, 30)
 # never a clean one.
 METRICS_TIMEOUT = 3.0
 METRICS_MAX_BYTES = 256 * 1024
+# The cell-recall-lagging alert reads each cell's readiness answer, a few KB of
+# fixed fields, the same way.
+READINESS_TIMEOUT = 3.0
+READINESS_MAX_BYTES = 64 * 1024
 
 
-async def _read_metrics(targets: dict[str, str], port: int, scraped: dict[str, str]) -> None:
-    """Fills `scraped` with the page of each node in `targets` (node -> pod IP)
-    that answered in time; the others are left out."""
+async def _read_pages(urls: dict[str, str], *, timeout: float, max_bytes: int) -> dict[str, bytes]:
+    """The body of each page in `urls` (key -> URL) that answered 2xx within
+    `timeout`; the others are left out."""
 
-    async def read(client: httpx.AsyncClient, node: str, address: str) -> None:
+    pages: dict[str, bytes] = {}
+
+    async def read(client: httpx.AsyncClient, key: str, url: str) -> None:
         try:
-            async with asyncio.timeout(METRICS_TIMEOUT):
-                async with client.stream("GET", f"http://{address}:{port}/metrics") as response:
+            async with asyncio.timeout(timeout):
+                async with client.stream("GET", url) as response:
                     response.raise_for_status()
                     body = b""
                     # Raw bytes, so the cap counts what the pod sent: a decoded
                     # stream would inflate a small compressed body before the check.
                     async for chunk in response.aiter_raw():
                         body += chunk
-                        if len(body) > METRICS_MAX_BYTES:
-                            raise ValueError("metrics page too large")
-            scraped[node] = body.decode("utf-8")
+                        if len(body) > max_bytes:
+                            raise ValueError("page too large")
+            pages[key] = body
         except (httpx.HTTPError, httpx.InvalidURL, ValueError, TimeoutError):
             pass
 
     # timeout=None: the asyncio.timeout above is the one bound, covering the phases a socket timeout misses.
-    # Accept-Encoding identity: the exporters then send plain text, and a page that is
+    # max_connections=None: one connection per page, all at once, so no page
+    # waits behind another inside its own timeout. `urls` bounds the count.
+    # Accept-Encoding identity: the pods then send plain text, and a page that is
     # compressed anyway fails to decode or parse and reads unreadable.
     async with httpx.AsyncClient(
-        trust_env=False, timeout=None, headers={"Accept-Encoding": "identity"}
+        trust_env=False, timeout=None, limits=httpx.Limits(max_connections=None),
+        headers={"Accept-Encoding": "identity"},
     ) as client:
-        await asyncio.gather(*(read(client, node, address) for node, address in targets.items()))
+        await asyncio.gather(*(read(client, key, url) for key, url in urls.items()))
+    return pages
 
 
 def _bound_requests(api_client: k8s.ApiClient) -> None:
@@ -291,14 +302,35 @@ class ClusterClient:
         failed pod listing raises. The chart grants `list` on pods."""
 
         targets = {
-            pod.spec.node_name: pod.status.pod_ip
+            pod.spec.node_name: f"http://{pod.status.pod_ip}:{port}/metrics"
             for pod in self._core.list_namespaced_pod(namespace, label_selector=selector).items
             if pod.status.phase == "Running" and not pod.metadata.deletion_timestamp
             and pod.spec.node_name and pod.status.pod_ip
         }
+        pages = asyncio.run(_read_pages(targets, timeout=METRICS_TIMEOUT, max_bytes=METRICS_MAX_BYTES))
         scraped: dict[str, str] = {}
-        asyncio.run(_read_metrics(targets, port, scraped))
+        for node, body in pages.items():
+            try:
+                scraped[node] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
         return scraped
+
+    def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
+        """The cell-recall-lagging alert's input: each cell's readiness answer,
+        read from its health-only port on its ready pod's own IP (`addresses`:
+        cell id -> pod IP). cellctl derives every cell bearer, so it reads no
+        other port of a cell, and the network policies admit it to no other.
+        A pod that does not answer 2xx in time (a cell that is not ready
+        answers 503), or sends more than READINESS_MAX_BYTES, is left out: an
+        unread cell, never a clean one. The body is the caller's to parse and
+        never to log."""
+
+        urls = {
+            cell_id: f"http://{address}:{CELL_HEALTH_PORT}{CELL_READINESS_PATH}"
+            for cell_id, address in addresses.items()
+        }
+        return asyncio.run(_read_pages(urls, timeout=READINESS_TIMEOUT, max_bytes=READINESS_MAX_BYTES))
 
     def observe_import_jobs(self, namespace: str, import_id: str):
         import json
@@ -631,6 +663,7 @@ class ClusterClient:
         ready_pod_image = None
         if ready_pod is not None and ready_pod.spec.containers:
             ready_pod_image = ready_pod.spec.containers[0].image
+        ready_pod_ip = (ready_pod.status.pod_ip or None) if ready_pod is not None else None
         pod_uses_volume = pod_exists  # single PVC per namespace, ReadWriteOnce
         pod_node = next((pod.spec.node_name for pod in live_pods if pod.spec.node_name), None)
         # D4: the init deadline is measured from the current pod's creation,
@@ -727,6 +760,7 @@ class ClusterClient:
             init_started_at=init_started_at,
             init_error_code=init_error_code,
             ready_pod_image=ready_pod_image,
+            ready_pod_ip=ready_pod_ip,
             **_job_observation(backup_job, prefix="backup_job", snapshot_id=backup_snapshot_id),
             backup_job_used_bytes=backup_used_bytes,
             backup_job_total_bytes=backup_total_bytes,
