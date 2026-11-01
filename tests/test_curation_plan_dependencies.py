@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -132,15 +133,17 @@ def test_a_split_whose_second_page_links_to_the_first_applies_end_to_end(
 
 def test_a_page_created_by_another_writer_after_proposal_still_refuses(vault: Path) -> None:
     _open_obsidian_at_the_kb(vault)
-    proposed = _propose(
-        vault,
-        _create_step(
-            "branch",
-            "curation-branch",
-            "## Observations\n\n- [finding] The branch splits off. ^branch\n\n"
-            "## Connections\n\n- [[Curation curation-elsewhere]]\n",
-        ),
+    branch = _create_step(
+        "branch",
+        "curation-branch",
+        "## Observations\n\n- [finding] The branch splits off. ^branch\n\n"
+        "## Connections\n\n- [[Curation curation-elsewhere]]\n",
     )
+    branch["args"].update(
+        relation_disposition="reviewed_none",
+        relation_review_reason="Its only link points at a page that does not exist yet.",
+    )
+    proposed = _propose(vault, branch)
     _seed_note(vault, "curation-elsewhere", "## Observations\n\n- [finding] Elsewhere. ^else\n")
 
     with pytest.raises(curation.CurationError) as refused:
@@ -339,3 +342,70 @@ def test_a_relation_review_on_a_page_the_leaf_does_not_review_still_applies(vaul
     )
 
     assert _apply(vault, _propose(vault, log))["phase"] == "completed"
+
+
+def test_a_created_page_missing_the_relation_review_it_needs_is_refused_at_proposal(
+    vault: Path,
+) -> None:
+    _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
+    lone = _create_step("lone", "curation-lone", "## Observations\n\n- [finding] Alone. ^lone\n")
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, lone)
+
+    assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert "RELATION_DISPOSITION_MISSING" in str(refused.value)
+
+
+def test_an_edit_that_stales_the_saved_relation_review_needs_a_review_at_proposal(
+    vault: Path,
+) -> None:
+    home = _seed_note(
+        vault, "curation-home", "## Observations\n\n- [finding] The home keeps the record. ^home\n"
+    )
+    _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
+    reviewed = _edit_step(
+        vault,
+        home,
+        {
+            "kind": "replace_string",
+            "old_string": "keeps the record",
+            "new_string": "keeps the whole record",
+        },
+    )
+    unreviewed = json.loads(json.dumps(reviewed))
+    for key in ("relation_disposition", "relation_review_reason"):
+        unreviewed["args"]["operation"].pop(key)
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, unreviewed)
+
+    assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert "RELATION_DISPOSITION_STALE" in str(refused.value)
+    assert _apply(vault, _propose(vault, reviewed))["phase"] == "completed"
+
+
+def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_review(
+    vault: Path,
+) -> None:
+    target = _seed_note(
+        vault, "curation-target", "## Observations\n\n- [finding] Keeps the record. ^target\n"
+    )
+    _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
+    edit = _edit_step(
+        vault,
+        target,
+        {
+            "kind": "replace_string",
+            "old_string": "Keeps the record",
+            "new_string": "Keeps the whole record",
+        },
+    )
+    for key in ("relation_disposition", "relation_review_reason"):
+        edit["args"]["operation"].pop(key)
+    edit["args"]["why"] = "Follow-up to [[Curation curation-home]]."
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _home_step(), edit)
+
+    assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"

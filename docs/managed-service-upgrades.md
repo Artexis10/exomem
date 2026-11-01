@@ -195,8 +195,8 @@ whether a repair runs. Install the release only when all four pass:
 
 A failed check holds the install. A repair that holds `/health/ready` at
 `not_ready` fails, and so does a write refused to its caller. Run the same read
-and write in the live install window; there, use a write that is safe to repeat,
-such as a scratch note.
+and write in the live install window; there, use a write that is safe to repeat
+and that the vault accepts, such as recording an episode.
 `ready_after_ms` counts from the old worker's stop, so it includes the state
 migrator when `handoff.migration.state` is `ran`.
 
@@ -230,7 +230,7 @@ runtime directory have a 104-byte limit.
 15. Note the time, then switch with the `service_upgrade` command below.
 16. Read `last_transition.handoff` in the printed result.
 17. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
-18. Count failed calls with the check command below; expect 0.
+18. Count failed reads and failed writes with the check command below; expect 0 and 0.
 19. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
 20. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
 
@@ -328,13 +328,15 @@ The issue command runs in a subshell from the empty working directory, so a
 The probe loop sends one MCP read and one MCP write every 30 seconds for 50
 minutes, which covers the 45 minutes after a switch made within 5 minutes of
 its start. It writes one line per call, `TIME read|write RESPONSE`, and each
-write creates a disposable note in the copy:
+write records a disposable episode in the copy. The `record_episode` tool
+ships in 0.149.0 and later, so rehearse from 0.149.0 or a newer release.
+Run the loop:
 
 ```sh
 TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
 while [ "$(date +%s)" -lt "$END" ]; do
   NOW=$(date -u +%H:%M:%S)
-  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"create_note\",\"arguments\":{\"title\":\"Rehearsal probe $NOW\",\"content\":\"Disposable rehearsal write.\",\"note_type\":\"insight\"}}"; do
+  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"record_episode\",\"arguments\":{\"operation\":{\"kind\":\"record\",\"subject\":\"Rehearsal probe\",\"summary\":\"Disposable rehearsal write at $NOW UTC.\",\"worked_on\":[\"rehearsal probe\"]}}}"; do
     BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
       -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":${CALL#* }}" | tr -d '\n')
@@ -344,12 +346,15 @@ while [ "$(date +%s)" -lt "$END" ]; do
 done
 ```
 
-A call fails when its line holds `"isError":true`, `MUTATION_BUSY`,
-`VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. The check command
-prints two counts; expect both to be 0:
+The check looks for success, not for each kind of failure. A read passes
+when its line holds `"isError":false` and no `"success":false`. A write passes
+when its line holds `"state":"committed"`. A refused call still returns a
+normal `"result"`, so the absence of an error is not proof that a call
+succeeded. A search refused while an index rebuilds is one example. The check
+command prints the failed reads, then the failed writes; expect both to be 0:
 
 ```sh
-grep -cE '"isError":true|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
+awk '$2 == "read" && (!/"isError":false/ || /"success":false/)' /tmp/xr/calls.log | wc -l; awk '$2 == "write"' /tmp/xr/calls.log | grep -vc '"state":"committed"'
 ```
 
 The worker also inherits the user manager's environment. Run `systemctl --user

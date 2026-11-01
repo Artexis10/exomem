@@ -858,8 +858,36 @@ def test_retained_colon_source_rechecks_its_literal_entry(
     assert caught.value.code == "UNSAFE_PATH"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses a backslash in a file name")
+def test_a_source_name_with_a_backslash_is_refused_as_an_unsafe_path_not_as_missing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path, {"Coll/back\\slash note.md": "# Back slash\n", "Coll/ok.md": "# Ok\n"})
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert {s["path"]: s["code"] for s in planned["plan"]["skipped"]} == {
+        "Coll/back\\slash note.md": "INVALID_PATH"
+    }
+    assert final["outcomes"]["Coll/ok.md"]["status"] == "applied"
+
+
 # --- plan-layer rules -----------------------------------------------------------
-def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_bin_artifact(tmp_path: Path) -> None:
+def test_a_planned_page_name_that_exists_gets_the_next_free_name_and_the_existing_page_is_kept(
+    tmp_path: Path,
+) -> None:
+    existing = f"{SOURCES}/Imported/2026-07-14-note.md"
+    vault = _vault(tmp_path, {existing: "# Mine\n\nwritten before the import\n", "Coll/note.md": "# Note\n"})
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert final["outcomes"]["Coll/note.md"]["target_path"] == f"{SOURCES}/Imported/2026-07-14-note-2.md"
+    assert (vault / existing).read_text(encoding="utf-8") == "# Mine\n\nwritten before the import\n"
+
+
+def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_text_artifact_outside_the_graph(
+    tmp_path: Path,
+) -> None:
     data = "# Café\n\nnaïve\n".encode("latin-1")
     vault = _vault(tmp_path, {"Coll/OLD.MD": data})
     run_id, planned = _import(vault, path="Coll", include=["Coll"])
@@ -868,8 +896,13 @@ def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_bin_artifact(tmp
 
     outcome = applied["outcomes"]["Coll/OLD.MD"]
     assert outcome["status"] == "applied"
-    assert outcome["artifact_path"].endswith(".bin")
+    assert outcome["artifact_path"].endswith(".md.txt")
     assert (vault / outcome["artifact_path"]).read_bytes() == data
+    # The page names the kind of the stored file, so the media pass extracts its text and keeps the
+    # import's provenance instead of rebuilding the page.
+    page, _body, _raw = parse_frontmatter((vault / outcome["target_path"]).read_text(encoding="utf-8"))
+    assert page["media_type"] == "text"
+    assert page["imported_from"] == "Coll/OLD.MD"
 
 
 def test_a_link_fragment_is_dropped_for_resolution_and_kept_in_the_rendered_link(

@@ -1272,8 +1272,10 @@ def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
     return _guarded_text(Path(vault_root), path, stale=True)
 
 
-def _require_applicable_review(review: Mapping[str, Any], validation: Mapping[str, Any]) -> None:
-    """Refuse a relation review the leaf would refuse at commit.
+def _require_committable(
+    review: Mapping[str, Any], validation: Mapping[str, Any], *, relation_pending: bool
+) -> None:
+    """Refuse a create or supersede step the leaf would refuse at commit.
 
     The review is held back from the leaf's validation, so the leaf cannot object
     to it there; its validation still says whether the page needs one. Only a
@@ -1288,9 +1290,47 @@ def _require_applicable_review(review: Mapping[str, Any], validation: Mapping[st
             "RELATION_REVIEW_NOT_APPLICABLE",
             "the page needs no reviewed-none relation review; drop relation_disposition",
         )
+    _refuse_blocked(
+        validation.get("contract_result"), relation_answered=bool(review) or relation_pending
+    )
 
 
-def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
+def _refuse_blocked(contract_result: Any, *, relation_answered: bool) -> None:
+    """Refuse at proposal a step whose leaf validation says its commit will block.
+
+    A relation-disposition finding is set aside when the step answers it with a
+    review the leaf could not see, and deferred to execution when the step links to
+    a page an earlier step creates, which the leaf can judge only once that page
+    exists. A truncated finding list cannot show that nothing else blocks.
+    """
+    from . import semantic_contract
+
+    result = dict(contract_result or {})
+    if not result.get("should_block"):
+        return
+    findings = list(result.get("blocking_findings") or [])
+    if relation_answered:
+        findings = [
+            finding
+            for finding in findings
+            if tuple(finding.get("resolved_rule") or ())
+            != semantic_contract.RELATION_DISPOSITION_RULE
+        ]
+        if not findings and not dict(result.get("omitted_counts") or {}).get("blocking_findings"):
+            return
+    detail = "; ".join(
+        f"{finding.get('code')} at {finding.get('path')}: {finding.get('detail')}"
+        for finding in findings
+    )
+    raise _error(
+        "SEMANTIC_CONTRACT_BLOCKED",
+        f"the step would block at commit: {detail or 'blocking findings were truncated'}",
+    )
+
+
+def _prepare_step(
+    vault_root: Path, step: Mapping[str, Any], ordinal: int, *, relation_pending: bool = False
+) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
     from . import (
         commands,
@@ -1339,7 +1379,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     canonical_json({"vocabulary_preparation": preflight.evidence}),
                 )
             validation = preflight.as_dict()
-            _require_applicable_review(review, validation)
+            _require_committable(review, validation, relation_pending=relation_pending)
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"create destination {path!r} exists")
@@ -1376,6 +1416,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 vault_root, path=path, why=args["why"], operation=operation
             )
             semantic = dict(validation.get("semantic") or {})
+            _refuse_blocked(semantic.get("contract_result"), relation_answered=relation_pending)
             prepared = {
                 "transition_token": semantic.get("transition_token"),
                 "relation_review_hash": semantic.get("relation_review_hash"),
@@ -1430,7 +1471,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     "CURATION_VOCABULARY_PREPARATION_REQUIRED",
                     canonical_json({"vocabulary_preparation": preparation}),
                 )
-            _require_applicable_review(review, validation)
+            _require_committable(review, validation, relation_pending=relation_pending)
             prepared = {
                 "draft_id": validation["draft_id"],
                 "draft_hash": validation["draft_hash"],
@@ -1674,7 +1715,8 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     part-way: a later step bound to a path an earlier step writes, a step that
     links to a page an earlier step supersedes, and a step that gives a relation
     disposition while it links to a page an earlier step creates (that link is
-    its relation once the page exists). Relocation steps, which remove pages, are
+    its relation once the page exists). A step whose leaf validation already blocks
+    is refused too (`_refuse_blocked`). Relocation steps, which remove pages, are
     refused before any step runs (`_require_plan_relocation_history`).
     """
     from . import find as find_module
@@ -1696,15 +1738,15 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
         disposition = args.get("relation_disposition") or (
             operation.get("relation_disposition") if isinstance(operation, Mapping) else None
         )
-        related = _planned_link_targets(vault_root, args, created) if disposition else []
-        if related:
+        related = _planned_link_targets(vault_root, args, created)
+        if related and disposition:
             raise _error(
                 "CURATION_STEP_CONFLICT",
                 f"step {step['step_id']!r} links to {related[0]!r}, which an earlier step "
                 "creates; that link is its relation, so it takes no relation disposition",
             )
         with find_module.planned_pages(vault_root, created):
-            item = _prepare_step(vault_root, step, ordinal)
+            item = _prepare_step(vault_root, step, ordinal, relation_pending=bool(related))
         conflicts = sorted(
             {str(expected["path"]) for expected in _binding_expectations(item)} & written
         )
@@ -1735,10 +1777,37 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     return manifest
 
 
+# Fields of the closed step argument schema whose text never reaches the page, so a link
+# there is neither a relation nor a rendered link.
+_UNWRITTEN_ARGUMENTS = frozenset({"why", "reason", "relation_review_reason", "old_string"})
+
+
+def _written_arguments(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The step's arguments without the schema fields whose text never reaches the page.
+
+    Only the step schema's own levels are filtered: the step arguments, an edit's
+    operation and its `edits`. Deeper keys come from the user's data.
+    """
+
+    def written(fields: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in fields.items() if key not in _UNWRITTEN_ARGUMENTS}
+
+    result = written(args)
+    operation = result.get("operation")
+    if isinstance(operation, Mapping):
+        result["operation"] = operation = written(operation)
+        edits = operation.get("edits")
+        if isinstance(edits, list):
+            operation["edits"] = [
+                written(edit) if isinstance(edit, Mapping) else edit for edit in edits
+            ]
+    return result
+
+
 def _planned_link_targets(
     vault_root: Path, args: Mapping[str, Any], pages: Sequence[tuple[str, str | None]]
 ) -> list[str]:
-    """The `pages` that a step's authored wikilinks resolve to, by path or by title."""
+    """The `pages` that the wikilinks a step writes resolve to, by path or by title."""
     from .vault import (
         WikilinkError,
         WikilinkResolver,
@@ -1750,7 +1819,7 @@ def _planned_link_targets(
         return []
     resolver = WikilinkResolver.from_entries(vault_root, pages)
     found: set[str] = set()
-    texts: list[Any] = [args]
+    texts: list[Any] = [_written_arguments(args)]
     while texts:
         value = texts.pop()
         if isinstance(value, Mapping):
