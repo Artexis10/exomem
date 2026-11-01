@@ -18,6 +18,8 @@ from membench.utility.switch_eval.arms import ArmSpec
 from membench.utility.switch_eval.state import Slot, mcp_server_entry
 from membench.utility.switch_eval.tap import ALLOW_ALL, READY_TIMEOUT_SECONDS
 
+from .runfile import refusal, structured_answer
+
 #: Scripted sessions are setup, not the actor's turns: the per-turn guard is
 #: the measured sessions' rule, so a seed of any size passes the tap here.
 SCRIPTED_BUDGET = 100_000
@@ -52,24 +54,12 @@ def payload(result) -> object:
     """The structured answer of one call, or its text parsed as JSON."""
 
     if result.structured_content is not None:
-        return result.structured_content
+        return structured_answer(result.structured_content, result.meta)
     texts = [getattr(item, "text", "") for item in result.content]
     try:
         return json.loads("".join(texts))
     except json.JSONDecodeError:
         return {"text": "".join(texts)}
-
-
-def refusal(answer: object) -> str | None:
-    """The structured refusal code of an answer, or ``None`` when it succeeded."""
-
-    if not isinstance(answer, dict):
-        return None
-    error = answer.get("error")
-    if answer.get("success") is False or isinstance(error, dict):
-        code = error.get("code") if isinstance(error, dict) else None
-        return str(code or "refused")
-    return None
 
 
 def retry_after(answer: object) -> float | None:

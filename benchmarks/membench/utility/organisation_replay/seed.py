@@ -17,7 +17,7 @@ from pathlib import Path
 from membench.utility.switch_eval.arms import ArmSpec
 from membench.utility.switch_eval.state import Slot
 
-from .runfile import read_jsonl
+from .runfile import PATH_FIELDS, read_jsonl
 from .scripted import ScriptedSession
 from .situation import ESTABLISHED, PRIOR_AGENT, Situation
 
@@ -218,32 +218,30 @@ async def _create_note(
     elif note.get("projects"):
         arguments["projects"] = list(note["projects"])
     draft = await session.call("remember", {**arguments, "validate_only": True})
-    committed = await session.call(
-        "remember",
-        {
-            **arguments,
-            "draft_id": draft.get("draft_id"),
-            "draft_hash": draft.get("draft_hash"),
-            "draft_token": draft.get("draft_token"),
-            # Seed notes carry no typed relations (SCHEMA.md: edges are what the
-            # sessions are measured on), so the review records that none applies.
+    commit = {
+        **arguments,
+        "draft_id": draft.get("draft_id"),
+        "draft_hash": draft.get("draft_hash"),
+        "draft_token": draft.get("draft_token"),
+    }
+    # The draft says whether its commit needs a relation review: a vault's
+    # first page bootstraps without one, and the product refuses a review there.
+    if draft.get("reviewed_none_required") is True:
+        # Seed notes carry no typed relations (SCHEMA.md: edges are what the
+        # sessions are measured on), so the review records that none applies.
+        commit |= {
             "relation_disposition": "reviewed_none",
             "relation_review_hash": draft.get("relation_review_hash"),
             "relation_review_reason": "seed note without typed relations",
-        },
-    )
-    return committed
+        }
+    return await session.call("remember", commit)
 
 
-def _landed_path(answer: Mapping) -> str | None:
-    for container in (
-        answer,
-        answer.get("result") if isinstance(answer.get("result"), dict) else {},
-    ):
-        for name in ("path", "destination"):
-            value = container.get(name)
-            if isinstance(value, str) and value:
-                return value
+def _landed_path(answer: object) -> str | None:
+    for name in PATH_FIELDS:
+        value = answer.get(name) if isinstance(answer, dict) else None
+        if isinstance(value, str) and value:
+            return value
     return None
 
 
@@ -324,15 +322,8 @@ def _due_promotions(answer: object) -> int:
 
     from exomem.promotions import FAMILY
 
-    containers = [answer]
-    if isinstance(answer, dict) and isinstance(answer.get("result"), dict):
-        containers.append(answer["result"])
-    rows = 0
-    for container in containers:
-        due = container.get("due_state") if isinstance(container, dict) else None
-        for row in (due or {}).get("top") or []:
-            rows += row.get("category") == FAMILY
-    return rows
+    due = answer.get("due_state") if isinstance(answer, dict) else None
+    return sum(row.get("category") == FAMILY for row in (due or {}).get("top") or [])
 
 
 async def settle_session(session: ScriptedSession, build: SeedBuild) -> None:
