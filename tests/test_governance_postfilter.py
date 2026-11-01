@@ -1849,6 +1849,62 @@ def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
         assert egress.WITHHELD_REFERENCE not in present[form], form
 
 
+@pytest.mark.parametrize(
+    ("command_name", "parameter", "value"),
+    [
+        ("compile_source", "sources", [ERROR_WITHHELD]),
+        ("list_inbound_links", "target", ERROR_WITHHELD),
+        ("ask_memory", "relation_of", ERROR_WITHHELD),
+        ("recover_from_trash", "restore_path", ERROR_WITHHELD),
+        # Declared for error echo only, outside reserved preflight.
+        ("link", "ref", ERROR_WITHHELD),
+        ("adoption_studio", "include", [{"path": ERROR_WITHHELD, "domain": "example"}]),
+    ],
+)
+def test_a_reference_the_command_declares_is_echoed_in_an_error(
+    vault: Path, command_name: str, parameter: str, value: object
+) -> None:
+    """Each argument that names a page in the command's path roles is the caller's own.
+
+    An error that echoed it read `[withheld]` for a withheld page and the path
+    for a missing one, so the redaction itself said which one it was.
+    """
+    _govern_patterns_shut(vault)
+    error = ValueError(f"NOT_FOUND: [{ERROR_WITHHELD!r}]")
+    with _external_scope():
+        egress.postfilter_error(command_name, error, vault, request_kwargs={parameter: value})
+    assert ERROR_WITHHELD in str(error)
+    assert egress.WITHHELD_REFERENCE not in str(error)
+
+
+@pytest.mark.parametrize(
+    ("command_name", "parameter", "value"),
+    [
+        # `target` names a page for `connect_memory`, but not for this command.
+        ("compile_source", "target", ERROR_WITHHELD),
+        ("connect_memory", "why_in_kb", ERROR_WITHHELD),
+        # A collection name here is free text; for `maintain_memory` it names a collection.
+        ("adoption_studio", "collection", ERROR_WITHHELD),
+        # Only the rule's `path` is a path; its other fields are free text.
+        ("adoption_studio", "include", [{"path": "Sources/example", "domain": ERROR_WITHHELD}]),
+    ],
+)
+def test_a_path_the_command_does_not_declare_as_a_reference_stays_redacted(
+    vault: Path, command_name: str, parameter: str, value: object
+) -> None:
+    """A withheld path the caller puts in any other field does not unlock the error.
+
+    Otherwise a collision list redacted around it would show which slot that
+    path occupies.
+    """
+    _govern_patterns_shut(vault)
+    error = ValueError(f"AMBIGUOUS_REFERENCE: [{ERROR_WITHHELD!r}]")
+    with _external_scope():
+        egress.postfilter_error(command_name, error, vault, request_kwargs={parameter: value})
+    assert ERROR_WITHHELD not in str(error)
+    assert egress.WITHHELD_REFERENCE in str(error)
+
+
 def test_an_ungoverned_vault_keeps_its_error_text(vault: Path) -> None:
     """The empty-policy fast path is untouched: no governance tree means no
     reference gating, and only the always-on scrubber may alter the text."""
