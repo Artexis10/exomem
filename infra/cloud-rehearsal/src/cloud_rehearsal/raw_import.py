@@ -73,7 +73,7 @@ MAIN_LABEL, EARLIER_LABEL = "Collection", "Earlier collection"
 MEDIA_DEADLINE_S = 300.0
 # The scorer reads the cell's vault through its own local server. With engines on, that server would extract
 # media that the cell left pending and the scorer would credit the text to Cloud, so it runs none.
-SCORER_ENV = {"EXOMEM_MEDIA_ENGINES": "", "EXOMEM_DISABLE_CLIP": "1"}
+SCORER_ENV = {"EXOMEM_MEDIA_ENGINES": ""}
 LOCAL_MEDIA_DEADLINE_S = 900.0  # about 100 attachments with OCR on one runner core
 LISTED_ITEMS = 100  # a group's report names this many items per state; the counts cover all of them
 SCORE_TIMEOUT_S = 3600
@@ -505,7 +505,7 @@ async def adopt(ctx: Context, plan: RawImportPlan, tenant: Tenant, session: Any,
                             initialize_kb=initialize_kb)
     rules_state: dict[str, Any] = {"folder_kind_rules": "not-probed", "collection_label": "not-tried"}
     summary = await journey.run(collection_label="try", rules_state=rules_state, probe_rules=True, include_rules=[])
-    media = await drive.wait_for_media(session, "first", MEDIA_DEADLINE_S, drive.hosted_media_status)
+    media = await drive.wait_for_media(session, "first", MEDIA_DEADLINE_S, drive.hosted_media_status, jobs_only=True)
     return {"stage_path": stage_path, "import": import_summary(row), "cli": cli_coverage(collection, row),
             "journey": summary, "rules_state": rules_state, "media": media,
             "stopped_at": summary.get("stopped_at"), "jobs_idle": jobs_idle(media),
@@ -583,6 +583,9 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
     earlier_key = json.loads(earlier_key_path.read_text(encoding="utf-8"))
     out["key"] = {"profile": key["profile"], "seed": key["seed"], "fixture_tree_sha256": key["fixture_tree_sha256"],
                   "summary": key["summary"]}
+    out["scoring"] = {"cloud_media_engines": SCORER_ENV["EXOMEM_MEDIA_ENGINES"] or "none, as the cell runs",
+                      "local_media_engines": "all (personal profile)",
+                      "note": "media recall rows compare unlike engine sets; the item groups and the verdict do not use them"}
     record = StepRecord(0, "raw_import")
     from .scenarios import first_session
 

@@ -372,8 +372,8 @@ async def wait_for_media(session: LedgerSession, journey: str, deadline_s: float
                          status_request: Any = local_media_status, *, jobs_only: bool = False) -> dict[str, Any]:
     """Poll ``process_media status`` until the job queue and index refresh drain, or time runs out.
 
-    With ``jobs_only``, an idle job queue is enough: a stdio server never drains its deferred index upserts,
-    so a caller that judges only the queue would otherwise wait out the whole deadline."""
+    With ``jobs_only``, an idle job queue is enough: deferred index upserts can take longer than the deadline
+    to drain, and a caller that judges only the queue would otherwise wait for them."""
     started = time.perf_counter()
     polls: list[dict[str, Any]] = []
     quiet = 0
