@@ -5,8 +5,8 @@ Use this when the person wants existing files in the Knowledge Base: a folder, a
 ## Flow
 1. Send the files to the server. Never retype or paste file contents.
    - Local server with a shell: run `exomem import <folder>`. It copies the folder into `_Imports/<id>/` and prints the path to start on.
-   - Exomem Cloud with a shell: run `exomem cloud import <folder>`. The folder or ZIP is encrypted before it leaves the machine.
-     A folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID. Room appears as you file. Run the command in the background, or have the person run it. File each window once it reaches `done` (steps 3 to 5), and discard it (step 8), while the command runs.
+   - Exomem Cloud with a shell: start `exomem cloud import <folder>` in the background, never in the foreground. It can run for hours, and it waits for you: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID, and room appears only as you file. The folder or ZIP is encrypted before it leaves the machine.
+     While it runs, file each window once it reaches `done` (steps 3 to 5), and discard it (step 8). Read its output for the window IDs.
      The command waits for room, and it stops with the members not yet sent if the cell cannot take them. Until it finishes, those members are only at the source.
    - Exomem Cloud without a shell: give the person the exact `exomem cloud import <folder>` command to run themselves, or the Home link from `observe_transfer(action="import_handoff")` for a browser upload. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
 2. Wait until the import, or the first window, is `done`. On Cloud, poll `observe_transfer`. `read_import` status lists each landed window's `import_id`, so later windows are found there.
