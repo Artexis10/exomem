@@ -98,6 +98,17 @@ class RankingConfig:
     # shared word is a coincidence, two is a reference.
     working_set_lexical_min_terms: int = 2
 
+    # ---- CLIP lane chance band ----
+    # The CLIP lane admits an image only when its similarity to the query clears
+    # the chance maximum of every indexed image (`chance_band.semantic_band`).
+    # Text queries and visual ones share one cosine range, so no cosine is fixed
+    # here. Below `clip_semantic_min_population` images there is no chance level
+    # and the lane ranks its top images unbanded.
+    # The working set's own alpha: one unrelated query in a hundred may still clear.
+    clip_semantic_alpha: float = 0.01
+    # The working set's own floor: the median and MAD of fewer images are noise.
+    clip_semantic_min_population: int = 50
+
     def note_type_factor(self, role: str | None) -> float:
         """The ranking knob a note-type role takes; no role, or `evidence`, is neutral.
 

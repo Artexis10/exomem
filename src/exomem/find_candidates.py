@@ -605,12 +605,14 @@ def collect_candidates(
                     for path in semantic_paths
                     if path.endswith(".md")
                 }
-                clip_hits = clip_idx.search(
+                clip_search = clip_idx.search_above_chance(
                     clip_qvec,
                     k=candidate_k * 8,
                     allowed_paths=allowed_images,
+                    alpha=config.clip_semantic_alpha,
+                    min_population=config.clip_semantic_min_population,
                 )
-                for img_rel, frame_ts, score in clip_hits:
+                for img_rel, frame_ts, score in clip_search.hits:
                     if len(clip_ranking) >= candidate_k:
                         break
                     sidecar_rel = img_rel + ".md"
@@ -623,6 +625,8 @@ def collect_candidates(
                         "status": "participated" if clip_ranking else "available_nonmatching",
                         "backend": type(clip_idx).__name__,
                         "model": embeddings.CLIP_MODEL_NAME,
+                        "band": "applied" if clip_search.banded else "uncalibrated",
+                        "withheld": clip_search.withheld,
                         "metric": {
                             "name": "cosine_similarity",
                             "direction": "higher",

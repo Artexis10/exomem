@@ -339,3 +339,144 @@ def test_find_video_clip_at_timestamp(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert d["media_type"] == "video"
     assert d["clip_match_at"] == "0:42"
     assert d["signals"]["clip_frame_ts"] == 42.0
+
+
+# ---- the CLIP lane admits only images that clear the chance maximum ------------
+
+
+def _unit_rows(rng: np.random.Generator, rows: int) -> np.ndarray:
+    matrix = rng.standard_normal((rows, embeddings.CLIP_DIM)).astype(np.float32)
+    return matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
+
+
+def _photo_library(vault, vectors: np.ndarray, *, pages: int = 6) -> list[str]:
+    """A CLIP row per vector; the first `pages` rows have an image sidecar. Returns those sidecars.
+
+    The other rows are the rest of the library: they set the chance level, and
+    only a sidecar can be returned by `find`.
+    """
+    index = embeddings.ClipIndex(vault)
+    sidecars = []
+    for number, vector in enumerate(vectors):
+        if number < pages:
+            saved = preserve.preserve_bytes(
+                vault, scope="Rental", category="photos", filename=f"photo-{number}.jpg",
+                data=b"\xff\xd8\xff" + bytes([number]), text="(no text detected)",
+            )
+            index.upsert(saved.path, vector, 1.0)
+            sidecars.append(saved.sidecar_path)
+        else:
+            index.upsert(f"Knowledge Base/Evidence/Rental/photos/other-{number}.jpg", vector, 1.0)
+    return sidecars
+
+
+def _ask(vault, monkeypatch: pytest.MonkeyPatch, query_vector: np.ndarray, config=None):
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts",
+        lambda texts, **kw: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda q: query_vector)
+    find_module.clear_cache()
+    return find_module.find(vault, query="kill switch for risky releases", mode="hybrid", config=config)
+
+
+def test_an_image_that_only_matches_a_text_question_by_chance_is_not_collected(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rng = np.random.default_rng(11)
+    library = _photo_library(vault, _unit_rows(rng, 60))
+    query = _unit_rows(rng, 1)[0]  # unrelated to every photo: the best of 60 is only the luckiest
+
+    hits = _ask(vault, monkeypatch, query)
+
+    assert not [h.path for h in hits if h.path in library]
+    assert any("kill-switch" in h.path for h in hits)  # the matching note is still found
+
+
+def test_without_the_band_the_luckiest_unrelated_image_joins_the_results(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rng = np.random.default_rng(11)
+    library = _photo_library(vault, _unit_rows(rng, 60))
+    query = _unit_rows(rng, 1)[0]
+    unbanded = find_module.RankingConfig(clip_semantic_min_population=10**9)
+
+    hits = _ask(vault, monkeypatch, query, config=unbanded)
+
+    assert [h.path for h in hits if h.path in library]  # the old lane took its top images
+
+
+def test_an_image_far_above_chance_still_ranks_among_unrelated_ones(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rng = np.random.default_rng(11)
+    vectors = _unit_rows(rng, 60)
+    query = _unit_rows(rng, 1)[0]
+    vectors[3] = query  # one image really is what the query describes
+    library = _photo_library(vault, vectors)
+
+    hits = _ask(vault, monkeypatch, query)
+
+    images = [h for h in hits if h.path in library]
+    assert [h.path for h in images] == [library[3]]
+    assert images[0].as_dict()["signals"]["clip_rank"] == 1
+
+
+def test_a_library_too_small_to_calibrate_keeps_the_unbanded_lane(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rng = np.random.default_rng(11)
+    library = _photo_library(vault, _unit_rows(rng, 12))
+    query = _unit_rows(rng, 1)[0]
+
+    hits = _ask(vault, monkeypatch, query)
+
+    assert [h.path for h in hits if h.path in library]  # 12 images have no chance level
+
+
+def test_the_clip_trace_reports_the_band_and_what_it_withheld(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
+    rng = np.random.default_rng(11)
+    _photo_library(vault, _unit_rows(rng, 60))
+    query = _unit_rows(rng, 1)[0]
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts",
+        lambda texts, **kw: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda q: query)
+
+    explained = commands.op_ask_memory(
+        vault, query="kill switch for risky releases", mode="hybrid", graph=False,
+        rerank=False, scope="kb-only", detail="compact", explain=True,
+    )
+
+    lane = explained["retrieval_profile"]["lanes"]["clip"]
+    assert (lane["status"], lane["band"], lane["withheld"]) == ("available_nonmatching", "applied", 6)
+
+
+def test_a_photo_with_no_legible_text_is_found_by_its_image_and_shows_no_ocr_noise(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.ocr_facts import OcrFacts
+
+    rng = np.random.default_rng(11)
+    vectors = _unit_rows(rng, 60)
+    query = _unit_rows(rng, 1)[0]
+    vectors[5] = query
+    library = _photo_library(vault, vectors)
+    sidecar = vault / library[5]
+    preserve.update_sidecar_extraction(
+        vault, sidecar, text="", engine="tesseract",
+        ocr=OcrFacts(confidence=31.0, low_confidence_text="zyxqv blorft"),
+    )
+
+    hits = _ask(vault, monkeypatch, query)
+
+    photo = next(h for h in hits if h.path == library[5])
+    assert "zyxqv" not in photo.excerpt and "blorft" not in photo.excerpt
+    assert find_module.find(vault, query="zyxqv", mode="keyword") == []
