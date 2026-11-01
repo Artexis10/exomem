@@ -661,7 +661,7 @@ def test_live_success_and_control_envelopes_never_receive_issuance_exception(
     assert scrubber.NOTICE in json.dumps(cleaned)
 
 
-def test_dispatcher_marked_issuance_survives_both_mcp_postfilter_passes(
+def test_dispatcher_marked_issuance_survives_a_repeated_postfilter_pass(
     vault: Path,
 ) -> None:
     _govern_patterns_shut(vault)

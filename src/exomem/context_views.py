@@ -11,7 +11,7 @@ change, so no entry the caller cannot see moves a byte the caller receives.
 map through `activation_packet` and `map_within`. A compile records what it
 served in its own invocation (`served_items`), and each pass of the terminal
 guard serves that record again (`pinned_items`), never the items it is handed.
-So both passes serve the text that the generation was computed from.
+So every pass serves the text that the generation was computed from.
 
 A caller that may not read the domain registry gets nothing from it: no topic,
 no topic key and no domain map. Every topic ref then reads as an unknown one.

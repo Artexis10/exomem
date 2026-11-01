@@ -294,7 +294,11 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
 
 @pytest.mark.parametrize("include_history", [False, True])
 def test_mcp_history_refresh_drops_a_row_that_loses_authority_before_release(store, monkeypatch, include_history):
-    """A still-readable collection cannot disclose stale rows or history after row authority changes."""
+    """A still-readable collection cannot disclose stale rows or history after row authority changes.
+
+    The store here is unserved, so the release reads policy live. A served store pins a read's
+    policy through its release, and the response then matches the policy it loaded.
+    """
     from dataclasses import replace
 
     from exomem import command_surface, commands
