@@ -92,7 +92,7 @@ Before the cell moves data, it SHALL parse each URL that it uses and check three
 - the path is the pinned bucket, then the grant's object key;
 - the object key sits under the cell's own prefix.
 
-A backup SHALL go only to the repository that the cell derives from its own cell ID and the pinned endpoint and bucket.
+A backup SHALL go only to the repository that the cell derives from its own cell ID, its repository generation and the pinned endpoint and bucket. The cell SHALL keep the generation on its volume.
 
 A refused operation SHALL log a cataloged, content-free event that names the cell, the operation and the reason.
 
@@ -140,6 +140,10 @@ Each cell SHALL generate its own backup repository password and keep it on its e
 
 No platform service SHALL hold the password or a key that decrypts it. In standard mode the escrow recipient SHALL be the operator's presence-gated identity. In tenant-locked mode it SHALL be the tenant's own key, and the platform SHALL write no copy that it can open. A restore after the loss of the cell's volume SHALL need the holder of the escrow recipient's identity.
 
+A mode statement SHALL carry an audience that no operation grant carries. In tenant-locked mode the backup password SHALL sit only inside the tenant's inner layer, and a restore after volume loss SHALL receive it only on the tenant-lock key channel. A cell that leaves tenant-locked mode SHALL start an empty repository at its next generation, SHALL erase the locked-period password before the platform re-wraps its root key, and SHALL hide the locked-period repository. It SHALL escrow to the operator no password that opens a snapshot from the locked period.
+
+A cell SHALL destroy its platform-wrapped password only after the new repository passes `restic check --read-data` and holds every snapshot of the old one, matched by original snapshot ID.
+
 #### Scenario: The controller downgrades a locked cell
 
 - **WHEN** the controller replays an older standard-mode statement to a tenant-locked cell, or renders its own recipient
@@ -160,6 +164,22 @@ No platform service SHALL hold the password or a key that decrypts it. In standa
 - **WHEN** an identity holding everything the controller holds downloads a cell's backup repository
 - **THEN** it cannot decrypt any snapshot
 
+#### Scenario: A tenant leaves the lock
+
+- **WHEN** a tenant-authenticated statement moves a locked cell back to standard mode
+- **THEN** the cell backs up into a new, empty repository, erases the locked-period password, and hides the locked-period repository
+- **AND** the operator's escrow copy opens no snapshot taken while the cell was locked
+
+#### Scenario: A grant is replayed as a mode statement
+
+- **WHEN** a valid operation grant reaches the cell as a mode statement
+- **THEN** the cell refuses it, because its audience is not the mode statement audience
+
+#### Scenario: A migration copy is incomplete
+
+- **WHEN** the new repository fails `restic check --read-data`, or lacks a snapshot of the old one by original ID
+- **THEN** the cell keeps its platform-wrapped password and reports the migration as failed
+
 #### Scenario: A volume is lost
 
 - **WHEN** a cell's volume is lost and the operator restores the cell from backup
@@ -171,7 +191,8 @@ The platform SHALL raise an alert through the platform alert receiver for each o
 - an admission denial for the controller's identity;
 - a grant or destination refusal that a cell logged;
 - a Secret read by an identity outside the expected set;
-- a denied write of an unknown workload kind.
+- a denied write of an unknown workload kind;
+- an object-store key or a backup bucket setting outside the fixed shapes.
 
 The alert path SHALL NOT pass through the controller. Each alert SHALL carry only an identity, a cell ID and a reason token. The evaluator SHALL coalesce signals by cell ID and reason, so that a flood of one class cannot bury another class.
 
@@ -179,3 +200,41 @@ The alert path SHALL NOT pass through the controller. Each alert SHALL carry onl
 
 - **WHEN** admission denies a write by the controller's identity
 - **THEN** the operator receives an alert even though the controller sends nothing
+
+### Requirement: Only the key custodian can create object-store keys
+
+Cell backups SHALL live in a provider account that holds no other data. No in-cluster component other than the key custodian SHALL hold a key that can create object-store keys, in any provider account.
+
+The custodian SHALL run outside every namespace that the controller can write, on a node that runs no cell. It SHALL create only the per-cell key shape: the pinned bucket, the prefix of the cell ID in the cell's namespace name, and exactly `listBuckets`, `listFiles`, `readFiles`, `writeFiles` and `deleteFiles`. It SHALL write each key only to its own Secret in the cell's namespace, and SHALL read no other Secret. It SHALL hide a cell's prefix only on a deletion record that Substrate signed, after a grace period, and SHALL raise an alert on each hide.
+
+A key watcher SHALL run outside the cluster, at least hourly, with keys that can only list keys and buckets and read bucket retention, encryption and replication settings. It SHALL match each single-purpose key by its key ID, and each per-cell key by its exact bucket, prefix shape and capability set, with at most one key per prefix. It SHALL raise an alert for every other key, for every backup bucket setting that differs from its pinned value, for every failure to authenticate or list, and for every missed run. Its alerts SHALL use a receiver credential that no in-cluster component holds.
+
+#### Scenario: The controller's keys are searched for key creation
+
+- **WHEN** every object-store key that the controller holds is listed
+- **THEN** none of them can create keys or change bucket settings
+
+#### Scenario: The controller reaches the infrastructure state
+
+- **WHEN** an identity holding everything the controller holds tries to read the Terraform state
+- **THEN** it holds no key that can read it or create a key that can
+
+#### Scenario: A rogue key appears
+
+- **WHEN** an identity with the custodian's key creates a key that can change bucket settings, or a copy of an allowed key with the same name and capabilities
+- **THEN** the key watcher raises an alert at its next run, through a path that excludes the cluster
+
+#### Scenario: The watcher's key is deleted
+
+- **WHEN** an identity with the custodian's key deletes the watcher's key
+- **THEN** the watcher's next run fails to authenticate and raises an alert, and a missed heartbeat raises one too
+
+#### Scenario: The controller deletes a cell's namespace
+
+- **WHEN** the controller deletes or recreates a cell's namespace without a signed deletion record
+- **THEN** the custodian hides none of that cell's backups
+
+#### Scenario: The backup bucket's default retention is removed
+
+- **WHEN** a key removes the default retention of the backup bucket
+- **THEN** the key watcher raises an alert at its next run, and every version locked before the change stays locked

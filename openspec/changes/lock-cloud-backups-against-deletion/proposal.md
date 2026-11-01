@@ -28,8 +28,8 @@ None.
 
 ## Impact
 
-- **Terraform:** the locked backup bucket, its lifecycle rule, and a controller parent key with no `deleteFiles`.
-- **cellctl:** per-cell keys scoped to the new bucket; the repository location; the migration of existing repositories.
+- **Terraform:** the locked backup bucket and its lifecycle rule, in the cell-data account. Key creation moves to the key custodian of `contain-cloud-controller-compromise` D9.
+- **cellctl:** the repository location and the migration of existing repositories. The key custodian of `contain-cloud-controller-compromise` D9 creates the per-cell keys for the new bucket.
 - **Runbooks:** recovery from a mass deletion, and the stated expiry of deleted cells' backups.
 - **Cost:** storage of hidden versions for the retention period (task 1.2 measures it).
 
