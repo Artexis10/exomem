@@ -48,6 +48,9 @@ _KIND_BY_EXT: dict[str, str] = {
 }
 #: Every extraction kind this registry assigns to an extension.
 KINDS = frozenset(_KIND_BY_EXT.values())
+#: The kinds whose extraction runs a speech or vision engine. That costs minutes, so a repair
+#: never runs it again to rebuild text; every other kind reads its original cheaply.
+ENGINE_KINDS = frozenset({"audio", "video", "image"})
 
 
 def media_type_for(path: str | Path) -> str | None:

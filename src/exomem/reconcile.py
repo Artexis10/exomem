@@ -59,6 +59,9 @@ class ReconcileReport:
     semantic_unit_orphans_removed: int = 0
     clip_orphans_removed: int = 0
     frame_orphans_removed: int = 0
+    part_orphans_removed: int = 0
+    parts_rebuilt: int = 0
+    parts_missing: list[str] = field(default_factory=list)
     semantic_suppressed_drift: list[dict[str, str]] = field(default_factory=list)
     semantic_suppressed_purged: list[str] = field(default_factory=list)
     semantic_suppressed_corrupt: list[dict[str, str]] = field(default_factory=list)
@@ -113,6 +116,9 @@ class ReconcileReport:
             "semantic_unit_orphans_removed": self.semantic_unit_orphans_removed,
             "clip_orphans_removed": self.clip_orphans_removed,
             "frame_orphans_removed": self.frame_orphans_removed,
+            "part_orphans_removed": self.part_orphans_removed,
+            "parts_rebuilt": self.parts_rebuilt,
+            "parts_missing": self.parts_missing,
             "semantic_suppressed_drift": self.semantic_suppressed_drift,
             "semantic_suppressed_purged": self.semantic_suppressed_purged,
             "semantic_suppressed_corrupt": self.semantic_suppressed_corrupt,
@@ -821,6 +827,15 @@ def reconcile(
                 pass
     report.frame_orphans_removed = len(frame_orphans)
 
+    # Hidden part pages of long extractions: remove those no Source owns, and write missing
+    # ones again where the original reads cheaply. A recording's or image's are only reported.
+    from . import extraction_parts
+
+    swept = extraction_parts.sweep(vault_root, dry_run=dry_run)
+    report.part_orphans_removed = len(swept.removed)
+    report.parts_rebuilt = len(swept.rebuilt)
+    report.parts_missing = swept.missing
+
     # ---- 3. Stable-reference sidecar ----
     from . import memory_refs
 
@@ -917,6 +932,8 @@ def _job_summary(report: ReconcileReport) -> dict[str, Any]:
         "references_refreshed": report.references_refreshed,
         "clip_orphans_removed": report.clip_orphans_removed,
         "frame_orphans_removed": report.frame_orphans_removed,
+        "part_orphans_removed": report.part_orphans_removed,
+        "parts_missing": len(report.parts_missing),
         "semantic_suppressed_purged": len(report.semantic_suppressed_purged),
         "semantic_missing_purged": len(report.semantic_missing_purged),
         "semantic_suppressed_corrupt_purged": dict(report.semantic_suppressed_corrupt_purged),

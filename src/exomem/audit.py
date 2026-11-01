@@ -2117,7 +2117,8 @@ def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
         except OSError:
             continue
         page = find_module._parse_page(path, mtime, vault_root)
-        if page is not None:
+        # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
+        if page is not None and page.part_of is None:
             pages.append(page)
     return pages
 

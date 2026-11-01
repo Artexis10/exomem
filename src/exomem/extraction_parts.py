@@ -20,14 +20,17 @@ leaves the field behind breaks nothing.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import memory_refs, preserve
+from . import media_types, memory_refs, preserve, temporal
 from .governance import raw_protection
+from .kbdir import kb_dirname
 from .vault import (
     MISSING_CONTENT_HASH,
+    VAULT_SCAN_SKIP_DIRS,
     PlannedWrite,
     content_hash,
     parse_frontmatter,
@@ -382,3 +385,94 @@ def read_window(
     end = _window_end(text, local)
     reached = starts[number - 1] + end
     return Window(text[local:end], offset, reached if reached < total else None, total, number, len(starts))
+
+
+@dataclass
+class Sweep:
+    """What `sweep` found, and with `dry_run=False` fixed."""
+
+    #: Part pages that no Source owns: their Source is gone, or lists fewer parts.
+    removed: list[str] = field(default_factory=list)
+    #: Source pages whose missing parts were written again from the original.
+    rebuilt: list[str] = field(default_factory=list)
+    #: Source pages with a part that is missing and could not be rebuilt.
+    missing: list[str] = field(default_factory=list)
+
+
+def _part_folders(root: Path) -> Iterator[Path]:
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        try:
+            children = [child for child in directory.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            if child.name in VAULT_SCAN_SKIP_DIRS:
+                continue
+            if source_page_for(child / f"{_PART_PREFIX}00.md") is not None:
+                yield child
+            else:
+                stack.append(child)
+
+
+def _rebuild(vault_root: Path, page: Path, content: str, missing: list[int]) -> bool:
+    """Write the missing parts of `page` again from its original, when that is cheap and agrees.
+
+    The original is read again only when no speech or vision engine is needed, and its text
+    must split into the layout the Source records, so a part never mixes with other text.
+    """
+    from . import extract
+
+    binary = page.with_name(page.name.removesuffix(".md"))
+    kind = media_types.media_type_for(binary)
+    if kind is None or kind in media_types.ENGINE_KINDS or not binary.is_file():
+        return False
+    try:
+        pieces = split(extract.extract_text(binary, media_type=kind, vault_root=vault_root).text.strip())
+    except Exception:  # noqa: BLE001 — a failed re-read is reported as not rebuilt
+        return False
+    frontmatter = parse_frontmatter(content)[0]
+    agreed = layout(page, pieces)
+    if (
+        agreed is None
+        or pieces[0] != preserve.extracted_text(content)
+        or agreed.offsets != offsets_of(frontmatter)
+        or agreed.chars != frontmatter.get("extraction_chars")
+    ):
+        return False
+    planned = plan(vault_root, page, pieces, inherited=frontmatter, date_iso=temporal.stamp(temporal.now()))
+    writes = tuple(write for write in planned.writes if part_number(write.path) in missing)
+    preserve.commit_media_sidecar_writes(vault_root, writes)
+    return True
+
+
+def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
+    """Find part pages with no owner and parts that are missing, and fix them unless `dry_run`.
+
+    A part page belongs to a Source page that exists and lists that many parts. A missing part
+    is rebuilt from the original where extraction is cheap; a recording or an image is only
+    reported, because rebuilding it would run its engine again.
+    """
+    result = Sweep()
+    for folder in _part_folders(Path(vault_root) / kb_dirname()):
+        page = source_page_for(folder / f"{_PART_PREFIX}00.md")
+        present = {n: entry for entry in folder.iterdir() if (n := part_number(entry)) is not None}
+        try:
+            content, _guard = read_guarded_text(vault_root, page)
+            count = count_of(parse_frontmatter(content)[0])
+        except (OSError, UnicodeError):
+            content, count = None, 0
+        surplus = tuple(entry for number, entry in sorted(present.items()) if number > count)
+        result.removed += [entry.relative_to(vault_root).as_posix() for entry in surplus]
+        if not dry_run:
+            retire(vault_root, surplus)
+        missing = [number for number in range(2, count + 1) if number not in present]
+        if content is None or not missing:
+            continue
+        rel = page.relative_to(vault_root).as_posix()
+        if not dry_run and _rebuild(vault_root, page, content, missing):
+            result.rebuilt.append(rel)
+        else:
+            result.missing.append(rel)
+    return result
