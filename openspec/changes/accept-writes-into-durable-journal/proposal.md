@@ -12,28 +12,33 @@ A busy refusal gives the caller nothing to act on except to send the write again
 
 ## What Changes
 
-- **Accept instead of refuse.** Some writes meet a held boundary, a full waiting line, an overdue holder or a warming component. The server records each such write as an intent in a durable per-vault intent journal. The caller gets the committed result when the intent commits within about 2 seconds. Otherwise the caller gets `state: "accepted"` and an `intent_id`.
-- **Uncontended writes do not change.** A write that finds the journal empty and the boundary free runs inline, as today.
-- **Accept checks everything that the caller controls.** Authorization, arguments, size limits, reserved paths, idempotency, file fetches and the command's own semantic validation run before accept. A failed check returns its existing error, and the server records nothing.
-- **One applier per vault.** The applier applies intents in arrival order when the boundary is free. It sends each intent through the existing command path with the intent's retry identity. Existing receipts then commit each intent once, also across a crash.
-- **Reconcile on the fly.** The applier runs each intent against the current vault. It plans navigation files again, applies content-relative edits to current content and follows a moved page through its stable reference. When the caller's own basis changed, the intent stops as a write-conflict review item. The owner then retries or discards it. The applier never overwrites or drops an intent silently.
-- **Observe completion.** `review_memory(mode="write-intent", ref=...)` returns the state of an intent and can wait for it. A resend with the same retry identity returns the same intent. Direct reads and the recall status name the reader's own accepted writes that are not applied yet.
-- **Busy only when the journal cannot accept.** `MUTATION_BUSY` remains only with `cause: journal_full` or `cause: journal_unavailable`. The caller-visible refusal journal records the cause of every busy refusal.
-- **Captures stop blocking other writes.** A capture with files stages the fetched bytes into the journal at accept. The applier commits one file per step, so other intents commit between the files of a long capture.
-- **Credential issuance stays synchronous.** The server never journals `transfer_artifact` or session open and rotate, because their result is a bearer. They take writer authority and their own store lock instead of the vault boundary.
+- **Accept instead of refuse.** An eligible write that cannot commit inline becomes an intent in a durable per-vault intent journal. The caller gets the committed result when the intent commits within 2.0 seconds of waiting. Otherwise the caller gets `state: "accepted"` and an `intent_id`.
+- **One accept deadline.** Every wait before the answer ends 2.0 seconds after the request arrives: the inline acquire, the warm-up wait, the wait on an identical in-flight retry, and the collection-store admission. Preflight work that the synchronous path does anyway, such as validation and file fetches, is not waiting.
+- **Uncontended writes do not change.** A write that finds no queued intent and a free boundary runs inline, as today. A capture with files also runs inline first. It joins the journal only when its first file meets a held boundary, and then it keeps the bytes it already fetched.
+- **Accept checks everything that the caller controls.** Authorization, arguments, size limits, reserved paths, idempotency, file fetches and the command's own validation run before accept. A failed check returns its existing error, and the server records nothing. A write that depends on the caller's own queued write skips validation at accept, and the applier validates it later.
+- **One retry identity.** The intent keeps the caller's retry key, the digest of the original arguments and the replay window. The applier commits under that key, so the existing receipts commit each intent at most once, also across a crash. A crash during an apply becomes an owner decision, never a silent re-run.
+- **One applier per vault.** The applier applies intents in arrival order. It enters through the same command entry point as a request, with the caller's full principal, and it checks that the caller's login is still active before each dispatch.
+- **Reconcile on the fly.** The applier runs each intent against the current vault. When the caller's own basis changed, the intent becomes a write-conflict review item with state `conflicted`. The owner then retries or discards it. The applier never overwrites or drops an intent silently.
+- **Observe completion.** `review_memory(mode="write-intent", ref=...)` returns the state of an intent and can wait for it. A resend with the same retry identity returns the same intent, also after it ends. Direct reads and the recall status name the reader's own accepted writes that are not applied yet.
+- **Busy only when the journal cannot accept.** `MUTATION_BUSY` remains for eligible writes only with `cause: journal_full` or `cause: journal_unavailable`. The caller-visible refusal journal records the cause of every busy refusal.
 
-Out of scope: per-page locks, moving intents between machines, push notifications and the remote writer lease.
+Delivered before this change, by the change that shortens capture holds, without a flag:
+
+- Credential issuance (`transfer_artifact` upload and download, session open and rotate) takes writer authority and its own store lock instead of the vault boundary. This removes the six `transfer_artifact` refusals.
+- Files 2 and later of a capture wait for the boundary through `absorbing_mutation_guard`, because their bytes are local. This fixes today's partial-capture outcome.
+
+Out of scope: per-page locks, one intent per capture file, moving intents between machines, push notifications and the remote writer lease.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- `hosted-mutation-safety`: The server accepts contended eligible writes into a durable intent journal. One applier per vault commits each intent once. Accept validates what the caller controls. Conflicts become review items. A busy refusal remains only for a journal that cannot accept. Credential issuance leaves the vault boundary.
-- `mutation-terminal-contract`: adds the nonterminal `accepted` state, and limits `MUTATION_BUSY` for eligible writes to a journal that cannot accept.
+- `hosted-mutation-safety`: The server accepts contended eligible writes into a durable intent journal within one accept deadline. One applier per vault commits each intent once under the caller's retry identity and principal. Accept validates what the caller controls. Conflicts become review items. A busy refusal remains only for a journal that cannot accept.
+- `mutation-terminal-contract`: adds the nonterminal states `accepted` and `conflicted`, and limits `MUTATION_BUSY` for eligible writes to a journal that cannot accept.
 
 ## Impact
 
-- Code: a new `src/exomem/write_intents.py` (journal and applier); `writer_lease.py` (accept path, applier dispatch, idle release); `client_artifacts.py` (staged inputs); `mutation_terminal.py`; `mutation_journal.py`; `commands.py` (`review_memory` and `triage_memory` modes); read and recall status; `studio/`; the CLI.
+- Code: a new `src/exomem/write_intents.py` (journal and applier); `writer_lease.py` (accept deadline, accept path, applier dispatch, the receipt expiry, idle release); `client_artifacts.py` (moving staged inputs into the journal); `mutation_terminal.py`; `mutation_journal.py`; `commands.py` (`review_memory` and `triage_memory` modes); `vocabulary_state.py` (binding release); read and recall status; `studio/`; the CLI.
 - Behaviour: a contended write returns committed or accepted, never busy. Agents must handle `accepted`, so the tool instructions and the scaffold reference change.
 - Rollout: `EXOMEM_WRITE_INTENTS` (`off`, `on`, `always`). The applier drains existing intents in every mode.
-- Order: lands after the auxiliary re-plan fix (#2297) and the change that shortens capture holds. It removes the request-side contention loop for eligible commands, so net weight falls.
+- Order: lands after the auxiliary re-plan fix (#2297) and the capture-hold change. It removes the request-side contention loop for eligible commands, so net weight falls.

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Accepted Is A Nonterminal State
-The closed mutation state set SHALL include `accepted`: a write that the system recorded in the vault's intent journal and has not committed yet. An accepted response SHALL carry `ok=true`, `state="accepted"`, `terminal=false`, `status="accepted"`, `committed=false` and `mutated=false`. It SHALL also carry `intent_id`, the intent reference, `request_id`, the receipt identity when one exists, `validation`, the planned paths, `warnings_count` and a next action. It SHALL NOT carry `status="committed"` or `mutated=true`. The terminal that the intent later reaches SHALL carry the same `intent_id`. `operation_id` SHALL keep its meaning as the correlation of a validated draft with its commit.
+The closed mutation state set SHALL include `accepted`: a write that the system recorded in the vault's intent journal and has not committed yet. An accepted response SHALL carry `ok=true`, `state="accepted"`, `terminal=false`, `status="accepted"`, `committed=false` and `mutated=false`. It SHALL also carry `intent_id`, the intent reference, `request_id`, the receipt identity when one exists, `validation`, the planned paths, `warnings_count`, a next action and `poll_after_ms`. It SHALL NOT carry `status="committed"`, `mutated=true` or `retry_after_ms`, because a resend of an accepted write is never needed. The terminal that the intent later reaches SHALL carry the same `intent_id`. `operation_id` SHALL keep its meaning as the correlation of a validated draft with its commit.
 
 #### Scenario: An accepted write later commits
 - **WHEN** a write is answered `accepted` and the applier then commits it
@@ -12,10 +12,18 @@ The closed mutation state set SHALL include `accepted`: a write that the system 
 - **WHEN** a REST write is answered with the accepted envelope
 - **THEN** the HTTP status is 202 and the envelope reports success
 
+### Requirement: Conflicted Is A Nonterminal State Distinct From Needs Review
+The closed mutation state set SHALL include `conflicted`: an accepted write that stopped as a write-conflict review item and waits for an owner decision. A conflicted response SHALL carry `terminal=false`, `committed=false`, the `intent_id`, the intent reference and the cause code. Its next action SHALL name the owner's `retry-write` or `discard-write` decision. It SHALL NOT tell the caller to complete a review step or to re-issue the write, which `needs_review` means.
+
+#### Scenario: A caller polls a conflicted intent
+- **WHEN** a caller polls an intent that became a write-conflict review item
+- **THEN** the response carries `state="conflicted"` and the cause code
+- **AND** it does not carry `state="needs_review"`
+
 ## MODIFIED Requirements
 
 ### Requirement: Pre-Commit And Uncertain Errors Remain Unambiguous
-The terminal projector MUST NOT convert rejected, busy, pending, accepted, committed-failure, or committed-uncertain outcomes into successful committed result dictionaries. `MUTATION_BUSY` SHALL remain retryable only when no commit occurred, and post-commit uncertainty SHALL retain its committed semantics and same-identity remediation. For a write that is eligible for the intent journal, `MUTATION_BUSY` SHALL be returned only when the journal cannot accept the write, with `cause` `journal_full` or `journal_unavailable`. A held boundary SHALL yield the committed or accepted state instead. Committed-uncertain SHALL be returned only when the canonical commit is proven and persisting the terminal record itself failed; a failure in derived-state acknowledgement after a persisted terminal is not uncertainty and SHALL NOT produce this error.
+The terminal projector MUST NOT convert rejected, busy, pending, accepted, conflicted, committed-failure, or committed-uncertain outcomes into successful committed result dictionaries. `MUTATION_BUSY` SHALL remain retryable only when no commit occurred, and post-commit uncertainty SHALL retain its committed semantics and same-identity remediation. For a write that is eligible for the intent journal, `MUTATION_BUSY` SHALL be returned only when the journal cannot accept the write, with `cause` `journal_full` or `journal_unavailable`. A held boundary SHALL yield the committed or accepted state instead. Committed-uncertain SHALL be returned only when the canonical commit is proven and persisting the terminal record itself failed; a failure in derived-state acknowledgement after a persisted terminal is not uncertainty and SHALL NOT produce this error.
 
 #### Scenario: Mutation boundary is busy
 - **WHEN** boundary acquisition times out before the command leaf runs, for a write that is not eligible for the intent journal
