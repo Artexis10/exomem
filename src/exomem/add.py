@@ -185,9 +185,17 @@ def source_artifact_name(filename: str) -> str:
 
 
 def source_artifact_suffix(filename: str) -> str:
-    """Keep original Markdown opaque to governed page parsers."""
-    suffix = Path(source_artifact_name(filename)).suffix
-    return ".md.bin" if suffix.lower() == ".md" else suffix
+    """Name the stored suffix for an original artifact."""
+    return stored_artifact_suffix(Path(source_artifact_name(filename)).suffix)
+
+
+def stored_artifact_suffix(suffix: str) -> str:
+    """Store a Markdown original as `.md.txt`, outside the graph's `.md` input set.
+
+    The graph reads every `.md` under the knowledge base as a strict UTF-8 page, so an original
+    keeps a suffix the graph never reads; `.txt` has its text extracted in the encoding its bytes show.
+    """
+    return ".md.txt" if suffix.lower() == ".md" else suffix
 
 
 def _artifact_pair(
@@ -1330,7 +1338,7 @@ def _render_source(
     lines.extend(extra_lines)
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
-        # can differ (a Markdown original is stored under a text suffix, or `.md.bin` at capture).
+        # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).
         media_type = _media_type_for(artifact_rel)
         if media_type:
             lines.append(f"media_type: {media_type}")
