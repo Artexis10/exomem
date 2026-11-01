@@ -179,6 +179,41 @@ def test_a_ruled_folder_lands_in_its_kind_directory_and_an_unregistered_kind_cha
 
 
 # --- 2.3: re-import -------------------------------------------------------------
+def test_a_rerun_finds_each_unicode_twin_as_already_imported(tmp_path: Path) -> None:
+    """Two names that differ only in Unicode normalisation share every normalised identity field.
+    A rerun used to compare one twin with the other twin's page and file it again as changed."""
+    composed, decomposed = "Coll/Caf\u00e9 ledger.md", "Coll/Cafe\u0301 ledger.md"
+    vault = _vault(tmp_path, {composed: "# Ledger\n\ncomposed name\n", decomposed: "# Ledger\n\ndecomposed name\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    actions = {item["original_path"]: item["action"] for item in planned["plan"]["items"]}
+    assert actions == {composed: "already-imported", decomposed: "already-imported"}
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 2
+
+
+def test_a_re_uploaded_collection_finds_each_unicode_twin_as_already_imported(tmp_path: Path) -> None:
+    """A re-upload stages the collection under a new root, so the whole path never matches an
+    earlier page; the spelling inside the collection still tells the twins apart."""
+    composed, decomposed = "Caf\u00e9 ledger.md", "Cafe\u0301 ledger.md"
+    vault = _vault(tmp_path, {
+        f"_Imports/first/Coll/{composed}": "# Ledger\n\ncomposed name\n",
+        f"_Imports/first/Coll/{decomposed}": "# Ledger\n\ndecomposed name\n",
+        f"_Imports/second/Coll/{composed}": "# Ledger\n\ncomposed name\n",
+        f"_Imports/second/Coll/{decomposed}": "# Ledger\n\ndecomposed name\n",
+    })
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    run_id, planned = _import(vault, path="_Imports/second", include=["_Imports/second"])
+
+    actions = [item["action"] for item in planned["plan"]["items"]]
+    assert actions == ["already-imported", "already-imported"]
+
+
 def test_a_re_staged_collection_plans_existing_refs_and_a_changed_note_names_its_predecessor(
     tmp_path: Path,
 ) -> None:
@@ -1093,7 +1128,9 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
     monkeypatch.setattr(adoption_run, "REPLY_SECONDS_PER_ITEM", 0.0)
     monkeypatch.setattr(adoption_run, "APPLY_CHUNK_BUDGET_SHARE", 1.0)
     vault = _vault(tmp_path, {})
-    batch = types.SimpleNamespace(handoff_outcome=None, handoff_error=None)
+    batch = types.SimpleNamespace(
+        receipt=types.SimpleNamespace(batch_id="b", paths=()), handoff_outcome=None, handoff_error=None
+    )
     session = writer_lease._FastAcknowledgementSession(
         vault_root=vault, request_id="r", mutation_attempt_digest="d",
         terminal_replay_until=0.0, advisory_required=False, batches=[batch],
@@ -1121,8 +1158,8 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
         # A handoff near zero still reserves the floor (2 s), not nothing.
         measure_handoff(0.0)
         assert items_admitted(12) == 5
-        # A 1.5 s handoff per batch reserves 3 s: the session's batch and the chunk's.
-        measure_handoff(1.5)
+        # A 3 s handoff per batch reserves 3 s for the chunk's batch: the session's is handed off.
+        measure_handoff(3.0)
         assert items_admitted(12) == 4
         # A 100 s handoff reserves no more than the ceiling (20 s).
         measure_handoff(100.0)

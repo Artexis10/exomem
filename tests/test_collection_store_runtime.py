@@ -515,14 +515,14 @@ def test_idle_flush_crossing_ttl_renews_from_actual_publisher_progress(runtime, 
     original_flush = replica._Publisher.flush
     delayed = []
 
-    def slow_flush(publisher):
+    def slow_flush(publisher, **kwargs):
         if not delayed:
             delayed.append(True)
             until = time.monotonic() + 3.2
             while time.monotonic() < until:
                 publisher.check()
                 time.sleep(0.1)
-        return original_flush(publisher)
+        return original_flush(publisher, **kwargs)
 
     monkeypatch.setattr(replica._Publisher, "flush", slow_flush)
     manager._last_activity_monotonic -= 10
@@ -537,9 +537,9 @@ def test_lease_loss_during_publication_does_not_release_or_reacquire(runtime, mo
     manager, client = runtime.manager, runtime.manager.client
     original_flush = replica._Publisher.flush
 
-    def lose_lease(publisher):
+    def lose_lease(publisher, **kwargs):
         client.holder = "other"
-        return original_flush(publisher)
+        return original_flush(publisher, **kwargs)
 
     monkeypatch.setattr(replica._Publisher, "flush", lose_lease)
     manager._last_activity_monotonic -= 10
@@ -823,9 +823,9 @@ def test_cancellation_during_real_publication_leaves_release_pending(runtime, mo
     cancelled = threading.Event()
     original = replica._Publisher.flush
 
-    def cancel(publisher):
+    def cancel(publisher, **kwargs):
         cancelled.set()
-        return original(publisher)
+        return original(publisher, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(replica._Publisher, "flush", cancel)

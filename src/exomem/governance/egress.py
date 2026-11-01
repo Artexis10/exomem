@@ -6331,6 +6331,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "work-item": "structure",
         "propose": "mutation",
         "apply-proposal": "mutation",
+        "acknowledge": "mutation",
     },
     ("process_media", "operation"): {
         "process": "mutation",

@@ -20,7 +20,7 @@ Give the assistant the information to save or name the project you mean. Exomem 
 
 ## Data handling
 
-MCP tool arguments, including user turns sent to `recall_context`, reach the authenticated Exomem Cloud service. Reads return authorized account content; successful writes persist governed memory in that account. OAuth selects the account. This package does not import a local vault, read local service credentials, or share authorization between accounts. Your AI provider also processes the conversation and tool results under its policies.
+MCP tool arguments, including user turns sent to `recall_context`, reach the authenticated Exomem Cloud service. Reads return authorized account content; successful writes persist governed memory in that account. OAuth selects the account, and this package reaches Exomem only through that admitted MCP connection. It does not import a local vault or share authorization between accounts. Your AI provider also processes the conversation and tool results under its policies.
 
 ## Surface support
 

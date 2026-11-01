@@ -59,6 +59,7 @@ from .vault import (
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
+    yaml_flow_list,
     yaml_scalar,
 )
 
@@ -1319,7 +1320,7 @@ def _render_source(
     if domain:
         lines.append(f"domain: {domain}")
     if projects:
-        lines.append("projects: [" + ", ".join(projects) + "]")
+        lines.append("projects: " + yaml_flow_list(projects))
     lines.append(f"captured: {date_iso}")
     if source_identity is not None:
         import json
@@ -1352,7 +1353,7 @@ def _render_source(
     if url:
         lines.append(f"url: {yaml_scalar(url)}")
     if tags:
-        lines.append("tags: [" + ", ".join(tags) + "]")
+        lines.append("tags: " + yaml_flow_list(tags))
     else:
         lines.append("tags: []")
     lines.append("ingested_into: []")

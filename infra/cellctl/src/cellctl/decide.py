@@ -57,6 +57,8 @@ class ReconcileConfig:
     import_growth_deadline: timedelta = timedelta(minutes=60)
     import_cleanup_deadline: timedelta = timedelta(minutes=2)
     import_cleanup_retry: timedelta = timedelta(hours=1)
+    # The cell stops for each attempt, and a person settles the cause of an owner refusal, so retry daily.
+    import_cleanup_owner_retry: timedelta = timedelta(hours=24)
     # C6: an export hold not finished this long per started 10 GiB of its cap
     # (exports.export_deadline) fails, and the cell starts again. A ready export
     # is kept for export_ttl (EXOMEM_EXPORT_TTL_HOURS), and each download link

@@ -7,11 +7,12 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from exomem import originals
+from exomem import held_fs, originals, reserved_paths
 
 
 @pytest.fixture
@@ -2529,3 +2530,366 @@ def test_an_offload_takes_no_hydration_slot(vault: Path, selected_store, monkeyp
         finally:
             release.set()
         assert pending.result(timeout=10) is not None
+
+
+# The status of an import sent as windows reads this ledger; the budget terms are in tests/test_adoption_windows.py.
+
+# A volume of 1 GB at an 80% growth threshold, a 1 MB reserve, a 10 MB hydration capacity for two hydrations,
+# and a largest offloadable file of 5 MB (0.5% of the volume): 21 MB of fixed terms.
+_WINDOW_VOLUME = 1_000_000_000
+_FIXED_TERMS = 1_000_000 + 10_000_000 + 2 * 5_000_000
+
+
+def _window_policy(selected_store, monkeypatch) -> None:
+    vault = Path(next(iter(json.loads(selected_store[1].read_text())["vaults"])))
+    _configure(selected_store, vault, growth_threshold=0.8, volume_fraction=0.005, minimum_idle_seconds=3600)
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", "1000000")
+
+
+def _window_status(vault: Path, **arguments) -> dict:
+    from exomem import commands
+
+    return commands.op_adoption_studio(vault, action="status", **arguments)["window_budget"]
+
+
+def test_the_status_counts_a_copy_the_worker_hydrated_in_the_job_pinned_bytes(vault: Path, selected_store, monkeypatch):
+    """Catches job-pinned bytes that miss the hydrated copy of an evicted original, which a claimed job returns when it ends."""
+    from exomem import media_jobs, media_store
+
+    _window_policy(selected_store, monkeypatch)
+    path = _stored(vault, "recording", 300)
+    size = path.stat().st_size
+    assert media_store.evict(vault, path)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    assert ledger.claim_next().binary_path == path
+    assert _window_status(vault)["job_pinned"] == {"bytes": 0}  # Claimed, and nothing hydrated yet.
+
+    with media_store.open_original(vault, path):  # The worker's hydration places the copy.
+        pass
+
+    assert originals.original_state(vault, path).state == "cached"
+    assert _window_status(vault)["job_pinned"] == {"bytes": size}
+
+
+@pytest.mark.parametrize("used, reachable, effective", [(776_500_000, 2_000_000, 2_500_000), (770_000_000, 8_500_000, 5_000_000)])
+def test_the_effective_file_limit_is_the_reachable_budget_plus_the_job_pinned_bytes_up_to_the_largest_offloadable_file(
+        vault: Path, selected_store, monkeypatch, used, reachable, effective):
+    """Catches a limit that leaves out the room a claimed job returns, or that promises a file above the largest offloadable one."""
+    from exomem import media_jobs
+
+    _window_policy(selected_store, monkeypatch)
+    pinned = _stored(vault, "pinned", 500_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(pinned, pinned.with_name(pinned.name + ".md"), "text"))
+    ledger.claim_next()
+    # The 500 000 bytes of the pinned original count in use: 0.8 * 1 000 000 000 - (used + 500 000) - 21 000 000 = reachable.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, used, pinned))
+
+    figures = _window_status(vault)
+
+    assert figures["reachable_budget"] == {"bytes": reachable}
+    assert figures["job_pinned"] == {"bytes": 500_000}
+    assert figures["effective_file_limit"] == {"bytes": effective}
+
+
+def test_with_eviction_off_the_effective_file_limit_adds_no_pinned_bytes(vault: Path, selected_store, monkeypatch):
+    """Catches a limit that promises the bytes of a claimed job when eviction is off: nothing turns them into room."""
+    from exomem import media_jobs
+
+    _window_policy(selected_store, monkeypatch)
+    _configure(selected_store, vault, growth_threshold=0.8, volume_fraction=0.005, minimum_idle_seconds=3600,
+               eviction_enabled=False)
+    pinned = _stored(vault, "pinned", 500_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(pinned, pinned.with_name(pinned.name + ".md"), "text"))
+    ledger.claim_next()
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 776_500_000, pinned))
+
+    figures = _window_status(vault)
+
+    assert figures["reachable_budget"] == {"bytes": 2_000_000}
+    assert figures["job_pinned"] == {"bytes": 500_000}
+    assert figures["effective_file_limit"] == {"bytes": 2_000_000}
+
+
+def test_the_reachable_budget_adds_what_eviction_filing_and_a_pending_offload_free_but_not_a_recent_owner_read(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a reachable budget that counts an original the owner just read, or leaves out a term that frees room."""
+    from test_adoption_windows import _window
+
+    from exomem import media_jobs, media_store
+
+    _window_policy(selected_store, monkeypatch)
+    unread, played = _stored(vault, "unread", 3_000), _stored(vault, "played", 1_000)
+    with media_store.open_original(vault, played, read=True):
+        pass
+    local = _preserved(vault, category="pending")  # Filing queues its offload, which no worker has run.
+    assert media_jobs.MediaJobStore(vault).get_by_binary(local, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
+    _window(vault, {"report.pdf": 4_000})  # A landed window that holds one unfiled artifact of 4 000 bytes.
+    held = [unread, played, local]
+    in_use = sum(path.stat().st_size for path in held)
+    # The window budget is 1 000 bytes: 0.8 * 1 000 000 000 - in use - 21 000 000 of fixed terms.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 779_000_000 - 1_000 - in_use, *held))
+
+    figures = _window_status(vault)
+
+    assert figures["window_budget"] == {"bytes": 1_000}
+    # Plus the unread original (3 000), the local original once offloaded and evicted, and the unfiled artifact (4 000).
+    assert figures["reachable_budget"] == {"bytes": 1_000 + 3_000 + local.stat().st_size + 4_000}
+
+
+def test_a_status_call_records_and_renews_a_demand_for_each_series_and_ignores_one_above_the_reachable_budget(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a demand that replaces another series' lease, or one the cell cannot meet that still asks for eviction."""
+    from exomem import media_jobs
+
+    _window_policy(selected_store, monkeypatch)
+    held = [_stored(vault, "large", 3_000), _stored(vault, "middle", 2_000), _stored(vault, "small", 1_000)]
+    base = 779_000_000 - 1_000 - 6_000  # A window budget of 1 000 bytes, and 6 000 bytes that eviction can free.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, base, *held))
+    ledger = media_jobs.MediaJobStore(vault)
+
+    def leases() -> dict[str, tuple[int, int, float]]:
+        with sqlite3.connect(ledger.path) as connection:
+            return {series: (demand, offset, renewed) for series, demand, offset, renewed in connection.execute(
+                "SELECT series, demand_bytes, budget_offset, renewed_at FROM media_demands")}
+
+    first = _window_status(vault, series_id="series-a", next_window_bytes=4_000)
+    assert first["window_budget"] == {"bytes": 1_000} and first["reachable_budget"] == {"bytes": 7_000}
+    assert first["demand"]["recorded"] is True
+    _window_status(vault, series_id="series-b", next_window_bytes=6_500)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("UPDATE media_demands SET renewed_at = 1")
+    _window_status(vault, series_id="series-a", next_window_bytes=5_000)
+    _window_status(vault, series_id="series-b", next_window_bytes=6_000)
+
+    renewed = leases()
+    assert {series: demand for series, (demand, _offset, _renewed) in renewed.items()} == {"series-a": 5_000, "series-b": 6_000}
+    assert all(lease[2] > 1 for lease in renewed.values())
+    assert renewed["series-a"][1] == 1_000 + base + 6_000  # The cell stored its own budget as an offset from its own use.
+
+    ignored = _window_status(vault, series_id="series-c", next_window_bytes=7_001)
+
+    assert ignored["demand"]["recorded"] is False
+    assert set(leases()) == {"series-a", "series-b"}
+
+
+def _recorded_by_a_batch(vault: Path) -> int:
+    """Offload one original through a batch, which records its owner census; returns the bytes that the census counts."""
+    from exomem import media_store
+
+    path = _filed(vault, 1, category="recorded")[0]
+    media_store.offload(vault, path, batch=media_store.OffloadBatch(vault))
+    return path.stat().st_size
+
+
+def test_the_status_reports_the_remaining_allowance_from_the_census_that_offload_recorded(
+        vault: Path, selected_store, monkeypatch):
+    """Catches an allowance figure that reports the setting alone, or a status that walks every note to measure it."""
+    used = _recorded_by_a_batch(vault)
+    censuses = _count_censuses(monkeypatch)
+
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert censuses == []
+    assert {key: allowance[key] for key in ("allowance_bytes", "used_bytes", "remaining_bytes")} == {
+        "allowance_bytes": 10_000_000, "used_bytes": used, "remaining_bytes": 10_000_000 - used}
+    assert datetime.fromisoformat(allowance["observed_at"]).tzinfo is not None
+
+
+def test_a_plain_status_with_no_recorded_census_reports_the_use_as_unknown_and_takes_none(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a status that reads 0 bytes in use before any offload ran, or that walks the vault to find out."""
+    censuses = _count_censuses(monkeypatch)
+
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert censuses == []
+    assert allowance["allowance_bytes"] == 10_000_000 and "used_bytes" not in allowance and allowance["unknown"]
+
+
+def test_a_status_that_carries_a_demand_takes_one_census_when_none_is_recorded(vault: Path, selected_store, monkeypatch):
+    """Catches a series that starts with no figure for the room it needs, because only offload ever recorded one."""
+    path = _stored(vault, "recording", 300)  # A stored original; its offload was not a batch, so no census is recorded.
+    censuses = _count_censuses(monkeypatch)
+
+    allowance = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
+
+    assert len(censuses) == 1
+    assert allowance["used_bytes"] == path.stat().st_size and allowance["observed_at"]
+
+
+def _filed(vault: Path, count: int, *, category: str = "batch") -> list[Path]:
+    """`count` filed originals of 40 distinct bytes each, so that none reuses another's stored version."""
+    from exomem import preserve
+
+    return [vault / preserve.preserve(vault, scope="Test", category=category, filename=f"member-{number}.txt",
+                                      content=f"{number:040d}").path for number in range(count)]
+
+
+def _count_censuses(monkeypatch) -> list[int]:
+    from exomem import media_allowance
+
+    reads: list[int] = []
+    read = media_allowance.reference_usage
+
+    def counted(*args, **kwargs):
+        reads.append(1)
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(media_allowance, "reference_usage", counted)
+    return reads
+
+
+def test_a_batch_of_offloads_reads_the_owner_census_once(vault: Path, selected_store, monkeypatch):
+    """Catches each offload reading every owner reference up to three times, which makes a long series quadratic."""
+    from exomem import media_store
+
+    members = _filed(vault, 12)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+
+    for path in members:
+        media_store.offload(vault, path, batch=batch)
+
+    assert all(originals.original_state(vault, path).reference is not None for path in members)
+    assert len(reads) == 1
+
+
+def test_other_writes_land_between_two_members_of_a_batch(vault: Path, selected_store, monkeypatch):
+    """Catches a batch that keeps the mutation boundary from its first member to its last."""
+    import threading
+
+    from exomem import media_store, mutation_lock
+
+    first, second = _filed(vault, 2)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, first, batch=batch)
+
+    assert not mutation_lock.current_thread_holds_boundary()
+    landed: list[Path] = []
+    writer = threading.Thread(target=lambda: landed.extend(_filed(vault, 1, category="written-between-members")),
+                              daemon=True)
+    writer.start()
+    writer.join(timeout=15)
+    media_store.offload(vault, second, batch=batch)
+
+    assert not writer.is_alive() and landed and landed[0].exists()
+    assert originals.original_state(vault, second).reference is not None
+    assert len(reads) == 1
+
+
+def test_a_batch_charges_each_version_it_publishes_to_its_census(vault: Path, selected_store, monkeypatch):
+    """Catches a batch census that forgets its own earlier members, so the batch fills the allowance and passes it."""
+    from exomem import media_store
+
+    first, second, third = _filed(vault, 3)
+    _configure(selected_store, vault, allowance_bytes=2 * first.stat().st_size)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+
+    media_store.offload(vault, first, batch=batch)
+    media_store.offload(vault, second, batch=batch)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, third, batch=batch)
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert originals.original_state(vault, third).reference is None
+    assert len(reads) == 1
+
+
+def test_a_batch_member_whose_reference_changed_before_publication_is_refused(vault: Path, selected_store, monkeypatch):
+    """Catches a shared census standing in for the publication-time check that the original is unchanged."""
+    from exomem import media_store
+
+    first, second = _filed(vault, 2)
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, first, batch=batch)
+    upload = media_store.FilesystemStore.upload
+    elsewhere: list[object] = []
+
+    def bind_elsewhere(*args, **kwargs):
+        version = upload(*args, **kwargs)
+        if not elsewhere:
+            elsewhere.append(None)  # the competing offload uploads too
+            elsewhere[0] = media_store.offload(vault, second)
+        return version
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", bind_elsewhere)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, second, batch=batch)
+
+    assert refused.value.code == "MEDIA_ORIGINAL_CHANGED"
+    assert originals.original_state(vault, second).reference == elsewhere[0]
+
+
+def test_a_census_that_could_not_count_replaces_an_older_known_figure_in_the_status(vault: Path, selected_store, monkeypatch):
+    """Catches a status that keeps showing the last known use after the references could no longer be counted."""
+    from exomem import media_allowance, media_store
+
+    _recorded_by_a_batch(vault)
+    unreadable = media_allowance.ReferenceUsage(None, "2026-11-01T08:00:00+00:00")
+    monkeypatch.setattr(media_allowance, "reference_usage", lambda *args, **kwargs: unreadable)
+    next_member = _filed(vault, 2, category="next")[1]
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, next_member, batch=media_store.OffloadBatch(vault))
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert "used_bytes" not in allowance and allowance["unknown"] and allowance["observed_at"] == unreadable.observed_at
+
+
+def test_a_status_with_a_demand_counts_afresh_once_the_recorded_census_is_older_than_the_demand_lease(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a series that sizes its window by a figure from before the lease, which later offloads may have changed."""
+    from exomem import media_jobs, media_store
+
+    used = _recorded_by_a_batch(vault)
+    old = (datetime.now(UTC) - timedelta(seconds=media_store.DEMAND_LEASE_SECONDS + 60)).isoformat()
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_owner_census SET observed_at = ?", (old,))
+    censuses = _count_censuses(monkeypatch)
+
+    plain = _window_status(vault)["media_allowance"]
+    assert censuses == [] and plain["observed_at"] == old and plain["used_bytes"] == used
+
+    fresh = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
+    again = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
+
+    assert len(censuses) == 1 and fresh["observed_at"] > old and again["observed_at"] == fresh["observed_at"]
+    assert media_store.recorded_census(vault).observed_at == fresh["observed_at"]
+
+
+def test_members_that_the_allowance_refuses_share_the_batch_census(vault: Path, selected_store, monkeypatch):
+    """Catches a batch that reads the owner census again after each refused member, which makes a refused series quadratic."""
+    from exomem import media_store
+
+    first, *refused = _filed(vault, 4)
+    _configure(selected_store, vault, allowance_bytes=first.stat().st_size)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, first, batch=batch)
+
+    for path in refused:
+        with pytest.raises(media_store.MediaStoreError) as error:
+            media_store.offload(vault, path, batch=batch)
+        assert error.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("error", [held_fs.HeldFsError("PATH_NOT_FOUND", "the ledger"), reserved_paths.ReservedPathLeafError("RESERVED")])
+def test_a_ledger_that_refuses_the_census_record_does_not_stop_the_batch(vault: Path, selected_store, error):
+    """Catches an offload that stops because its status record was refused, which costs the status only a fresher figure."""
+    from exomem import media_store
+
+    class RefusingLedger:
+        def _connect(self, **_options):
+            raise error
+
+    usage = media_store.OffloadBatch(vault).usage(RefusingLedger())
+
+    assert usage.versions is not None

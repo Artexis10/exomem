@@ -522,14 +522,28 @@ class CorpusPostings:
     page text for a word it has met before, however many pages hold that
     word. It belongs to one admitted corpus's rows: whoever adds counts reads
     them from the rows that corpus's statistics were built on.
+
+    `page_terms` maps each page to its distinct terms and their counts, when
+    the corpus keeps them: a new word is then counted from those, and no page
+    text is read at all. A corpus too large to keep them has its new words
+    counted by the caller from each page's text.
     """
 
-    def __init__(self, lengths: Mapping[str, int]) -> None:
+    def __init__(
+        self,
+        lengths: Mapping[str, int],
+        page_terms: Mapping[str, tuple[Sequence[str], Sequence[int]]] | None = None,
+    ) -> None:
         # Interned, so every kept slot shares its page's one path string.
         self.lengths = MappingProxyType({sys.intern(path): length for path, length in lengths.items()})
+        self._page_terms = page_terms
         self._postings: OrderedDict[str, Mapping[str, int]] = OrderedDict()
         self._slots = 0
         self._lock = threading.Lock()
+
+    @property
+    def keeps_page_terms(self) -> bool:
+        return self._page_terms is not None
 
     def missing(self, words: Iterable[str]) -> list[str]:
         """The words with no kept postings, in sorted order."""
@@ -556,6 +570,26 @@ class CorpusPostings:
             key = sys.intern(path)
             for word in wanted.intersection(document):
                 found[word][key] = document.count(word)
+        return self._keep(found, document_frequency)
+
+    def counted_from_page_terms(
+        self, words: Iterable[str], document_frequency: Mapping[str, int],
+    ) -> dict[str, Mapping[str, int]] | None:
+        """`counted` over the corpus's own page terms, which hold every page; None when it keeps none."""
+        held = self._page_terms
+        if held is None:
+            return None
+        wanted = set(words)
+        found: dict[str, dict[str, int]] = {word: {} for word in wanted}
+        for path in self.lengths:
+            terms, counts = held[path]
+            for word in wanted.intersection(terms):
+                found[word][path] = counts[terms.index(word)]
+        return self._keep(found, document_frequency)
+
+    def _keep(
+        self, found: dict[str, dict[str, int]], document_frequency: Mapping[str, int],
+    ) -> dict[str, Mapping[str, int]] | None:
         if any(len(pages) != document_frequency.get(word, 0) for word, pages in found.items()):
             return None
         postings = {word: MappingProxyType(pages) for word, pages in found.items()}

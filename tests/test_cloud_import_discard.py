@@ -177,6 +177,34 @@ def test_a_discard_that_finds_no_manifest_no_record_and_no_stage_records_nothing
     assert import_stage.read_residual(vault, import_id) is None
 
 
+def test_a_discard_that_waits_on_a_renamed_member_tells_the_controller_that_the_owner_settles_it(
+    vault: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Catches a refusal that only the person can settle but looks retryable: the controller would stop the cell hourly."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+    _stop_after_the_rename_of(vault, monkeypatch, import_id)
+
+    result = _run_discard(monkeypatch, vault, import_id, tmp_path=tmp_path)
+
+    assert result == {"ok": False, "error": "IMPORT_RENAMES_PENDING", "retry": "owner"}
+
+
+def test_a_discard_that_fails_for_a_reason_a_retry_may_fix_carries_no_retry_value(
+    vault: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Catches a retry value on every failure: a transient fault would then wait a day."""
+    import_id = _job_stage(vault, {"scan.bin": PDF})
+
+    def broken(*_args, **_kwargs):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(cloud_import_job, "discard", broken)
+
+    result = _run_discard(monkeypatch, vault, import_id, tmp_path=tmp_path)
+
+    assert result == {"ok": False, "error": "IMPORT_FAILED"}
+
+
 # 4
 
 
@@ -190,7 +218,7 @@ def test_a_discard_refuses_and_keeps_the_stage_when_it_cannot_read_the_receipt(
 
     result = _run_discard(monkeypatch, vault, import_id, tmp_path=tmp_path)
 
-    assert result == {"ok": False, "error": "IMPORT_RECEIPT_UNREADABLE"}
+    assert result == {"ok": False, "error": "IMPORT_RECEIPT_UNREADABLE", "retry": "owner"}
     assert (_stage_dir(vault, import_id) / "Field Notes" / "scan.bin").read_bytes() == PDF
     assert _receipt_file(vault, import_id).read_text(encoding="utf-8") == damaged
 
@@ -308,6 +336,37 @@ def test_a_plain_discard_after_a_walk_writes_no_empty_record_over_the_walk(vault
     assert import_stage.RESIDUAL_KEY not in _receipt(vault, import_id)
     assert import_stage.read_residual(vault, import_id) == [
         {"path": "Field Notes/plan.md", "bytes": len(b"# Plan\n\nInvented plan.\n"), "code": "receipt_unreadable"}]
+
+
+def _walk_a_stage_with_a_file_the_manifest_does_not_list(vault: Path) -> str:
+    """A stage of one manifest member, `left.bin`, and `extra.bin` put there later, walked while the receipt is unreadable."""
+    import_id = _job_stage(vault, {"left.bin": PDF})
+    (_stage_dir(vault, import_id) / "Field Notes" / "extra.bin").write_bytes(OTHER)
+    _walk_then_make_the_receipt_readable_again(vault, import_id)
+    return import_id
+
+
+def test_a_plain_discard_after_a_walk_keeps_the_members_that_only_the_walk_listed(vault: Path) -> None:
+    """Catches a record built from the manifest alone: it outranks the walk's, which listed a file the manifest did not."""
+    import_id = _walk_a_stage_with_a_file_the_manifest_does_not_list(vault)
+
+    cloud_import_job.discard(vault, import_id)
+
+    assert {member["path"]: member["code"] for member in import_stage.read_residual(vault, import_id)} == {
+        "Field Notes/left.bin": "outside_run", "Field Notes/extra.bin": import_stage.UNREADABLE_CODE}
+
+
+def test_a_plain_discard_after_a_walk_keeps_a_member_that_the_person_cleared(vault: Path) -> None:
+    """Catches a record that forgets a clearance: the member comes back as unfiled, and a naive merge lists it twice."""
+    import_id = _walk_a_stage_with_a_file_the_manifest_does_not_list(vault)
+    import_stage.clear_residual(vault, import_id, {"Field Notes/left.bin"}, "2026-11-01T00:00:00Z")
+
+    cloud_import_job.discard(vault, import_id)
+
+    record = import_stage.window_record(vault, import_id)
+    assert (record.kind, record.source) == (import_stage.WINDOW_DISCARDED, import_stage.RECEIPT_SOURCE)
+    assert [member["path"] for member in record.members] == ["Field Notes/extra.bin"]
+    assert [member["path"] for member in record.acknowledged] == ["Field Notes/left.bin"]
 
 
 def test_a_walking_discard_of_an_import_with_no_stage_records_nothing(vault: Path) -> None:

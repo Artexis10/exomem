@@ -386,7 +386,11 @@ class MediaWorker:
         execution_mode: str | None = None,
         idle_seconds: float | None = None,
     ) -> None:
+        from . import media_store
+
         self._vault_root = vault_root
+        #: The owner census that consecutive offloads share; it ends when this worker has no job left (D10).
+        self._offload_batch = media_store.OffloadBatch(vault_root)
         selected = execution_mode or os.environ.get("EXOMEM_MEDIA_WORKER_MODE", "process")
         if selected not in {"process", "inline"}:
             raise ValueError("media worker mode must be process or inline")
@@ -542,6 +546,8 @@ class MediaWorker:
                 if job is None:
                     return
                 self._process(job)
+                if self._q.empty():
+                    self._offload_batch.end()
                 _evict(self._vault_root)
             except Exception:  # noqa: BLE001 — a bad job must never kill the worker
                 log.exception("media worker job crashed: %s", getattr(job, "binary_path", "?"))
@@ -556,7 +562,7 @@ class MediaWorker:
         # A store outage leaves its generation pending while extraction continues.
         if job.do_offload:
             try:
-                media_store.offload(self._vault_root, job.binary_path)
+                media_store.offload(self._vault_root, job.binary_path, batch=self._offload_batch)
             except (media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OSError) as error:
                 offload_error = error
             else:
@@ -2663,6 +2669,7 @@ def run_child(
                 log.info("media worker: admission refused the next job (exit %d); child exiting", refusal[0])
                 return refusal[0]
             if job is None:
+                worker._offload_batch.end()
                 if gpu_busy:
                     log.info("media worker: only speech work is left and the GPU is busy; child exiting")
                     return _GPU_BUSY_EXIT_CODE
