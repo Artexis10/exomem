@@ -72,8 +72,7 @@ _BUCKET_TOKENS = (BUCKET_MISSING, BUCKET_SETTING_DRIFT)
 # A cell prefix is `cells/<cell id>/`. The cell id is the 16-character base32 body of
 # cellctl's namespace rule `exo-cell-[a-z2-7]{16}`. That protocol fixes the shape, so a
 # regex over this closed form is sound; it checks a format, not what anyone meant.
-CELL_PREFIX_ROOT = "cells/"
-_CELL_PREFIX = re.compile(re.escape(CELL_PREFIX_ROOT) + r"[a-z2-7]{16}/")
+_CELL_PREFIX = re.compile(r"cells/[a-z2-7]{16}/")
 _ACCOUNT_LABEL = re.compile(r"[a-z0-9-]{1,32}")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 _BUCKET_SETTING_FIELDS = frozenset(
@@ -364,13 +363,16 @@ def _matches_per_cell(key: Mapping[str, Any], shape: PerCell) -> bool:
 
 
 def _near_miss(key: Mapping[str, Any], shape: PerCell) -> bool:
-    """A key for this bucket and a cell prefix whose capabilities fall within the shape."""
+    """A key for this bucket, inside one full cell prefix, with capabilities within the shape.
+
+    A shorter prefix such as `cells/` reaches many cells, so it is not a near miss.
+    """
     prefix = key.get("namePrefix")
     return (
         key.get("bucketIds") == [shape.bucket_id]
         and frozenset(key["capabilities"]) <= shape.capabilities
         and isinstance(prefix, str)
-        and prefix.startswith(CELL_PREFIX_ROOT)
+        and _CELL_PREFIX.match(prefix) is not None
     )
 
 

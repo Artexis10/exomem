@@ -340,11 +340,10 @@ def test_a_key_listed_on_a_later_page_is_still_checked() -> None:
 @pytest.mark.parametrize(
     "key",
     [
-        cell_key(prefix="cells/"),
-        cell_key(prefix="cells/ABCDEFGHIJKLMNOP/"),
         cell_key(capabilities=["listBuckets", "listFiles"]),
+        cell_key(prefix=f"{CELL_PREFIX}sub/"),
     ],
-    ids=["no-cell-id", "bad-cell-id", "missing-capability"],
+    ids=["missing-capability", "deeper-prefix"],
 )
 def test_a_near_miss_of_the_per_cell_shape_alerts_shape_drift(key: dict[str, Any]) -> None:
     fake = transport(keys=[custodian_key(), key])
@@ -362,8 +361,17 @@ def test_a_near_miss_of_the_per_cell_shape_alerts_shape_drift(key: dict[str, Any
         cell_key(bucket_ids=[BACKUP_BUCKET_ID, STAGING_BUCKET_ID]),
         cell_key(capabilities=[*CELL_CAPABILITIES, "bypassGovernance"]),
         cell_key(prefix="exports/"),
+        cell_key(prefix="cells/"),
+        cell_key(prefix="cells/ABCDEFGHIJKLMNOP/"),
     ],
-    ids=["other-bucket", "two-buckets", "extra-capability", "foreign-prefix"],
+    ids=[
+        "other-bucket",
+        "two-buckets",
+        "extra-capability",
+        "foreign-prefix",
+        "no-cell-id",
+        "bad-cell-id",
+    ],
 )
 def test_a_key_that_is_not_a_near_miss_of_the_per_cell_shape_alerts_unknown_key(
     key: dict[str, Any],
@@ -376,15 +384,23 @@ def test_a_key_that_is_not_a_near_miss_of_the_per_cell_shape_alerts_unknown_key(
     assert active_alerts(fake) == {"fixture:UNKNOWN_KEY"}
 
 
-def test_an_account_wide_key_is_unknown_even_while_a_near_miss_is_active() -> None:
-    wide = listed_key(
-        ROGUE_KEY_ID,
-        capabilities=["listKeys", "writeKeys", "deleteKeys"],
-        bucket_ids=None,
-        prefix=None,
-    )
-    alone = transport(keys=[custodian_key(), wide])
-    beside_near_miss = transport(keys=[custodian_key(), cell_key(prefix="cells/"), wide])
+@pytest.mark.parametrize(
+    "rogue",
+    [
+        listed_key(
+            ROGUE_KEY_ID,
+            capabilities=["listKeys", "writeKeys", "deleteKeys"],
+            bucket_ids=None,
+            prefix=None,
+        ),
+        cell_key("0050000000000fixturecell02", prefix="cells/"),
+    ],
+    ids=["account-wide-writekeys", "whole-cells-prefix"],
+)
+def test_a_rogue_key_is_unknown_even_while_a_near_miss_is_active(rogue: dict[str, Any]) -> None:
+    near_miss = cell_key(capabilities=["listBuckets", "listFiles"])
+    alone = transport(keys=[custodian_key(), rogue])
+    beside_near_miss = transport(keys=[custodian_key(), near_miss, rogue])
 
     run(environment(account(per_cell=True)), alone)
     run(environment(account(per_cell=True)), beside_near_miss)
