@@ -119,6 +119,19 @@ class FakeCloud:
         self.fail_next_read = False
         self.read_count: int | None = None
         self.fail_prepare_once = False
+        self.short_parts_once = False
+        self.creates = 0  # Every create request, including the ones that Cloud refuses.
+
+    @staticmethod
+    def holds_cell(row: dict) -> bool:
+        """Substrate's unique index of open imports (migration 0061): a cell holds at most one such row."""
+        closed = row["observed_state"] in ("done", "failed", "expired", "discarded")
+        return not closed or (row["requested_state"] == "discard_requested" and row["observed_state"] != "discarded")
+
+    def open_another_import(self) -> None:
+        """An import that this series did not create, such as an upload from Home, is open on the cell."""
+        self.rows["another-import"] = {"declaration": {}, "import_id": "another-import", "requested_state": "requested",
+                                       "observed_state": "key_ready", "recipient": self.recipient}
 
     def release(self) -> None:
         """Cloud finishes every import that it held."""
@@ -136,6 +149,7 @@ class FakeCloud:
         if request.method == "POST" and path == base:
             if self.refuse_registration:
                 return httpx2.Response(503, json={"error": {"code": "STORE_UNAVAILABLE"}})
+            self.creates += 1
             body = json.loads(request.content)
             known = self.rows.get(body["import_id"])
             if known is not None:  # Cloud replays a known ID whatever its state, and refuses a changed declaration.
@@ -143,6 +157,8 @@ class FakeCloud:
                 if declared != known["declaration"]:
                     return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
                 return httpx2.Response(200, json={"import": known})
+            if any(self.holds_cell(row) for row in self.rows.values()):  # The insert violates the open-import index.
+                return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
             self.rows[body["import_id"]] = {"declaration": {key: body[key] for key in ("kind", "declared_bytes", "declared_files")},
                                             "import_id": body["import_id"], "requested_state": "requested",
                                             "observed_state": "key_ready", "recipient": self.recipient}
@@ -171,6 +187,9 @@ class FakeCloud:
             row["requested_state"] = "requested"  # Substrate keeps `requested` until the upload completes.
             row["part_urls"] = [{"part_number": n + 1, "part_size_bytes": min(5000, size - offset),
                                  "url": f"https://storage.example/{import_id}/{n + 1}"} for n, offset in enumerate(range(0, size, 5000))]
+            if self.short_parts_once:  # The issued parts do not cover the encrypted copy.
+                self.short_parts_once = False
+                row["part_urls"][0]["part_size_bytes"] -= 1
         elif request.method == "POST" and path.endswith("/complete"):
             self._land(import_id, row)
         return httpx2.Response(200, json={"import": row})
@@ -1018,27 +1037,88 @@ def _stop_with_cloud_importing_slowly_then_change_a_member(rig: Rig) -> None:
     (rig.source / "a02.bin").write_bytes(b"changed after the upload")
 
 
-def test_a_window_that_cloud_still_holds_with_another_member_set_says_the_run_goes_on_once_cloud_ends_it(rig):
-    """Catches the stop text 'cancel it or wait for it to expire' and resume=False for a window's own earlier attempt."""
+# -- Review round 5: one open import per cell, and the window's identity rules (a) to (d) in cloud_import_windows.py
+
+
+def _first_window(rig: Rig) -> dict:
+    """The first window of the series record: its import ID and the IDs of its earlier attempts."""
+    return json.loads((rig.tmp / "checkpoint" / "series.json").read_text())["windows"][0]
+
+
+def test_rule_d_a_window_whose_create_meets_another_open_import_stops_at_once_and_goes_on_once_that_import_ends(rig):
+    """R1 and rule (d): catches a conflict read as a dead attempt, which renews and creates again until RecursionError."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.open_another_import()
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.code == "IMPORT_CONFLICT" and stop.value.resume
+    assert "another import is open; cancel it in Home or wait for it to end" in stop.value.message
+    assert NOT_IN_EXOMEM in stop.value.message
+    assert rig.cloud.creates == 1
+    first = _first_window(rig)["import_id"]
+    rig.cloud.rows["another-import"].update(observed_state="done")
+    assert rig.run()["import_ids"] == [first] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_member_change_after_an_abandoned_upload_stops_while_that_attempt_holds_the_cell(rig):
+    """R2: catches a never-uploaded attempt read as over: the new import conflicts with it and the run loops."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.short_parts_once = True
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "PARTS_INVALID"
+    (rig.source / "a02.bin").write_bytes(b"changed after the abandon")
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.resume and "earlier attempt of this window" in stop.value.message
+    assert len(rig.cloud.rows) == 1 and rig.cloud.creates == 2
+
+
+@pytest.mark.parametrize("requested, observed", [
+    ("requested", "key_ready"), ("uploaded", "importing"), ("uploaded", "done"), ("discard_requested", "failed")])
+def test_rule_a_a_window_keeps_its_import_while_cloud_holds_its_earlier_attempt_open_or_done(rig, requested, observed):
+    """Rule (a): catches a new import ID while the earlier attempt is open or done, which lands the window twice or loops."""
     _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+    before = _first_window(rig)["import_id"]
+    rig.cloud.rows[before].update(requested_state=requested, observed_state=observed)  # The cell lists no receipt for it.
 
     with pytest.raises(CloudImportError) as stop:
         rig.run(poll_seconds=0.001)
 
-    assert stop.value.resume
-    assert "earlier attempt of this window" in stop.value.message
+    assert stop.value.resume and "earlier attempt of this window" in stop.value.message
+    assert _first_window(rig)["import_id"] == before and _first_window(rig)["attempts"] == []
+    assert len(rig.cloud.rows) == 1
 
 
-def test_after_cloud_fails_the_old_import_the_next_run_sends_the_window_once_under_a_new_import(rig):
-    """Catches a window that stays pinned to its old import ID and gets IMPORT_CONFLICT on every rerun."""
+def test_rule_b_a_window_gets_one_new_import_per_ended_attempt_and_retries_its_send_once(rig):
+    """Rule (b): catches a renewal that repeats: a retry or rerun that meets another open import keeps the new ID."""
+    _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+    old = _first_window(rig)["import_id"]
+    rig.cloud.rows[old].update(observed_state="failed")
+    rig.cloud.open_another_import()
+
+    for creates in (3, 4):  # The renewal and its one retry, then a rerun that keeps the new ID.
+        with pytest.raises(CloudImportError) as stop:
+            rig.run(poll_seconds=0.001)
+        assert "another import is open" in stop.value.message and stop.value.resume
+        assert rig.cloud.creates == creates and _first_window(rig)["attempts"] == [old]
+
+
+@pytest.mark.parametrize("observed", ["failed", "expired", "discarded"])
+def test_rule_c_after_cloud_ends_the_earlier_attempt_the_next_run_sends_the_window_once_under_a_new_import(rig, observed):
+    """Rule (c): catches an ended attempt that is not read as over, so the window stays pinned to it and never goes on."""
     _stop_with_cloud_importing_slowly_then_change_a_member(rig)
     with pytest.raises(CloudImportError):
-        rig.run(poll_seconds=0.001)
-    for row in rig.cloud.rows.values():
-        row.update(observed_state="failed")
+        rig.run(poll_seconds=0.001)  # Cloud still holds the earlier attempt.
+    old = _first_window(rig)["import_id"]
+    rig.cloud.rows[old].update(observed_state=observed)
     rig.cloud.holding = False  # Cloud lands the new import at once.
 
-    rig.run(poll_seconds=0.001)
+    result = rig.run(poll_seconds=0.001)
 
     assert rig.cloud.all_sent() == ["a01.bin"]
-    assert len(rig.cloud.rows) == 2
+    assert len(rig.cloud.rows) == 2 and old not in result["import_ids"]

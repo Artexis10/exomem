@@ -33,6 +33,7 @@ from .cloud_import_client import (
     _coded,
     _Where,
     import_source,
+    safe_code,
 )
 from .cloud_import_job import _private_json
 
@@ -178,6 +179,22 @@ class Member:
     def cost(self) -> int:
         """What the member takes of the window budget: text files twice, because the stage keeps a copy."""
         return 2 * self.size if self.klass == TEXT else self.size
+
+
+# A window's import identity. Cloud's create replays a known import ID whatever the row's state, refuses a known ID with
+# another declaration (IMPORT_CONFLICT), and refuses a new row while another import holds the cell (IMPORT_CONFLICT,
+# from the unique index of open imports in Substrate migration 0061). So:
+# (a) A window keeps its import ID while Cloud has no row for it, while its row is open or done, after the client gives
+#     up its checkpoint, after any failure that Cloud did not end, and after a member change: the create decides, as
+#     Cloud inserts the new declaration under an ID that it never saw.
+# (b) A window gets a new import ID only when Cloud reports that the window's own row ended (rule c): in the wait, or
+#     by a read of the row after IMPORT_CONFLICT at register. The old ID moves to `attempts`, and a receipt for any of
+#     the IDs lands the window. After a renewal at register, the send is retried once, never more.
+# (c) An attempt is over when its row is `failed`, `expired` or `discarded` and no longer holds the cell. `done` has
+#     landed. A row whose upload never completed (`requested`) still holds the cell until Cloud ends it.
+# (d) IMPORT_CONFLICT at register while Cloud has no row for the window's ID means that another import holds the cell:
+#     the run stops, and resumes under the same ID once that import ends. IMPORT_CONFLICT with the window's own row
+#     open or done means its earlier attempt with another member set holds the cell: the run stops, and resumes.
 
 
 @dataclass
@@ -369,9 +386,7 @@ class _Run:
             else:
                 kept.append(fresh)
         checkpoint = self.record.parent / window.dir
-        if gone:
-            if not (checkpoint / "checkpoint.json").exists() and await self._attempt_is_over(window):
-                window.renew()  # The member set differs from any earlier attempt's declaration, and Cloud is not importing that one.
+        if gone:  # The window keeps its import ID (rule a); the create decides.
             # The record is the partition: a member that changed is not sent and not planned again, and the person keeps it.
             window.paths = [item.rel for item in kept]
             self.series.skipped.extend(gone)
@@ -383,42 +398,54 @@ class _Run:
                 return
             self.series.write(self.record)
         self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
-        try:
-            result = await import_source(
-                self.source, self.config, checkpoint, api=self.api, uploads=self.uploads, poll_seconds=self.poll,
-                progress=self.progress, window=Window(import_selection.Selection(kept=kept), self.series.series_file.encode(), window.import_id),
-                include_hidden=self.series.options["include_hidden"], use_gitignore=self.series.options["use_gitignore"])
-        except CloudImportError as error:
-            # The Job refuses a window for lack of space with this code: the import ends `failed` with it.
-            if error.code == STORAGE_ALLOWANCE_EXCEEDED:
-                self.series.windows.remove(window)
-                self.series.write(self.record)
-                self.refused = window.cost
-                self.progress.say("The Job refused the window for space; planning it again from the current budget.")
-                return
-            message, resume = error.message, error.resume
-            if error.phase == REGISTER and error.code == "IMPORT_CONFLICT":
-                # Cloud checks the declaration before it returns a known row: this window's own earlier attempt declared another member set.
-                if await self._attempt_is_over(window):
-                    window.renew()
-                    shutil.rmtree(checkpoint, ignore_errors=True)  # Its checkpoint holds the dead ID, and a checkpoint's ID wins over the window's.
+        renewed = False
+        while True:
+            try:
+                result = await import_source(
+                    self.source, self.config, checkpoint, api=self.api, uploads=self.uploads, poll_seconds=self.poll,
+                    progress=self.progress, window=Window(import_selection.Selection(kept=kept), self.series.series_file.encode(), window.import_id),
+                    include_hidden=self.series.options["include_hidden"], use_gitignore=self.series.options["use_gitignore"])
+                break
+            except CloudImportError as error:
+                # The Job refuses a window for lack of space with this code: the import ends `failed` with it.
+                if error.code == STORAGE_ALLOWANCE_EXCEEDED:
+                    self.series.windows.remove(window)
                     self.series.write(self.record)
-                    return await self.send(window)
-                message = ("Cloud still holds an earlier attempt of this window with another member set. "
-                           "The run continues once Cloud lands or ends it")
-                resume = True
-            elif error.ended:
-                # Cloud reported that this import ended and replays its ID; the rerun uses a new one.
-                window.renew()
-                self.series.write(self.record)
-                resume = True
-            elif error.why:
-                # The client gave up its checkpoint, but Cloud's import may be open: the rerun replays the same ID, and Cloud's state decides.
-                message = (f"{error.why}. The checkpoint is removed. Cloud import {error.import_id} stays as it is, and the next run "
-                           f"replays it. To stop it, {_STOP_ON_CLOUD}")
-                resume = True
-            raise Stopped(error.phase, error.code, f"{message}. {not_sent_notice(self.series.not_landed())}",
-                          error.import_id, resume=resume) from None
+                    self.refused = window.cost
+                    self.progress.say("The Job refused the window for space; planning it again from the current budget.")
+                    return
+                message, resume = error.message, error.resume
+                if error.phase == REGISTER and error.code == "IMPORT_CONFLICT":
+                    refused = error.import_id or window.import_id  # The ID that the create declared.
+                    row = await self._own_row(refused)
+                    # Rule (b): one renewal and one retry. A renewed ID has no row, so its conflict reads as rule (d); the flag bounds the loop all the same.
+                    if row is not None and _ended(row) and not renewed:
+                        window.renew()
+                        shutil.rmtree(checkpoint, ignore_errors=True)  # Its checkpoint holds the dead ID, and a checkpoint's ID wins over the window's.
+                        self.series.write(self.record)
+                        renewed = True
+                        continue
+                    if row is None:  # Rule (d).
+                        message = "another import is open; cancel it in Home or wait for it to end"
+                    else:
+                        message = (f"Cloud import {refused} is an earlier attempt of this window with another member set, "
+                                   f"and its state is {safe_code(row['observed_state']) or 'unknown'}. The run continues once the cell "
+                                   "receives it or Cloud ends it")
+                        if row["observed_state"] != "done":
+                            message += f". To end it now, {_STOP_ON_CLOUD}"
+                    resume = True
+                elif error.ended:
+                    # Rule (b): Cloud reported that this import ended and replays its ID; the rerun uses a new one.
+                    window.renew()
+                    self.series.write(self.record)
+                    resume = True
+                elif error.why:
+                    # The client gave up its checkpoint, but Cloud's import may be open: the rerun replays the same ID, and Cloud's state decides.
+                    message = (f"{error.why}. The checkpoint is removed. Cloud import {error.import_id} stays as it is, and the next run "
+                               f"replays it. To stop it, {_STOP_ON_CLOUD}")
+                    resume = True
+                raise Stopped(error.phase, error.code, f"{message}. {not_sent_notice(self.series.not_landed())}",
+                              error.import_id, resume=resume) from None
         if window.import_id != result["import_id"]:  # The import resumed from a checkpoint that holds its own ID.
             window.attempts = [import_id for import_id in window.ids() if import_id != result["import_id"]]
             window.import_id = result["import_id"]
@@ -427,22 +454,17 @@ class _Run:
         self.refused = None
         await self.settle(window)
 
-    async def _attempt_is_over(self, window: SentWindow) -> bool:
-        """True when the window's last import ended on Cloud or never uploaded, so a new ID cannot land the window twice."""
-        if not window.import_id:
-            return True
-        url = self.config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports/" + window.import_id
+    async def _own_row(self, import_id: str) -> dict | None:
+        """Cloud's row for one of the window's import IDs, or None when Cloud has none."""
+        url = self.config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports/" + import_id
         try:
             response = await self.api.request("GET", url)
             response.raise_for_status()
         except httpx2.HTTPStatusError as error:
-            if error.response.status_code == 404:  # Cloud never saw the import.
-                return True
+            if error.response.status_code == 404:
+                return None
             raise
-        row = response.json()["import"]
-        # The Cloud import protocol fixes these states (Substrate: requested, uploaded, cancelled, discard_requested).
-        # nosemgrep: ep-word-membership -- The protocol fixes the terminal and pre-upload states.
-        return row["observed_state"] in ("failed", "expired", "discarded") or row["requested_state"] == "requested"
+        return response.json()["import"]
 
     async def settle(self, window: SentWindow) -> None:
         """A landed window of a resend clears its members from the old residual records, once."""
@@ -541,6 +563,18 @@ class _Run:
         return {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
                 "import_ids": [window.import_id for window in landed], "keep_source": keep,
                 "not_sent": list(self.series.skipped)}
+
+
+def _holds_cell(row: dict) -> bool:
+    """True while the row counts in Substrate's one-open-import-per-cell index; a pending discard keeps a row open."""
+    # nosemgrep: ep-word-membership -- The Cloud import protocol fixes the closed states that the index (migration 0061) excludes.
+    closed = row["observed_state"] in ("done", "failed", "expired", "discarded")
+    return not closed or (row["requested_state"] == "discard_requested" and row["observed_state"] != "discarded")
+
+
+def _ended(row: dict) -> bool:
+    """Rule (c): the attempt is over, so a new import ID cannot land the window twice or meet this row in the index."""
+    return row["observed_state"] != "done" and not _holds_cell(row)
 
 
 def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:
