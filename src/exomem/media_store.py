@@ -1280,7 +1280,10 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
                     try:
                         _require_released(vault, relative)
                     except ValueError:  # The same release rule as the census; its next pass names this row.
-                        conn.rollback()
+                        # Marked, as `_fill_missing_sizes` marks a row it cannot size: the row leaves the
+                        # candidates, so no pass revisits it and no budget counts its absent bytes as room.
+                        conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
+                        conn.commit()
                         return False
                 conn.execute("DELETE FROM media_cache WHERE binary_rel = ?", (relative,))
             conn.commit()

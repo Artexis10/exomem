@@ -3172,7 +3172,7 @@ def test_a_prune_pass_keeps_the_row_of_a_stopped_eviction_whose_companion_is_dam
         media_store.drain_census(vault)
     assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN"
     assert media_store.drain_record(vault).blocked_by == (relative,)
-    assert relative in _ledger_rows(vault)
+    assert _ledger_rows(vault)[relative][0] == 1  # Kept as evicted, so no budget counts its absent bytes as room.
 
 
 def test_a_prune_pass_still_drops_the_row_of_an_original_whose_companion_was_deleted(vault: Path, selected_store):
