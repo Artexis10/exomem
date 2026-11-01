@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Measure the Exomem Cloud cell image under runc and under runsc (gVisor).
+"""Measure the Exomem Cloud cell image under runc and under Kata Containers.
 
-Diagnostic harness for the `diag/gvisor-overhead` branch; it ships nothing. It
+Diagnostic harness for the `diag/kata-overhead` branch; it ships nothing. It
 drives the published Cloud image with Docker the way the cell runs in the
 cluster (read-only root, `/tmp` tmpfs, UID 10001, no capabilities, 2 CPUs,
 3 GiB), over the cell's real HTTP MCP endpoint with the cell bearer. Each
@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
-import re
 import secrets
 import shutil
 import subprocess
@@ -37,16 +36,12 @@ CELL_ID = "abcdefghijklmnop"
 CELL_PORT = 8765
 PROTOCOL = "2025-11-25"
 IMPORT_NAME = "Project Archive"
-RUNTIMES = ("runc", "runsc", "runsc-kvm", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug")
+RUNTIMES = ("runc", "kata")
 MEDIA_DIR = "Knowledge Base/Sources/Media"
-# Plain runsc cannot start the cell on a volume: the sandbox refuses renameat2(RENAME_NOREPLACE)
-# on its gofer-backed mounts, and the cell's filesystem probe then fails closed. So both arms run
-# the cell with /data on a tmpfs, filled from the session volume (mounted read-only at /seed) by
-# this wrapper. The copy time is printed so that start-up can be reported with and without it.
+# Both arms run the cell with /data on a real Docker volume. The wrapper only creates the scratch
+# directories the cell's TMPDIR and caches name, then execs the cell command unchanged.
 CELL_COMMAND = (
-    'ulimit -c 0; t0=$(date +%s%N); cp -a /seed/. /data/ || exit 70; t1=$(date +%s%N); '
-    'echo "restore_ms=$(( (t1 - t0) / 1000000 ))" >&2; '
-    'mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && exec "$@"'
+    'ulimit -c 0; mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && exec "$@"'
 )
 # Closed tool-name sets: the grouped execution name stays callable, the public name is listed.
 TOOLS = {
@@ -69,7 +64,12 @@ def now_ms() -> float:
 
 
 def sh(argv: list[str], *, check: bool = True, timeout: float | None = 900, input_text: str | None = None):
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, input=input_text, check=False)
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, input=input_text, check=False)
+    except subprocess.TimeoutExpired as expired:
+        if check:
+            raise HarnessError(f"{' '.join(argv[:6])} timed out after {timeout} s") from expired
+        return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout} s")
     if check and result.returncode != 0:
         raise HarnessError(f"{' '.join(argv[:6])} failed ({result.returncode}): {result.stdout[-1500:]}{result.stderr[-1500:]}")
     return result
@@ -118,7 +118,7 @@ class Mcp:
         r = self.client.post("/mcp", headers=self.headers, json={
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {"protocolVersion": PROTOCOL, "capabilities": {},
-                       "clientInfo": {"name": "gvisor-overhead", "version": "1"}}})
+                       "clientInfo": {"name": "kata-overhead", "version": "1"}}})
         if r.status_code != 200:
             raise HarnessError(f"initialize answered {r.status_code}: {r.text[:300]}")
 
@@ -431,7 +431,7 @@ class Lab:
         self.out = Path(args.out)
         self.work = Path(args.work)
         self.run_id = uuid.uuid4().hex[:8]
-        self.network = f"gv-net-{self.run_id}"
+        self.network = f"kv-net-{self.run_id}"
         self.token = secrets.token_urlsafe(32)
         self.fx = self.work / "fx"
         self.snap = self.work / "snap"
@@ -439,7 +439,7 @@ class Lab:
         (self.out / "logs").mkdir(exist_ok=True)
         self.results = (self.out / "results.jsonl").open("a", encoding="utf-8")
         self.events = (self.out / "events.log").open("a", encoding="utf-8")
-        self.arms: list[str] = ["runc", "runsc"]
+        self.arms: list[str] = list(RUNTIMES)
         self.stems: list[str] = []
         self.import_counts: dict = {}
         self.media_files: list[str] = []
@@ -521,8 +521,7 @@ class Lab:
         """Returns (base url, `docker run -d` milliseconds, clock at the call)."""
         argv = ["run", "-d", "--name", name, "--runtime", runtime, "--network", self.network,
                 "--cpus", "2", "--memory", "3g", *self.security(),
-                "--tmpfs", "/data:rw,nosuid,nodev,uid=10001,gid=10001,mode=2770,size=2g",
-                "-v", f"{volume}:/seed:ro", *self.cell_env(),
+                "-v", f"{volume}:/data", *self.cell_env(),
                 "--entrypoint", "sh", self.image, "-c", CELL_COMMAND, "cell-process", "exomem",
                 "--transport", "http", "--host", "0.0.0.0", "--port", str(CELL_PORT)]
         t0 = now_ms()
@@ -553,7 +552,7 @@ class Lab:
 
     def stop_cell(self, name: str, tag: str) -> dict:
         facts: dict = {}
-        stats = self.docker("stats", "--no-stream", "--format", "{{json .}}", name, check=False)
+        stats = self.docker("stats", "--no-stream", "--format", "{{json .}}", name, check=False, timeout=60)
         facts["stats"] = stats.stdout.strip()
         state = self.docker("inspect", "--format", "{{json .State}}", name, check=False)
         facts["state"] = state.stdout.strip()
@@ -570,7 +569,7 @@ class Lab:
             "nproc": ["nproc"], "uname": ["uname", "-a"], "free": ["free", "-m"],
             "lscpu": ["lscpu"], "docker_version": ["docker", "version", "--format", "{{json .}}"],
             "docker_info": ["docker", "info", "--format", "{{json .}}"],
-            "runsc_version": ["runsc", "--version"], "kvm": ["ls", "-l", "/dev/kvm"],
+            "kata_version": ["/opt/kata/bin/kata-runtime", "--version"], "kvm": ["ls", "-l", "/dev/kvm"],
             "daemon_json": ["cat", "/etc/docker/daemon.json"],
             "image": ["docker", "image", "inspect", self.image, "--format",
                       "{{.Id}} {{json .RepoDigests}} {{.Os}}/{{.Architecture}} size={{.Size}}"],
@@ -580,35 +579,42 @@ class Lab:
             facts[key] = (result.stdout + result.stderr).strip()[:6000]
         self.diag("environment", facts)
 
-    def runsc_facts(self) -> None:
-        """The sandbox's own view: kernel string, and the runsc command line with its platform and flags."""
-        name = f"gv-facts-{self.run_id}"
-        self.docker("run", "-d", "--name", name, "--runtime", "runsc", "--entrypoint", "sleep", self.image, "120")
+    def kata_facts(self) -> None:
+        """The hypervisor, its command line, the guest kernel and the Kata configuration the arm ran with."""
         facts: dict = {}
         for key, argv in {
-            "uname": ["docker", "exec", name, "uname", "-a"],
-            "proc_version": ["docker", "exec", name, "cat", "/proc/version"],
-            "dmesg": ["docker", "exec", "-u", "0", name, "dmesg"],
-            "host_runsc_processes": ["sh", "-c", "ps -eo args | grep -E 'runsc|boot' | grep -v grep | cut -c1-1500"],
+            "kata_runtime_version": ["/opt/kata/bin/kata-runtime", "--version"],
+            "kata_runtime_check": ["sudo", "/opt/kata/bin/kata-runtime", "check"],
+            "kata_runtime_env": ["sudo", "/opt/kata/bin/kata-runtime", "env"],
+            "qemu_version": ["/opt/kata/bin/qemu-system-x86_64", "--version"],
+            "installed_files": ["sh", "-c", "ls -l /opt/kata/bin /opt/kata/share/defaults/kata-containers "
+                                "/opt/kata/share/kata-containers /opt/kata/libexec 2>&1 | head -120"],
+            "configuration": ["sh", "-c", "grep -vE '^[[:space:]]*(#|$)' "
+                              "/opt/kata/share/defaults/kata-containers/configuration.toml | head -200"],
+        }.items():
+            result = sh(argv, check=False, timeout=120)
+            facts[key] = (result.stdout + result.stderr).strip()[:12000]
+        name = f"kv-facts-{self.run_id}"
+        self.docker("run", "-d", "--name", name, "--runtime", "kata", "--cpus", "2", "--memory", "3g",
+                    "--entrypoint", "sleep", self.image, "120", check=False, timeout=300)
+        for key, argv in {
+            "guest_uname": ["docker", "exec", name, "uname", "-a"],
+            "guest_cmdline": ["docker", "exec", name, "cat", "/proc/cmdline"],
+            "guest_cpus": ["docker", "exec", name, "nproc"],
+            "guest_meminfo": ["docker", "exec", name, "sh", "-c", "head -8 /proc/meminfo"],
+            "guest_mounts": ["docker", "exec", name, "sh", "-c", "cat /proc/self/mountinfo | cut -c1-200"],
+            "host_vm_processes": ["sh", "-c", "ps -eo pid,rss,args | grep -E 'qemu|virtiofsd|kata' | grep -v grep "
+                                  "| cut -c1-2500"],
         }.items():
             result = sh(argv, check=False, timeout=60)
-            facts[key] = (result.stdout + result.stderr).strip()[:6000]
+            facts[key] = (result.stdout + result.stderr).strip()[:12000]
         self.docker("rm", "-f", name, check=False)
-        self.diag("runsc_facts", facts)
-
-    def detect_kvm(self) -> None:
-        """Add the KVM-platform arm when this runner can start a sandbox on it."""
-        probe = sh(["docker", "run", "--rm", "--runtime", "runsc-kvm", "--entrypoint", "true", self.image],
-                   check=False, timeout=120)
-        self.log(f"runsc-kvm start rc={probe.returncode} {(probe.stdout + probe.stderr).strip()[-300:]}")
-        self.diag("kvm_start", {"rc": probe.returncode, "output": (probe.stdout + probe.stderr)[-2000:]})
-        if probe.returncode == 0 and self.args.kvm:
-            self.arms.append("runsc-kvm")
+        self.diag("kata_facts", facts)
 
     # -- compatibility
     def compat(self) -> None:
         """Which kernel primitives the cell's filesystem layer needs, per runtime and root; unmeasured."""
-        volume = f"gv-compat-{self.run_id}"
+        volume = f"kv-compat-{self.run_id}"
         self.new_volume(volume)
         try:
             for runtime in RUNTIMES:
@@ -620,16 +626,10 @@ class Lab:
                                                 "stderr": probed.stderr[-2000:]})
         finally:
             self.docker("volume", "rm", "-f", volume, check=False)
-        # The sandbox's own log names every syscall it refused; the debug runtime wrote it to the host.
-        pattern = "unsupported syscall|ENOSYS|not implemented|not supported"
-        listing = sh(["sudo", "sh", "-c", f"ls -l /tmp/runsc-debug | head -20; "
-                      f"grep -rhiE '{pattern}' /tmp/runsc-debug | cut -c1-300 | sort | uniq -c | sort -rn | head -60"],
-                     check=False, timeout=120)
-        self.diag("runsc_debug_unsupported", listing.stdout + listing.stderr)
 
     def cgroup_probe(self) -> None:
         """What the cell's media brakes read from the cgroup files, in a container limited like the cell."""
-        volume = f"gv-brake-{self.run_id}"
+        volume = f"kv-brake-{self.run_id}"
         self.new_volume(volume)
         try:
             for runtime in self.arms:
@@ -657,7 +657,7 @@ class Lab:
         """Build one seeded volume under runc and keep it as a tarball; unmeasured."""
         self.snap.mkdir(parents=True, exist_ok=True)
         self.snap.chmod(0o777)
-        volume = f"gv-seed-{self.run_id}"
+        volume = f"kv-seed-{self.run_id}"
         self.new_volume(volume)
         wall, init = self.oneshot("runc", volume, ["exomem", "cell-init", "--vault", "/data/vault", "--json"],
                                   entrypoint="env")
@@ -672,7 +672,7 @@ class Lab:
         if rebuilt.returncode != 0:
             raise HarnessError(f"seed embedding build failed: {rebuilt.stdout[-800:]}{rebuilt.stderr[-1500:]}")
         # Prove the seed through the cell itself before snapshotting it.
-        name = f"gv-seedcell-{self.run_id}"
+        name = f"kv-seedcell-{self.run_id}"
         url, _, t0 = self.start_cell("runc", name, volume)
         try:
             ready = self.wait_http(url, "/health/ready", t0, 300, name)
@@ -710,8 +710,8 @@ class Lab:
     # -- one session
     def session(self, arm: str, rep: int) -> None:
         tag = f"{arm}-r{rep}"
-        volume = f"gv-{arm}-{rep}-{self.run_id}"
-        name = f"gv-cell-{arm}-{rep}-{self.run_id}"
+        volume = f"kv-{arm}-{rep}-{self.run_id}"
+        name = f"kv-cell-{arm}-{rep}-{self.run_id}"
         self.log(f"=== session {tag}")
         self.new_volume(volume)
         self.helper(volume, "tar -C /data -xpf /snap/seed.tar && chmod 2770 /data",
@@ -745,17 +745,11 @@ class Lab:
         live = self.wait_http(url, "/health", t0, 240, name)
         ready = self.wait_http(url, "/health/ready", t0, 400, name)
         self.record(arm, rep, "e.docker_run_returns", [created])
-        restore = re.search(r"restore_ms=(\d+)", self.docker("logs", name, check=False).stderr)
-        restore_ms = float(restore.group(1)) if restore else None
-        if restore_ms is not None:
-            self.record(arm, rep, "e.restore_copy_into_tmpfs", [restore_ms], note="cp -a of the volume, inside the sandbox")
         for case, value in (("e.start_to_live", live), ("e.start_to_ready", ready)):
             if value is None:
                 self.fail(arm, rep, case, "never answered 200")
             else:
-                self.record(arm, rep, case, [value], note="includes the restore copy")
-                if restore_ms is not None:
-                    self.record(arm, rep, case + "_after_copy", [value - restore_ms])
+                self.record(arm, rep, case, [value])
         if ready is None:
             self.stop_cell(name, f"{tag}-cell")
             return
@@ -897,7 +891,7 @@ class Lab:
 
     # -- (d)
     def work_media(self, arm: str, rep: int, mcp: Mcp, container: str) -> None:
-        # The cell's /data is a tmpfs inside the container, so files go in through the container itself.
+        # Files go in through the running container, so each arm stages them the same way after the cell is up.
         for filename in self.media_files:
             with (self.fx / "media" / filename).open("rb") as source:
                 staged = subprocess.run(
@@ -935,7 +929,7 @@ class Lab:
                         note=f"ack_ms={ack_ms:.0f} states={states} first_ack={json.dumps(acked.structured)[:200]}")
 
     def fs_micro(self, arm: str, rep: int, volume: str) -> None:
-        """Small-file I/O on the volume itself, which the cell cannot use under runsc; not a product workload."""
+        """Small-file I/O on the volume itself; a microbenchmark of the storage path, not a product workload."""
         wall, result = self.oneshot(arm, volume, ["python", "-c", FS_SCRIPT, "/data/fsbench"], entrypoint="env")
         if result.returncode != 0:
             self.fail(arm, rep, "f.volume_io", result.stdout[-300:] + result.stderr[-500:])
@@ -1009,8 +1003,7 @@ class Lab:
         self.docker("network", "create", "--driver", "bridge", "--internal", self.network)
         try:
             self.environment()
-            self.runsc_facts()
-            self.detect_kvm()
+            self.kata_facts()
             self.compat()
             self.cgroup_probe()
             if self.args.compat_only:
@@ -1035,8 +1028,6 @@ def main() -> int:
     parser.add_argument("--seed-notes", type=int, default=200)
     parser.add_argument("--only", default="search,write,media,import,fs")
     parser.add_argument("--compat-only", action="store_true", help="probe the runtimes and stop")
-    parser.add_argument("--kvm", action=argparse.BooleanOptionalAction, default=True,
-                        help="add a runsc arm on the KVM platform when the runner can start one")
     args = parser.parse_args()
     args.only = {part for part in args.only.split(",") if part}
     lab = Lab(args)

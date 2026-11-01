@@ -1,0 +1,117 @@
+name: Kata Containers overhead (diagnostic)
+
+# Measures the Exomem Cloud cell image under runc and under Kata Containers on one
+# hosted runner, both arms in the same job and interleaved. A diagnostic branch
+# workflow: it triggers only on a push to diag/kata-overhead, reads no secret and
+# publishes nothing. The harness is scripts/kata_overhead/.
+on:
+  push:
+    branches: [diag/kata-overhead]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kata-overhead
+  cancel-in-progress: true
+
+env:
+  # A dated Kata release. The Go runtime package is the one the Kata documentation names for Docker
+  # (Docker supports the Go runtime with QEMU only). The sha256 is the digest GitHub publishes for the
+  # release asset; the install step checks the download against it and against the API at run time.
+  KATA_RELEASE: "4.3.1"
+  KATA_SHA256: "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97"
+  KATA_ASSET: "kata-go-static-4.3.1-amd64.tar.zst"
+  # The image a cell runs in production (published, anonymous pull).
+  CLOUD_IMAGE: ghcr.io/artexis10/exomem:0.154.0-cloud
+  REPEATS: "1"
+  SEED_NOTES: "200"
+  # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
+  EXTRA_ARGS: ""
+
+jobs:
+  measure:
+    name: runc and Kata on the Cloud cell image
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Kata Containers (pinned release, checksum verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -l /dev/kvm
+          base="https://github.com/kata-containers/kata-containers/releases/download/${KATA_RELEASE}"
+          mkdir -p "$RUNNER_TEMP/kata"
+          cd "$RUNNER_TEMP/kata"
+          curl -fsSLO "$base/$KATA_ASSET"
+          echo "${KATA_SHA256}  ${KATA_ASSET}" | sha256sum -c -
+          published="$(gh api "repos/kata-containers/kata-containers/releases/tags/${KATA_RELEASE}" \
+            --jq ".assets[] | select(.name == \"${KATA_ASSET}\") | .digest")"
+          echo "published digest: $published"
+          test "$published" = "sha256:${KATA_SHA256}"
+          command -v zstd >/dev/null || sudo apt-get install -y --no-install-recommends zstd
+          tar --zstd -xf "$KATA_ASSET"
+          sudo mv opt/kata /opt/kata
+          ls -l /opt/kata/bin
+          /opt/kata/bin/kata-runtime --version
+          /opt/kata/bin/containerd-shim-kata-v2 --version || true
+          # Docker runs Kata through its containerd shim: register the shim as a runtime.
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cat /etc/docker/daemon.json; fi
+          sudo python3 - <<'PY'
+          import json, os
+          path = "/etc/docker/daemon.json"
+          config = json.load(open(path)) if os.path.exists(path) and os.path.getsize(path) else {}
+          config.setdefault("runtimes", {})["kata"] = {"runtimeType": "/opt/kata/bin/containerd-shim-kata-v2"}
+          json.dump(config, open(path, "w"), indent=2)
+          PY
+          cat /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}'
+
+      - name: Pull the Cloud cell image
+        run: |
+          set -euo pipefail
+          docker pull "$CLOUD_IMAGE"
+          docker image inspect "$CLOUD_IMAGE" --format '{{.Id}} {{json .RepoDigests}} {{.Os}}/{{.Architecture}}'
+
+      - name: Kata smoke test (a VM boots and runs the image)
+        run: |
+          set -euo pipefail
+          docker run --rm --runtime kata --entrypoint uname "$CLOUD_IMAGE" -a
+          uname -a
+
+      - name: Install harness dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet 'httpx>=0.28,<1'
+
+      - name: Measure
+        run: |
+          mkdir -p "$RUNNER_TEMP/kv-out" "$RUNNER_TEMP/kv-work"
+          umask 022
+          "$RUNNER_TEMP/venv/bin/python" scripts/kata_overhead/run.py \
+            --image "$CLOUD_IMAGE" --out "$RUNNER_TEMP/kv-out" --work "$RUNNER_TEMP/kv-work" \
+            --repeats "$REPEATS" --seed-notes "$SEED_NOTES" ${EXTRA_ARGS:+"$EXTRA_ARGS"}
+
+      - name: Per-case table
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/kv-out/results.jsonl" ]; then
+            python3 scripts/kata_overhead/report.py "$RUNNER_TEMP/kv-out/results.jsonl" \
+              --json-out "$RUNNER_TEMP/kv-out/summary.json" --md-out "$RUNNER_TEMP/kv-out/summary.md"
+            { echo '### Kata overhead'; cat "$RUNNER_TEMP/kv-out/summary.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the result files
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kata-overhead
+          path: ${{ runner.temp }}/kv-out
+          if-no-files-found: warn

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Turn results.jsonl into the per-case runsc/runc table (diagnostic branch only).
+"""Turn results.jsonl into the per-case kata/runc table (diagnostic branch only).
 
 Per case and repeat, each arm's value is the median of its calls. The ratio of
-a repeat is runsc over runc. The reported ratio is the geometric mean of the
+a repeat is kata over runc. The reported ratio is the geometric mean of the
 repeat ratios, with a 95% interval from Student's t on the log ratios. An
 interval that includes 1.0 is "no measurable change".
 """
@@ -24,7 +24,7 @@ def load(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def summarize(rows: list[dict], base: str = "runc", test: str = "runsc") -> dict[str, dict]:
+def summarize(rows: list[dict], base: str = "runc", test: str = "kata") -> dict[str, dict]:
     cases: dict[str, dict] = defaultdict(lambda: {"arms": defaultdict(dict), "failed": defaultdict(list),
                                                   "unit": "ms", "items": 1, "notes": defaultdict(list)})
     for row in rows:
@@ -41,14 +41,14 @@ def summarize(rows: list[dict], base: str = "runc", test: str = "runsc") -> dict
     for name, case in sorted(cases.items()):
         per = {arm: {rep: statistics.median(values) for rep, values in reps.items()}
                for arm, reps in case["arms"].items()}
-        runc, runsc = per.get(base, {}), per.get(test, {})
-        pairs = sorted(set(runc) & set(runsc))
-        logs = [math.log(runsc[r] / runc[r]) for r in pairs if runc[r] > 0 and runsc[r] > 0]
+        runc, kata = per.get(base, {}), per.get(test, {})
+        pairs = sorted(set(runc) & set(kata))
+        logs = [math.log(kata[r] / runc[r]) for r in pairs if runc[r] > 0 and kata[r] > 0]
         entry = {
             "unit": case["unit"], "items": case["items"], "repeats_paired": len(logs),
             "base_median": statistics.median(runc.values()) if runc else None,
-            "test_median": statistics.median(runsc.values()) if runsc else None,
-            "base_per_repeat": runc, "test_per_repeat": runsc,
+            "test_median": statistics.median(kata.values()) if kata else None,
+            "base_per_repeat": runc, "test_per_repeat": kata,
             "failed": {arm: len(items) for arm, items in case["failed"].items() if arm in (base, test)},
             "failure_notes": {arm: items[:2] for arm, items in case["failed"].items() if arm in (base, test)},
             "ratio": None, "ci_low": None, "ci_high": None, "verdict": "n/a",
@@ -60,9 +60,9 @@ def summarize(rows: list[dict], base: str = "runc", test: str = "runsc") -> dict
                 half = T95[min(len(logs) - 1, 10)] * statistics.stdev(logs) / math.sqrt(len(logs))
                 entry["ci_low"], entry["ci_high"] = math.exp(mean - half), math.exp(mean + half)
                 if entry["ci_low"] > 1.0:
-                    entry["verdict"] = "slower under runsc"
+                    entry["verdict"] = f"slower under {test}"
                 elif entry["ci_high"] < 1.0:
-                    entry["verdict"] = "faster under runsc"
+                    entry["verdict"] = f"faster under {test}"
                 else:
                     entry["verdict"] = "no measurable change"
             else:
@@ -71,11 +71,9 @@ def summarize(rows: list[dict], base: str = "runc", test: str = "runsc") -> dict
     return result
 
 
-ARMS = ("runc: Docker's default runtime. runsc: gVisor runsc 20261026.0, systrap platform, directfs on. "
-        "runsc-kvm: the same on the KVM platform (shown only when the runner can start it). "
-        "Plain runsc cannot start the cell on a volume, so in every arm the cell runs with /data on a tmpfs "
-        "inside the container, copied from the session volume at start: the cells here never touch a disk. "
-        "The init container, the import Job and the f.* file benchmarks run on the volume itself.")
+ARMS = ("runc: Docker's default runtime (runc). kata: Kata Containers through Docker, QEMU hypervisor, "
+        "default configuration. Both arms run the unmodified Cloud cell image with /data on a real Docker volume, "
+        "a read-only root, no capabilities, 2 CPUs and 3 GiB. Within-run comparisons only.")
 
 
 def fmt(value, digits=1):
