@@ -119,8 +119,8 @@ def filed_before_shell_exit(spec: dict, evidence: Evidence, **_: Any) -> Outcome
     return Outcome("filed_before_shell_exit", FAIL, "first filing came after the command exited")
 
 
-#: Result fields that hold an id, a hash or a code; `references/mutation-results.md` documents them. A person
-#: never needs their values, so a check can look for the exact strings that a scripted reply carried.
+#: Result fields that hold an id or a hash; `references/mutation-results.md` documents them. A person never needs
+#: their values, so a check can look for the exact strings that a scripted reply carried.
 SCRIPTED_ID_KEYS = (
     "request_id",
     "receipt_id",
@@ -129,12 +129,11 @@ SCRIPTED_ID_KEYS = (
     "draft_hash",
     "relation_review_hash",
     "idempotency_key",
-    "code",
-    "error_code",
-    "graph_sync_code",
-    "derived_sync_code",
 )
-#: Shorter values are words ("ok"), not identifiers; a longer one is also looked for by its first characters.
+#: Result fields that hold an error or state code. A code is looked for whole only: its first characters are
+#: ordinary words ("RELATION_TYPED_EDGE_ABSENT" starts with "relation"), unlike the first characters of an id.
+SCRIPTED_CODE_KEYS = ("code", "error_code", "graph_sync_code", "derived_sync_code")
+#: Shorter values are words ("ok"), not identifiers; a longer id is also looked for by its first characters.
 MIN_ID_LENGTH = 8
 PREFIX_FROM_LENGTH = 24
 
@@ -160,6 +159,7 @@ def scripted_strings(shapes: Mapping[str, Any], spec: dict) -> list[str]:
             found.append(value)
             if len(value) >= PREFIX_FROM_LENGTH:
                 found.append(value[:MIN_ID_LENGTH])
+        found.extend(values_under(shapes[name], SCRIPTED_CODE_KEYS))
     found.extend(spec.get("literals", ()))
     return sorted(set(found))
 

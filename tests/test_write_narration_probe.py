@@ -48,6 +48,7 @@ SHAPES = {
         "graph_sync": "completed",
     },
     "refused": {"success": False, "error": {"code": "INVALID_RELATION_REVIEW"}},
+    "advice": {"findings": [{"code": "RELATION_TYPED_EDGE_ABSENT"}]},
 }
 
 
@@ -163,3 +164,13 @@ def test_a_rerun_replaces_the_earlier_row_of_the_same_run_and_the_report_lists_i
 
     assert "| 01 | m | 1/1 | 0/1 | -1.00 |" in text
     assert "Rows replaced by a later run" in text
+
+
+def test_the_start_of_a_code_is_not_a_leak_but_the_whole_code_is() -> None:
+    """Catches a prefix rule applied to codes: a plain "relation review" would count as a leaked code."""
+    spec = {"shapes": ["advice"]}
+
+    assert checks.leaked_strings("The save needed a relation review.", SHAPES, spec) == []
+    assert checks.leaked_strings("It said RELATION_TYPED_EDGE_ABSENT.", SHAPES, spec) == [
+        "RELATION_TYPED_EDGE_ABSENT"
+    ]
