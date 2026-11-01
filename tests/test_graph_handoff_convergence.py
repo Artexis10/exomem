@@ -791,6 +791,53 @@ def test_a_page_rewritten_after_every_read_declines_instead_of_folding_forever(
     assert len(reads) > 1, "the proof must have re-read the page before it gave up"
 
 
+def test_a_page_written_during_its_own_read_is_read_again_and_adopted_as_residue(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a proof that settles on a round whose recheck was clean but which never
+    # read one page, and adopts that page at the bytes its stale row holds.
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    written = f"{GENERATED}/generated-note-0007.md"
+    real_read = vault_module.read_bounded_guarded_bytes
+    refused: list[str] = []
+
+    def written_during_its_first_read(vault_root, target, **kwargs):
+        if target == written and not refused:
+            with (root / written).open("a", encoding="utf-8") as page:
+                page.write("\n- appended by an editor\n")
+            try:
+                return real_read(vault_root, target, **kwargs)
+            except vault_module.PathGuardError as error:
+                refused.append(error.code)
+                raise
+        return real_read(vault_root, target, **kwargs)
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes", written_during_its_first_read, raising=True
+    )
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+    adoptions: list[epistemic_graph.SnapshotAdoption] = []
+
+    def recorded(self, **kwargs):
+        adoptions.append(real_adopt(self, **kwargs))
+        return adoptions[-1]
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", recorded, raising=True)
+
+    assert service_standby.prove_graph_snapshot(root) is True, service_standby.adoption_record()
+    assert refused == [vault_module.PATH_GUARD_UNSAFE], "the write must race the page's read"
+    assert written in adoptions[-1].residue
+    monkeypatch.setattr(vault_module, "read_bounded_guarded_bytes", real_read, raising=True)
+
+    service_standby.promote(root, migrated=False)
+    # The promoted worker's watcher would see the editor's append; this process has none.
+    freshness.rebaseline(root)
+    _drain_to_empty(root)
+    _assert_matches_a_fresh_rebuild(root)
+
+
 def _land_a_batch_without_fanout(root: Path) -> None:
     """Canonical bytes and a new checkpoint generation; the sidecar is untouched."""
     from exomem import vault as vault_module

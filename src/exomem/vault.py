@@ -1173,6 +1173,19 @@ class BatchWriteError(ValueError):
         return type(self), (self.code, self.summary, self.committed)
 
 
+#: The codes a `PathGuardError` carries, a closed set this module raises. A
+#: caller that branches on a code compares against these names. The raise
+#: sites below still spell the same strings out.
+PATH_GUARD_CHANGED = "PATH_GUARD_CHANGED"
+PATH_GUARD_CONTENT = "PATH_GUARD_CONTENT"
+PATH_GUARD_INVALID = "PATH_GUARD_INVALID"
+PATH_GUARD_IO = "PATH_GUARD_IO"
+PATH_GUARD_LIMIT = "PATH_GUARD_LIMIT"
+PATH_GUARD_ROOT = "PATH_GUARD_ROOT"
+PATH_GUARD_TARGET = "PATH_GUARD_TARGET"
+PATH_GUARD_UNSAFE = "PATH_GUARD_UNSAFE"
+
+
 @dataclass
 class PathGuardError(ValueError):
     code: str

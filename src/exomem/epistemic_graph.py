@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 import weakref
@@ -1952,33 +1953,29 @@ class _SealMovement:
 _PROOF_FOLD_ROUNDS = 4
 
 
-def _proof_page_moved(
-    vault_root: Path, rel: str, error: Exception, suspects: set[str]
-) -> bool:
+def _proof_page_moved(vault_root: Path, rel: str, error: Exception) -> bool:
     """Whether a page the cold proof could not read or recheck moved (True) or is unsafe.
 
     A page removed after the membership walk fails the read loop's lstat, and a
-    replaced one fails its guard. Both are movement the proof folds. A page that
-    grew between the lstat and the open reads as unsafe, and a parent directory
-    replaced mid-open as unreadable, so either counts as movement once per page;
-    `suspects` holds the pages spent, and a clean read clears a page from it.
+    replaced one fails its guard: both are movement the proof folds. A refused
+    open is movement too when the path is now gone, or a regular file with one
+    link -- it grew past the size the proof lstat'ed, or vanished mid-open --
+    and unsafe when it is a symlink, a hardlink or not a file at all.
     """
     if isinstance(error, FileNotFoundError):
         return True
     if not isinstance(error, vault_module.PathGuardError):
         return False
-    # Branching on `code` is sound: it is the closed enum vault.py itself defines and raises.
-    # nosemgrep: ep-word-membership -- vault.py's own PathGuardError codes, not text to interpret.
-    if error.code in {"PATH_GUARD_CHANGED", "PATH_GUARD_CONTENT"}:
+    # Branching on `code` is sound: it is the closed set vault.py defines and raises.
+    if error.code in (vault_module.PATH_GUARD_CHANGED, vault_module.PATH_GUARD_CONTENT):
         return True
-    if error.code == "PATH_GUARD_IO" and not os.path.lexists(vault_root / rel):
+    if error.code not in (vault_module.PATH_GUARD_UNSAFE, vault_module.PATH_GUARD_IO):
+        return False
+    try:
+        info = os.lstat(vault_root / rel)
+    except FileNotFoundError:
         return True
-    # nosemgrep: ep-word-membership -- vault.py's own PathGuardError codes, not text to interpret.
-    if error.code in {"PATH_GUARD_UNSAFE", "PATH_GUARD_IO"} and rel not in suspects:
-        suspects.add(rel)
-        return True
-    # PATH_GUARD_ROOT and PATH_GUARD_INVALID, or a page unsafe on its second read.
-    return False
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
 
 
 class _RepublicationDeferred(Exception):
@@ -3019,7 +3016,6 @@ class EpistemicGraphIndex:
             snapshot = self._open_read_snapshot(require_current_projection=False)
             if snapshot is None:
                 return False
-            residue: set[str] = set()
             seals: list[_SnapshotSourceSeal] = []
             try:
                 stored_checkpoint = self._stored_recall_checkpoint(snapshot)
@@ -3029,12 +3025,15 @@ class EpistemicGraphIndex:
                 proven = self._snapshot_sources_match_disk(
                     snapshot,
                     resolver_fingerprint=metadata.get(_RESOLVER_TOPOLOGY_KEY),
-                    residue_out=residue,
                     seal_out=seals,
+                    # Folds a page saved with the same bytes, and stops at the
+                    # first page that differs from its row: this caller
+                    # publishes only a sidecar that matches disk exactly.
+                    fold=True,
                 )
             finally:
                 snapshot.close()
-            if not proven or residue or stored_checkpoint is None or not seals:
+            if not proven or stored_checkpoint is None or not seals:
                 self._note_republish_refused()
                 return False
 
@@ -3228,6 +3227,7 @@ class EpistemicGraphIndex:
                 resolver_fingerprint=str(row[0]) if row is not None else None,
                 residue_out=residue,
                 reason_out=decline,
+                fold=True,
             )
         finally:
             conn.close()
@@ -3278,6 +3278,7 @@ class EpistemicGraphIndex:
         residue_out: set[str] | None = None,
         reason_out: list[str] | None = None,
         seal_out: list[_SnapshotSourceSeal] | None = None,
+        fold: bool = False,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
 
@@ -3297,27 +3298,31 @@ class EpistemicGraphIndex:
         well.  This is deliberately the cold path and never runs for a live
         reader at the exact stored checkpoint.
 
-        A caller that passes `residue_out` also lets the proof converge while
-        writers keep committing. On a live vault the proof takes minutes, and a
-        governed write replaces several pages inside that window. Instead of
-        declining, the proof rechecks every page, re-reads only the pages that
-        moved or appeared, drops the ones that vanished, and recomputes the
-        residue and the topology from what it read. Then it rechecks every page
-        again, byte for byte, and folds again while that recheck still finds
-        movement, for at most `_PROOF_FOLD_ROUNDS` rounds. Without `residue_out`
-        any movement declines, and any incomplete read fails closed.
+        `fold` lets the proof converge while writers keep committing. On a live
+        vault the proof takes minutes, and a governed write replaces several
+        pages inside that window. Instead of declining, the proof rechecks every
+        page, re-reads only the pages that moved or appeared, drops the ones that
+        vanished, and rechecks every page again, for at most
+        `_PROOF_FOLD_ROUNDS` rounds. Only a converged round -- a recheck that
+        found nothing moved, with every admitted page read -- is evaluated for
+        its residue and topology. Without `fold` any movement declines, and any
+        incomplete read fails closed. A folding caller that takes no residue
+        declines on the first page that differs from its row, before it spends
+        a recheck on it.
 
         The invariant a True answer establishes: the snapshot S that `conn`'s
-        read transaction sees, plus the residue R, equals the admitted-page
-        projection of disk at one instant T* -- the end of the last read round
-        -- under one recall policy identity. Every page holds at T* the bytes
-        the proof hashed, because each was read before T* and rechecked
-        unchanged after it, and both memberships and the policy identity were
-        equal on both sides of it as well. The topology difference is explained
-        by R. A moved page is never accepted on bytes the proof did not hash at
-        their final value. The caller adds the rest: R fits in
-        `graph_drain.DRAIN_LIMIT`, and the registry origin is at or below the
-        generation it sampled before any read.
+        read transaction sees, plus the residue R, equals the admitted pages as
+        the last recheck found them, under one recall policy identity. Every
+        page held the bytes the proof hashed when that recheck reached it, and
+        both memberships and the policy identity were equal before the last
+        read round and after its recheck. The topology difference is explained
+        by R. A page whose read or recheck failed is read again before it is
+        accepted. The claim holds per page, not at one instant: a page
+        rewritten and put back between its read and its recheck, or created and
+        deleted between two membership walks, passes unseen, as before the
+        fold. The caller adds the rest: R fits in `graph_drain.DRAIN_LIMIT`,
+        and the registry origin is at or below the generation it sampled
+        before any read.
         """
 
         def declined(reason: str) -> bool:
@@ -3330,7 +3335,6 @@ class EpistemicGraphIndex:
                 reason_out.append(reason)
             return False
 
-        folding = residue_out is not None
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
             resolver_membership = self._recall_membership()
@@ -3345,10 +3349,6 @@ class EpistemicGraphIndex:
             }
             carry = self._read_topology_carry(conn)
             pages: dict[str, _ProofPage] = {}
-            # Pages whose read saw them move. Each is re-read in the next round.
-            raced: set[str] = set()
-            suspects: set[str] = set()
-            residue: set[str] = set()
             to_read = sorted(resolver_membership | indexed_membership)
             rounds = 0
             while True:
@@ -3356,101 +3356,47 @@ class EpistemicGraphIndex:
                     try:
                         page = self._read_proof_page(rel)
                     except (FileNotFoundError, vault_module.PathGuardError) as error:
-                        if not folding:
+                        if not fold:
                             raise
-                        if not _proof_page_moved(self.vault_root, rel, error, suspects):
+                        if not _proof_page_moved(self.vault_root, rel, error):
                             return declined("source_unsafe")
+                        # Left unread, so the next round reads it again.
                         pages.pop(rel, None)
-                        raced.add(rel)
                         continue
                     if page is None:
                         return declined("source_unparseable")
                     pages[rel] = page
-                    raced.discard(rel)
-                    suspects.discard(rel)
-
-                if not raced:
-                    current_hashes = {rel: pages[rel].snapshot_hash for rel in indexed_membership}
-                    residue = set()
-                    unchanged_without_row: set[str] = set()
-                    if stored_hashes != current_hashes:
-                        if not folding:
-                            return declined("indexed_sources_differ")
-                        # A page created or removed since the publication is a
-                        # residue like a page whose bytes moved: this proof
-                        # enumerated it, and the drain adds an appeared page's
-                        # rows and deletes a vanished one's, widening to the
-                        # pages whose links it re-targets. Before the 2026-09-27
-                        # upgrade both were "a different corpus", so one agent
-                        # write after the serving worker's last publication held
-                        # a standby to its warm budget and cost a cold start.
-                        created = set(current_hashes) - set(stored_hashes)
-                        removed = set(stored_hashes) - set(current_hashes)
-                        if any(os.path.lexists(self.vault_root / rel) for rel in removed):
-                            # Still on disk but no longer admitted: nothing on
-                            # the residue path is proven to remove its rows.
-                            return declined("indexed_membership_differs")
-                        residue.update(created | removed)
-                        residue.update(
-                            rel
-                            for rel, source_hash in current_hashes.items()
-                            if rel in stored_hashes and stored_hashes[rel] != source_hash
-                        )
-                        # A sidecar written when file rows were keyed by a name
-                        # cut at `#` holds no file row for the page that lost
-                        # its key, yet keeps that page's dependency coverage.
-                        # Its bytes are what the stored topology saw, so its
-                        # title is unchanged: leave it out of the revert below,
-                        # which would otherwise treat it as absent. It stays
-                        # residue, so the drain repairs it with one rebuild.
-                        unchanged_without_row = {
-                            rel
-                            for rel in created
-                            if conn.execute(
-                                "SELECT 1 FROM graph_dependency_coverage "
-                                "WHERE source_path = ? AND source_hash = ?",
-                                (rel, current_hashes[rel]),
-                            ).fetchone()
-                        }
-                    resolver = vault_module.WikilinkResolver.from_entries(
-                        self.vault_root,
-                        [(rel, pages[rel].title) for rel in sorted(resolver_membership)],
+                if residue_out is None and (
+                    not stored_hashes.keys() <= indexed_membership
+                    or any(
+                        stored_hashes.get(rel) != page.snapshot_hash
+                        for rel, page in pages.items()
+                        if rel in indexed_membership
                     )
-                    explained = residue - unchanged_without_row
-                    topology_matches = resolver_fingerprint is not None and (
-                        _resolver_topology_fingerprint(resolver) == resolver_fingerprint
-                        or bool(
-                            carry is not None
-                            and (explained or carry)
-                            and self._residue_explains_topology(
-                                conn, resolver, explained, resolver_fingerprint, carry=carry
-                            )
-                        )
-                    )
-                    if not topology_matches:
-                        return declined("resolver_topology_mismatch")
+                ):
+                    return declined("indexed_sources_differ")
 
-                # Stabilize the cold proof after every parse/topology callback.
-                # A direct editor does not participate in Exomem's mutation
-                # lock and may replace bytes while this O(vault) proof is
-                # running. Re-read each captured source, then repeat both path
-                # censuses and the policy identity so a mid-proof edit cannot
-                # bless the older graph snapshot merely because its first pass
-                # was internally coherent.
+                # Stabilize the cold proof after every read. A direct editor
+                # does not participate in Exomem's mutation lock and may
+                # replace bytes while this O(vault) proof is running. Re-read
+                # each captured source, then repeat both path censuses and the
+                # policy identity so a mid-proof edit cannot bless the older
+                # graph snapshot merely because its first pass was internally
+                # coherent. Without `fold`, the strict recheck runs after the
+                # topology check below instead.
                 seal = _SnapshotSourceSeal(
                     tuple(page.guard for page in pages.values()),
                     frozenset(resolver_membership),
                     frozenset(indexed_membership),
                     policy_identity,
                 )
-                if not folding:
-                    if not self._snapshot_source_seal_matches_disk(seal):
-                        return declined("projection_moved_during_proof")
+                if not fold:
                     break
                 movement = _SealMovement()
-                if self._snapshot_source_seal_matches_disk(seal, movement_out=movement) and (
-                    not raced
-                ):
+                sealed = self._snapshot_source_seal_matches_disk(seal, movement_out=movement)
+                # A page whose read raced is not in `pages`, and its guard is
+                # not in the seal, so a clean recheck alone does not cover it.
+                if sealed and pages.keys() == resolver_membership | indexed_membership:
                     break
                 if movement.policy_moved:
                     # The policy decides admission for every page, so no
@@ -3461,7 +3407,7 @@ class EpistemicGraphIndex:
                     return declined("recall_membership_unreadable")
                 moved: set[str] = set()
                 for rel, error in movement.failed:
-                    if not _proof_page_moved(self.vault_root, rel, error, suspects):
+                    if not _proof_page_moved(self.vault_root, rel, error):
                         return declined("source_unsafe")
                     moved.add(rel)
                 rounds += 1
@@ -3470,10 +3416,70 @@ class EpistemicGraphIndex:
                 resolver_membership = movement.resolver_membership
                 indexed_membership = movement.indexed_membership
                 admitted = resolver_membership | indexed_membership
-                for rel in set(pages) - admitted:
+                for rel in pages.keys() - admitted:
                     del pages[rel]
-                raced &= admitted
-                to_read = sorted((moved | raced | (admitted - set(pages))) & admitted)
+                to_read = sorted((moved & admitted) | (admitted - pages.keys()))
+
+            current_hashes = {rel: pages[rel].snapshot_hash for rel in indexed_membership}
+            residue: set[str] = set()
+            unchanged_without_row: set[str] = set()
+            if stored_hashes != current_hashes:
+                # Only a caller with `residue_out` reaches this: the read loop
+                # declined any difference for one without.
+                #
+                # A page created or removed since the publication is a residue
+                # like a page whose bytes moved: this proof enumerated it, and
+                # the drain adds an appeared page's rows and deletes a vanished
+                # one's, widening to the pages whose links it re-targets. Before
+                # the 2026-09-27 upgrade both were "a different corpus", so one
+                # agent write after the serving worker's last publication held
+                # a standby to its warm budget and cost a cold start.
+                created = set(current_hashes) - set(stored_hashes)
+                removed = set(stored_hashes) - set(current_hashes)
+                if any(os.path.lexists(self.vault_root / rel) for rel in removed):
+                    # Still on disk but no longer admitted: nothing on the
+                    # residue path is proven to remove its rows.
+                    return declined("indexed_membership_differs")
+                residue.update(created | removed)
+                residue.update(
+                    rel
+                    for rel, source_hash in current_hashes.items()
+                    if rel in stored_hashes and stored_hashes[rel] != source_hash
+                )
+                # A sidecar written when file rows were keyed by a name cut at
+                # `#` holds no file row for the page that lost its key, yet
+                # keeps that page's dependency coverage. Its bytes are what the
+                # stored topology saw, so its title is unchanged: leave it out
+                # of the revert below, which would otherwise treat it as absent.
+                # It stays residue, so the drain repairs it with one rebuild.
+                unchanged_without_row = {
+                    rel
+                    for rel in created
+                    if conn.execute(
+                        "SELECT 1 FROM graph_dependency_coverage "
+                        "WHERE source_path = ? AND source_hash = ?",
+                        (rel, current_hashes[rel]),
+                    ).fetchone()
+                }
+            resolver = vault_module.WikilinkResolver.from_entries(
+                self.vault_root,
+                [(rel, pages[rel].title) for rel in sorted(resolver_membership)],
+            )
+            explained = residue - unchanged_without_row
+            topology_matches = resolver_fingerprint is not None and (
+                _resolver_topology_fingerprint(resolver) == resolver_fingerprint
+                or bool(
+                    carry is not None
+                    and (explained or carry)
+                    and self._residue_explains_topology(
+                        conn, resolver, explained, resolver_fingerprint, carry=carry
+                    )
+                )
+            )
+            if not topology_matches:
+                return declined("resolver_topology_mismatch")
+            if not fold and not self._snapshot_source_seal_matches_disk(seal):
+                return declined("projection_moved_during_proof")
 
             if residue_out is not None:
                 residue_out.update(residue)
