@@ -38,7 +38,15 @@ from typing import Any, get_args
 
 from filelock import ReadWriteLock, Timeout
 
-from . import call_spans, durable_write, mutation_journal, mutation_lock, request_budget
+from . import (
+    call_spans,
+    durable_write,
+    intent_accept,
+    mutation_journal,
+    mutation_lock,
+    request_budget,
+    write_intents,
+)
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -1361,6 +1369,8 @@ def mark_active_mutation_committed() -> None:
     """Mark that the current canonical writer crossed its durable commit boundary."""
     if _ACTIVE_MUTATION_TRACE.get() is not None:
         _ACTIVE_MUTATION_COMMITTED.set(True)
+        # A write past its commit point has its answer; no later wait of it is bounded by the accept deadline.
+        mutation_lock.close_accept_window()
 
 
 @contextmanager
@@ -3395,6 +3405,7 @@ class IdempotencyStore:
         resume_canonically_committed=None,  # noqa: ANN001
         commit_evidence=None,  # noqa: ANN001
         legacy_graph_pending_proof=None,  # noqa: ANN001
+        on_precommit_refusal=None,  # noqa: ANN001
     ) -> Any:
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
@@ -3612,6 +3623,15 @@ class IdempotencyStore:
             # Abrupt exits and anything after the canonical commit point are
             # intentionally retained for exact evidence/outcome-unknown
             # classification instead.
+            if (
+                on_precommit_refusal is not None
+                and not leaf_returned
+                and isinstance(error, Exception)
+                and (commit_observed is None or not commit_observed())
+            ):
+                # The write journals its intent while this attempt still holds its claim on the key
+                # (design D3, rule 2), so a resend never finds the key free and the intent missing.
+                on_precommit_refusal(error)
             if (
                 not leaf_returned
                 and isinstance(error, Exception)
@@ -4027,6 +4047,9 @@ class IdempotencyStore:
     ) -> Any:
         _log_mutation_event("pending", receipt=_receipt_tag(key))
         deadline = self.monotonic() + self.wait_seconds
+        window = mutation_lock.current_accept_window()
+        if window is not None:
+            deadline = min(deadline, self.monotonic() + window.left())
         while True:
             now = self.clock()
             del now
@@ -4045,6 +4068,14 @@ class IdempotencyStore:
                 return disposition, stored
             remaining = deadline - self.monotonic()
             if remaining <= 0:
+                if window is not None and window.left() <= 0:
+                    # Nothing of this write committed. The accept path journals it under this key; the
+                    # unique index returns the other attempt's intent when that one is journaled first.
+                    raise OpError(
+                        "MUTATION_BUSY",
+                        "an identical mutation is still executing",
+                        details={"status": "retryable", "committed": False, "cause": "same_key_wait"},
+                    )
                 raise OpError(
                     "MUTATION_ACKNOWLEDGEMENT_PENDING",
                     "an identical mutation is still executing; its commit outcome is not yet known",
@@ -4615,6 +4646,40 @@ _ACTIVE_STORE_ATTEMPT: ContextVar[_StoreAttempt | None] = ContextVar(
 )
 
 
+# `_invoke` returns this from the accept path when the write became an intent; the answer is built from the intent.
+_ACCEPTED = object()
+
+
+def _await_intent_commit(
+    journal: write_intents.WriteIntentJournal | None,
+    intent: write_intents.Intent,
+    window: mutation_lock.AcceptWindow,
+) -> write_intents.Intent:
+    """Wait for the applier to end `intent`, until the accept deadline; no wait when no waiter slot is free.
+
+    The wait ends early when the row is gone or unreadable: the caller then gets the state it holds.
+    """
+    if journal is None or not intent.active:
+        return intent
+    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
+    if counted and not _take_capture_waiter_slot():
+        return intent
+    try:
+        while intent.active and window.left() > 0:
+            time.sleep(min(intent_accept.POST_ROW_POLL_SECONDS, window.left()))
+            try:
+                latest = journal.get(intent.intent_id)
+            except write_intents.JournalRefusal:
+                break
+            if latest is None:
+                break
+            intent = latest
+    finally:
+        if counted:
+            _release_capture_waiter_slot()
+    return intent
+
+
 class _FairCaptureQueue:
     """First-come-first-served order, within one process, for keyed writes
     waiting on the boundary.
@@ -4766,6 +4831,8 @@ class LeaseManager:
             if mutation_timeout_seconds is None
             else mutation_timeout_seconds
         )
+        self._intent_journals: dict[str, write_intents.WriteIntentJournal] = {}
+        self._intent_journals_lock = threading.Lock()
         self._mutation_poll_interval_seconds = mutation_poll_interval_seconds
         self._last_renew_monotonic: float | None = None
         # (code, monotonic-timestamp) for the most recent coordinator RPC
@@ -4957,6 +5024,10 @@ class LeaseManager:
         answer. Both ends of a handoff notify, so the poll below only bounds a missed wakeup.
         """
         thread = threading.get_ident()
+        window = mutation_lock.current_accept_window()
+        if window is not None:
+            # An eligible write waits no longer than its accept deadline for the store, as for the boundary.
+            deadline = min(deadline, time.monotonic() + window.left())
         with self._store_condition:
             if not self._store_handoff:
                 return
@@ -5337,6 +5408,42 @@ class LeaseManager:
         ) as mutation:
             yield mutation
 
+    def _intent_journal(self, vault_root: os.PathLike[str] | str) -> write_intents.WriteIntentJournal | None:
+        """This manager's journal for one vault, or None when the path is not a vault root.
+
+        Raises `JournalUnavailable` when the journal cannot open; the caller decides what that means.
+        """
+        if not (isinstance(vault_root, os.PathLike) or (isinstance(vault_root, str) and Path(vault_root).is_absolute())):
+            return None
+        root = Path(vault_root)
+        if not _is_receipt_vault_root(root):
+            return None
+        identity = canonical_mutation_identity(root)
+        with self._intent_journals_lock:
+            journal = self._intent_journals.get(identity)
+            if journal is None:
+                journal = write_intents.WriteIntentJournal(
+                    root,
+                    vault_id=self.config.vault_id or identity,
+                    replica_id=self.config.replica_id or "local",
+                )
+                self._intent_journals[identity] = journal
+            return journal
+
+    def _refuse_if_intents_queued(self, vault_root: os.PathLike[str] | str) -> None:
+        """Stop an eligible attempt that would commit ahead of an accepted write.
+
+        An unreadable journal cannot order anything, so the attempt goes on: a write that must be
+        journaled then answers `journal_unavailable`, and one the boundary admits still commits.
+        """
+        try:
+            journal = self._intent_journal(vault_root)
+            queued = journal is not None and journal.has_active()
+        except write_intents.JournalRefusal:
+            return
+        if queued:
+            raise intent_accept.intents_queued()
+
     @contextmanager
     def _mutation_boundary(
         self,
@@ -5353,9 +5460,15 @@ class LeaseManager:
         advance_generation: bool,
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, which advances the commit generation, and `projection_guard`, which does not."""
-        if self._mutation_coordinator_for(vault_root).current_thread_borrows_boundary():
+        coordinator = self._mutation_coordinator_for(vault_root)
+        if coordinator.current_thread_borrows_boundary():
             # A loan falls between two units of another mutation, whose reads must stay valid.
             raise RuntimeError("a canonical write cannot run on a borrowed mutation boundary")
+        # An eligible write that has not committed yields to every accepted write, before it takes the
+        # boundary and again once it holds it (design D2). Another process may have journaled in between.
+        ordered = mutation_lock.current_accept_window() is not None and not coordinator.current_thread_holds_boundary()
+        if ordered:
+            self._refuse_if_intents_queued(vault_root)
         direct_boundary: tuple[str, Path] | None = None
         direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
         outer_direct_boundary = False
@@ -5377,6 +5490,8 @@ class LeaseManager:
                 operation=operation,
                 holder_kind=holder_kind,
             ) as mutation:
+                if ordered:
+                    self._refuse_if_intents_queued(vault_root)
                 try:
                     with self.writer_authority_guard(
                         vault_root=vault_root,
@@ -5570,6 +5685,20 @@ class LeaseManager:
         kwargs: dict[str, Any],
         *,
         read_only: bool | None = None,
+        **options: Any,
+    ) -> Any:
+        """Run one command under the lease. An eligible write gets its accept deadline here, on arrival."""
+        invocation_read_only = command.read_only if read_only is None else read_only
+        with intent_accept.arrival(command, kwargs, read_only=invocation_read_only):
+            return self._invoke(command, injected, kwargs, read_only=read_only, **options)
+
+    def _invoke(
+        self,
+        command: Any,
+        injected: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        read_only: bool | None = None,
         idempotency_key: str | None = None,
         public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
         idempotency_principal_scope: str | None = None,
@@ -5652,6 +5781,30 @@ class LeaseManager:
             receipt_key_digest = None
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
+        accept = None
+        if (
+            mutation_lock.current_accept_window() is not None
+            and receipt_vault_root is not None
+            and not authorization_issuance
+            # A nested invocation or a store-thread attempt belongs to a write that has its own answer.
+            and _ACTIVE_LEASE_MANAGER.get() is None
+            and _ACTIVE_STORE_ATTEMPT.get() is None
+            and _is_receipt_vault_root(receipt_vault_root)
+        ):
+            accept = intent_accept.Accept(
+                window=mutation_lock.current_accept_window(),
+                command=command,
+                injected=injected,
+                kwargs=kwargs,
+                key=key,
+                digest=digest,
+                expires_after=expires_after,
+                open_journal=partial(self._intent_journal, receipt_vault_root),
+                manager=self,
+            )
+            known = self._known_intent(accept, receipt, effective_public_idempotency_key)
+            if known is not None:
+                return known
         vocabulary_binding = None
         vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
         # The private-identity inventory is a whole-vault walk. Build it here,
@@ -5734,9 +5887,14 @@ class LeaseManager:
         # then a busy boundary, so neither restarts the bound or under-reports it.
         wait_started = time.monotonic()
         wait_deadline = wait_started + _capture_wait_seconds(self._mutation_timeout_seconds)
+        if accept is not None:
+            # The warm-up wait, like every wait before the answer, ends at the accept deadline.
+            wait_deadline = min(wait_deadline, time.monotonic() + accept.window.left())
         warming, warm_cause, warm_waited = _wait_out_write_warmup(
             refuse_cause=(
-                "unkeyed" if key is None else "store_thread" if store_attempt is not None else None
+                None
+                if accept is not None
+                else "unkeyed" if key is None else "store_thread" if store_attempt is not None else None
             ),
             deadline=wait_deadline,
         )
@@ -5750,6 +5908,42 @@ class LeaseManager:
                 waited_ms=warm_waited_ms,
                 outcome="admitted" if warming is None else warm_cause,
             )
+        def accepted_answer() -> Any:
+            assert accept is not None and accept.intent is not None
+            return self._accepted_answer(
+                accept,
+                receipt=receipt,
+                public_key=effective_public_idempotency_key,
+                t_start=t_start,
+                scope=implicit_idempotency_scope or idempotency_principal_scope,
+                subject=mutation_subject,
+            )
+
+        if warming is not None and accept is not None:
+            # Nothing ran, so nothing of the write can be validated yet.
+            accept.journal(deferred=True, narrow=False)
+            if accept.intent is not None:
+                return accepted_answer()
+            assert accept.refusal is not None
+            refusal = accept.refusal
+            if isinstance(refusal, OpError):
+                refusal.details.update(request_id=request_id, receipt_id=receipt)
+                if effective_public_idempotency_key is not None:
+                    refusal.details["idempotency_key"] = effective_public_idempotency_key
+            self._record_mutation_journal(
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt,
+                outcome="failed",
+                error_code=leaf_contract_code(refusal) or type(refusal).__name__,
+                duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+                scope=implicit_idempotency_scope or idempotency_principal_scope,
+                targets=[str(mutation_subject)],
+                boundary_timing=(None, None),
+            )
+            if isinstance(refusal, OpError) and refusal.code == "MUTATION_BUSY":
+                _count_busy_once(refusal)
+            raise refusal
         if warming is not None:
             details: dict[str, Any] = {
                 "status": "retryable",
@@ -6648,24 +6842,69 @@ class LeaseManager:
                     resume_canonically_committed=resume_graph_sync,
                     commit_evidence=exact_commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
+                    on_precommit_refusal=journal_before_release if accept is not None else None,
                 )
+
+            def journal_before_release(error: BaseException) -> None:
+                if accept is None or commit_state["observed"] or not intent_accept.is_precommit_refusal(error):
+                    return
+                # A narrowed command that never started its leaf has not run its preflight either.
+                accept.journal(
+                    deferred=getattr(error, "code", None) != "MUTATION_BUSY",
+                    narrow=narrow_boundary and commit_state["leaf_started"],
+                    cause=error,
+                )
+
+            def accept_attempt() -> Any:
+                """Run once inline, or journal first. Returns `_ACCEPTED` when the write became an intent."""
+                assert accept is not None
+                if intent_accept.mode() == "always" or intent_accept.depends_on_queued(
+                    accept.open_journal, command, kwargs
+                ):
+                    # Validating against the vault now could refuse a write that only follows a waiting one.
+                    accept.journal(deferred=True, narrow=False)
+                    if accept.refusal is not None:
+                        raise accept.refusal
+                    return _ACCEPTED
+                preparation_token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(None)
+                try:
+                    with mutation_lock.absorbing_busy():
+                        return run_idempotent()
+                except Exception as error:
+                    if not accept.settled and intent_accept.is_precommit_refusal(error) and not commit_state["observed"]:
+                        # No claim was held, so the hook did not run: an unkeyed write, or a refusal before the claim.
+                        journal_before_release(error)
+                    if accept.refusal is not None:
+                        raise accept.refusal from error
+                    if accept.intent is None:
+                        raise
+                    # The accepted write is answered here; no later seam records its refusal.
+                    mutation_journal.claim_refusal(error)
+                    return _ACCEPTED
+                finally:
+                    _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(preparation_token)
 
             from .command_surface import OPEN_WORLD_OPS
 
-            result = self._run_absorbing_capture_contention(
-                command,
-                run_idempotent,
-                key=key,
-                commit_state=commit_state,
-                request_id=request_id,
-                wait_started=wait_started,
-                wait_deadline=wait_deadline,
-                # A narrow leaf meets the busy only after its own preparation. When
-                # that preparation fetched caller-supplied temporary handles, the
-                # server cannot fetch them again; only the caller can retry.
-                rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
-                absorb_unkeyed=absorb_unkeyed,
-            )
+            if accept is not None:
+                result = accept_attempt()
+                if result is _ACCEPTED:
+                    return accepted_answer()
+            else:
+                result = self._run_absorbing_capture_contention(
+                    command,
+                    run_idempotent,
+                    key=key,
+                    commit_state=commit_state,
+                    request_id=request_id,
+                    wait_started=wait_started,
+                    wait_deadline=wait_deadline,
+                    # A narrow leaf meets the busy only after its own preparation. When
+                    # that preparation fetched caller-supplied temporary handles, the
+                    # server cannot fetch them again; only the caller can retry.
+                    rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
+                    absorb_unkeyed=absorb_unkeyed,
+                )
             if (
                 vocabulary_replay_terminal is not None
                 and vocabulary_binding is not None
@@ -6797,6 +7036,63 @@ class LeaseManager:
             result,
             projected,
         )
+
+    def _known_intent(self, accept: intent_accept.Accept, receipt: str | None, public_key: str | None) -> Any | None:
+        """A resend under a journaled identity gets that intent back, never a second one (design D2, step 2)."""
+        if accept.key is None:
+            return None
+        try:
+            journal = accept.open_journal()
+            intent = None if journal is None else journal.find_by_key(accept.key)
+        except write_intents.JournalRefusal:
+            # A journal that cannot be read holds no key we can find; the write goes on inline.
+            return None
+        if intent is None:
+            return None
+        if intent.digest != accept.digest:
+            raise OpError(
+                "IDEMPOTENCY_KEY_REUSED",
+                "idempotency key was already used for different input",
+            )
+        intent = _await_intent_commit(journal, intent, accept.window)
+        return intent_accept.answer_for(intent, receipt_id=receipt, idempotency_key=public_key)
+
+    def _accepted_answer(
+        self,
+        accept: intent_accept.Accept,
+        *,
+        receipt: str | None,
+        public_key: str | None,
+        t_start: float,
+        scope: str | None,
+        subject: Any,
+    ) -> Any:
+        """Record the accept in the mutation log, wait for the intent as D1 says, and answer."""
+        intent = accept.intent
+        assert intent is not None
+        if accept.created:
+            _log_mutation_event(
+                "accepted", request_id=intent.request_id, command=accept.command.name, receipt=receipt or "none"
+            )
+            self._record_mutation_journal(
+                request_id=intent.request_id,
+                command=accept.command.name,
+                receipt=receipt,
+                outcome="accepted",
+                error_code=None,
+                duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+                scope=scope,
+                targets=[str(subject)],
+                boundary_timing=(accept.waited_ms, None),
+            )
+        if accept.key is not None:
+            # A write with no retry identity answers at once: a short answer keeps its client's resend window short.
+            try:
+                journal = accept.open_journal()
+            except write_intents.JournalRefusal:
+                journal = None
+            intent = _await_intent_commit(journal, intent, accept.window)
+        return intent_accept.answer_for(intent, receipt_id=receipt, idempotency_key=public_key)
 
     def _record_mutation_journal(
         self,

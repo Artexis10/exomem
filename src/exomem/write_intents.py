@@ -573,6 +573,16 @@ class WriteIntentJournal:
         return intent
 
     @_unavailable_on_sqlite_error
+    def has_active(self) -> bool:
+        """Whether any accepted or applying intent exists. The cheap check that orders other writes behind them."""
+        marks = ", ".join("?" for _ in ACTIVE_STATES)
+        conn = self._connect()
+        try:
+            return conn.execute(f"SELECT 1 FROM intents WHERE state IN ({marks}) LIMIT 1", ACTIVE_STATES).fetchone() is not None
+        finally:
+            conn.close()
+
+    @_unavailable_on_sqlite_error
     def non_terminal(self, *, audience: str | None = None) -> list[Intent]:
         """Active intents in acceptance order; `audience` limits them to one principal audience."""
         marks = ", ".join("?" for _ in ACTIVE_STATES)

@@ -13642,11 +13642,29 @@ _INTENT_ELIGIBILITY: dict[str, tuple[bool, str]] = {
 }
 
 
+# A mixed command is journaled only in the modes named here: the selector argument, then its values. These are
+# the command schemas' own closed selectors, the same ones `_INTENT_ELIGIBILITY` names in its reasons.
+_INTENT_MODES: dict[str, tuple[str, tuple[str, ...]]] = {  # nosemgrep: ep-word-set -- closed command selectors the schemas fix
+    "episode_memory": ("action", ("record",)),
+    "manage_memory_file": ("operation", ("create", "append")),
+}
+# A capture with staged files runs synchronously until the journal stages its inputs (design D2, captures).
+_INTENT_STAGED_ARGUMENT: dict[str, str] = {
+    "capture_source": "files",
+    "preserve_artifacts": "files",
+}
+
+
 def _intent_eligibility(name: str) -> dict[str, Any]:
     declared = _INTENT_ELIGIBILITY.get(name)
     if declared is None:
         return {}
-    return {"intent_eligible": declared[0], "intent_reason": declared[1]}
+    return {
+        "intent_eligible": declared[0],
+        "intent_reason": declared[1],
+        "intent_modes": _INTENT_MODES.get(name),
+        "intent_staged_argument": _INTENT_STAGED_ARGUMENT.get(name),
+    }
 
 
 def _build_commands() -> tuple[Command, ...]:
