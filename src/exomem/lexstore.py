@@ -2511,6 +2511,8 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):
             raise
+        # The traceback stays local: a hosted cell strips exc_info.
+        log.debug("lexical catch-up raised", exc_info=True)
         return _log_catch_up_decline(store, CatchUpDecline.ERROR, error=type(error).__name__)
 
 
@@ -2520,8 +2522,11 @@ def _log_catch_up_decline(store, reason: CatchUpDecline, **detail: int | str) ->
     `detail` holds counts, scope names or an error class, never a vault path,
     so the next whole-corpus pass is attributable. The store keeps the reason
     for the worker's finish line, the only part of this a hosted cell retains.
+    The first refusal of a round wins: a store error inside the outpaced stamp
+    must not be reported as the `outpaced` that its caller logs next.
     """
-    store._last_catch_up_decline = reason
+    if getattr(store, "_last_catch_up_decline", None) is None:
+        store._last_catch_up_decline = reason
     fields = "".join(f" {key}={value}" for key, value in detail.items())
     log.info("lexical catch-up declined (%s)%s; rebuilding", reason, fields)
     return False
@@ -7219,7 +7224,9 @@ class LexicalStore:
                         _log_catch_up_decline(self, CatchUpDecline.INCOMPLETE, scope=scope)
                         return None
                     if delta.requires_source_proof:
-                        _log_catch_up_decline(self, CatchUpDecline.SOURCE_PROOF,
+                        _log_catch_up_decline(
+                            self,
+                            CatchUpDecline.SOURCE_PROOF,
                             scope=scope,
                             changed=len(delta.changed),
                             deleted=len(delta.deleted),
