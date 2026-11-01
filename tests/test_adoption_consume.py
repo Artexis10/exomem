@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import json
 import types
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    _held_fs_posix,
     adoption_consume,
     adoption_run,
     cloud_import_job,
@@ -261,10 +263,26 @@ class _DiskRefusesUnlink:
         return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "the disk refused the removal"))
 
 
+def _rename_across_devices(real, *staged_leaves):
+    """The kernel's no-replace rename, except that the staged files `staged_leaves` cannot cross to the Knowledge Base.
+
+    The batch writer publishes through the same call, and every other rename stays real.
+    """
+    def rename(source, destination, **keywords):
+        if source in staged_leaves:
+            raise OSError(errno.EXDEV, "invalid cross-device link")
+        return real(source, destination, **keywords)
+
+    return rename
+
+
 def test_a_removal_that_fails_leaves_the_item_applied_and_a_later_call_removes_the_copy(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
     staged = _stage(tmp_path, vault, {"paper.pdf": PDF})
+    # A rename leaves nothing to remove, so the stage sits on another device for this file: it files by copy.
+    monkeypatch.setattr(
+        _held_fs_posix, "_rename_noreplace", _rename_across_devices(_held_fs_posix._rename_noreplace, "paper.pdf"))
     # Only adoption's removal sees the refusal; the batch writer keeps the real filesystem.
     refusing = types.SimpleNamespace(
         HeldFsError=held_fs.HeldFsError, HeldFile=held_fs.HeldFile,

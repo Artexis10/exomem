@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.154.0](https://github.com/Artexis10/exomem/compare/v0.153.1...v0.154.0) (2026-11-01)
+
+
+### Features
+
+* **adoption:** file imported media by rename, so imports can exceed the cell's free space ([#2284](https://github.com/Artexis10/exomem/issues/2284)) ([dd039a8](https://github.com/Artexis10/exomem/commit/dd039a8bad0ae1cb3dd69bcde4a21808d1ed4592))
+* **cellctl:** alert on a cell whose recall catalogue stops advancing ([#2272](https://github.com/Artexis10/exomem/issues/2272)) ([17e8a64](https://github.com/Artexis10/exomem/commit/17e8a6493c5be06e4122eaaff659d364c23af889))
+* **cloud-rehearsal:** raw-import mode comparing Cloud with the local journey ([#2290](https://github.com/Artexis10/exomem/issues/2290)) ([42879ce](https://github.com/Artexis10/exomem/commit/42879ce1cd35e604c98ae41b91e870bcc203c6fa))
+* **media:** keep a turned-off cell's stored media readable until it drains ([#2271](https://github.com/Artexis10/exomem/issues/2271)) ([085b4d4](https://github.com/Artexis10/exomem/commit/085b4d4cccde9c50d0813e56d9741d24d4074e2c))
+
+
+### Bug Fixes
+
+* **acceptance:** serve the collection store before direct mode prepares collections ([#2269](https://github.com/Artexis10/exomem/issues/2269)) ([309a3e9](https://github.com/Artexis10/exomem/commit/309a3e99c9fc49062f0bf24bc0896c8ca83499ee))
+* **jobs:** read a maintenance job's row and its live state together ([#2291](https://github.com/Artexis10/exomem/issues/2291)) ([3754c9f](https://github.com/Artexis10/exomem/commit/3754c9f19797fe268950d53a4973a18ce55b1f43))
+* **lexstore:** converge a full repair under a live import and yield to it ([#2288](https://github.com/Artexis10/exomem/issues/2288)) ([4c6dbcd](https://github.com/Artexis10/exomem/commit/4c6dbcd85b7b5e7825c02f68845b88d7979be45d))
+* **media:** let a managed service find and keep the diarizer sidecar ([#2286](https://github.com/Artexis10/exomem/issues/2286)) ([2a5995e](https://github.com/Artexis10/exomem/commit/2a5995e64de9caea23c48da643a959d0120bf9f3))
+* **writes:** wait out busy boundaries for CLI writes and file uploads ([#2268](https://github.com/Artexis10/exomem/issues/2268)) ([00af333](https://github.com/Artexis10/exomem/commit/00af33390a0d48b0c06a470fe1adfae7b2794ed4))
+
+
+### Performance
+
+* **adoption:** file large imports faster and let custody proofs in between apply chunks ([#2281](https://github.com/Artexis10/exomem/issues/2281)) ([eef0fd8](https://github.com/Artexis10/exomem/commit/eef0fd8d6abcb90b7b2eb02ab7669f5324783082))
+* **lexstore:** catch up a lag over the foreground cap in capped steps ([#2270](https://github.com/Artexis10/exomem/issues/2270)) ([1786527](https://github.com/Artexis10/exomem/commit/17865277e924d4c8f970acb4e43d41d66a96585f))
+
+## [0.153.1](https://github.com/Artexis10/exomem/compare/v0.153.0...v0.153.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **auth:** keep a refresh grant when a slow response makes the client retry ([#2278](https://github.com/Artexis10/exomem/issues/2278)) ([459e487](https://github.com/Artexis10/exomem/commit/459e487822d42861b38ac2d8782a23d3405674ad))
+* **collections:** route structured-files maintenance on store collections to the store thread ([#2276](https://github.com/Artexis10/exomem/issues/2276)) ([db59abd](https://github.com/Artexis10/exomem/commit/db59abd471de06826733e8d850399e6e17c21a8f))
+
+## [0.153.0](https://github.com/Artexis10/exomem/compare/v0.152.0...v0.153.0) (2026-10-31)
+
+
+### Features
+
+* **adoption:** commit own notes in batches, finish honestly and keep inline tags ([#2258](https://github.com/Artexis10/exomem/issues/2258)) ([45cd755](https://github.com/Artexis10/exomem/commit/45cd755adf62128e0a49b511ada6f5785a0e9051))
+* **maintenance:** run remote vault maintenance as governed background jobs ([#2233](https://github.com/Artexis10/exomem/issues/2233)) ([b1922cc](https://github.com/Artexis10/exomem/commit/b1922cc76a2d1f49149f430c5a45be5c4edf37c2))
+* **media:** bound media store read-back space for imports larger than the volume ([#2262](https://github.com/Artexis10/exomem/issues/2262)) ([4dedb7d](https://github.com/Artexis10/exomem/commit/4dedb7dfe65171f07c0c80c69178d421267b4f97))
+
+
+### Bug Fixes
+
+* **benchmarks:** resume organisation replay runs after a crash ([#2265](https://github.com/Artexis10/exomem/issues/2265)) ([3ecd865](https://github.com/Artexis10/exomem/commit/3ecd865cc713f74ca8306d7d2e071aab04a14c5c))
+* **collections:** do not read a just-published view as an owner edit before its stat is recorded ([#2263](https://github.com/Artexis10/exomem/issues/2263)) ([ffbeac6](https://github.com/Artexis10/exomem/commit/ffbeac68e2b434e8b76a2efe15c98e310663effb))
+* **collections:** wait out store-write contention on the request thread ([#2250](https://github.com/Artexis10/exomem/issues/2250)) ([e5a6fde](https://github.com/Artexis10/exomem/commit/e5a6fde0d2f9a18fad6f54207144e4cf7eea9482))
+* **lexstore:** publish a full catalogue rebuild under observed writes ([#2253](https://github.com/Artexis10/exomem/issues/2253)) ([b02d8e2](https://github.com/Artexis10/exomem/commit/b02d8e2aca589fc3222fe1f6ef832a5f1d85f27b))
+* **lexstore:** reconcile an identity-current catalogue instead of re-parsing the corpus ([#2247](https://github.com/Artexis10/exomem/issues/2247)) ([d5a71de](https://github.com/Artexis10/exomem/commit/d5a71deeaeee9fe68c31645928deda2a96d95224))
+* **mcp:** keep one session identity for the life of a stdio connection ([#2252](https://github.com/Artexis10/exomem/issues/2252)) ([026c25f](https://github.com/Artexis10/exomem/commit/026c25fda3214fc2b974c363f95101725a33ed49))
+* **media:** contain GPU faults and defer speech on a busy GPU ([#2221](https://github.com/Artexis10/exomem/issues/2221)) ([083e82c](https://github.com/Artexis10/exomem/commit/083e82c8c8aca78b33ae84ddb90408949bf1d152))
+* **observability:** journal every caller-visible write refusal and count busy only when a caller sees it ([#2248](https://github.com/Artexis10/exomem/issues/2248)) ([db43ce3](https://github.com/Artexis10/exomem/commit/db43ce3b0c110fd64c67214c8b05dd5e493acc47))
+* **service:** open the listeners before the first worker is ready ([#2254](https://github.com/Artexis10/exomem/issues/2254)) ([f0a3037](https://github.com/Artexis10/exomem/commit/f0a3037168c30c32f774929d76676d3541bac7d3))
+* tolerate a released owner lock at writer startup; record the writing release in history ([#2240](https://github.com/Artexis10/exomem/issues/2240)) ([d81cfa8](https://github.com/Artexis10/exomem/commit/d81cfa8e19c5c8e20b76be97c48ec145db219e5e))
+* **writes:** wait out a short warm-up instead of refusing keyed writes ([#2245](https://github.com/Artexis10/exomem/issues/2245)) ([fa47a61](https://github.com/Artexis10/exomem/commit/fa47a6143dc51f0ce4d23a38a8304df7a2176ed9))
+* **writes:** wait out busy boundaries for Studio actions and for waiters in other processes ([#2255](https://github.com/Artexis10/exomem/issues/2255)) ([31e1627](https://github.com/Artexis10/exomem/commit/31e1627b7cc545f14dfb4ecc6b1c1fdfbeb7b520))
+
+
+### Performance
+
+* **adoption:** cut each import call's fixed cost on a grown vault ([#2266](https://github.com/Artexis10/exomem/issues/2266)) ([af95b14](https://github.com/Artexis10/exomem/commit/af95b145cc61253ea3b9ac29985589d5accf9a85))
+* **graph:** prove a created, removed or retitled page's topology by the pages that moved ([#2259](https://github.com/Artexis10/exomem/issues/2259)) ([ade66af](https://github.com/Artexis10/exomem/commit/ade66af8f3016219e0612a0fb57c07f98d45ba24))
+* **graph:** prove dependency-index completeness from a stored record and drop unused whole-table counts ([#2267](https://github.com/Artexis10/exomem/issues/2267)) ([74c8160](https://github.com/Artexis10/exomem/commit/74c8160748303ec8421f77e3fe89ed71b988b136))
+* **review:** halve the entity-recurrence attention call and time every audit check ([#2244](https://github.com/Artexis10/exomem/issues/2244)) ([0d5110a](https://github.com/Artexis10/exomem/commit/0d5110a682b9034278e16db6deaead4ff42860ec))
+* **watcher:** subscribe only to the filesystem events the watcher handles ([#2260](https://github.com/Artexis10/exomem/issues/2260)) ([b22334d](https://github.com/Artexis10/exomem/commit/b22334df4d2c7ae5245d999e47a7332771f2e845))
+
 ## [0.152.0](https://github.com/Artexis10/exomem/compare/v0.151.1...v0.152.0) (2026-10-31)
 
 

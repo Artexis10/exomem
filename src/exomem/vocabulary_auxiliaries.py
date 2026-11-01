@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,10 +112,13 @@ def seal(
     )
 
 
-def planned_images(vault_root: Path, writes: Iterable[Any]) -> tuple[Any, ...]:
-    """Adapt complete guarded plans to the same validator as staged images."""
+def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
+    """Adapt complete guarded plans to the same validator as staged images.
+
+    Lazy on purpose: `validate` reads no image without a manifest, and a batch of many writes
+    revalidates its plan once per write, so building the images up front hashed every write each time.
+    """
     root = Path(vault_root).resolve()
-    images = []
     for write in writes:
         try:
             path = _relative(root, write.path)
@@ -124,7 +127,7 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> tuple[Any, ...]:
         if not isinstance(write.content, str):
             continue
         guard = write.guard
-        images.append(SimpleNamespace(
+        yield SimpleNamespace(
             path=path,
             after=write.content.encode("utf-8"),
             before_sha256=(
@@ -132,8 +135,7 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> tuple[Any, ...]:
                 if guard is not None and guard.leaf_policy == "content" else None
             ),
             after_sha256=_hash(write.content),
-        ))
-    return tuple(images)
+        )
 
 
 def _validate_each(vault_root: Path, images: tuple[Any, ...], manifests: tuple[Any, ...]) -> dict[str, str]:

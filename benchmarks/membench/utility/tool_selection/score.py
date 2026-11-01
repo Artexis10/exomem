@@ -349,7 +349,8 @@ def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool)
             actual = actual_runs.get(path, {})
             allowed.add(path)
             # Only these source-owned plan fields change; inventory, selection and outcomes stay frozen.
-            changed_fields = {"updated", "phase", "plan", "plan_draft"}
+            # The run's seal of filed Source names is apply bookkeeping that planning may refresh.
+            changed_fields = {"updated", "phase", "plan", "plan_draft", "sources_seal"}
             if ({name: value for name, value in prior.items() if name not in changed_fields}
                     != {name: value for name, value in actual.items() if name not in changed_fields}):
                 reasons.append("adoption planning changed the prepared run outside its plan")

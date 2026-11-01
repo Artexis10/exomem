@@ -117,13 +117,15 @@
     - a stop after the commit settles as already applied with no byte read;
     - a failed batch renames the file back, recreates a removed staged folder and never removes the file;
     - the batch writer never lists the renamed binary as a destination;
-    - `import_discard` settles a renamed but uncommitted member first, or refuses and names it;
-    - the discard Job keeps a residual record of the unfiled members in the receipt, in the same write that drops the manifest;
+    - `import_discard` refuses with `IMPORT_RENAMES_PENDING` and names a renamed but uncommitted member in the receipt's `renames_pending`, keeps the stage, and proceeds once the member is settled or moved;
+    - `cancel`, `select`, `plan` and `start` refuse with `RENAMES_PENDING` while a renamed member has no page, and say to move the file and keep the source when the receipt cannot be read;
+    - a walking discard of an unreadable receipt names that member in the walk file, and a retried walk still records the stage;
+    - the discard Job keeps a residual record of the unfiled manifest members in the receipt, in the same write that drops the manifest, and lists a renamed member that has no page;
     - a retried discard keeps that record, and a discard writes an empty record when every member was filed;
     - a discard refuses with `IMPORT_RECEIPT_UNREADABLE` and keeps the stage when it cannot read the receipt;
     - a discard with `walk_stage` set records each staged file except the series file in a separate file, keeps the receipt and removes the stage;
     - a discard with `walk_stage` set refuses with `IMPORT_REQUEST_INVALID` and keeps the stage when it can read the receipt;
-    - a retried walk keeps the record that the first walk wrote;
+    - a retried walk keeps the record that the first walk wrote, and a later discard writes no empty record over it;
     - the file watcher and media scans bind no renamed file before replay settles it.
   - [ ] 5.4.6 Report these in `adoption_studio status`: both budgets, the job-pinned bytes and the effective file limit. Also report the classification inputs, the remaining allowance, the drain state and each window's residual with its paths. Report each landed window's unfiled members, with or without a run, and never count the series file. Report each residual record's members as "discarded, not filed", and add `adoption_studio(action="acknowledge")` with explicit paths. Accept a series ID and the next window's bytes as that series' demand. Verify these with tests:
     - the budget arithmetic, and job-pinned bytes that include the copies that the worker hydrated;
@@ -184,6 +186,11 @@
     - a report captured after the store was turned off with no evicted original gives the retained store without keys or egress;
     - after that removal, the wrapped bundle stays on the cell row;
     - a deleted cell leaves the active set and has its keys retired without a report;
+    - a turned-off canary's namespace keeps the edge access label, and the chart's edge ingress and cellctl's admission admit a labelled namespace and refuse an unlabelled one (operator decision of 2026-10-31);
+    - the credential and the label leave in one render, and the active-set entry leaves after them;
+    - a served cell whose live namespace lacks the label gets it on the next pass, with no restart;
+    - on real K3s, admission gives the edge peer to a labelled namespace, refuses an unlabelled one, and admits a label-then-policy pair;
+    - a chart upgrade with the edge off is refused while the live active set lists a cell or cannot be read, and renders once it lists none;
     - a cell whose evicted originals do not fit hydrates an owner read, offloads nothing new, evicts the hydrated copy again and reports the shortfall.
   - [ ] 5.4.16 Extend the large-import rehearsal of `scale-agent-led-imports` (its task 5.1) with the media store on a local-storage cell. Use a sandbox bucket with a bucket-restricted key in the existing B2 account. The operator creates the bucket and key before this task (pending). Import at least 50 GiB of mixed media and notes. Include files over 200 MiB, one large offloadable file and one file above the object bound. Run no owner reads during the series. Record the store policy used, with the 5.25 GiB of hydration capacity and `max_hydrations` at 1 that the operator confirmed.
     - Size the large file or the cell from the band. One way is a 20 GiB cell with a large file within the effective file limit that status reports before the series. The other is a cell whose band holds a 5 GiB file, which needs `max_cell_gib` raised above 20 GiB for the rehearsal. Do not assume that a 5 GiB file fits a 20 GiB cell during a large import.

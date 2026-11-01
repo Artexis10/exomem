@@ -140,7 +140,18 @@ Each page in the report keeps the counts and seconds of every `apply` call (`app
 
 The report records, under `stages.large_import.measurements`: peak volume use, the cell's memory during the index build, `read_import_index` time per call, wall time per phase, and apply MiB/s for the large binaries. Each states its window and source. The volume and memory peaks are lower bounds from a 10-second sampler, and the sampler cannot read the cell while an import or discard Job holds its volume.
 
+Runners differ in CPU speed by 2 to 2.4 times, so a timing from one run does not compare with a timing from another. The report's `environment` records `cpu_model`, `cpu_count_lscpu` and `cpu_mhz` from `lscpu` (`null` where `lscpu` does not give one). It also records the best of three passes of a fixed single-threaded workload (`host_speed.py`), which runs for a few seconds before any build: `host_calibration_zlib_seconds` for zlib compression, `host_calibration_sha256_seconds` for SHA-256, every pass, and the workload's definition (`host_calibration_workload`). SHA-256 runs about 6 times faster on a CPU with SHA-NI, so only the zlib seconds scale the timings, and the SHA-256 seconds tell an instruction-set difference from a general-speed one. Under `measurements`, `phase_seconds` and the page 1 `apply_seconds` of each folder stay raw, and `phase_seconds_per_calibration` and `apply_seconds_per_calibration` divide them by the calibration ratio (the zlib seconds over the reference), with the ratio in `calibration_scale`. The scaled values assume CPU-bound work, and the cell shares the runner's CPU with K3s, Postgres and the harness, so the raw values are the record. Without a calibration, the scaled values are `null`.
+
 To run it from a workstation with Docker, sudo and enough free disk, use the `--large-import` flag of `exomem-cloud-rehearsal run`. Dispatch it on GitHub with `gh workflow run cloud-rehearsal.yml -f mode=large-import`.
+
+## Raw-data import
+
+`--raw-import` proves that messy input survives a Cloud import as well as a local one, and runs only on demand as the `raw-import` mode of the `Cloud rehearsal` workflow.
+The run generates a collection and its answer key with `benchmarks/collection_ingest/generate.py` (`--profile standard --seed 7`), so new raw-data cases in the generator need no change here.
+It sends the collection through `exomem cloud import` and the cell's MCP tools to a new vault, and to a second vault that first adopted another collection (`--profile small --seed 8`).
+It copies each vault out with one streamed read-only `tar` of the pod's volume, which costs less than the owner export, and scores the copy with `score.py`.
+It runs the same journey locally with `drive.py --profile personal`, then compares each key item between the two arms: a loss is an item that local kept and Cloud did not.
+The exit code is 0 only on a pass, which means no loss on the first pass, no unknown read or measurement gap, and no changed, missing or copied pre-existing source page; run it with `--raw-import-python <interpreter with fastmcp and the server installed>`.
 
 ## Owner export
 

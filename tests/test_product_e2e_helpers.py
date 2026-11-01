@@ -508,39 +508,40 @@ def test_maintenance_diagnostics_accepts_raw_noop_or_committed_full_result(
     ) == expected
 
 
-def test_remote_write_maintenance_refusal_matches_operator_contract() -> None:
-    error = {
-        "code": "MAINTENANCE_REQUIRES_CLI",
-        "status": "terminal",
-        "committed": False,
-        "remediation": "Run exomem maintain --reconcile on the host.",
-    }
+def test_remote_maintenance_job_accepts_a_completed_job_started_from_its_preview() -> None:
+    handle = {"run_id": "run-1", "state": "running", "mode": "reconcile", "plan_id": "plan-1"}
+    job = {"run_id": "run-1", "state": "completed", "receipt": {"chunks": []}}
 
-    assert e2e_product_loop._remote_maintenance_refusal(
-        {"success": False, "error": error}
-    ) == error
+    assert e2e_product_loop._remote_maintenance_job(handle, job, plan_id="plan-1") == job
 
 
 @pytest.mark.parametrize(
-    "result",
+    ("handle", "job"),
     [
-        {"success": True, "data": {}},
-        {"success": False, "error": {"code": "MUTATION_BUSY"}},
-        {
-            "success": False,
-            "error": {
-                "code": "MAINTENANCE_REQUIRES_CLI",
-                "status": "terminal",
-                "committed": True,
-            },
-        },
+        (
+            {"success": False, "error": {"code": "MAINTENANCE_PLAN_REQUIRED"}},
+            {"run_id": "run-1", "state": "completed", "receipt": {}},
+        ),
+        (
+            {"run_id": "run-1", "state": "running", "plan_id": "another-plan"},
+            {"run_id": "run-1", "state": "completed", "receipt": {}},
+        ),
+        (
+            {"run_id": "run-1", "state": "running", "plan_id": "plan-1"},
+            {"run_id": "run-1", "state": "failed", "receipt": {}},
+        ),
+        (
+            {"run_id": "run-1", "state": "running", "plan_id": "plan-1"},
+            {"run_id": "run-1", "state": "completed"},
+        ),
     ],
 )
-def test_remote_write_maintenance_refusal_rejects_other_outcomes(
-    result: dict[str, object],
+def test_remote_maintenance_job_rejects_a_refused_failed_or_receiptless_job(
+    handle: dict[str, object],
+    job: dict[str, object],
 ) -> None:
-    with pytest.raises(RuntimeError, match="operator-only refusal"):
-        e2e_product_loop._remote_maintenance_refusal(result)
+    with pytest.raises(RuntimeError, match="maintenance job|reviewed job"):
+        e2e_product_loop._remote_maintenance_job(handle, job, plan_id="plan-1")
 
 
 def test_operator_reconcile_output_unwraps_the_shared_cli_envelope() -> None:

@@ -107,7 +107,7 @@ async def eventually(predicate, timeout=10):
 
 
 @asynccontextmanager
-async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
+async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30", hold_ready=False):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -128,6 +128,8 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
             "EXOMEM_STANDBY_WARM_SECONDS": warm_seconds,
         }
     )
+    if hold_ready:
+        (tmp_path / "hold-ready").touch()
     log = (tmp_path / "service.log").open("w")
     command = [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)]
     if env_file is not None:
@@ -147,7 +149,8 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
                         pytest.fail((tmp_path / "service.log").read_text()[-5000:])
                     try:
                         response = await client.get(f"http://127.0.0.1:{port}/health", timeout=0.2)
-                        if response.status_code == 200:
+                        # A held worker never turns ready; an open listener is the signal.
+                        if response.status_code == 200 or hold_ready:
                             break
                     except httpx.HTTPError:
                         pass
@@ -325,6 +328,34 @@ def test_a_worker_that_cannot_restart_stops_the_supervisor(tmp_path):
                     await asyncio.sleep(0.05)
             # A failed status, so systemd's Restart= and cgroup cleanup take over.
             assert supervisor.returncode != 0
+
+    asyncio.run(scenario())
+
+
+def test_the_listener_answers_while_the_first_worker_warms(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        async with live_fixture(tmp_path, hold_ready=True) as (url, token, supervisor):
+            assert (await control(tmp_path, "status"))["phase"] == "starting"
+            async with httpx.AsyncClient() as raw:
+                refused = await raw.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+                    timeout=5,
+                )
+            # Answered at once with the unavailable refusal, not held for the queue budget.
+            assert refused.status_code == 503
+            assert refused.text == "Request not dispatched"
+            (tmp_path / "hold-ready").unlink()
+            async with asyncio.timeout(30):
+                while (await control(tmp_path, "status"))["phase"] != "ready":
+                    await asyncio.sleep(0.05)
+            async with Client(url, auth=token, timeout=20) as client:
+                served = await client.call_tool("counted", {"marker": "after-warm"})
+            assert served.data["marker"] == "after-warm"
+            assert supervisor.poll() is None
 
     asyncio.run(scenario())
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import jwt
 import pytest
+import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -252,6 +253,21 @@ def test_a_lost_upload_reply_recovers_the_exact_version(tmp_path: Path, size: in
     assert harness.fake.names() == [f"cells/{CELL_A}/{name_of(data)}"]
     assert harness.generation() == 1
     assert asyncio.run(harness._plain(PENDING_PATH, harness.edge)).json() == {"pending": 0}
+
+
+def test_the_chart_bound_admits_a_5_gib_original_in_8_mib_parts_within_the_part_limit(tmp_path: Path):
+    # A 5 GiB original's age ciphertext adds 16 bytes per 64 KiB chunk. A bound below it refuses the file;
+    # a part plan past 10,000 parts fails at B2 after hours of upload. Only the first part is sent here.
+    values = yaml.safe_load((Path(__file__).resolve().parents[1] / "infra/helm/platform/values.yaml").read_text())
+    harness = Harness(tmp_path, max_object_bytes=values["mediaEdge"]["maxObjectBytes"])
+    size = 5 * 2**30 + 16 * (5 * 2**30 // 2**16)
+    first_part = b"c" * (8 * 2**20)
+    response = harness.request("PUT", f"{OBJECTS_PATH}{name_of(b'5 GiB')}", content=first_part, headers={
+        SIZE_HEADER: str(size), SHA256_HEADER: name_of(b"5 GiB"), "content-length": str(size)})
+
+    assert response.status_code == 422  # the body ended after the first part
+    assert harness.fake.calls.count("upload_part") == 1 and harness.fake.upload_bytes == len(first_part)
+    assert -(-size // len(first_part)) == 641 <= 10_000
 
 
 def test_an_unsettled_upload_holds_its_name_while_other_cells_keep_working(harness: Harness):

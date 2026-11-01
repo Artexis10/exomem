@@ -656,6 +656,23 @@ def _posthoc_relative_path(root: Path, path: Path | str) -> str | None:
     return vault.canonical_vault_rel(root, value)
 
 
+def build_posthoc_corpus(
+    vault_root: Path, *, status_basis: lifecycle_statuses.Basis
+) -> tuple[semantic_contract.SemanticCorpusContext, semantic_language_registry.SemanticLanguageRegistry]:
+    """The corpus and language registry a posthoc pass reads.
+
+    A caller that needs the corpus before it evaluates builds it here, then passes both back to
+    `evaluate_posthoc_batch`, so one pass reads the vault once.
+    """
+    root = Path(vault_root)
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language, status_basis=status_basis
+    )
+    return corpus, language
+
+
 def evaluate_posthoc_batch(
     vault_root: Path,
     *,
@@ -675,12 +692,8 @@ def evaluate_posthoc_batch(
         )
     root = Path(vault_root)
     if corpus is None:
-        registry = relation_registry.load_registry(root)
-        language = semantic_language_registry.load_registry(root)
+        corpus, language = build_posthoc_corpus(root, status_basis=status_basis)
         resolved_saved_contracts = memory_schema.load_saved_contracts(root)
-        corpus = semantic_contract.build_corpus_context(
-            root, registry=registry, language_registry=language, status_basis=status_basis
-        )
     else:
         language = language_registry or semantic_language_registry.load_registry(root)
         resolved_saved_contracts = (
@@ -1455,6 +1468,11 @@ def _existing_transition_token(
     # validated ones instead of drifting whenever the clock ticks between calls.
     if stamp is not None:
         payload["stamp"] = stamp
+    # The release that planned the transition rides in the token, so an exact
+    # retry after an upgrade re-plans the same history bytes.
+    from . import __version__
+
+    payload["exomem_version"] = __version__
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -1578,13 +1596,19 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     }
     # `stamp` is optional so a token minted before this field existed still
     # decodes; a token that omits it simply cannot pin the writer's instant.
-    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at"})):
+    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at", "exomem_version"})):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
     if value["version"] != 1 or any(
         type(value[key]) is not str
         for key in ("transition_id", "operation", "path", "before_hash", "after_hash")
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    if "exomem_version" in value and (
+        type(value["exomem_version"]) is not str or not value["exomem_version"]
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"

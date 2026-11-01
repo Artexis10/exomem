@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -26,11 +27,13 @@ from membench.utility.switch_eval.session import (
     HARNESS_FAULT,
     OK,
     QUOTA,
+    AttemptResult,
     ClaudeSessionExecutor,
     PlannedSession,
     RunAborted,
     RunPaused,
     SessionInputs,
+    _end_orphan_server,
     load_session,
     run_session,
     session_env,
@@ -45,6 +48,7 @@ from membench.utility.switch_eval.state import (
     mcp_server_entry,
     tree_digest,
 )
+from membench.utility.switch_eval.tap import process_start_ticks
 
 from . import seed as seed_module
 from .runfile import read_jsonl, session_object
@@ -71,6 +75,8 @@ _CHECKOUT = Path(__file__).resolve().parents[4]
 REASON_CAPABLE = {"baseline": False, "candidate": True}
 #: A situation's checkpoint until ``run.json`` is written; its run status is ``PAUSED``.
 PROGRESS_FILE = "progress.json"
+#: A finished situation's record, written once (SCHEMA.md section 2).
+RUN_FILE = "run.json"
 #: The run status of a checkpoint: not an outcome, so never in a ``run.json``.
 PAUSED = "paused"
 #: A measured session's readback window, kept beside its attempts.
@@ -78,6 +84,10 @@ WINDOW_FILE = "window.json"
 #: The code files the shipped hook install deploys: Python hooks and their shell
 #: wrappers (the product's ``_hooks`` directory holds only these two kinds).
 HOOK_CODE_SUFFIXES = (".py", ".sh")
+#: The fault kind of an attempt whose runner stopped before it logged a result.
+INTERRUPTED = "runner_interrupted"
+#: The interruption event of a situation the lane closed as struck.
+STRUCK_BY_LANE = "struck_by_lane"
 
 
 @dataclass(frozen=True)
@@ -162,12 +172,22 @@ def shipped_hooks(slot: Slot, spec: ArmSpec, settings: Path) -> frozenset[str]:
     return frozenset(item["event"] for item in report["installed"])
 
 
+def session_paths(files_dir: Path, *, hooked: bool) -> dict[str, Path]:
+    """Where a measured session's MCP config and, when hooked, its hook settings live."""
+
+    paths = {"mcp.json": files_dir / "mcp.json"}
+    if hooked:
+        paths["settings.json"] = files_dir / "settings.json"
+    return paths
+
+
 def session_files(
     slot: Slot, spec: ArmSpec, files_dir: Path, *, hooked: bool
 ) -> tuple[dict[str, Path], frozenset[str]]:
     """The MCP config and hook settings a measured session reads, and the hook events wired."""
 
     files_dir.mkdir(parents=True, exist_ok=True)
+    paths = session_paths(files_dir, hooked=hooked)
     entry = mcp_server_entry(
         slot,
         spec,
@@ -178,13 +198,11 @@ def session_files(
         skip_ready_gate=True,
         budget=CALL_GUARD,
     )
-    paths = {"mcp.json": files_dir / "mcp.json"}
     paths["mcp.json"].write_text(
         json.dumps({"mcpServers": {SERVER_NAME: entry}}, indent=2, sort_keys=True), encoding="utf-8"
     )
     if not hooked:
         return paths, frozenset()
-    paths["settings.json"] = files_dir / "settings.json"
     return paths, shipped_hooks(slot, spec, paths["settings.json"])
 
 
@@ -380,6 +398,11 @@ def bind(config: RunConfig) -> dict:
             f"refused: the arm's interpreter loads the package at {loaded}, not at the "
             f"bound revision {config.revision}"
         )
+    uncommitted = facts["package_identity"].get("uncommitted_paths", [])
+    if uncommitted != []:
+        raise SystemExit(
+            f"refused: the arm's package source has uncommitted changes {uncommitted or 'unknown'}"
+        )
     # PR B changes a shipped hook, so the arms' hooks differ by design; each arm's
     # wired hooks must instead be the files its own package ships.
     deployed = deployed_hooks(slot)
@@ -544,6 +567,13 @@ def _session(config, situation, role, turns, slot, spec, run_dir, executor, path
             shutil.rmtree(pristine)
         return final, session_dir
     if pristine.exists():
+        # An attempt a stopped invocation never logged left its tap log and hook state
+        # in the slot; keep them beside its transcript, as a finished attempt does.
+        stopped = session_dir / f"attempt-{len(read_jsonl(session_dir / 'attempts.jsonl')) + 1}"
+        if stopped.exists():
+            for part in (slot.runtime, slot.hook_home):
+                if part.exists():
+                    shutil.copytree(part, stopped / part.name, symlinks=True, dirs_exist_ok=True)
         _restore_slot(slot, pristine)
     else:
         # Each session starts with an empty runtime: its own tap log, server stderr and turn file.
@@ -573,6 +603,14 @@ def _session(config, situation, role, turns, slot, spec, run_dir, executor, path
         _snapshot_slot(slot, pristine)
 
     def execute(inputs: SessionInputs, attempt_dir: Path):
+        if attempt_dir.exists():
+            # An earlier invocation stopped inside this attempt before logging it. Keep
+            # its evidence and log it as a harness fault, so the retry rule counts it.
+            return AttemptResult(
+                outcome=HARNESS_FAULT,
+                kind=INTERRUPTED,
+                detail=f"the runner stopped during {attempt_dir.name}; its directory is kept",
+            )
         # A retry keeps its inputs: each attempt starts from the same slot.
         _restore_slot(slot, pristine)
         started = dt.datetime.now(dt.UTC)
@@ -583,6 +621,8 @@ def _session(config, situation, role, turns, slot, spec, run_dir, executor, path
             ended = dt.datetime.now(dt.UTC)
             _write_json(session_dir / WINDOW_FILE, [started.isoformat(), ended.isoformat()])
 
+    # A start fault past its retries aborts, as in switch_eval: every later situation
+    # would meet an environment fault too. ``strike_situation`` closes a seed's own.
     final = run_session(inputs, session_dir, execute)
     shutil.rmtree(pristine)
     return final, session_dir
@@ -600,6 +640,135 @@ def _now() -> str:
     return dt.datetime.now(dt.UTC).isoformat()
 
 
+def _end_orphan_client(server: Mapping, slot: Slot) -> None:
+    """End the client session behind a live orphan server, hooks included.
+
+    The executor starts each client in a session of its own, which its tap and
+    server inherit, so the server names the session. Only a session whose
+    leader works in this slot's directory is the slot's client.
+    """
+
+    pid = int(server["pid"])
+    if server.get("start_ticks") is None or process_start_ticks(pid) != server["start_ticks"]:
+        return
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        # Field 6, the session id; the command name before it may hold spaces.
+        session = int(stat.rpartition(")")[2].split()[3])
+        leader_cwd = Path(os.readlink(f"/proc/{session}/cwd"))
+    except (OSError, ValueError):
+        return
+    if session == os.getsid(0) or leader_cwd != slot.cwd.resolve():
+        return
+    leader = {
+        "event": "server_started",
+        "pid": session,
+        "start_ticks": process_start_ticks(session),
+    }
+    try:
+        os.killpg(session, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    # The evaluation's guarded stop then waits until the killed leader is gone.
+    _end_orphan_server([leader])
+
+
+def _end_orphans(run_dir: Path, slot: Slot) -> None:
+    """End each server a stopped invocation left running, and its client, before reuse.
+
+    The measured sessions log to the slot's runtime and the seed's scripted
+    sessions to the seed directory. Each stop checks the recorded start time,
+    so an ended process's reused pid is never touched.
+    """
+
+    logs = [slot.runtime / "tap.jsonl", *sorted((run_dir / "seed").glob("*/*-tap.jsonl"))]
+    for log in logs:
+        for event in read_jsonl(log):
+            if event.get("event") == "server_started":
+                _end_orphan_client(event, slot)
+                _end_orphan_server([event])
+
+
+def _run_dir(config: RunConfig, situation: Situation) -> Path:
+    return refuse_unsafe_out_dir(config.out) / situation.id / config.arm
+
+
+def finished_run(config: RunConfig, binding: Mapping, situation: Situation) -> dict | None:
+    """The situation's finished run for this binding, or ``None`` while it is unfinished."""
+
+    path = _run_dir(config, situation) / RUN_FILE
+    if not path.exists():
+        return None
+    run = json.loads(path.read_text(encoding="utf-8"))
+    if (run["situation_sha256"], run["binding_ref"]) != (situation.sha256, binding["binding_ref"]):
+        raise SystemExit(f"refused: {path} was written from another situation file or binding")
+    return run
+
+
+def _read_progress(run_dir: Path, situation: Situation, binding: Mapping) -> dict | None:
+    path = run_dir / PROGRESS_FILE
+    if not path.exists():
+        return None
+    progress = json.loads(path.read_text(encoding="utf-8"))
+    run = progress["run"]
+    if (run["situation_sha256"], run["binding_ref"]) != (situation.sha256, binding["binding_ref"]):
+        raise SystemExit(f"refused: {path} was started from another situation file or binding")
+    return progress
+
+
+def _finish(run_dir: Path, run: dict, slot: Slot, status: str, evidence: Path | None) -> Path:
+    """Write the run once, then drop its checkpoint and its slot.
+
+    A struck run first keeps the slot's vault in ``evidence``, the directory of
+    the step that struck it, beside that step's runtime and hook state.
+    """
+
+    if evidence is not None and slot.vault.exists():
+        shutil.copytree(slot.vault, evidence / "vault", symlinks=True, dirs_exist_ok=True)
+    run["status"] = status
+    path = _write_json(run_dir / RUN_FILE, run)
+    (run_dir / PROGRESS_FILE).unlink(missing_ok=True)
+    slot.wipe()
+    return path
+
+
+def strike_situation(
+    config: RunConfig, binding: Mapping, situation: Situation, reason: str
+) -> Path:
+    """Close a situation that aborted on a harness fault past its retries as struck.
+
+    The runner aborts on a start fault past its retries, because an environment
+    fault would strike every later situation. The lane strikes the situation
+    when it judges the fault the situation's own, and ``reason`` records why.
+    """
+
+    run_dir = _run_dir(config, situation)
+    if finished_run(config, binding, situation) is not None:
+        raise SystemExit(f"refused: {situation.id} is finished; a run is written once")
+    progress = _read_progress(run_dir, situation, binding)
+    if progress is None:
+        raise SystemExit(f"refused: {situation.id} has not stopped on a fault; nothing to strike")
+    stage = progress["stage"]
+    session_dir = run_dir / "sessions" / stage
+    outcomes = [row["outcome"] for row in read_jsonl(session_dir / "attempts.jsonl")]
+    # f34 strikes only a harness fault past its retries.
+    if outcomes[-1:] != [HARNESS_FAULT] or (
+        outcomes.count(HARNESS_FAULT) <= protocol.HARNESS_FAULT_RETRIES
+    ):
+        raise SystemExit(
+            f"refused: {situation.id} did not stop on a harness fault past its retries"
+        )
+    slot = Slot(run_dir / "slot")
+    _end_orphans(run_dir, slot)
+    run = progress["run"]
+    run["faults"] += _session_faults(stage, session_dir)
+    run["interruptions"].append(
+        {"stage": stage, "event": STRUCK_BY_LANE, "detail": reason, "at": _now()}
+    )
+    shutil.rmtree(run_dir / f"pre-{stage}", ignore_errors=True)
+    return _finish(run_dir, run, slot, "struck", session_dir / f"attempt-{len(outcomes)}")
+
+
 def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> Path:
     """Run one situation for one arm, or resume it from its checkpoint.
 
@@ -611,28 +780,23 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
     """
 
     refuse_api_keys(os.environ)
-    run_dir = refuse_unsafe_out_dir(config.out) / situation.id / config.arm
+    run_dir = _run_dir(config, situation)
     if not isinstance(binding.get("reason_capable"), bool):
         raise SystemExit(f"refused: binding {binding['binding_ref']} has no reason_capable; rebind")
-    if (run_dir / "run.json").exists():
-        raise SystemExit(f"refused: {run_dir / 'run.json'} exists; a finished run is written once")
+    if finished_run(config, binding, situation) is not None:
+        # A rerun of the same command skips a finished situation; it is written once.
+        return run_dir / RUN_FILE
     run_dir.mkdir(parents=True, exist_ok=True)
     shape = binding["shapes"][situation.client_shape]
     spec = arm_spec(
         config, situation.client_shape, tuple(shape["tools"]), frozenset(shape["wired_hooks"])
     )
     slot = Slot(run_dir / "slot")
+    _end_orphans(run_dir, slot)
     progress_path = run_dir / PROGRESS_FILE
-    if progress_path.exists():
-        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress = _read_progress(run_dir, situation, binding)
+    if progress is not None:
         run = progress["run"]
-        if (run["situation_sha256"], run["binding_ref"]) != (
-            situation.sha256,
-            binding["binding_ref"],
-        ):
-            raise SystemExit(
-                f"refused: {progress_path} was started from another situation file or binding"
-            )
         run["interruptions"].append({"stage": progress["stage"], "event": "resumed", "at": _now()})
     else:
         # Only the model-free seed runs before the first checkpoint, so an
@@ -665,18 +829,16 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
         progress["stage"] = stage
         _write_json(progress_path, progress)
 
-    def finish(status: str) -> Path:
-        run["status"] = status
-        path = _write_json(run_dir / "run.json", run)
-        progress_path.unlink(missing_ok=True)
-        return path
+    def finish(status: str, evidence: Path | None = None) -> Path:
+        return _finish(run_dir, run, slot, status, evidence)
 
     seed_file = run_dir / "seed-pages.json"
+    inputs_dir = run_dir / "session-inputs"
+    hooked = situation.client_shape == "hooked"
     if progress["stage"] == "seed":
         build, facts = _build_seed(config, situation, slot, spec, run_dir, faults)
         if build is None:
-            slot.wipe()
-            return finish("struck")
+            return finish("struck", run_dir / "seed" / f"attempt-{SEED_RETRIES + 1}")
         run["seed"] = {
             **seed_module.seed_snapshot(facts, tree_digest=tree_digest(slot.vault), check=[]),
             "relation_keys": build.relation_keys,
@@ -690,15 +852,17 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
             "retries": build.retries,
         }
         _write_json(seed_file, {page["path"]: page["content_sha256"] for page in facts["pages"]})
+        # Installed once, as in an uninterrupted run: a reinstall on a resume would
+        # rewrite the hooks' restart-pending marker under a later session.
+        paths, wired = session_files(slot, spec, inputs_dir, hooked=hooked)
+        if wired != spec.wired_hooks:
+            raise SystemExit(f"refused: the install wired hooks {sorted(wired)}")
         checkpoint("capture")
-    paths, wired = session_files(
-        slot, spec, run_dir / "session-inputs", hooked=situation.client_shape == "hooked"
-    )
+    else:
+        paths = session_paths(inputs_dir, hooked=hooked)
     digests = files_digests(paths, slot)
-    if digests != {k: shape.get(k) for k in digests} or wired != spec.wired_hooks:
-        raise SystemExit(
-            f"refused: the session files moved since binding: {digests}, hooks {sorted(wired)}"
-        )
+    if digests != {k: shape.get(k) for k in digests}:
+        raise SystemExit(f"refused: the session files moved since binding: {digests}")
     executor = ClaudeSessionExecutor(
         layout=Layout(run_dir),
         specs={config.arm: spec},
@@ -715,7 +879,7 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
             faults += _session_faults("capture", capture_dir)
             run["sessions"].append(session_object("capture", capture, capture_dir, run_dir))
             if capture["outcome"] == HARNESS_FAULT:
-                return finish("struck")
+                return finish("struck", capture_dir / f"attempt-{capture['attempts']}")
             before = tree_digest(slot.vault)
             since, until = json.loads((capture_dir / WINDOW_FILE).read_text(encoding="utf-8"))
             run["end_state"] = _child(
@@ -736,7 +900,7 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
                 faults.append(
                     _fault("readback", 1, HARNESS_FAULT, "the readback changed the vault")
                 )
-                return finish("struck")
+                return finish("struck", run_dir / "readback")
             checkpoint("fresh")
         fresh, fresh_dir = _session(
             config, situation, "fresh", (situation.question,), slot, spec, run_dir, executor, paths
@@ -763,6 +927,7 @@ def run_situation(config: RunConfig, binding: Mapping, situation: Situation) -> 
         if ACTOR_FAILURE in outcomes
         else "ok"
     )
-    path = finish(status)
-    slot.wipe()
-    return path
+    # Only the fresh session can strike here; the capture session's strike returned above.
+    return finish(
+        status, fresh_dir / f"attempt-{fresh['attempts']}" if status == "struck" else None
+    )

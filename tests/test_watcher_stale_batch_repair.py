@@ -101,8 +101,13 @@ def test_a_stale_watcher_batch_replays_its_paths_and_names_its_cause(
     assert rebuilds == [], "a stale batch rebuilt the whole catalogue"
     assert _paths_matching(store, "afterchange") == [PAGE]
     assert _paths_matching(store, "steadytext") == [UNTOUCHED]
+    started = [
+        record.fields
+        for record in caplog.records
+        if getattr(record, "event", None) == "lexical_repair_started"
+    ]
     assert any(
-        "scope=targeted" in message and "causes=watcher_batch_stale" in message
-        for message in caplog.messages
-    ), caplog.messages
+        fields["kind"] == "targeted" and "watcher_batch_stale" in fields["causes"].split(",")
+        for fields in started
+    ), started
 

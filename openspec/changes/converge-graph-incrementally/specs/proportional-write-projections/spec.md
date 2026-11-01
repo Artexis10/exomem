@@ -10,9 +10,15 @@ to select affected sources without rereading unrelated Markdown bodies.
 A refresh or drain that owns the stored topology SHALL prove the topology from the
 delta, from the pages the delta affects, and from every page that holds a stored
 edge to a moved page. It SHALL NOT read or re-normalise the Markdown bodies of pages
-outside that set. A check that the dependency index is complete MAY scan that index. The
-publication proof and the source-version proof remain required for every page the
-pass rewrites, independently of discovery.
+outside that set. A check that the dependency index is complete SHALL answer from a
+proof that the sidecar records, and SHALL read the whole index only when none is
+recorded. Any change to the file rows or the dependency rows SHALL retire the recorded
+proof in the same transaction, whichever writer made it. A writer that keeps the index
+complete SHALL record the proof again in its own transaction, after proving the sources
+it changed when the proof was recorded at the start of its transaction, otherwise the whole
+index. The publication proof and the
+source-version proof remain required for every page the pass rewrites, independently of
+discovery.
 
 A change with no recorded file event SHALL converge on its event or on the periodic
 reconcile. An edit that leaves the file's stat unchanged SHALL converge no later than
@@ -48,3 +54,15 @@ state and SHALL retain its established unresolved-link presentation.
 #### Scenario: An edit that leaves the file stat unchanged converges by the next change or rebuild
 - **WHEN** a page's bytes change while its file stat stays the same
 - **THEN** the graph converges no later than that page's next change or the next whole-vault rebuild
+
+#### Scenario: A recorded completeness proof does not outlive the rows it describes
+- **WHEN** a repair, a schema migration, a purge, or a writer of another release changes a file row or a dependency row
+- **THEN** the next completeness check reads the whole index and answers from the rows, not from the earlier proof
+
+#### Scenario: A cold start does not read the whole dependency index
+- **WHEN** an owned refresh or drain runs first after a process start, with the sidecar pages absent from the page cache, and the last writer recorded the completeness proof
+- **THEN** the completeness check reads no dependency rows
+
+#### Scenario: A writer that starts without a recorded proof does not record one for pages it did not touch
+- **WHEN** a page that the writer does not change has no dependency coverage, and the writer finds no recorded proof when its transaction starts
+- **THEN** the writer proves the whole index, finds the gap, and records no proof

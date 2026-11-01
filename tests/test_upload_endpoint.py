@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from held_boundary import held_boundary
 
 from exomem import server
 
@@ -296,7 +297,7 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
             yield
 
         @contextmanager
-        def mutation_guard(self, guarded_vault):
+        def absorbing_mutation_guard(self, guarded_vault, *, operation):
             assert guarded_vault == vault
             events.append("guard-enter")
             self.depth += 1
@@ -343,7 +344,7 @@ def test_upload_media_reconciliation_uses_writer_authority(
             yield
 
         @contextmanager
-        def mutation_guard(self, guarded_vault):
+        def absorbing_mutation_guard(self, guarded_vault, *, operation):
             nonlocal depth
             assert guarded_vault == vault
             depth += 1
@@ -388,7 +389,7 @@ def test_upload_maps_mutation_lock_errors(
             return None
 
         @contextmanager
-        def mutation_guard(self, _vault):
+        def absorbing_mutation_guard(self, _vault, *, operation):
             raise OpError(code, "lock rejected the upload")
             yield
 
@@ -402,6 +403,63 @@ def test_upload_maps_mutation_lock_errors(
 
     assert response.status_code == status, response.text
     assert response.json()["code"] == code
+
+
+@pytest.mark.parametrize("lane", ["evidence", "source"])
+def test_an_upload_waits_out_a_held_boundary_and_commits_once(
+    vault, monkeypatch: pytest.MonkeyPatch, lane: str
+) -> None:
+    """Another writer holds the boundary past one acquire timeout; the client sees no 409."""
+    from exomem import upload_tokens
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    token = upload_tokens.mint("sekret", scope=upload_tokens.upload_scope(lane))
+    data = b"bytes uploaded while another writer holds the boundary"
+
+    with held_boundary(vault, monkeypatch):
+        response = client.post(
+            "/upload",
+            files={"file": ("held.bin", data, "application/octet-stream")},
+            data={"scope": "Held", "category": "Wait", "title": "Held upload"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 201, response.text
+    stored = [
+        p for p in vault.rglob("*")
+        if p.is_file() and p.stat().st_size == len(data) and p.read_bytes() == data
+    ]
+    assert [p.relative_to(vault).as_posix() for p in stored] == [
+        response.json().get("artifact_path") or response.json()["path"]
+    ]
+
+
+def test_a_busy_raised_after_the_stream_was_read_is_not_run_again(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running the body again would preserve an empty stream: only the acquire is waited out."""
+    from exomem import preserve
+    from exomem.cli_ops import OpError
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    runs = 0
+
+    def busy_after_reading(_vault, *, stream, **_kwargs):
+        nonlocal runs
+        runs += 1
+        stream.read()
+        raise OpError("MUTATION_BUSY", "nested boundary busy", details={"committed": False})
+
+    monkeypatch.setattr(preserve, "preserve_stream", busy_after_reading)
+    response = client.post(
+        "/upload",
+        files={"file": ("once.bin", b"bytes", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert runs == 1
 
 
 def test_identical_concurrent_uploads_serialize_before_append_only_check(

@@ -18,8 +18,10 @@ and commits. A mismatch or content that can never be preserved fails the
 session and deletes its bytes, and the bytes are deleted after a commit. A
 commit that fails for any other reason, such as a full disk or a lease handoff,
 keeps the bytes and leaves the session `retryable`; the next read retries it.
-A per-session file lock lets one process at a time commit a session, and a
-store-wide one serialises creation, so its limits hold across processes.
+When the vault was only busy or warming, the server also retries it after a wait
+that doubles from 2 to 60 seconds, until the session expires. A per-session
+file lock lets one process at a time commit a session, and a store-wide one
+serialises creation, so its limits hold across processes.
 
 A session expires `TTL_SECONDS` after its last accepted part, and a sweep at
 creation and at the serving runtime's start removes expired sessions with
@@ -94,6 +96,15 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CHUNK = 1024 * 1024
 #: How long a session waits for an earlier part or failed worker to release its lock.
 _LOCK_WAIT_SECONDS = 30.0
+# A commit that ends retryable for a busy vault is started again by the server: first after
+# `REATTEMPT_INITIAL_SECONDS`, then after twice the previous wait, to `REATTEMPT_MAX_SECONDS`.
+REATTEMPT_INITIAL_SECONDS = 2.0
+REATTEMPT_MAX_SECONDS = 60.0
+# The codes a busy or still-warming vault gives; they are `OpError` codes that the vault's own
+# lock, store and warm-up fix, so this set is closed by them. Other retryable codes (a full
+# disk, an unknown outcome) need the client or an operator, so the server leaves them alone.
+# nosemgrep: ep-word-set -- these are the vault's documented transient error codes.
+_REATTEMPT_CODES = frozenset({"MUTATION_BUSY", "COLLECTION_STORE_BUSY", "MUTATION_WARMING"})
 _now = time.time
 
 
@@ -177,6 +188,10 @@ class _Running:
     lock: threading.Lock = field(default_factory=threading.Lock)
     size: int = -1
     digest: Any = None
+    parked: str | None = None  # the code of the park last recorded for a caller
+    # The one pending re-attempt, and the wait that the next one gets.
+    reattempt: threading.Timer | None = None
+    reattempt_wait: float = field(default_factory=lambda: REATTEMPT_INITIAL_SECONDS)
 
 
 _RUNNING: dict[str, _Running] = {}
@@ -190,7 +205,9 @@ def _running(session_id: str) -> _Running:
 
 def _forget(session_id: str) -> None:
     with _RUNNING_LOCK:
-        _RUNNING.pop(session_id, None)
+        running = _RUNNING.pop(session_id, None)
+    if running is not None and running.reattempt is not None:
+        running.reattempt.cancel()
 
 
 def _store(vault_root: Path) -> Path:
@@ -536,6 +553,48 @@ def _commit(store: Path, session_id: str, committer: Committer, lock: FileLock) 
         _commit_locked(store, session_id, committer, _running(session_id))
     finally:
         lock.release()
+    _schedule_reattempt(store, session_id, committer)
+
+
+def _schedule_reattempt(store: Path, session_id: str, committer: Committer) -> None:
+    """After a commit that a busy vault left retryable, start it again later, with no client.
+
+    A client that sent every byte has nothing more to send, and the vault's contention is the
+    server's to wait out. One timer waits per session, so a client that also reads the session
+    and starts a commit does not add a second one; the session's expiry ends the attempts.
+    """
+    record = _read_record(store, session_id)
+    if record is None or record.get("state") != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+        return
+    with _RUNNING_LOCK:
+        running = _RUNNING.get(session_id)
+        if running is None or running.reattempt is not None:
+            return
+        wait = running.reattempt_wait
+        running.reattempt_wait = min(wait * 2, REATTEMPT_MAX_SECONDS)
+        timer = threading.Timer(wait, _reattempt, args=(store, session_id, committer))
+        timer.name = f"upload-session-reattempt-{session_id[:8]}"
+        timer.daemon = True
+        running.reattempt = timer
+        timer.start()
+
+
+def _reattempt(store: Path, session_id: str, committer: Committer) -> None:
+    with _RUNNING_LOCK:
+        running = _RUNNING.get(session_id)
+        if running is None:
+            return
+        running.reattempt = None
+    record = _read_record(store, session_id)
+    try:
+        expired = record is None or float(record["expires"]) <= _now()
+    except (KeyError, TypeError, ValueError):
+        expired = True
+    if expired or record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+        return
+    # An empty context: nothing of the request that began the session, its principal included,
+    # reaches the commit, which binds the transfer principal itself.
+    contextvars.Context().run(start_commit, Session(store, record), committer)
 
 
 def _commit_locked(store: Path, session_id: str, committer: Committer, running: _Running) -> None:
@@ -555,21 +614,34 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
     if size != int(record["length"]) or not hmac.compare_digest(digest, record["sha256"]):
         _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
         return
+    from .mutation_journal import retrying_park
+
     try:
-        receipt = committer(part, record)
+        # A refusal with the code of the park this retry started from adds no row and no count.
+        with retrying_park(running.parked):
+            receipt = committer(part, record)
     except CommitFailed as exc:
         if not exc.retryable:
             _fail(store, record, exc.code, exc.reason)
             return
-        code, reason = exc.code, exc.reason
-    except Exception:  # noqa: BLE001 - the bytes are sound, so a retry may succeed
+        code, reason, refusal = exc.code, exc.reason, exc
+    except Exception as exc:  # noqa: BLE001 - the bytes are sound, so a retry may succeed
         log.exception("upload session commit failed")
         code, reason = "UPLOAD_COMMIT_FAILED", "the upload could not be preserved yet"
+        refusal = exc
     else:
         _write_record(store, {**record, "state": COMMITTED, "receipt": receipt})
         _remove(part)
         _forget(session_id)
         return
+    # The committer ran outside any request's dispatcher, so the park records itself. A poll retries a parked
+    # session and parks it again for the same reason: that is one refusal, not a new one. A new process
+    # starts without this memory, so it records one row for each park code.
+    if running.parked != code:
+        from .writer_lease import record_caller_refusal
+
+        record_caller_refusal(refusal, tool="upload_session", code=code)
+        running.parked = code
     _write_record(store, {**record, "state": RETRYABLE, "code": code, "reason": reason})
 
 

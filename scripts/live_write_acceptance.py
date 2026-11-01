@@ -3,6 +3,10 @@
 The connector measures HTTP entry to acknowledgement and the public read that
 immediately follows it. Its service owns startup and background convergence.
 Direct mode is an in-process helper diagnosis, not maintained-runtime proof.
+On a vault with a collection store it serves that store as a managed service does:
+its own loopback writer-lease coordinator, then the lease and the store thread, then
+managed recall, before it writes anything. It never enrols a store: a copied vault is
+refused with the product's own adoption instruction, which the owner runs first.
 The deterministic gate in ``semantic_write_latency.py`` proves the shape on
 synthetic corpora.
 
@@ -31,20 +35,26 @@ this at a live cell is the one way it could do harm.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.metadata
 import importlib.resources
 import json
 import os
+import secrets
+import signal
 import socket
 import sqlite3
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -60,6 +70,7 @@ if _bootstrap.parse_known_args()[0].package_mode == "source":
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import e2e_product_loop as loop  # noqa: E402
 import managed_recall  # noqa: E402
 import records_live_acceptance  # noqa: E402
 import yaml  # noqa: E402
@@ -81,6 +92,8 @@ from exomem import (  # noqa: E402
 )
 from exomem import find as find_module  # noqa: E402
 from exomem.cli_ops import OpError  # noqa: E402
+from exomem.collection_store import ownership  # noqa: E402
+from exomem.collection_store import runtime as store_runtime  # noqa: E402
 
 #: The design's installed-product numbers. Not this script's to tune.
 P50_MS = 3_000.0
@@ -95,6 +108,17 @@ CONVERGENCE_BOUND_SECONDS = 300.0
 # These are the public commands this acceptance protocol measures.
 OPERATIONS = ("remember", "edit_memory", "record_memory", "plan_memory")
 TRANSPORTS = ("direct", "connector")
+
+#: A vault with a collection store is fenced by a writer-lease coordinator, whose database
+#: holds that fence. A copied vault is enrolled in this run's coordinator by the owner's
+#: offline ``exomem collections adopt-local``, so that step and this run name the same
+#: coordinator database (``<state-dir>/leases.sqlite``), vault id and replica id.
+LEASE_DATABASE_NAME = "leases.sqlite"
+LEASE_VAULT_ID = "live-write-acceptance"
+LEASE_REPLICA_ID = "live-write-acceptance-direct"
+#: The store thread opens and admits the store after the service starts; a store that
+#: is still not admitted after this long is reported with its refusal, not measured.
+STORE_ADMISSION_SECONDS = 300.0
 
 #: Bounded so one pathological response cannot be read into memory.
 _MAX_HTTP_RESPONSE_BYTES = 1_048_576
@@ -249,14 +273,110 @@ def _require_disposable_connector(
     }
 
 
+def _start_lease_coordinator(
+    state_dir: Path, token: str, package_mode: str
+) -> tuple[subprocess.Popen, str]:
+    """Start this run's own coordinator on a loopback port, its database under ``state_dir``.
+
+    The e2e journeys' port, readiness and termination helpers do the plumbing; none of
+    those scripts exports a coordinator start of its own.
+    """
+    (reservation,) = loop._reserve_port_reservations(1)
+    port = int(reservation.getsockname()[1])
+    url = f"http://127.0.0.1:{port}"
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key != "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"
+    }
+    environment["EXOMEM_LEASE_COORDINATOR_TOKEN"] = token
+    if package_mode == "source":
+        environment["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(SRC), environment.get("PYTHONPATH")) if part
+        )
+    log = state_dir / "coordinator.log"
+    reservation.close()
+    with log.open("w", encoding="utf-8") as handle:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "exomem.lease_coordinator", "--host", "127.0.0.1",
+             "--port", str(port), "--database", str(state_dir / LEASE_DATABASE_NAME)],
+            env=environment, stdout=handle, stderr=subprocess.STDOUT, text=True,
+        )
+    try:
+        loop._wait_http_ready(
+            lambda: loop._http_json(
+                f"{url}/v1/vaults/{LEASE_VAULT_ID}/lease", token=token, timeout=1.0
+            )[0] == 200,
+            proc=process, deadline=time.monotonic() + 60.0, log=log, label="lease coordinator",
+        )
+    except BaseException:
+        loop._terminate(process, 10.0)
+        raise
+    return process, url
+
+
+def _require_store_served(vault_root: Path, state_dir: Path, manager: writer_lease.LeaseManager) -> None:
+    """Refuse a run whose store never reached admission, with the product's own reason.
+
+    The product's refusal says what to run; this adds which coordinator that step must address.
+    """
+    deadline = time.monotonic() + STORE_ADMISSION_SECONDS
+    while True:
+        status = manager.status().get("collection_store", {})
+        if status.get("status") == "admitted":
+            return
+        # The runtime exposes no public read of the store thread's refusal; a rename fails the adoption test.
+        server = store_runtime._SERVERS.get(vault_root.resolve())
+        # The refusal that `exomem collections adopt-local` is named in, as the product reads it.
+        code, message = server.refusal if server is not None else ("COLLECTION_STORE_UNAVAILABLE", "no store thread")
+        if code != "COLLECTION_STORE_UNAVAILABLE" or time.monotonic() >= deadline:
+            raise SystemExit(
+                f"the vault's collection store is not served ({code}): {message}; this run's coordinator "
+                f"database is {state_dir / LEASE_DATABASE_NAME}, with vault id {LEASE_VAULT_ID} and "
+                f"replica id {LEASE_REPLICA_ID}"
+            )
+        time.sleep(0.25)
+
+
+@contextlib.contextmanager
+def _served_store(
+    vault_root: Path, state_dir: Path, package_mode: str
+) -> Iterator[writer_lease.LeaseManager]:
+    """Serve a vault that has a collection store as a managed service does.
+
+    A service starts its writer lease and the store thread behind it before it takes
+    a request; the store refuses every route until a coordinator fences it and the
+    thread has admitted it. The service environment is patched for the length of the
+    run only, so the process the caller owns is left as it was found.
+    """
+    token = secrets.token_hex(16)
+    coordinator, url = _start_lease_coordinator(state_dir, token, package_mode)
+    try:
+        with mock.patch.dict(os.environ, {
+            "EXOMEM_VAULT_PATH": str(vault_root),
+            "EXOMEM_WRITER_LEASE_URL": url, "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": LEASE_VAULT_ID,
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": LEASE_REPLICA_ID,
+            "EXOMEM_WRITER_LEASE_TOKEN": token, "EXOMEM_WRITER_LEASE_STATE_DIR": str(state_dir),
+            "EXOMEM_WRITER_LEASE_PREFERRED": "1",
+        }):
+            manager = writer_lease.start_server_lifecycle()
+            try:
+                _require_store_served(vault_root, state_dir, manager)
+                yield manager
+            finally:
+                writer_lease.stop_server_lifecycle()
+    finally:
+        loop._terminate(coordinator, 10.0)
+
+
 class _DirectTransport:
     """The same public command descriptors and lease boundary as the server."""
 
     name = "direct"
 
-    def __init__(self, vault_root: Path, state_dir: Path) -> None:
+    def __init__(self, vault_root: Path, manager: writer_lease.LeaseManager) -> None:
         self.vault_root = vault_root
-        self.manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=state_dir))
+        self.manager = manager
 
     def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, dict[str, Any]]:
         command = next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
@@ -765,7 +885,6 @@ def measure(
         client: Any = _ConnectorTransport(connector_url, connector_token)
     else:
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        client = _DirectTransport(root, state_dir)
 
     if transport == "direct":
         os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
@@ -833,9 +952,21 @@ def measure(
         except (Exception, SystemExit):  # noqa: BLE001 - a failed read proves no visibility
             return "unknown"
 
+    served_store = contextlib.ExitStack()
     try:
         if transport == "connector":
             relation_target = _connector_relation_target(client)
+        else:
+            # A service serves its store and enters managed recall before it takes a
+            # write, and the collections below are writes that the store has to take.
+            if ownership.file_only(root):
+                manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=state_dir))
+            else:
+                manager = served_store.enter_context(_served_store(root, state_dir, package_mode))
+            client = _DirectTransport(root, manager)
+            recall_admission = str(
+                managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")
+            )
         example, planning_path = _prepare_collections(client)
         if transport == "connector":
             preparation_seconds, preparation_converged, preparation_drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds)
@@ -853,9 +984,6 @@ def measure(
             retrieval = connector_runtime.get("retrieval") or {}
             recall_admission = str(retrieval.get("state", "unverified"))
         else:
-            recall_admission = str(
-                managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")
-            )
             preparation_seconds, preparation_converged, preparation_drain = _converge(
                 root, bound_seconds=convergence_bound_seconds
             )
@@ -921,6 +1049,7 @@ def measure(
     finally:
         if transport == "direct":
             readiness.unmanage_runtime()
+        served_store.close()
 
     if transport == "connector":
         convergence_seconds, converged, drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds, started=last_acknowledged)
@@ -1160,4 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A plain `kill` must unwind the finally blocks, or the run's coordinator outlives it. KeyboardInterrupt,
+    # not SystemExit: the per-case guards record SystemExit as a failed case and carry on.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     raise SystemExit(main())

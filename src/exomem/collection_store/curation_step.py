@@ -278,6 +278,8 @@ def verify_imported(writer, prepared, postimage, *, kind):
 def needs_store(root, command, arguments):
     """Whether a curation or episode command has a Records step in a canonically owned collection.
 
+    Structured-files maintenance on such a collection counts too: it moves the collection's views.
+
     A step on a store collection runs only on the store thread, so the whole command runs there;
     every other curation keeps its current path. The collections come from the sealed plans the
     command names, or from the leaves an episode prepare proposes. Anything unreadable is not
@@ -291,6 +293,9 @@ def needs_store(root, command, arguments):
     if command == "maintain_memory":
         if arguments.get("mode") == "curation" and isinstance(arguments.get("run_id"), str):
             runs.append(arguments["run_id"])
+        elif arguments.get("mode") == "structured-files" and isinstance(arguments.get("collection"), str):
+            # Filename maintenance on a store collection moves its views through the store writer.
+            selectors.add(arguments["collection"])
     elif arguments.get("action") == "prepare":
         proposal = arguments.get("proposal")
         leaves = proposal.get("leaves") if isinstance(proposal, Mapping) else None

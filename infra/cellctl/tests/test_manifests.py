@@ -11,6 +11,7 @@ import pytest
 
 from cellctl.imports import PHASES, ImportRow
 from cellctl.manifests import (
+    CELL_HEALTH_PORT,
     CELL_PORT,
     STORAGE_CLASS,
     CellManifestSpec,
@@ -66,15 +67,22 @@ def test_resource_quota_is_present_and_bounds_storage() -> None:
     assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
 
 
-def test_runtime_network_policy_admits_only_the_gateway_on_cell_port() -> None:
+def test_runtime_ingress_admits_the_gateway_to_the_cell_port_and_cellctl_to_the_health_port_only() -> None:
+    """cellctl derives every cell bearer, so it may reach only the health-only
+    port; the cell port, which carries MCP, stays the gateway's alone."""
     policies = render_network_policies(_spec())
     runtime = next(p for p in policies if p["metadata"]["name"] == "runtime-ingress")
-    rule = runtime["spec"]["ingress"]
-    assert len(rule) == 1
-    peer = rule[0]["from"][0]
-    assert peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] == "exomem-cloud"
-    assert peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "exomem-cloud-gateway"
-    assert rule[0]["ports"] == [{"protocol": "TCP", "port": CELL_PORT}]
+
+    def platform_peer(name: str) -> list[dict]:
+        return [{
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "exomem-cloud"}},
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": name}},
+        }]
+
+    assert runtime["spec"]["ingress"] == [
+        {"from": platform_peer("exomem-cloud-gateway"), "ports": [{"protocol": "TCP", "port": CELL_PORT}]},
+        {"from": platform_peer("cellctl"), "ports": [{"protocol": "TCP", "port": CELL_HEALTH_PORT}]},
+    ]
 
 
 @pytest.mark.parametrize("phase", PHASES)

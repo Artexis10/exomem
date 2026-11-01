@@ -32,6 +32,7 @@ from .capacity import (
     parse_budget_frame,
     quantity,
 )
+from .cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH
 from .manifests import (
     BACKUP_FAMILY_ANNOTATION,
     BACKUP_JOB_NAME,
@@ -45,6 +46,8 @@ from .manifests import (
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
+    MEDIA_CENSUS_UNKNOWN,
+    MEDIA_EDGE_ACCESS_LABEL,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
     PREVIOUS_IMAGE_ANNOTATION,
@@ -61,7 +64,7 @@ from .manifests import (
     snapshot_backup_name,
 )
 from .media_edge import ACTIVE_SET_NAME, read_generation
-from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation
+from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation, MediaCensus
 from .storage.topolvm import FamilyRequest, LocalVolumeState, LogicalVolume
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
@@ -90,35 +93,45 @@ API_REQUEST_TIMEOUT = (5, 30)
 # never a clean one.
 METRICS_TIMEOUT = 3.0
 METRICS_MAX_BYTES = 256 * 1024
+# The cell-recall-lagging alert reads each cell's readiness answer, a few KB of
+# fixed fields, the same way.
+READINESS_TIMEOUT = 3.0
+READINESS_MAX_BYTES = 64 * 1024
 
 
-async def _read_metrics(targets: dict[str, str], port: int, scraped: dict[str, str]) -> None:
-    """Fills `scraped` with the page of each node in `targets` (node -> pod IP)
-    that answered in time; the others are left out."""
+async def _read_pages(urls: dict[str, str], *, timeout: float, max_bytes: int) -> dict[str, bytes]:
+    """The body of each page in `urls` (key -> URL) that answered 2xx within
+    `timeout`; the others are left out."""
 
-    async def read(client: httpx.AsyncClient, node: str, address: str) -> None:
+    pages: dict[str, bytes] = {}
+
+    async def read(client: httpx.AsyncClient, key: str, url: str) -> None:
         try:
-            async with asyncio.timeout(METRICS_TIMEOUT):
-                async with client.stream("GET", f"http://{address}:{port}/metrics") as response:
+            async with asyncio.timeout(timeout):
+                async with client.stream("GET", url) as response:
                     response.raise_for_status()
                     body = b""
                     # Raw bytes, so the cap counts what the pod sent: a decoded
                     # stream would inflate a small compressed body before the check.
                     async for chunk in response.aiter_raw():
                         body += chunk
-                        if len(body) > METRICS_MAX_BYTES:
-                            raise ValueError("metrics page too large")
-            scraped[node] = body.decode("utf-8")
+                        if len(body) > max_bytes:
+                            raise ValueError("page too large")
+            pages[key] = body
         except (httpx.HTTPError, httpx.InvalidURL, ValueError, TimeoutError):
             pass
 
     # timeout=None: the asyncio.timeout above is the one bound, covering the phases a socket timeout misses.
-    # Accept-Encoding identity: the exporters then send plain text, and a page that is
+    # max_connections=None: one connection per page, all at once, so no page
+    # waits behind another inside its own timeout. `urls` bounds the count.
+    # Accept-Encoding identity: the pods then send plain text, and a page that is
     # compressed anyway fails to decode or parse and reads unreadable.
     async with httpx.AsyncClient(
-        trust_env=False, timeout=None, headers={"Accept-Encoding": "identity"}
+        trust_env=False, timeout=None, limits=httpx.Limits(max_connections=None),
+        headers={"Accept-Encoding": "identity"},
     ) as client:
-        await asyncio.gather(*(read(client, node, address) for node, address in targets.items()))
+        await asyncio.gather(*(read(client, key, url) for key, url in urls.items()))
+    return pages
 
 
 def _bound_requests(api_client: k8s.ApiClient) -> None:
@@ -289,14 +302,35 @@ class ClusterClient:
         failed pod listing raises. The chart grants `list` on pods."""
 
         targets = {
-            pod.spec.node_name: pod.status.pod_ip
+            pod.spec.node_name: f"http://{pod.status.pod_ip}:{port}/metrics"
             for pod in self._core.list_namespaced_pod(namespace, label_selector=selector).items
             if pod.status.phase == "Running" and not pod.metadata.deletion_timestamp
             and pod.spec.node_name and pod.status.pod_ip
         }
+        pages = asyncio.run(_read_pages(targets, timeout=METRICS_TIMEOUT, max_bytes=METRICS_MAX_BYTES))
         scraped: dict[str, str] = {}
-        asyncio.run(_read_metrics(targets, port, scraped))
+        for node, body in pages.items():
+            try:
+                scraped[node] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
         return scraped
+
+    def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
+        """The cell-recall-lagging alert's input: each cell's readiness answer,
+        read from its health-only port on its ready pod's own IP (`addresses`:
+        cell id -> pod IP). cellctl derives every cell bearer, so it reads no
+        other port of a cell, and the network policies admit it to no other.
+        A pod that does not answer 2xx in time (a cell that is not ready
+        answers 503), or sends more than READINESS_MAX_BYTES, is left out: an
+        unread cell, never a clean one. The body is the caller's to parse and
+        never to log."""
+
+        urls = {
+            cell_id: f"http://{address}:{CELL_HEALTH_PORT}{CELL_READINESS_PATH}"
+            for cell_id, address in addresses.items()
+        }
+        return asyncio.run(_read_pages(urls, timeout=READINESS_TIMEOUT, max_bytes=READINESS_MAX_BYTES))
 
     def observe_import_jobs(self, namespace: str, import_id: str):
         import json
@@ -524,7 +558,8 @@ class ClusterClient:
         self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None,
         family_secret_references: frozenset[tuple[str, str]] | None = frozenset(),
     ) -> ClusterObservation:
-        namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
+        namespace_labels = namespace_obj.metadata.labels or {}
+        namespace_cell_label = namespace_labels.get(CELL_LABEL)
         namespace_annotations = getattr(namespace_obj.metadata, "annotations", None) or {}
         namespace_volume_lost = namespace_annotations.get(VOLUME_LOST_ANNOTATION)
         namespace_move_volume = namespace_annotations.get(MOVE_VOLUME_ANNOTATION)
@@ -628,6 +663,7 @@ class ClusterClient:
         ready_pod_image = None
         if ready_pod is not None and ready_pod.spec.containers:
             ready_pod_image = ready_pod.spec.containers[0].image
+        ready_pod_ip = (ready_pod.status.pod_ip or None) if ready_pod is not None else None
         pod_uses_volume = pod_exists  # single PVC per namespace, ReadWriteOnce
         pod_node = next((pod.spec.node_name for pod in live_pods if pod.spec.node_name), None)
         # D4: the init deadline is measured from the current pod's creation,
@@ -646,6 +682,7 @@ class ClusterClient:
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
+        backup_media_census = None
         snapshot_steps: dict[str, bool] = {}
         if backup_family_request or (started_raw and hold_kind == SNAPSHOT_BACKUP):
             snapshot_steps = self._snapshot_steps(namespace, started_raw, backup_family_request)
@@ -654,8 +691,9 @@ class ClusterClient:
             backup_job = self._get_job(namespace, backup_name)
             restore_job = self._get_job(namespace, hold_job_name(RESTORE_JOB_NAME, started_raw))
             if backup_job is not None and bool(backup_job.status.succeeded):
-                backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(
-                    self._job_pod_termination_message(namespace, backup_name))
+                report = self._job_pod_termination_message(namespace, backup_name)
+                backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(report)
+                backup_media_census = _media_census(report)
             elif backup_job is not None and bool(backup_job.status.failed):
                 message = self._job_pod_termination_message(namespace, backup_name, succeeded=False)
                 backup_failure_code = message if message in BACKUP_FAILURE_CODES else None
@@ -670,6 +708,7 @@ class ClusterClient:
         return ClusterObservation(
             namespace_exists=True,
             namespace_cell_label=namespace_cell_label,
+            namespace_media_edge_access=namespace_labels.get(MEDIA_EDGE_ACCESS_LABEL) == "true",
             pvc_bound=pvc_bound,
             pvc_volume_id=pvc_volume_id,
             pvc_uid=pvc_uid,
@@ -721,9 +760,11 @@ class ClusterClient:
             init_started_at=init_started_at,
             init_error_code=init_error_code,
             ready_pod_image=ready_pod_image,
+            ready_pod_ip=ready_pod_ip,
             **_job_observation(backup_job, prefix="backup_job", snapshot_id=backup_snapshot_id),
             backup_job_used_bytes=backup_used_bytes,
             backup_job_total_bytes=backup_total_bytes,
+            backup_job_media_census=backup_media_census,
             backup_job_failure_code=backup_failure_code,
             **_job_observation(restore_job, prefix="restore_job"),
             **snapshot_steps,
@@ -1230,13 +1271,39 @@ def _backup_report(message: str | None) -> tuple[str | None, int | None, int | N
     them consistently. A use report that does not add up is dropped; the
     backup it came with still counts."""
 
-    match = _BACKUP_REPORT.fullmatch(message or "")
+    # add-cloud-media-store D12: the media census follows on a line of its own.
+    report = None if message is None else message.partition("\n")[0]
+    match = _BACKUP_REPORT.fullmatch(report or "")
     if match is None:
-        return message, None, None
+        return report, None, None
     used, total = int(match["used"]), int(match["total"])
     if not 0 <= used <= total or total == 0:
         return match["snapshot"], None, None
     return match["snapshot"], used, total
+
+
+# add-cloud-media-store D12: the backup Job's second line, "<evicted count> <evicted bytes>
+# <capture time>", a format manifests.render_backup_job fixes. MEDIA_CENSUS_UNKNOWN is an incomplete census;
+# a line with one count known and one unknown is no census, since a known 0 beside it would read as drained.
+_MEDIA_CENSUS = re.compile(
+    rf"(?:(?P<evicted>[0-9]{{1,19}}) (?P<bytes>[0-9]{{1,19}})|{re.escape(MEDIA_CENSUS_UNKNOWN)}) (?P<captured>\S+)")
+
+
+def _media_census(message: str | None) -> MediaCensus | None:
+    """The census a backup Job reported, or None when it reported none that cellctl can read.
+    None keeps a turned-off cell's key and egress, as no report does."""
+
+    match = _MEDIA_CENSUS.fullmatch((message or "").partition("\n")[2])
+    if match is None:
+        return None
+    try:
+        captured_at = datetime.fromisoformat(match["captured"])
+    except ValueError:
+        return None
+    if captured_at.tzinfo is None:
+        return None
+    evicted, evicted_bytes = (None if match[key] is None else int(match[key]) for key in ("evicted", "bytes"))
+    return MediaCensus(evicted=evicted, evicted_bytes=evicted_bytes, captured_at=captured_at)
 
 
 def _parse_timestamp(value) -> datetime | None:

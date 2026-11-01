@@ -306,6 +306,84 @@ def test_a_warm_up_that_cannot_admit_fails_the_measure(
         readiness.unmanage_runtime()
 
 
+def _enrol_store(
+    module: Any, vault: Path, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's offline `exomem collections create`, in the coordinator database a run will use."""
+    from test_collection_store_s1_gate import coordinator
+    from test_collection_store_summary import summary_text
+    from test_collection_store_writer import manifest_path
+
+    from exomem import __main__ as cli
+
+    state_dir.mkdir(parents=True)
+    manifest = state_dir / "store-collection.md"
+    manifest.write_text(summary_text(), encoding="utf-8")
+    for name, value in {
+        "EXOMEM_STATE_ROOT": str(state_dir / "product"),
+        "EXOMEM_WRITER_LEASE_URL": "http://localhost",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": module.LEASE_VAULT_ID,
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": module.LEASE_REPLICA_ID,
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(state_dir),
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN": "operator",
+    }.items():
+        monkeypatch.setenv(name, value)
+    with coordinator(state_dir / module.LEASE_DATABASE_NAME):
+        assert cli._collections_main([
+            "create", "--vault", str(vault), "--manifest-path", manifest_path(),
+            "--manifest-file", str(manifest), "--why", "disposable acceptance store",
+        ]) == 0
+    monkeypatch.delenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN")
+
+
+def test_direct_mode_serves_a_collection_store_before_it_prepares_collections(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vault with a store refuses every collection write until a service has admitted it.
+
+    The first live run on a copy of a real vault died preparing collections with
+    COLLECTION_NOT_FOUND: direct mode wrote them through a lease manager that had no
+    coordinator and no store thread, so the store read as absent.
+    """
+    module = _acceptance()
+    state_dir = tmp_path / "acceptance-state"
+    _enrol_store(module, vault, state_dir, monkeypatch)
+    try:
+        report = module.measure(
+            vault, transport="direct", samples_per_operation=1, state_dir=state_dir,
+            package_mode="source", convergence_bound_seconds=60.0,
+        )
+    finally:
+        module.readiness.unmanage_runtime()
+
+    assert [case["terminal_outcome"] for case in report["cases"]] == ["ok"] * 8
+    assert "EXOMEM_WRITER_LEASE_URL" in module.os.environ  # the caller's own value, put back
+    assert module.os.environ["EXOMEM_WRITER_LEASE_URL"] == "http://localhost"
+
+
+def test_direct_mode_refuses_a_copied_store_with_the_products_adoption_instruction(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy is not enrolled in this run's coordinator, so it is refused before any write."""
+    module = _acceptance()
+    _enrol_store(module, vault, tmp_path / "owner-state", monkeypatch)
+    state_dir = tmp_path / "acceptance-state"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(state_dir / "product"))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state_dir))
+    before = {path: path.read_bytes() for path in vault.rglob("*.md")}
+    try:
+        with pytest.raises(SystemExit, match=r"COLLECTION_STORE_ADOPTION_REQUIRED.*adopt-local.*leases\.sqlite"):
+            module.measure(
+                vault, transport="direct", samples_per_operation=1, state_dir=state_dir,
+                package_mode="source", convergence_bound_seconds=60.0,
+            )
+    finally:
+        module.readiness.unmanage_runtime()
+
+    assert {path: path.read_bytes() for path in vault.rglob("*.md")} == before
+
+
 def test_shared_warm_up_is_the_same_object_in_both_scripts() -> None:
     """One warm-up, imported twice -- not two warm-ups that agree today.
 

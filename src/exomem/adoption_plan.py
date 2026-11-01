@@ -15,7 +15,10 @@ import hashlib
 import json
 import os
 import posixpath
+import threading
+import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +29,7 @@ from . import (
     context_refs,
     find_results,
     held_fs,
+    import_stage,
     markdown_regions,
     note_types,
     reserved_paths,
@@ -135,46 +139,73 @@ def earlier_import_of(
     )
 
 
+def _source_pages(root: Path) -> list[Path]:
+    """Every Markdown page under Sources, in the order `read_import_index` reads them."""
+    sources = kb_root(root) / "Sources"
+    pages: list[Path] = []
+    if not sources.is_dir():
+        return pages
+    for dirpath, dirnames, filenames in os.walk(sources):
+        dirnames.sort()
+        pages.extend(
+            Path(dirpath) / name for name in sorted(filenames) if name.lower().endswith(".md")
+        )
+    return pages
+
+
+def source_page_paths(root: Path) -> list[str]:
+    """The vault-relative path of every Markdown page under Sources that can hold an import.
+
+    Names only, no page is opened. The Sources index is left out: every filing rewrites it and it
+    holds no import, so it must not move `sources_seal`.
+    """
+    sources_index = kb_root(root) / "Sources" / "index.md"
+    return [
+        page.relative_to(root).as_posix() for page in _source_pages(root) if page != sources_index
+    ]
+
+
+def sources_seal(paths: Iterable[str]) -> str:
+    """An order-free digest of a set of Source page paths.
+
+    Two listings with one seal hold the same pages.
+    """
+    return hashlib.sha256("\n".join(sorted(set(paths))).encode("utf-8")).hexdigest()
+
+
+def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
+    """The entry a Source page's parsed front matter gives, or None when it names no original."""
+    try:
+        frontmatter = _leading_frontmatter(root, page)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return None
+    if frontmatter is None:
+        return None
+    imported_from = _text_field(frontmatter.get("imported_from"))
+    if imported_from is None:
+        return None
+    aliases = frontmatter.get("aliases")
+    return EarlierImport(
+        path=page.relative_to(root).as_posix(),
+        imported_from=imported_from,
+        import_collection=_text_field(frontmatter.get("import_collection")),
+        collection_path=_text_field(frontmatter.get("collection_path")),
+        original_sha256=_text_field(frontmatter.get("original_sha256")),
+        captured=str(frontmatter.get("captured") or ""),
+        aliases=tuple(
+            nfc(a) for a in aliases if isinstance(a, str) and a.strip()
+        ) if isinstance(aliases, list) else (),
+    )
+
+
 def read_import_index(root: Path) -> list[EarlierImport]:
     """Every Source page whose parsed front matter names its original.
 
     The decision is the parsed ``imported_from`` field, never a substring of the
     page, so a page that merely quotes a path does not count as an import.
     """
-    sources = kb_root(root) / "Sources"
-    found: list[EarlierImport] = []
-    if not sources.is_dir():
-        return found
-    for dirpath, dirnames, filenames in os.walk(sources):
-        dirnames.sort()
-        for name in sorted(filenames):
-            if not name.lower().endswith(".md"):
-                continue
-            page = Path(dirpath) / name
-            try:
-                frontmatter = _leading_frontmatter(root, page)
-            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-                continue
-            if frontmatter is None:
-                continue
-            imported_from = _text_field(frontmatter.get("imported_from"))
-            if imported_from is None:
-                continue
-            aliases = frontmatter.get("aliases")
-            found.append(
-                EarlierImport(
-                    path=page.relative_to(root).as_posix(),
-                    imported_from=imported_from,
-                    import_collection=_text_field(frontmatter.get("import_collection")),
-                    collection_path=_text_field(frontmatter.get("collection_path")),
-                    original_sha256=_text_field(frontmatter.get("original_sha256")),
-                    captured=str(frontmatter.get("captured") or ""),
-                    aliases=tuple(
-                        nfc(a) for a in aliases if isinstance(a, str) and a.strip()
-                    ) if isinstance(aliases, list) else (),
-                )
-            )
-    return found
+    entries = (read_import_entry(root, page) for page in _source_pages(root))
+    return [entry for entry in entries if entry is not None]
 
 
 def latest_earlier_import(
@@ -464,7 +495,8 @@ def source_failure(error: Exception) -> dict[str, str]:
 
 
 def read_facts(
-    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True
+    root: Path, original_path: str, *, ceiling: int, text_hint: bool, hash_artifact: bool = True,
+    vouched: tuple[import_stage.Identity, str] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Hash one original and decide how it imports.
 
@@ -472,6 +504,8 @@ def read_facts(
     ``{"code", "reason"}``. A text-like file that is not valid UTF-8, or is too big
     to hold, imports as an artifact so its bytes survive. With ``hash_artifact`` false an
     artifact is only sized and its ``original_sha256`` is None, for a caller whose copy hashes it.
+    An artifact whose identity equals ``vouched`` (a stage manifest's identity and SHA-256) takes that
+    SHA-256, is not bound by the ceiling and is not read: adoption files it by rename, not by copy.
     """
     from .add import AddError, artifact_identity
 
@@ -481,14 +515,20 @@ def read_facts(
 
         with open_original(root, original_path, physical=True) as source:
             size = source.version.size
-            if size > ceiling:
+            reads_as_text = text_hint and size <= INLINE_TEXT_MAX_BYTES
+            stands_for_bytes = (
+                vouched is not None and not reads_as_text and import_stage.Identity.of_version(source.version) == vouched[0]
+            )
+            if size > ceiling and not stands_for_bytes:
                 return {"code": OVER_CEILING, "reason": f"original exceeds the {ceiling:,} byte adoption ceiling"}
-            if text_hint and size <= INLINE_TEXT_MAX_BYTES:
+            if reads_as_text:
                 data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
                 if len(data) != size:
                     return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
                 text = decode_text(data)
                 digest, length = hashlib.sha256(data).hexdigest(), len(data)
+            elif stands_for_bytes:
+                digest, length = vouched[1], size
             elif hash_artifact:
                 digest, length = artifact_identity(source.stream, ceiling=ceiling)
             else:
@@ -546,47 +586,118 @@ def _is_note_of(
     )
 
 
+@dataclass(frozen=True)
+class _NotePage:
+    """What one non-Source page told the note index, and the file state it was read at.
+
+    `signature` is None when the page must be read again on the next refresh: it was
+    unreadable, or it changed too recently for its timestamps to prove a later change.
+    `identity` is `(import_collection, collection_path, type)`, or None for a page that
+    carries no import identity.
+    """
+
+    signature: tuple[int, int, int, int] | None
+    identity: tuple[str, str, Any] | None
+
+
+# A page whose timestamps are this close to the refresh may change again within the same
+# timestamp tick, which a later stat cannot see; FAT keeps timestamps at 2 s granularity.
+_RACY_NS = 2_000_000_000
+# The knowledge bases whose note pages this process remembers. A process serves one vault;
+# a test process makes many, so the oldest is dropped.
+_KNOWN_VAULTS = 4
+_NOTE_PAGES: OrderedDict[str, dict[str, _NotePage]] = OrderedDict()
+_NOTE_PAGES_LOCK = threading.Lock()
+
+
+def _known_note_pages(root: Path) -> dict[str, _NotePage]:
+    """The note pages this process last read under `root`, as of the last refresh."""
+    with _NOTE_PAGES_LOCK:
+        return _NOTE_PAGES.get(os.path.realpath(root), {})
+
+
+def _remember_note_pages(root: Path, pages: dict[str, _NotePage]) -> None:
+    key = os.path.realpath(root)
+    with _NOTE_PAGES_LOCK:
+        _NOTE_PAGES[key] = pages
+        _NOTE_PAGES.move_to_end(key)
+        while len(_NOTE_PAGES) > _KNOWN_VAULTS:
+            _NOTE_PAGES.popitem(last=False)
+
+
+def _page_signature(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino)
+
+
 class NoteIndex:
-    """The notes that earlier imports made, by import identity, read once per plan or apply call.
+    """The notes that earlier imports made, by import identity, as of this call's first lookup.
 
     A note carries the `import_collection` and `collection_path` of its original wherever
     the user has since moved it, so the index finds a moved note. The knowledge base is
-    walked on the first lookup: a call without an own-note item never reads the notes.
+    listed on the first lookup: a call without an own-note item never reads the notes.
+    The process remembers what each page said with the page's file signature, so a later
+    call reads again only the pages that were added or changed since, by any writer, and
+    forgets the pages that are gone. A page is read again when its mtime, ctime, size or
+    file id moved. On POSIX every write moves ctime. On native Windows `st_ctime` is the
+    creation time, so the guarantee there is "mtime, size or file id moved": an in-place
+    edit that keeps the size and restores the exact mtime is served as it was.
     """
 
     def __init__(self, root: Path) -> None:
         self._root = root
         self._paths: dict[tuple[str, str], str] | None = None
 
-    def _read(self) -> dict[tuple[str, str], str]:
+    def _refresh(self) -> dict[str, _NotePage]:
+        """Every non-Source page and what it says, reading only pages whose signature moved."""
         from .find_corpus import walk_md
 
-        found: dict[tuple[str, str], str] = {}
         kb = kb_root(self._root)
         if not kb.is_dir():
-            return found
-        basis = note_types.Basis(self._root)
+            return {}
+        known = _known_note_pages(self._root)
+        settled_before = time.time_ns() - _RACY_NS
         # A compiled page cannot be in Sources/: the mover refuses moves into it, and
         # `read_import_index` already reads its pages for their own identities.
         sources = kb / "Sources"
+        pages: dict[str, _NotePage] = {}
         # Sorted, so the first of two pages that carry one identity is always the same page.
         for page in sorted(walk_md(kb)):
             if page.is_relative_to(sources):
                 continue
+            rel = page.relative_to(self._root).as_posix()
+            try:
+                info = page.lstat()
+            except OSError:
+                continue
+            signature = _page_signature(info)
+            seen = known.get(rel)
+            if seen is not None and seen.signature == signature:
+                pages[rel] = seen
+                continue
+            # The signature is taken before the read, so a change during the read shows next time.
+            settled = max(info.st_mtime_ns, info.st_ctime_ns) < settled_before
             try:
                 frontmatter = _leading_frontmatter(self._root, page)
             except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                pages[rel] = _NotePage(None, None)
                 continue
-            if frontmatter is None:
-                continue
-            collection = _text_field(frontmatter.get("import_collection"))
-            collection_path = _text_field(frontmatter.get("collection_path"))
-            if collection is None or collection_path is None:
-                continue
-            if basis.selects(frontmatter.get("type"), note_types.compiled):
-                found.setdefault(
-                    (collection, collection_path), page.relative_to(self._root).as_posix()
-                )
+            identity = None
+            if frontmatter is not None:
+                collection = _text_field(frontmatter.get("import_collection"))
+                collection_path = _text_field(frontmatter.get("collection_path"))
+                if collection is not None and collection_path is not None:
+                    identity = (collection, collection_path, frontmatter.get("type"))
+            pages[rel] = _NotePage(signature if settled else None, identity)
+        _remember_note_pages(self._root, pages)
+        return pages
+
+    def _read(self) -> dict[tuple[str, str], str]:
+        found: dict[tuple[str, str], str] = {}
+        basis = note_types.Basis(self._root)
+        for rel, page in self._refresh().items():
+            # The type is judged on every call, because the vault's registry can change.
+            if page.identity is not None and basis.selects(page.identity[2], note_types.compiled):
+                found.setdefault(page.identity[:2], rel)
         return found
 
     def find(self, *, collection: str, collection_path: str) -> str | None:
@@ -725,9 +836,10 @@ def plan_item(
     index: Iterable[EarlierImport],
     notes: NoteIndex,
     ceiling: int,
+    vouched: tuple[import_stage.Identity, str] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Facts, identity and a frozen destination for one original; or a refusal dict."""
-    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint)
+    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
         return {"path": original_path, **read}
     facts, text = read
@@ -1042,8 +1154,11 @@ __all__ = [
     "plan_item",
     "plan_note",
     "plan_total_bytes",
+    "read_import_entry",
     "read_import_index",
     "resolve_links",
+    "source_page_paths",
+    "sources_seal",
     "title_from_text",
     "wikilink_for",
 ]

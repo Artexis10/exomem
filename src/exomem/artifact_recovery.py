@@ -284,7 +284,7 @@ def stage(
                     else time.monotonic() + seconds
                 )
                 path, metadata = _resolve(root, selected)
-                stack.enter_context(media_store.local_originals(root, (path,)))
+                stack.enter_context(media_store.local_originals(root, (path,), read=True))
                 available = shutil.disk_usage(temporary).free
                 copied = reserved_paths.copy_generic_file(
                     root,
