@@ -110,53 +110,45 @@ def _digest(admitted: list[tuple[Any, Any]]) -> str:
     return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()[:24]
 
 
-#: Owed rows by (vault, admitted digest, last-told stamp, window start, audience, policy,
-#: tombstones). The digest is the content identity of everything admitted, so a save or a revert
-#: reads another key. History admission follows the audience, the policy and the tombstones and
-#: not that digest, so each is part of the key. Bounded, cleared when full.
-_OWED_ROWS: dict[tuple[Any, ...], list[tuple[str, str, Any]]] = {}
-_OWED_ROWS_CAP = 16
+def _history_kept(root: Path, spec: Any) -> bool:
+    """False when the registry has no history directory: nothing was ever kept, so nothing is owed.
+
+    One stat spares a registry that was never saved the governed check, which walks the path twice.
+    It only withholds rows: a directory that exists still passes `history_refusal` for the caller.
+    """
+    from . import registry_history
+
+    try:
+        registry_history.history_dir(root, spec.stem).lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _additions(
     root: Path,
     admitted: list[tuple[Any, Any]],
-    digest: str,
     *,
     after: str,
     plane: tuple[Any, frozenset[str]],
 ) -> list[tuple[str, str, Any]]:
-    """`(stamp, registry, entry)` of the admitted additions newer than `after`, newest first."""
-    from .governance.principal import effective_principal
-    from .vocabulary import bootstrap
+    """`(stamp, registry, entry)` of the admitted additions newer than `after`, newest first.
 
-    policy, tombstones = plane
-    since = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=bootstrap.NEW_WINDOW_DAYS)
-    key = (
-        str(root), digest, after, since.isoformat(),
-        effective_principal().audience_id, policy.fingerprint, tombstones,
-    )
-    if key not in _OWED_ROWS:
-        if len(_OWED_ROWS) >= _OWED_ROWS_CAP:
-            _OWED_ROWS.clear()
-        _OWED_ROWS[key] = _read_additions(root, admitted, since=since, after=after, plane=plane)
-    return _OWED_ROWS[key]
-
-
-def _read_additions(
-    root: Path,
-    admitted: list[tuple[Any, Any]],
-    *,
-    since: dt.date,
-    after: str,
-    plane: tuple[Any, frozenset[str]],
-) -> list[tuple[str, str, Any]]:
+    Read per call and never kept between calls: whether a caller may read a registry's history
+    follows its audience, declared purpose, authorization session and the policy, so rows read for
+    one caller are not another's.
+    """
     from .registry_history import HistoryAdmissionRefused
     from .vocabulary import bootstrap, contract
 
     policy, tombstones = plane
+    since = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=bootstrap.NEW_WINDOW_DAYS)
     found: dict[tuple[str, str], tuple[str, Any]] = {}
     for spec, snapshot in admitted:
+        if not _history_kept(root, spec):
+            continue
         if contract.history_refusal(root, spec, policy=policy, tombstones=tombstones) is not None:
             continue
         try:
@@ -213,7 +205,7 @@ def pending(vault_root: Path, *, session: str | None = None, limit: int = MAX_CH
     held_digest, _, through = (due_state.acknowledged(SCOPE, vault_root=root, session=session) or "").partition("@")
     if held_digest == digest:
         return None
-    rows = _additions(root, admitted, digest, after=through, plane=plane)
+    rows = _additions(root, admitted, after=through, plane=plane)
     claim = f"{digest}@{rows[0][0] if rows else through}"
     block = _fit(rows, min(limit, MAX_CHARS)) if rows else None
     if block is not None:

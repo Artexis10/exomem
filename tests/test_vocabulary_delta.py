@@ -24,10 +24,8 @@ from exomem.governance.principal import library_scope
 @pytest.fixture(autouse=True)
 def _clean_state():
     due_state_module.reset_emission_state()
-    vocabulary_delta._OWED_ROWS.clear()
     yield
     due_state_module.reset_emission_state()
-    vocabulary_delta._OWED_ROWS.clear()
 
 
 def _promote(call, key: str) -> None:
@@ -280,3 +278,41 @@ def test_a_caller_whose_history_is_withheld_is_never_served_rows_read_for_anothe
 
     assert _keys(packet_for(owner, "owner-session").get("vocabulary_delta")) == ["vault.hosts"]
     assert "vocabulary_delta" not in packet_for(external, "external-after")
+
+
+def test_a_caller_whose_declared_purpose_withholds_the_history_is_not_served_rows_read_for_another(
+    vault, monkeypatch
+) -> None:
+    """History admission also follows the purpose a caller declares. Two callers of one audience
+    share the registries they are admitted to and can still differ on what their history shows."""
+    from test_governance_egress import EXTERNAL, write_rule, write_scope
+
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    def packet_for(purpose: str | None, session: str) -> dict:
+        _as(monkeypatch, session)
+        packet = {"budget": {"limit_chars": 4000, "used_chars": 0}}
+        with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp", purpose=purpose)):
+            vocabulary_delta.for_packet(vault, packet)
+        return packet
+
+    with request_scope(owner_principal()):
+        inspected = commands.op_schema_memory(vault, "inspect", subject="relations")
+        saved = commands.op_schema_memory(
+            vault, "save", subject="relations", expected_hash=inspected["content_hash"],
+            why="Register a synthetic relation.",
+            proposal={
+                "upsert": {
+                    "vault.hosts": {"parent": "relates_to", "description": "Synthetic relation."}
+                }
+            },
+        )
+        assert saved["valid"], saved
+
+    # The registry history is withheld from the external audience only under the marketing purpose.
+    write_scope(vault, paths="Knowledge Base/_Schema/history/**", name="History")
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+
+    assert "vocabulary_delta" not in packet_for("marketing", "marketing-first")
+    assert _keys(packet_for(None, "no-purpose").get("vocabulary_delta")) == ["vault.hosts"]
+    assert "vocabulary_delta" not in packet_for("marketing", "marketing-after")
