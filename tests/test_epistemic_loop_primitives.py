@@ -567,7 +567,8 @@ def test_a_governed_key_is_recognized_through_label_normalization(
     tmp_path: Path, authored: str, normalized: str
 ) -> None:
     """The inverse guard: a real governed key spelled loosely is still governed."""
-    value = "refuted" if normalized == "verdict" else "2026-11-01"
+    # A past date: the count below must not also match the page's own date stamp.
+    value = "refuted" if normalized == "verdict" else "2001-02-03"
     page, unit = _rich_page_with_rows(tmp_path, f"- {authored}: {value}\n")
 
     assert getattr(unit, normalized) == value
