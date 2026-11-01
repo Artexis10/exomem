@@ -38,7 +38,7 @@ from cellctl.manifests import (
 from . import substrate as substrate_mod
 from .build import BuiltImages
 from .http import Resolver
-from .infra import BACKUP_BUCKET, Stack
+from .infra import BACKUP_BUCKET, STAGING_BUCKET, Stack
 from .mcp_client import (
     BrowserSession,
     HeadlessBrowser,
@@ -298,9 +298,9 @@ class Context:
             config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
 
-    def s3_keys(self, prefix: str) -> list[str]:
+    def s3_keys(self, prefix: str, bucket: str = BACKUP_BUCKET) -> list[str]:
         keys: list[str] = []
-        for page in self.s3().get_paginator("list_objects_v2").paginate(Bucket=BACKUP_BUCKET, Prefix=prefix):
+        for page in self.s3().get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
             keys.extend(item["Key"] for item in page.get("Contents", []))
         return keys
 
@@ -1120,6 +1120,7 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
         if (pv["spec"].get("claimRef") or {}).get("namespace") == namespace or pv["metadata"]["name"] in pv_names
     ]
     objects = ctx.s3_keys(f"cells/{cell_id}/")
+    staged = ctx.s3_keys(f"cells/{cell_id}/", bucket=STAGING_BUCKET)
     keys = await ctx.fetchrow(
         "SELECT b2_key_id IS NULL AS b2_key_nulled, b2_key_wrapped IS NULL AS b2_wrapped_nulled, backup_key_wrapped IS NULL AS backup_key_nulled, desired_state, observed_state FROM exomem_cloud_cells WHERE cell_id = $1",
         cell_id,
@@ -1134,6 +1135,7 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
             "namespace_absent": namespace_gone.returncode != 0 and "NotFound" in namespace_gone.stderr,
             "persistent_volumes_absent": not remaining_pvs,
             "backup_objects_under_prefix": len(objects),
+            "staging_objects_under_prefix": len(staged),
             "keys": keys,
             "tenant_status": (tenant or {}).get("status"),
             "old_access_token_status": after.status_code,
@@ -1145,8 +1147,12 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
         problems.append("the cell namespace still exists")
     if remaining_pvs:
         problems.append(f"PersistentVolumes remain: {remaining_pvs}")
-    if objects:
-        problems.append(f"{len(objects)} backup objects remain under the prefix")
+    # D9: cellctl sweeps the staging prefix but holds no key that deletes backups; they stay under
+    # the lock until the operator's clean-up script hides them after the grace period.
+    if staged:
+        problems.append(f"{len(staged)} staging objects remain under the prefix")
+    if not objects:
+        problems.append("the backup objects under the prefix are gone; cellctl must not be able to delete them")
     if not keys or not (keys["b2_key_nulled"] and keys["b2_wrapped_nulled"] and keys["backup_key_nulled"]):
         problems.append(f"wrapped keys not destroyed: {keys}")
     if after.status_code != 401:
