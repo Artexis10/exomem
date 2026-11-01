@@ -2853,10 +2853,10 @@ def test_a_census_refuses_when_the_registry_holds_two_spellings_of_one_page(
     signature = (100, 100, 10)
     after_walk = (
         after_walk_checkpoint,
-        {"C:/vault/Knowledge Base/Note.md": signature, "C:/vault/Knowledge Base/note.md": signature},
+        {"Knowledge Base/Note.md": signature, "Knowledge Base/note.md": signature},
     )
     view = lexstore.LexicalStore._census_view(
-        [("C:/vault/Knowledge Base/Note.md", signature)], after_walk
+        [("Knowledge Base/Note.md", signature)], after_walk
     )
 
     assert (
