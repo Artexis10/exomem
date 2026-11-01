@@ -41,6 +41,11 @@ RUNTIMES = ("runc", "kata")
 # Kata with /data as a loop-device ext4 volume handed to the guest as a block device (a directly assigned
 # volume), instead of the default virtio-fs share. It runs on the Docker runtime named "kata".
 BLOCK_ARM = "kata-blk"
+# The same arm under a tuned Kata configuration (see the workflow): a second file next to the shipped one, which
+# the harness switches to by repointing the `configuration.toml` symlink before the arm's containers start.
+TUNED_ARM = "kata-blk-tuned"
+KATA_CONFIG_DIR = Path("/opt/kata/share/defaults/kata-containers")
+KATA_CONFIGS = {BLOCK_ARM: "configuration-qemu.toml", TUNED_ARM: "configuration-tuned.toml", "kata": "configuration-qemu.toml"}
 KATA_RUNTIME_BIN = "/opt/kata/bin/kata-runtime"
 MEDIA_DIR = "Knowledge Base/Sources/Media"
 # Both arms run the cell with /data on a real Docker volume. The wrapper only creates the scratch
@@ -64,8 +69,12 @@ class HarnessError(RuntimeError):
     pass
 
 
+def is_block_arm(arm: str) -> bool:
+    return arm in (BLOCK_ARM, TUNED_ARM)
+
+
 def docker_runtime(arm: str) -> str:
-    return "kata" if arm == BLOCK_ARM else arm
+    return "kata" if is_block_arm(arm) else arm
 
 
 def now_ms() -> float:
@@ -479,15 +488,17 @@ for path in leaves:
                         **{k + "_kb": v // 1024 for k, v in kv(base + "/memory.stat", {"anon", "file", "kernel", "shmem"}).items()}}
     except OSError as error:
         groups[path] = {"unreadable": str(error)}
-# Under a VM, one thread per virtual CPU is named "CPU n/KVM"; this is how many the cell's VM has right now.
+# Under a VM, one thread per virtual CPU is named "CPU n/KVM" (QEMU) or "vcpuN" (Cloud Hypervisor); this is how many
+# the cell's VM has right now.
 vcpu_threads = 0
 for item in processes:
-    if item["comm"].startswith("qemu"):
+    if item["comm"].startswith(("qemu", "cloud-hyper")):
         for task in os.listdir("/proc/%d/task" % item["pid"]):
             try:
-                vcpu_threads += open("/proc/%d/task/%s/comm" % (item["pid"], task)).read().strip().endswith("/KVM")
+                thread = open("/proc/%d/task/%s/comm" % (item["pid"], task)).read().strip()
             except OSError:
-                pass
+                continue
+            vcpu_threads += thread.endswith("/KVM") or thread.startswith("vcpu")
 by_comm = {}
 for item in processes:
     row = by_comm.setdefault(item["comm"], {"processes": 0, "pss_kb": 0, "rss_kb": 0})
@@ -776,14 +787,22 @@ class Lab:
             facts[key] = (result.stdout + result.stderr).strip()[:6000]
         self.diag("environment", facts)
 
-    def kata_facts(self) -> None:
+    def use_kata_config(self, arm: str) -> None:
+        """Point the runtime's default configuration at the arm's file; each sandbox reads it once, when it is created."""
+        target = KATA_CONFIGS.get(arm)
+        if target:
+            sh(["sudo", "ln", "-sfn", target, str(KATA_CONFIG_DIR / "configuration.toml")])
+
+    def kata_facts(self, arm: str) -> None:
         """The hypervisor, its command line, the guest kernel and the Kata configuration the arm ran with."""
+        self.use_kata_config(arm)
         facts: dict = {}
         for key, argv in {
             "kata_runtime_version": ["/opt/kata/bin/kata-runtime", "--version"],
             "kata_runtime_check": ["sudo", "/opt/kata/bin/kata-runtime", "check"],
             "kata_runtime_env": ["sudo", "/opt/kata/bin/kata-runtime", "env"],
             "qemu_version": ["/opt/kata/bin/qemu-system-x86_64", "--version"],
+            "clh_version": ["sh", "-c", "/opt/kata/bin/cloud-hypervisor --version 2>&1"],
             "installed_files": ["sh", "-c", "ls -l /opt/kata/bin /opt/kata/share/defaults/kata-containers "
                                 "/opt/kata/share/kata-containers /opt/kata/libexec 2>&1 | head -120"],
             "configuration": ["sh", "-c", "grep -vE '^[[:space:]]*(#|$)' "
@@ -791,7 +810,7 @@ class Lab:
         }.items():
             result = sh(argv, check=False, timeout=120)
             facts[key] = (result.stdout + result.stderr).strip()[:12000]
-        name = f"kv-facts-{self.run_id}"
+        name = f"kv-facts-{arm}-{self.run_id}"
         self.docker("run", "-d", "--name", name, "--runtime", "kata", "--cpus", "2", "--memory", "3g",
                     "--entrypoint", "sleep", self.image, "120", check=False, timeout=300)
         for key, argv in {
@@ -800,13 +819,13 @@ class Lab:
             "guest_cpus": ["docker", "exec", name, "nproc"],
             "guest_meminfo": ["docker", "exec", name, "sh", "-c", "head -8 /proc/meminfo"],
             "guest_mounts": ["docker", "exec", name, "sh", "-c", "cat /proc/self/mountinfo | cut -c1-200"],
-            "host_vm_processes": ["sh", "-c", "ps -eo pid,rss,args | grep -E 'qemu|virtiofsd|kata' | grep -v grep "
+            "host_vm_processes": ["sh", "-c", "ps -eo pid,rss,args | grep -E 'qemu|cloud-hyper|virtiofsd|kata' | grep -v grep "
                                   "| cut -c1-2500"],
         }.items():
             result = sh(argv, check=False, timeout=60)
             facts[key] = (result.stdout + result.stderr).strip()[:12000]
         self.docker("rm", "-f", name, check=False)
-        self.diag("kata_facts", facts)
+        self.diag(f"kata_facts-{arm}", facts)
 
     # -- compatibility
     def compat(self) -> None:
@@ -815,10 +834,11 @@ class Lab:
         self.new_volume(volume)
         block = ""
         try:
-            for runtime in (*RUNTIMES, *([BLOCK_ARM] if BLOCK_ARM in self.arms else [])):
-                if runtime == BLOCK_ARM:
-                    block = self.block_volume(f"compat-{self.run_id}")
-                wall, probed = self.oneshot(runtime, block if runtime == BLOCK_ARM else volume,
+            for runtime in self.arms:
+                self.use_kata_config(runtime)
+                if is_block_arm(runtime):
+                    block = self.block_volume(f"compat-{self.run_id}-{runtime}")
+                wall, probed = self.oneshot(runtime, block if is_block_arm(runtime) else volume,
                                             ["python", "-c", PROBE_SCRIPT, "/data", "/tmp"],
                                             entrypoint="env", timeout=300)
                 self.log(f"compat {runtime} rc={probed.returncode} {wall:.0f} ms {probed.stdout.strip()[:1200]}"
@@ -827,8 +847,8 @@ class Lab:
                                                 "stderr": probed.stderr[-2000:]})
         finally:
             self.docker("volume", "rm", "-f", volume, check=False)
-            if block:
-                self.block_volume_remove(block)
+            for path in list(self.blocks):
+                self.block_volume_remove(path)
 
     def cgroup_probe(self) -> None:
         """What the cell's media brakes read from the cgroup files, in a container limited like the cell."""
@@ -836,7 +856,7 @@ class Lab:
         self.new_volume(volume)
         try:
             for runtime in self.arms:
-                if runtime == BLOCK_ARM:
+                if is_block_arm(runtime):
                     continue  # the brake reads cgroup files, which the storage mode does not change
                 wall, probed = self.oneshot(runtime, volume, ["python", "-c", BRAKE_SCRIPT], entrypoint="env",
                                             timeout=300, limits=True)
@@ -918,7 +938,8 @@ class Lab:
         volume = f"kv-{arm}-{rep}-{self.run_id}"
         name = f"kv-cell-{arm}-{rep}-{self.run_id}"
         self.log(f"=== session {tag}")
-        if arm == BLOCK_ARM:
+        self.use_kata_config(arm)
+        if is_block_arm(arm):
             volume = self.block_volume(f"{arm}-{rep}-{self.run_id}")
         else:
             self.new_volume(volume)
@@ -928,7 +949,7 @@ class Lab:
             self.session_body(arm, rep, tag, volume, name)
         finally:
             self.docker("rm", "-f", name, check=False)
-            if arm == BLOCK_ARM:
+            if is_block_arm(arm):
                 self.block_volume_remove(volume)
             else:
                 self.docker("volume", "rm", "-f", volume, check=False)
@@ -984,6 +1005,9 @@ class Lab:
                     self.fail(arm, rep, f"section.{key}", f"{type(error).__name__}: {error}")
             self.diag(f"spellings-{tag}", mcp.names)
             self.memory(arm, rep, name, "after")
+            # Memory that the guest hands back (free page reporting, the balloon) is released after a delay.
+            time.sleep(self.args.settle)
+            self.memory(arm, rep, name, "settled")
         finally:
             mcp.close()
             facts = self.stop_cell(name, f"{tag}-cell")
@@ -1369,7 +1393,9 @@ class Lab:
         self.docker("network", "create", "--driver", "bridge", "--internal", self.network)
         try:
             self.environment()
-            self.kata_facts()
+            for arm in self.arms:
+                if arm != "runc":
+                    self.kata_facts(arm)
             self.compat()
             self.cgroup_probe()
             if self.args.compat_only:
@@ -1398,6 +1424,7 @@ def main() -> int:
     parser.add_argument("--only", default="search,write,media,import,fs")
     parser.add_argument("--arms", default=",".join(RUNTIMES), help="runtimes measured against each other")
     parser.add_argument("--phases", default="measure", help="measure, trace, or both: trace records runc syscalls")
+    parser.add_argument("--settle", type=float, default=30, help="seconds between the after and the settled memory sample")
     parser.add_argument("--compat-only", action="store_true", help="probe the runtimes and stop")
     args = parser.parse_args()
     args.only = {part for part in args.only.split(",") if part}

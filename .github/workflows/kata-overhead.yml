@@ -24,13 +24,21 @@ env:
   KATA_ASSET: "kata-go-static-4.3.1-amd64.tar.zst"
   # The image a cell runs in production (published, anonymous pull).
   CLOUD_IMAGE: ghcr.io/artexis10/exomem:0.154.0-cloud
-  REPEATS: "3"
+  REPEATS: "1"
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
   EXTRA_ARGS: ""
   # "measure" times runc against Kata; "trace" records the syscalls of the runc cell with strace.
-  PHASES: "measure,trace"
-  ARMS: "runc,kata,kata-blk"
+  PHASES: "measure"
+  # kata-blk: the shipped QEMU configuration (plus the block-device key). kata-blk-tuned: the same arm with the
+  # configuration built below from the shipped file of KATA_HYPERVISOR plus KATA_CONFIG_EDITS.
+  ARMS: "runc,kata-blk,kata-blk-tuned"
+  # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line).
+  KATA_HYPERVISOR: "qemu"
+  KATA_CONFIG_EDITS: |
+    default_memory = 512
+  # "1" also boots a cell with and without psi=1 on the guest kernel command line and prints the PSI files.
+  PSI_PROBE: "1"
 
 jobs:
   measure:
@@ -60,12 +68,29 @@ jobs:
           command -v zstd >/dev/null || sudo apt-get install -y --no-install-recommends zstd
           tar --zstd -xf "$KATA_ASSET"
           sudo mv opt/kata /opt/kata
+          dir=/opt/kata/share/defaults/kata-containers
+          mkdir -p "$RUNNER_TEMP/shipped"
+          cp "$dir/configuration-qemu.toml" "$dir/configuration-${KATA_HYPERVISOR}.toml" "$RUNNER_TEMP/shipped/"
           # The block-volume arm needs the runtime to hot-plug a host block device; the shipped default switches
-          # that off. The key does nothing for a mount that is not a block device, so the virtio-fs arm is unchanged.
-          cfg=/opt/kata/share/defaults/kata-containers/configuration-qemu.toml
-          cp "$cfg" "$RUNNER_TEMP/configuration-qemu.shipped.toml"
-          sudo sed -i -E 's/^disable_block_device_use *= *true/disable_block_device_use = false/' "$cfg"
-          diff "$RUNNER_TEMP/configuration-qemu.shipped.toml" "$cfg" || true
+          # that off. The key does nothing for a mount that is not a block device.
+          sudo sed -i -E 's/^disable_block_device_use *= *true/disable_block_device_use = false/' "$dir/configuration-qemu.toml"
+          diff "$RUNNER_TEMP/shipped/configuration-qemu.toml" "$dir/configuration-qemu.toml" || true
+          # The tuned arm: the hypervisor's shipped configuration, the same block key, then the edits. A key that
+          # is not in the file stops the job, so a misspelt key cannot pass as a measured variant.
+          edit_config() {
+            local file="$1" line key value
+            while IFS= read -r line; do
+              [ -n "${line// }" ] || continue
+              key="${line%%=*}"; key="${key// }"; value="${line#*=}"; value="${value# }"
+              grep -qE "^${key}[[:space:]]*=" "$file" || { echo "config key not found in $file: $key"; return 1; }
+              sudo sed -i -E "s|^${key}[[:space:]]*=.*|${key} = ${value}|" "$file"
+            done
+          }
+          sudo cp "$dir/configuration-${KATA_HYPERVISOR}.toml" "$dir/configuration-tuned.toml"
+          edit_config "$dir/configuration-tuned.toml" <<< "disable_block_device_use = false"
+          edit_config "$dir/configuration-tuned.toml" <<< "$KATA_CONFIG_EDITS"
+          echo "--- tuned against the shipped ${KATA_HYPERVISOR} configuration"
+          diff "$RUNNER_TEMP/shipped/configuration-${KATA_HYPERVISOR}.toml" "$dir/configuration-tuned.toml" || true
           ls -l /opt/kata/bin
           /opt/kata/bin/kata-runtime --version
           /opt/kata/bin/containerd-shim-kata-v2 --version || true
@@ -102,6 +127,32 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet 'httpx>=0.28,<1'
 
+      - name: Guest PSI probe (memory.pressure with and without psi=1)
+        if: env.PSI_PROBE == '1'
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/kv-out/diagnostics"
+          out="$RUNNER_TEMP/kv-out/diagnostics/psi_probe.txt"
+          dir=/opt/kata/share/defaults/kata-containers
+          probe() {
+            echo "=== $1"
+            docker run --rm --runtime kata --cpus 2 --memory 3g -e EXOMEM_CLOUD_CELL=1 --entrypoint sh "$CLOUD_IMAGE" -c '
+              echo "cmdline: $(cat /proc/cmdline)"
+              echo "--- /proc/pressure"; ls -l /proc/pressure 2>&1; cat /proc/pressure/memory 2>&1
+              echo "--- cgroup files"; ls /sys/fs/cgroup | grep -i pressure; cat /sys/fs/cgroup/memory.pressure 2>&1
+              echo "--- the cell brake"; python -c "from exomem import media_brakes; print(media_brakes.read_cell())" 2>&1' 2>&1
+          }
+          {
+            echo "guest kernel PSI config:"; grep -E 'CONFIG_PSI' /opt/kata/share/kata-containers/config-6.18.56-208
+            sudo ln -sfn configuration-qemu.toml "$dir/configuration.toml"
+            probe "shipped kernel_params"
+            sudo cp "$dir/configuration-qemu.toml" "$RUNNER_TEMP/configuration-qemu.before-psi.toml"
+            trap 'sudo cp "$RUNNER_TEMP/configuration-qemu.before-psi.toml" "$dir/configuration-qemu.toml"' EXIT
+            sudo sed -i -E 's/^(kernel_params *= *"[^"]*)"/\1 psi=1"/' "$dir/configuration-qemu.toml"
+            grep -E '^kernel_params' "$dir/configuration-qemu.toml"
+            probe "kernel_params with psi=1"
+          } 2>&1 | tee "$out"
+
       - name: Measure
         run: |
           mkdir -p "$RUNNER_TEMP/kv-out" "$RUNNER_TEMP/kv-work"
@@ -110,6 +161,17 @@ jobs:
             --image "$CLOUD_IMAGE" --out "$RUNNER_TEMP/kv-out" --work "$RUNNER_TEMP/kv-work" \
             --repeats "$REPEATS" --seed-notes "$SEED_NOTES" --phases "$PHASES" --arms "$ARMS" \
             ${EXTRA_ARGS:+"$EXTRA_ARGS"}
+
+      - name: Keep the Kata configuration that ran
+        if: always()
+        run: |
+          dir=/opt/kata/share/defaults/kata-containers
+          mkdir -p "$RUNNER_TEMP/kv-out/kata-config"
+          cp "$dir/configuration-tuned.toml" "$dir/configuration-qemu.toml" "$RUNNER_TEMP/kv-out/kata-config/"
+          diff "$RUNNER_TEMP/shipped/configuration-${KATA_HYPERVISOR}.toml" "$dir/configuration-tuned.toml" \
+            > "$RUNNER_TEMP/kv-out/kata-config/tuned-against-shipped.diff" || true
+          diff "$RUNNER_TEMP/shipped/configuration-qemu.toml" "$dir/configuration-qemu.toml" \
+            > "$RUNNER_TEMP/kv-out/kata-config/default-arm-against-shipped.diff" || true
 
       - name: Per-case table
         if: always()
