@@ -1,0 +1,3 @@
+cell_data_b2_application_key_id = "read-from-secret-manager"
+cell_data_b2_application_key    = "read-from-secret-manager"
+bucket_prefix                   = "replace-with-globally-unique-prefix"

@@ -211,10 +211,13 @@ def _legacy_original(vault, source_schema, tmp_path, original, *, title="Legacy 
 
 
 def _legacy_markdown_pair(vault, artifact, page):
-    legacy_artifact = artifact.with_suffix("") if artifact.name.endswith(".md.bin") else artifact
+    legacy_artifact = artifact.with_suffix("") if artifact.name.endswith((".md.bin", ".md.txt")) else artifact
     legacy_page = preserve._sidecar_path(legacy_artifact, protected=True)
     metadata, body, _ = vault_module.parse_frontmatter(page.read_text())
     metadata["evidence_file"] = legacy_artifact.relative_to(vault).as_posix()
+    # A legacy `.md` original was never classified for extraction.
+    metadata.pop("media_type", None)
+    metadata.pop("extracted_by", None)
     if "artifact_adoption" in metadata:
         metadata["artifact_adoption"]["stored_path"] = legacy_artifact.relative_to(vault).as_posix()
         metadata["artifact_adoption"]["page_path"] = legacy_page.relative_to(vault).as_posix()
@@ -282,16 +285,19 @@ def test_legacy_custody_skips_an_unrelated_occupied_companion_name(vault, source
             assert reserved_paths.read_held(copied, 0, copied.size) == original
 
 
-def test_utf16_markdown_capture_keeps_bytes_outside_page_indexes(vault, source_schema, tmp_path):
-    from exomem import epistemic_graph
+def test_utf16_markdown_capture_keeps_bytes_outside_page_indexes_and_extracts_its_text(vault, source_schema, tmp_path):
+    from exomem import epistemic_graph, extract
 
     original = "---\ntype: source\n---\n# Original Ω\r\n".encode("utf-16")
     staged = tmp_path / "original.md"
     staged.write_bytes(original)
     captured = add.add(vault, source_schema, title="UTF16 document", content="", source_type="session", artifact=add.SourceArtifact(staged, "original.md", "text/markdown; charset=utf-16"), expected_sha256=hashlib.sha256(original).hexdigest())
-    assert captured.artifact_path.endswith(".md.bin")
+    assert captured.artifact_path.endswith(".md.txt")
     assert captured.path == captured.artifact_path + ".md"
     assert (vault / captured.artifact_path).read_bytes() == original
+    metadata, _, _ = vault_module.parse_frontmatter((vault / captured.path).read_text())
+    assert (metadata["media_type"], metadata["extracted_by"]) == ("text", "pending")
+    assert "# Original Ω" in extract.extract_text(vault / captured.artifact_path).text
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     who = owner_principal(surface="mcp")
     with request_scope(who):
