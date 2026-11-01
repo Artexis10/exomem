@@ -1093,7 +1093,9 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
     monkeypatch.setattr(adoption_run, "REPLY_SECONDS_PER_ITEM", 0.0)
     monkeypatch.setattr(adoption_run, "APPLY_CHUNK_BUDGET_SHARE", 1.0)
     vault = _vault(tmp_path, {})
-    batch = types.SimpleNamespace(handoff_outcome=None, handoff_error=None)
+    batch = types.SimpleNamespace(
+        receipt=types.SimpleNamespace(batch_id="b", paths=()), handoff_outcome=None, handoff_error=None
+    )
     session = writer_lease._FastAcknowledgementSession(
         vault_root=vault, request_id="r", mutation_attempt_digest="d",
         terminal_replay_until=0.0, advisory_required=False, batches=[batch],

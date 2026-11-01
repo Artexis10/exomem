@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
@@ -300,6 +300,8 @@ class _FastAcknowledgementSession:
     advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
     handoff_in_progress: bool = False
+    #: `_owed_proofs` for the batch and pending counts it was read at.
+    owed_proofs: tuple[tuple[int, int], tuple[int, int]] | None = None
 
 
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
@@ -525,32 +527,33 @@ _handoff_samples: dict[Path, deque[float]] = {}
 _handoff_samples_lock = threading.Lock()
 
 
-def _handoff_targets(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
-    """The batches the next handoff proves, newest first.
-
-    Every batch not yet handed off, or whose handoff failed, and every earlier batch that
-    still holds unretired custody on a path one of them changed. An earlier batch whose
-    rows on those paths are all retired handed them on before, to the batch that holds
-    them now, so its re-proof would find nothing of this handoff's to hand on. Without
-    that skip each handoff re-proves every batch that shares an import's index pages,
-    and an import's handoffs cost the square of its batches.
-    """
-    pending = [
+def _unhanded_batches(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    return [
         batch
         for batch in session.batches
         if batch.handoff_outcome is None and batch.handoff_error is None
     ]
-    if not pending:
-        return []
-    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
-    from . import derived_receipts
 
-    # Unreadable custody re-proves every batch that shares a changed path: dearer, never less.
-    holders = derived_receipts.open_custody_batches(session.vault_root, changed_paths)
+
+def _custody_proofs(
+    session: _FastAcknowledgementSession,
+    rel_paths: Collection[str],
+    holders: frozenset[str] | None,
+) -> list[_FastAcknowledgementBatch]:
+    """The session's batches, newest first, that a handoff moving `rel_paths` proves.
+
+    Each batch on one of the paths that is not handed off or whose handoff failed, and each
+    earlier one that still holds unretired custody on one of them. An earlier batch whose
+    rows on those paths are all retired handed them on before, to the batch that holds them
+    now, so its re-proof would find nothing to hand on. Without that skip each handoff
+    re-proves every batch that shares an import's index pages, and an import's handoffs
+    cost the square of its batches. Unknown `holders` (unreadable custody) prove every
+    batch on the paths: dearer, never less.
+    """
     return [
         batch
         for batch in reversed(session.batches)
-        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
+        if any(path.rel_path in rel_paths for path in batch.receipt.paths)
         and (
             batch.handoff_outcome is None
             or batch.handoff_error is not None
@@ -558,6 +561,45 @@ def _handoff_targets(session: _FastAcknowledgementSession) -> list[_FastAcknowle
             or batch.receipt.batch_id in holders
         )
     ]
+
+
+def _handoff_targets(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    """The batches the next handoff proves, newest first: `_custody_proofs` of the unhanded."""
+    unhanded = _unhanded_batches(session)
+    changed = {path.rel_path for batch in unhanded for path in batch.receipt.paths}
+    if not changed:
+        return []
+    from . import derived_receipts
+
+    holders = derived_receipts.open_custody_batches(session.vault_root, changed)
+    return _custody_proofs(session, changed, holders)
+
+
+def _owed_proofs(session: _FastAcknowledgementSession) -> tuple[int, int]:
+    """The batches the session's next handoff proves now, and the ones a later batch adds.
+
+    A batch still to commit moves what the newest batch moved, as each batch of an import
+    rewrites its index and log pages, so it also re-proves the earlier holders of those
+    pages. Read once per commit or handoff: between them custody only retires, so the
+    counts stay an upper bound.
+    """
+    unhanded = _unhanded_batches(session)
+    key = (len(session.batches), len(unhanded))
+    if session.owed_proofs is not None and session.owed_proofs[0] == key:
+        return session.owed_proofs[1]
+    changed = {path.rel_path for batch in unhanded for path in batch.receipt.paths}
+    newest = session.batches[-1:]
+    later = {path.rel_path for batch in newest for path in batch.receipt.paths}
+    counts = (0, 0)
+    if changed or later:
+        from . import derived_receipts
+
+        holders = derived_receipts.open_custody_batches(session.vault_root, changed | later)
+        proved = {batch.receipt.batch_id for batch in _custody_proofs(session, changed, holders)}
+        held = {batch.receipt.batch_id for batch in _custody_proofs(session, later, holders)}
+        counts = (len(proved), len(held - proved))
+    session.owed_proofs = (key, counts)
+    return counts
 
 
 def _timed_handoff(session: _FastAcknowledgementSession) -> None:
@@ -575,10 +617,10 @@ def _timed_handoff(session: _FastAcknowledgementSession) -> None:
 def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> float | None:
     """Seconds the custody handoff will take once `more_batches` more batches have committed.
 
-    The dearest recent time per proved batch, times the batches a handoff would prove now
-    (`_handoff_targets`) plus `more_batches`, or nothing when no batch is owed. A batch still
-    to commit may also move a page that an earlier batch holds, one proof more, which this
-    leaves out. None when no handoff has been measured for this vault.
+    The dearest recent time per proved batch, times the batches a handoff would prove
+    (`_owed_proofs`): those it proves now, `more_batches`, and with them the earlier
+    holders of the pages they move. Nothing when no batch is owed. None when no handoff
+    has been measured for this vault.
     """
     with _handoff_samples_lock:
         samples = _handoff_samples.get(_fast_ack_root_key(vault_root))
@@ -587,12 +629,12 @@ def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> floa
         return None
     session = _ACTIVE_FAST_ACK_SESSION.get()
     if session is None or not active_derived_batch_custody(vault_root):
-        proved = 0
+        proved, held = 0, 0
     else:
-        proved = len(_handoff_targets(session))
+        proved, held = _owed_proofs(session)
     if not proved and not more_batches:
         return 0.0
-    return dearest * (proved + more_batches)
+    return dearest * (proved + (more_batches + held if more_batches else 0))
 
 
 #: What the running leaf declared about its default duplicate/overlap sweep:
