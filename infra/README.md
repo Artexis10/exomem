@@ -11,10 +11,13 @@ The lifecycle domains are deliberately split:
 - `terraform/durability`: private B2 recovery, short-lived user-export, and
   complete-database backup storage with least-privilege identities. It cannot
   manage the node, ingress, Kubernetes objects, or tenant application records.
+- `terraform/cell-data`: the B2 cell-data member account's compliance-locked cell
+  backup bucket, export and import staging bucket, and the key custodian and
+  `cellctl` keys. It cannot manage the platform account's buckets.
 - `terraform/bootstrap`: already-applied legacy B2 state bucket and identities;
   quarantined until a separately reviewed post-HCP cleanup.
 - `terraform/hcp-bootstrap`: one-time HCP project plus explicit local/state-only
-  foundation, durability, and disposable proof workspaces; never run from the
+  foundation, durability, cell-data, and disposable proof workspaces; never run from the
   normal apply path.
 - `ansible`: idempotent host hardening and pinned K3s bootstrap.
 - `helm/platform`: cluster-wide CSI, ingress, policy, scheduler, cellctl and the
@@ -51,6 +54,7 @@ infra/scripts/bootstrap_hcp_backend.sh apply \
   /secure/operator/exomem-hcp-bootstrap-state.sops.json
 infra/scripts/plan.sh foundation infra/terraform/foundation/foundation.tfplan
 infra/scripts/plan.sh durability infra/terraform/durability/durability.tfplan
+infra/scripts/plan.sh cell-data infra/terraform/cell-data/cell-data.tfplan
 infra/scripts/apply_saved_plan.sh foundation infra/terraform/foundation/foundation.tfplan
 ```
 

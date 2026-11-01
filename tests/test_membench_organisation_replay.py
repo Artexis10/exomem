@@ -20,12 +20,20 @@ from pathlib import Path
 import pytest
 import yaml
 from epistemic.journeys.f27_replay import AgentEnvelope
+from fastmcp import Client
+from fastmcp.client.client import CallToolResult
+from fastmcp.client.transports import StdioTransport
 from membench.utility.organisation_replay import runner
 from membench.utility.organisation_replay.__main__ import main as replay_main
 from membench.utility.organisation_replay.readback import edge_review_reasons
 from membench.utility.organisation_replay.runfile import call_records, check_run, read_jsonl
 from membench.utility.organisation_replay.runner import RunConfig, bind, refuse_api_keys
-from membench.utility.organisation_replay.scripted import DoorFault, ScriptedSession, retry_after
+from membench.utility.organisation_replay.scripted import (
+    DoorFault,
+    ScriptedSession,
+    payload,
+    retry_after,
+)
 from membench.utility.organisation_replay.seed import (
     SeedBuild,
     check_seed,
@@ -41,9 +49,10 @@ from membench.utility.switch_eval.session import (
     AttemptResult,
     RunPaused,
     classify,
+    session_env,
 )
 from membench.utility.switch_eval.state import Slot, _child_env
-from membench.utility.switch_eval.tap import process_start_ticks
+from membench.utility.switch_eval.tap import ALLOW_ALL, process_start_ticks, warming_refusal
 
 TOY = {
     "id": "x01",
@@ -402,6 +411,23 @@ def test_the_seed_resends_only_a_refusal_that_committed_nothing(status, committe
     assert retry_after({"success": False, "error": error}) == expected
 
 
+def test_a_wrapped_warm_up_refusal_is_resent():
+    # Failure caught: a warm-up refusal that FastMCP sends wrapped as {"result": ...}
+    # reads as no refusal, so the seed records a write that never landed.
+    error = {"code": "MUTATION_WARMING", "status": "retryable", "committed": False}
+    result = CallToolResult(
+        content=[],
+        structured_content={
+            "result": {"success": False, "error": {**error, "retry_after_ms": 750}}
+        },
+        meta={"fastmcp": {"wrap_result": True}},
+        data=None,
+        is_error=False,
+    )
+
+    assert retry_after(payload(result)) == 0.75
+
+
 def product_slot(tmp_path):
     """A fresh slot whose vault this checkout's product initialised, its arm spec and env.
 
@@ -435,8 +461,12 @@ def test_a_refusal_inside_a_wrapped_answer_is_a_refusal_to_the_seed_and_the_run_
                 )  # fmt: skip
             return s.tap_log
 
-    records = call_records(read_jsonl(asyncio.run(create_entity_of_unregistered_type())))
+    events = read_jsonl(asyncio.run(create_entity_of_unregistered_type()))
+    records = call_records(events)
 
+    # The product still wraps this answer; without the marker this test proves nothing.
+    last_call = [e for e in events if e.get("event") == "call"][-1]
+    assert last_call["result"]["_meta"]["fastmcp"]["wrap_result"] is True
     assert records[-1]["refusal_code"] == "ENTITY_TYPE_UNKNOWN"
 
 
@@ -471,6 +501,42 @@ def test_seed_notes_in_a_fresh_vault_commit_whether_or_not_the_draft_asks_for_a_
     # The first note bootstraps the vault; the second one's draft asks for the review.
     assert [draft["reviewed_none_required"] for draft in drafts] == [False, True]
     assert [note["title"] for note in build.notes if note["landed"]] == ["Note M", "Note N"]
+
+
+@pytest.mark.timeout(300)
+def test_a_measured_session_that_opens_with_recall_meets_no_warm_up(tmp_path):
+    # Failure caught: the actor's first call reaching a measured session's server
+    # while that new process still warms its own index. The tap's gate is skipped
+    # there, so a first recall_context abstains `index_warming` and the session
+    # strikes as a harness fault. The deployed profile runs the warm-up; embeddings
+    # stay off so that no model loads.
+    config = RunConfig(
+        out=tmp_path, arm="arm-x", profile="deployed", model="m", client=None, launcher=(),
+        revision="a" * 40, base_revision="a" * 40, wheel=None,
+    )  # fmt: skip
+    spec = runner.arm_spec(config, "hookless", (ALLOW_ALL,))
+    slot = Slot(tmp_path / "slot")
+    runner.fresh_slot(slot, spec)
+    paths, _ = runner.session_files(slot, spec, tmp_path / "files", hooked=False)
+    entry = json.loads(paths["mcp.json"].read_text(encoding="utf-8"))["mcpServers"]["exomem"]
+    # The client's own environment, as the executor starts it, and the entry's on top.
+    env = {**session_env(os.environ, slot, spec), **entry["env"], "EXOMEM_DISABLE_EMBEDDINGS": "1"}
+
+    async def open_with_recall():
+        transport = StdioTransport(entry["command"], entry["args"], env=env, cwd=str(slot.cwd))
+        async with Client(transport, timeout=240) as client:
+            await client.list_tools()
+            await client.call_tool(
+                "recall_context", {"turn": "What changed?"}, raise_on_error=False
+            )
+
+    asyncio.run(open_with_recall())
+    events = read_jsonl(slot.runtime / "tap.jsonl")
+
+    first = next(event for event in events if event.get("event") == "call")
+    assert (first["name"], first["outcome"]) == ("recall_context", "served")
+    assert not warming_refusal({"result": first.get("result"), "error": first.get("error")})
+    assert next(e for e in events if e.get("event") == "ready_finished")["outcome"] == "ready"
 
 
 @pytest.mark.parametrize(
