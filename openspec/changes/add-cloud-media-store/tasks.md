@@ -215,7 +215,7 @@
     5. A head request for a streamed version confirms only that it exists and its size. With no stored digest, it answers "unconfirmed", never "absent".
     - Verify: an offload of a 5 GiB file writes no ciphertext temporary file, and a digest mismatch leaves no finished version.
   - [ ] 5.4.19 Follow-up, optional for closing this change: give the import row a cellctl-owned `cleanup_retry_at` column and a discard request stamp, through one Substrate migration and its grant. cellctl then stores an owner refusal's next attempt there instead of in `urls_expire_at`, and a new discard request from the owner re-arms the attempt at once. Verify: a test shows a new request after an owner refusal runs the discard without the daily wait, and `urls_expire_at` is never written during `cleanup_pending`.
-  - [ ] 5.4.20 Before task 5.5, let the CLI settle its own stalled window attempts. Make these changes:
+  - [x] 5.4.20 Before task 5.5, let the CLI settle its own stalled window attempts. Make these changes:
     - drop a window's stale checkpoint when Cloud has no row for its import ID;
     - cancel the CLI's own never-uploaded (`key_ready`) attempt itself when its member set changed, instead of asking the person to press Cancel in Home;
     - treat a `done` own attempt as over when a known receipt listing holds none of the window's import IDs, so a window whose receipt a restore lost is sent again; until then, name the discard route in that stop.
