@@ -7892,24 +7892,35 @@ def writer_resolver_snapshot(
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
+    # A write published during the corpus proof's vault walk moves the
+    # checkpoint, and the proof declines. The publication advances the corpus
+    # with the checkpoint, so one fresh attempt costs one walk instead of a
+    # disk build (on 2026-11-01, 9 of 11 disk builds were this race). A
+    # caller-supplied key names one exact state, so it gets one attempt.
+    attempts = 2 if freshness_key is None else 1
     # A fixed phase label; its one field names the route taken, a count.
     with call_spans.span("writer.resolver_snapshot", {}) as measured:
-        current_freshness = (
-            freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
-        )
-        with _RESOLVER_LOCK:
-            cached = _RESOLVER_CACHE.get(root)
-            if cached and cached[0] == current_freshness:
-                measured["forked"] = 1
-                return cached[1].fork()
-        entries = semantic_contract.current_writer_resolver_entries(
-            root,
-            freshness_key=current_freshness,
-            declined=measured,
-        )
-        if entries is not None:
-            measured["corpus_entries"] = 1
-            return WikilinkResolver.from_entries(root, entries)
+        for _attempt in range(attempts):
+            current_freshness = (
+                freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
+            )
+            with _RESOLVER_LOCK:
+                cached = _RESOLVER_CACHE.get(root)
+                if cached and cached[0] == current_freshness:
+                    measured["forked"] = 1
+                    return cached[1].fork()
+            declined: dict[str, int] = {}
+            entries = semantic_contract.current_writer_resolver_entries(
+                root,
+                freshness_key=current_freshness,
+                declined=declined,
+            )
+            measured.update(declined)
+            if entries is not None:
+                measured["corpus_entries"] = 1
+                return WikilinkResolver.from_entries(root, entries)
+            if "declined_changed_during_proof" not in declined:
+                break
         if not allow_disk:
             measured["disk_declined"] = 1
             return None
