@@ -713,26 +713,30 @@ validation.
 - **WHEN** a governed write changes a replayed page on disk before its event
   reaches the registry
 - **AND** the detached replay runs off the publication barrier
-- **THEN** the replay waits a bounded time for the registry to observe the
-  newer state of that page, and then replays the newer delta
+- **THEN** the replay waits for the registry to observe the newer state of
+  that page, and then replays the newer delta
+- **AND** waits only while a write in the process holds a mutation boundary,
+  and for at most a bounded time shared by every path of one round
 - **AND** retargets at most a bounded number of times in one replay
 - **AND** declines the pass as `source_changed` when the registry does not
-  observe the newer state in time, or when the page changes again after each
-  retarget
+  observe the newer state in time, when no write is in flight and the page
+  still differs, or when the page changes again after each retarget
 - **AND** a replay under the publication barrier never waits and declines as
   before
 - **AND** the repair telemetry counts the retargets of each pass
+- **AND** `lexical_repair_finished` names which of those three bounds ended a
+  pass that declined, as `declined_for`
 
 #### Scenario: A write still publishing during the census walk is replayed, not refused
 
 - **WHEN** the final census walk sees a page that a governed write changed,
   created or deleted before its event reached the registry
-- **THEN** the census replay waits a bounded time, on the same retarget budget,
-  for the registry to observe each path where the walk and the registry
-  disagree
+- **THEN** the census waits, while a write in the process holds a mutation
+  boundary and for a bounded time, for the registry to observe each path where
+  the walk and the registry disagree
 - **AND** replays and re-proves those paths before the census judges the walk
 - **AND** declines the pass as `source_changed` at the census when the registry
-  does not observe such a path in time
+  does not observe such a path in time, or when no write is in flight
 - **AND** a delta that needs a source proof still excuses no path
 
 ### Requirement: Bounded write-time index maintenance

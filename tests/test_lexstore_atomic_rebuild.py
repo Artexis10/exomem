@@ -52,7 +52,7 @@ from typing import Any
 import pytest
 
 from exomem import find as find_module
-from exomem import find_types, freshness, lexstore, reserved_paths
+from exomem import find_types, freshness, lexstore, reserved_paths, writer_lease
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -82,6 +82,27 @@ _HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
 _FOREGROUND_BOUND_SECONDS = 0.5
 _STILL_BLOCKED_SECONDS = 1.0
+
+
+@contextmanager
+def _a_write_in_flight(vault: Path) -> Any:
+    """Another writer holds the vault's mutation boundary, as a write does while it publishes."""
+    holder = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with holder.mutation_guard(vault, request_id="writer", operation="semantic edit"):
+            holding.set()
+            release.wait(_HOLD_SECONDS)
+
+    writer = threading.Thread(target=hold)
+    writer.start()
+    assert holding.wait(_OBSERVE_SECONDS)
+    try:
+        yield
+    finally:
+        release.set()
+        writer.join(_OBSERVE_SECONDS)
 
 
 @pytest.fixture(autouse=True)
@@ -227,8 +248,6 @@ def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
 
     Page P is edited before the census walk reads it, page Q after.
     """
-    # An unreported edit waits this long for its event before it refuses the replay.
-    monkeypatch.setattr(lexstore, "_REPLAY_OBSERVATION_WAIT_SECONDS", 0.2)
     p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
     q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
     _seed(tmp_path, [p, q])
@@ -276,6 +295,8 @@ def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
         assert "pbefore" in contents and "qbefore" in contents
         assert "pafter" not in contents and "qafter" not in contents
         assert "punreported" not in contents
+        # No write was in flight, so the census refused at once, not after a wait.
+        assert store._last_decline_cause == lexstore.DeclineCause.UNOBSERVED_DRIFT
         return
     for page, how in ((p, before_walk), (q, after_walk)):
         if how is None:
@@ -325,7 +346,8 @@ def test_a_census_waits_for_writes_whose_events_are_still_on_their_way(
         return real_walk()
 
     monkeypatch.setattr(store, "_walk_entries", census_walk_during_an_unpublished_batch)
-    published = store.rebuild_atomic()
+    with _a_write_in_flight(tmp_path):
+        published = store.rebuild_atomic()
     for late in late_events:
         late.join()
     assert walks >= 2
@@ -419,7 +441,8 @@ def test_a_replay_waits_for_a_rewrite_whose_event_is_still_on_its_way(
         return built
 
     monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p_twice)
-    published = store.rebuild_atomic()
+    with _a_write_in_flight(tmp_path):
+        published = store.rebuild_atomic()
     late_events[0].join()
     assert published is True
     with sqlite3.connect(store.path) as live:
@@ -428,6 +451,105 @@ def test_a_replay_waits_for_a_rewrite_whose_event_is_still_on_its_way(
     assert "pbefore" not in contents and "pfirst" not in contents
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+def test_a_replay_drops_the_rows_of_pages_deleted_and_renamed_while_it_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import batch rewrites Q, deletes P and renames R to S on disk. Q's first
+    event reaches the registry at once; the events of the whole batch arrive
+    late. The replay waits for them. The published catalogue must hold S and the
+    newer Q, and none of the rows of P or R. A replay that waits but forgets the
+    late deletions publishes the rows of pages that no longer exist.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
+    r = _kb_file(tmp_path, "r.md", "- [config] rbefore ^u3")
+    _seed(tmp_path, [p, q, r])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    late_events: list[threading.Timer] = []
+    moved = tmp_path / "Knowledge Base" / "s.md"
+
+    def rewrite_q(token: str) -> None:
+        q.write_text(_page_text("q", f"- [config] {token} ^u2"), encoding="utf-8")
+        _touch_future(q)
+
+    def materialize_then_publish_a_batch_late(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        if not late_events:
+            rewrite_q("qfirst")
+            freshness.on_files_changed(tmp_path, changed=[q])
+            rewrite_q("qsecond")
+            p.unlink()
+            r.unlink()
+            moved.write_text(_page_text("s", "- [config] rmoved ^u3"), encoding="utf-8")
+            late = threading.Timer(
+                1.0,
+                freshness.on_files_changed,
+                args=(tmp_path,),
+                kwargs={"changed": [q, moved], "deleted": [p, r]},
+            )
+            late_events.append(late)
+            late.start()
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_publish_a_batch_late)
+    with _a_write_in_flight(tmp_path):
+        published = store.rebuild_atomic()
+    late_events[0].join()
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "qsecond" in contents and "rmoved" in contents
+    assert "pbefore" not in contents and "rbefore" not in contents and "qfirst" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+@pytest.mark.parametrize(
+    ("write_in_flight", "cause"),
+    [
+        pytest.param(True, lexstore.DeclineCause.OBSERVATION_TIMED_OUT, id="write_never_publishes"),
+        pytest.param(False, lexstore.DeclineCause.UNOBSERVED_DRIFT, id="no_write_in_flight"),
+    ],
+)
+def test_a_replay_that_cannot_prove_a_page_names_what_ended_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_in_flight: bool,
+    cause: lexstore.DeclineCause,
+) -> None:
+    """A page changes on disk and its event never arrives. While a write holds
+    the boundary, the replay waits out its bound. With none, it refuses at
+    once. Either way the pass keeps the live catalogue and says which it was.
+    """
+    # A write that never publishes holds the replay for this long.
+    monkeypatch.setattr(lexstore, "_REPLAY_OBSERVATION_WAIT_SECONDS", 0.2)
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+
+    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        for token, reported in (("pfirst", True), ("punreported", False)):
+            p.write_text(_page_text("p", f"- [config] {token} ^u1"), encoding="utf-8")
+            _touch_future(p)
+            if reported:
+                freshness.on_files_changed(tmp_path, changed=[p])
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    if write_in_flight:
+        with _a_write_in_flight(tmp_path):
+            published = store.rebuild_atomic()
+    else:
+        published = store.rebuild_atomic()
+    assert published is False
+    assert store._last_decline_cause == cause
 
 
 def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it(
@@ -475,15 +597,17 @@ def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it
     monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p_with_a_late_event)
     outcome: dict[str, bool] = {}
     build = threading.Thread(target=lambda: outcome.setdefault("published", store.rebuild_atomic()))
-    build.start()
-    build.join(timeout=10)
-    finished = not build.is_alive()
-    writer_stopped.set()
-    build.join()
+    with _a_write_in_flight(tmp_path):
+        build.start()
+        build.join(timeout=_OBSERVE_SECONDS)
+        finished = not build.is_alive()
+        writer_stopped.set()
+        build.join()
     for late in late_events:
         late.join()
     assert finished, "the replay kept chasing a page that never stopped changing"
     assert outcome["published"] is False
+    assert store._last_decline_cause == lexstore.DeclineCause.RETARGETS_EXHAUSTED
     with sqlite3.connect(store.path) as live:
         contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
     assert "pbefore" in contents and "prewrite" not in contents
