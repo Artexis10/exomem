@@ -11043,7 +11043,7 @@ class LexicalStore:
                     col = "in_vault" if scope == "vault" else "in_kb"
                     raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
                     # The captured partition is the in-scope complement of that same clause, less Episodes.
-                    episodes = f"{kb_dirname()}/Sources/{source_taxonomy.EPISODE_PATH_LABEL}/"
+                    episodes = f"{kb_dirname()}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}/"
                     with call_spans.span("lexical.resolver_entries", {}) as measured:
                         entries, candidates, outside, captured = [], [], [], []
                         # Cache the SQL partitions, then decide visibility anew for each request.

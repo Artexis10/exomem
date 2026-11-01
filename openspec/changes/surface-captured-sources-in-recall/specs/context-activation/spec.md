@@ -42,3 +42,70 @@ In the default `maps` packet, the turn slice SHALL list each standalone captured
 #### Scenario: A captured document reaches the default packet
 - **WHEN** a turn names a phrase that only an uncompiled captured page answers, under the default packet mode
 - **THEN** `turn_slice.items` contains one `source` lead for that page
+
+## MODIFIED Requirements
+
+### Requirement: Categorical anchor evidence and resolution
+Anchor candidates SHALL carry only categorical evidence kinds. Contact kinds —
+`exact_alias`, `lexical_overlap`, `vector_band`, `claims_match` and `retrieval` —
+establish that the turn reached the anchor; qualifier kinds — `category_match`,
+`graph_corroboration` and `usage_prior` — strengthen an anchor the turn already reached
+and SHALL never create a candidate on their own. No float score SHALL appear in the
+packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or at least
+two independent kinds other than `usage_prior`, at least one of them a contact kind; as
+`partial` when it carries exactly one kind other than `usage_prior`; the turn SHALL be
+`ambiguous` when two or more resolved anchors of the same anchor kind share no anchor
+neighbour and neither is a neighbour of the other, where an anchor's anchor
+neighbourhood is the set of its typed-link neighbours that are themselves anchors in
+the activation index (resolved anchors of different kinds are complementary; a shared
+page that is not an anchor, reached by alias or otherwise, never makes two anchors
+complementary; a direct typed link between the two always does; project-key anchors
+have no page, so they can neither bridge two anchors nor be anyone's neighbour, and two
+resolved project anchors are therefore trivially competing); otherwise,
+when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
+abstain with an empty packet, unless the turn names uncompiled captured material: that
+turn is served with captured pointers and no anchor, as "Activation points to
+uncompiled captured material that a turn names" states. Lexical overlap SHALL ignore stopwords, and turn tokens
+SHALL keep their order and repetitions for n-gram construction so that two anchors
+sharing a word in their names can both receive `exact_alias` from one turn. `usage_prior` SHALL only break ties between
+otherwise equal candidates and SHALL never contribute to the two-kinds rule.
+`claims_match` SHALL be computed with the existing collection-claims routing and
+`graph_corroboration` SHALL count a typed edge between two candidates even when both
+already appear in ordinary recall.
+
+#### Scenario: Two kinds resolve a resource anchor
+- **WHEN** a turn mentions a resource whose profile page title matches lexically and
+  whose Records collection claims cover the turn's terms
+- **THEN** the anchor resolves with evidence `[lexical_overlap, claims_match]`
+
+#### Scenario: Ambiguous domain is reported, not guessed
+- **WHEN** a turn's terms resolve two hub anchors whose anchor neighbourhoods share no
+  anchor
+- **THEN** the packet status is `ambiguous`, both anchors are listed under
+  `ambiguity` with their neighbourhood sizes, and no role lane runs for either
+
+#### Scenario: Two directly linked anchors are complementary, not competing
+- **WHEN** a turn resolves two same-kind anchors and one of them links the other
+- **THEN** the packet is not `ambiguous`, both anchors are served, and both carry
+  `graph_corroboration`
+
+#### Scenario: A shared boilerplate page does not suppress ambiguity
+- **WHEN** two same-kind resolved anchors both link one page that is not an anchor,
+  for example a handbook reached through a short alias, and share no anchor neighbour
+- **THEN** the packet status is still `ambiguous`
+
+#### Scenario: Two names sharing a word both resolve
+- **WHEN** a turn names two anchors whose names share a word, such as "Alpha
+  Initiative and Beta Initiative"
+- **THEN** both anchors carry `exact_alias`
+
+#### Scenario: Negative twin abstains
+- **WHEN** a turn is lexically similar to an anchor's domain but carries no alias, no
+  claims coverage and no corroborating kind, and names no captured page that qualifies
+  for a pointer
+- **THEN** no anchor is `resolved`, the packet is `abstained: true` with
+  `abstention.reason = "unresolved"`, and `units` and `pointers` are empty
+
+#### Scenario: Usage never resolves
+- **WHEN** a candidate carries only `usage_prior` and `vector_band`
+- **THEN** it is at most `partial`

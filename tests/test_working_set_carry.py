@@ -3096,3 +3096,26 @@ def test_a_bound_of_zero_restores_the_packet_without_captured_pages(
     assert comparable(off) == comparable(before)
     assert comparable(before_off) == comparable(before)  # a turn no captured page answers is the same at either bound
     assert len(on["pointers"]) == 1  # the control: the same vault does reach the page with the bound on
+
+
+def test_a_citation_the_vault_resolves_elsewhere_attaches_no_captured_page(carry_vault: Path, budget_free) -> None:
+    """The note cites another page that shares a captured page's title. Hanging the captured page from the
+    note would invent a citation and skip the precedence test."""
+    note = "Knowledge Base/Notes/Research/zerrin-bracken-freight.md"
+    _write(
+        carry_vault / note,
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n"
+        'sources: ["[[Freight invoice]]"]\n---\n\n# Zerrin Bracken freight\n\n## Summary\n\n'
+        "- [decision] The zerrin bracken freight total was disputed and settled. ^z-decision\n",
+    )
+    # The cited page answers by its file name only; it shares no word with the turn.
+    _capture(carry_vault, "Sources/2024/Freight invoice.md", "Courier pallets, one row.", title="Courier pallets")
+    namesake = _capture(
+        carry_vault, "Sources/2025/zb-2025-03.md",
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.", title="Freight invoice",
+    )
+
+    packet = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+
+    assert [anchor["path"] for anchor in packet["anchors"]] == [note]
+    assert not any(pointer["ref"] == namesake and pointer["anchor"] == note for pointer in packet["pointers"])

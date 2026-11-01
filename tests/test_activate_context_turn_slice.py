@@ -801,7 +801,7 @@ def test_a_captured_page_the_turn_names_is_a_source_lead_beside_the_map(vault: P
 
     (item,) = [item for item in packet["turn_slice"]["items"] if item["kind"] == "source"]
     assert item["ref"] == INVOICE and item["match"] == "carried"
-    assert item["title"].strip() == "Bracken invoice"  # the wikilinked word is removed, as for any title the guard serves
+    assert item["title"] == "Bracken invoice"  # the wikilinked word is removed and the gap closed, as for a catalogue title
     assert item["description"] == ""
 
 
@@ -813,3 +813,20 @@ def test_a_captured_page_cited_by_a_carried_note_is_not_a_lead_of_its_own(vault:
     leads = {(item["kind"], item["ref"]) for item in packet["turn_slice"]["items"]}
     assert ("source", INVOICE) not in leads
     assert any(ref == INVOICE_NOTE for _kind, ref in leads)  # the control: the citing note is the lead
+
+
+def test_a_source_lead_follows_a_compiled_partial_lead() -> None:
+    """Leads are taken in order under the slice reserve, so a captured lead ahead of a compiled one would
+    push the compiled lead out of a tight slice."""
+    partial = f"{KB}/Notes/Research/winter-schedule.md"
+    packet = {
+        "anchors": [{"path": partial, "status": "partial", "evidence": ["title"]}],
+        "pointers": [{
+            "ref": INVOICE, "anchor": INVOICE, "title": "Zerrin Bracken invoice",
+            "why": working_set.SOURCE_POINTER_WHY, "reason": "requires_read",
+        }],
+    }
+
+    leads = context_views.turn_leads(packet).leads
+
+    assert [(lead.ref, lead.match) for lead in leads] == [(partial, "partial"), (INVOICE, "carried")]

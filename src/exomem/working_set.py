@@ -3968,12 +3968,13 @@ def compile_packet(
             vault_root, _origins=origins, _source_scan=scan, _selection_stack=selection,
             **kwargs, status_basis=status_basis,
         )
-    if scan is not None and scan.phrases:
-        packet = _with_source_pointers(
-            vault_root, packet, scan, slots=slots, status_basis=status_basis,
-            freshness_snapshot=kwargs.get("freshness_snapshot"),
-            query_context=kwargs.get("lexical_admission"),
-        )
+        # Inside the selection: the captured pass reads the compile's own retained lexical view (D1).
+        if scan is not None and scan.phrases:
+            packet = _with_source_pointers(
+                vault_root, packet, scan, slots=slots, status_basis=status_basis,
+                freshness_snapshot=kwargs.get("freshness_snapshot"),
+                query_context=kwargs.get("lexical_admission"),
+            )
     _label_origins(
         packet,
         origins,
@@ -4005,19 +4006,30 @@ class _SourceScan:
 
 
 def _compiled_citations(
-    vault_root: Path, compiled: Sequence[str], captured: Sequence[str]
+    vault_root: Path, compiled: Sequence[str], captured: Sequence[str], *, freshness_snapshot: Any = None
 ) -> dict[str, str]:
     """For each captured page that a page of `compiled` cites, the first such page.
 
-    Read the way source coverage reads it (`source_closure.claims_in`, `resolve_reference`), over a resolver
-    of the candidate pages alone: it answers whether a claim names one of them, and walks nothing else.
+    Read the way source coverage reads it (`source_closure.claims_in`, `resolve_reference`), over the
+    whole-vault recall resolver: a bare name that the vault resolves elsewhere, or finds ambiguous, cites
+    none of the candidates. Without that resolver nothing attaches, so every candidate keeps the
+    precedence test.
     """
-    from . import find, note_types, source_closure, vault
+    from . import find, note_types, source_closure
 
     root = Path(vault_root)
-    resolver = vault.WikilinkResolver.from_entries(
-        root, ((path, _page_title(root, path) or None) for path in captured)
-    )
+    try:
+        resolver = find.recall_resolver_snapshot(
+            root,
+            allow_fallback=False,
+            expected_checkpoint=(
+                freshness_snapshot.recall_checkpoint("vault") if freshness_snapshot is not None else None
+            ),
+        )
+    except Exception:  # noqa: BLE001 - an unavailable resolver attaches nothing; precedence still applies
+        log.debug("activation captured citations unavailable", exc_info=True)
+        return {}
+    candidates = set(captured)
     type_basis = note_types.Basis(root)
     cited: dict[str, str] = {}
     for note in compiled:
@@ -4026,7 +4038,7 @@ def _compiled_citations(
             continue
         for claim in source_closure.claims_in(page.frontmatter, type_basis):
             target = source_closure.resolve_reference(root, claim, resolver=resolver)
-            if target in captured:
+            if target in candidates:
                 cited.setdefault(target, note)
     return cited
 
@@ -4085,8 +4097,14 @@ def _with_source_pointers(
         # nosemgrep: ep-word-set -- The packet specification fixes the two statuses that serve a compiled page.
         if anchor.get("path") and anchor.get("status") in ("resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS)
     ]
-    cited = _compiled_citations(vault_root, compiled, [hit.path for hit in hits]) if compiled else {}
-    chosen = [hit for hit in hits if hit.path in cited or hit.outranks_compiled][:slots]
+    cited = (
+        _compiled_citations(vault_root, compiled, [hit.path for hit in hits], freshness_snapshot=freshness_snapshot)
+        if compiled else {}
+    )
+    already = {str(pointer.get("ref")) for pointer in packet.get("pointers") or ()}
+    chosen = [
+        hit for hit in hits if hit.path not in already and (hit.path in cited or hit.outranks_compiled)
+    ][:slots]
     if not chosen:
         return packet
     registry = context_roles.load_roles(vault_root)

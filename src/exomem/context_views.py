@@ -1430,14 +1430,16 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
     for item in packet.get("related") or ():
         if isinstance(item, Mapping):
             add(item, "related")
-    # A captured page that hangs from a carried page is that page's, not a lead of its own.
+    compiled = sorted(found.values(), key=lambda lead: MATCHES.index(lead.match))
+    # A captured page that hangs from a carried page is that page's, not a lead of its own. A standalone
+    # one follows every compiled lead, so the slice reserve never trades a compiled lead for it.
+    captured: list[Lead] = []
     for item in packet.get("pointers") or ():
-        if isinstance(item, Mapping) and working_set.is_source_pointer(item) and _lead_ref(item) not in found:
-            found[_lead_ref(item)] = Lead(
-                _lead_ref(item), "carried", ("retrieval",),
-                source_title=egress.without_wikilinks(str(item.get("title") or "")),
-            )
-    leads = tuple(sorted(found.values(), key=lambda lead: MATCHES.index(lead.match)))
+        ref = _lead_ref(item) if isinstance(item, Mapping) else ""
+        if ref and working_set.is_source_pointer(item) and ref not in found:
+            found[ref] = Lead(ref, "carried", ("retrieval",), source_title=_unlinked(str(item.get("title") or "")))
+            captured.append(found[ref])
+    leads = (*compiled, *captured)
     return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence, conversation)
 
 

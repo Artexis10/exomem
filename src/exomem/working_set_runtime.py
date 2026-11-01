@@ -2057,7 +2057,9 @@ def carry_source_hits(
                     or not working_set._is_current_page(vault_root, path, status_basis=status_basis)
                 ):
                     continue
-                hit = SourceHit(path, score, score * weight, best_compiled is None or score * weight > best_compiled)
+                # A phrase whose compiled survivors did not come back cannot show that this page beats them.
+                outranks = not survivors if best_compiled is None else score * weight > best_compiled
+                hit = SourceHit(path, score, score * weight, outranks)
                 held = found.get(path)
                 if held is None or (hit.outranks_compiled, hit.adjusted) > (held.outranks_compiled, held.adjusted):
                     found[path] = hit
