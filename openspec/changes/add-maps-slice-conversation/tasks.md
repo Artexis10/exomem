@@ -19,5 +19,5 @@
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Run the scoped activation, slice, maps, conversation and latency tests and compare failure names with the `origin/main` baseline; run Ruff, the privacy gate and `openspec validate --all --strict`.
+- [x] 3.1 Run the scoped activation, slice, maps, conversation and latency tests and compare failure names with the `origin/main` baseline; run Ruff, the privacy gate and `openspec validate --all --strict`.
 - [ ] 3.2 After release, replay a recorded turn and its follow-up on the installed service with the conversation that the hook sends, and record the slice, the reports and the timings beside the same request on the earlier release.
