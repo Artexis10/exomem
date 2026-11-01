@@ -58,6 +58,11 @@ class _RecordingMutationManager:
             self.depth -= 1
             self.events.append("guard-exit")
 
+    @contextmanager
+    def projection_guard(self, vault, **metadata):
+        with self.mutation_guard(vault, **metadata, holder_kind="background"):
+            yield
+
 
 def _preserve_media_stub(vault, filename="rec.mp3"):
     """Preserve a media binary with no text → a `pending` stub sidecar."""
@@ -1984,6 +1989,40 @@ def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     assert manager.events.index("clip-embed") < manager.events.index("guard-enter")
     assert manager.events.index("guard-enter") < manager.events.index("clip-commit")
     assert manager.depth == 0
+
+
+def test_an_image_clip_commit_leaves_the_commit_generation_alone(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLIP image commit writes only the CLIP index, so it must not stale the
+    validity stamp of a semantic write that is waiting to commit."""
+    from exomem import writer_lease
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="gen.jpg",
+        data=b"\xff\xd8\xff", text="beach",
+    )
+    monkeypatch.setattr(
+        embeddings, "embed_image", lambda _p: np.ones(embeddings.CLIP_DIM, dtype=np.float32)
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    indexed: list[str] = []
+    monkeypatch.setattr(worker._clip_index, "upsert", lambda rel, *_a: indexed.append(rel))
+    before = writer_lease.read_commit_generation(vault)
+
+    worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="image",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    assert indexed
+    assert writer_lease.read_commit_generation(vault) == before
 
 
 def test_scene_artifacts_and_reembed_publish_under_guard(

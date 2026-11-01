@@ -47,6 +47,10 @@ class MutationTimings:
             entry = self.stages.setdefault(name, {})
             entry["ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
 
+    def annotate(self, name: str, **fields: Any) -> None:
+        """Attach plain facts to a stage, such as the commit generations it compared."""
+        self.stages.setdefault(name, {}).update(fields)
+
     def skipped(self, name: str) -> None:
         self.stages.setdefault(name, {})["skipped"] = True
 

@@ -3402,6 +3402,37 @@ def build_corpus_context_with_census(
     return enriched, census
 
 
+def _event_miss_reason(
+    root: Path,
+    cache_key: tuple[str, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+    relation_definitions: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> str:
+    """Name why the event-hit proof failed, for the walk's log line; reads only."""
+    if checkpoint.triple is None:
+        return "registry_not_live"
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+        language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+    if entry is None:
+        return "cache_cold"
+    if caption is None:
+        return "caption_none"
+    if caption != checkpoint:
+        bridge = freshness.delta_since(root, "vault", caption)
+        return "caption_behind_bridge_complete" if bridge.complete else "caption_behind_bridge_incomplete"
+    if language_hash != f"{language.schema_version}:{language.content_hash}":
+        return "language_registry_changed"
+    if (entry[1].registry.core_version, entry[1].registry.extension_hash) != (
+        relation_definitions.core_version,
+        relation_definitions.extension_hash,
+    ):
+        return "relation_registry_changed"
+    return "config_changed"
+
+
 def _build_corpus_context_with_census(
     vault_root: Path,
     *,
@@ -3432,6 +3463,7 @@ def _build_corpus_context_with_census(
 
     census: tuple | None = None
     cache_key: tuple[str, str] | None = None
+    miss_reason = "not_event_cached"
     if candidate is None and corpus_context_cache_enabled():
         cache_key = _corpus_cache_key(root)
         event_checkpoint = freshness.consumer_checkpoint(root, "vault")
@@ -3459,6 +3491,9 @@ def _build_corpus_context_with_census(
                     len(event_entry[1].pages),
                 )
                 return event_entry[1], event_entry[0]
+        miss_reason = _event_miss_reason(
+            root, cache_key, event_checkpoint, relation_definitions, language
+        )
         # This walk's meaning is only settled by the branch it lands in, and
         # every one of those branches decides while a cache lock is held. So
         # the disposition is recorded in place and emitted by `_census_walk_log`
@@ -3487,9 +3522,11 @@ def _build_corpus_context_with_census(
                             )
                             _caption_corpus_context_locked(cache_key, current_checkpoint)
                             log.info(
-                                "semantic corpus context reused pages=%d census_ms=%.1f",
+                                "semantic corpus context reused pages=%d census_ms=%.1f "
+                                "event_miss=%s",
                                 len(entry[1].pages),
                                 census_ms,
+                                miss_reason,
                             )
                             walk[1] = "hit"
                             return entry[1], entry[0]
@@ -3526,11 +3563,13 @@ def _build_corpus_context_with_census(
                                     )
                                     log.info(
                                         "semantic corpus context reconciled pages=%d "
-                                        "changed=%d reconcile_ms=%.1f census_ms=%.1f",
+                                        "changed=%d reconcile_ms=%.1f census_ms=%.1f "
+                                        "event_miss=%s",
                                         len(context.pages),
                                         len(changed_paths),
                                         (time.perf_counter() - started) * 1000.0,
                                         census_ms,
+                                        miss_reason,
                                     )
                                     walk[1] = "patch"
                                     return context, census
@@ -3694,10 +3733,11 @@ def _build_corpus_context_with_census(
                         _trim_corpus_cache_locked(cache_key)
                     stored = True
         log.info(
-            "semantic corpus context built pages=%d build_ms=%.1f cached=%s",
+            "semantic corpus context built pages=%d build_ms=%.1f cached=%s event_miss=%s",
             len(context.pages),
             build_ms,
             stored,
+            miss_reason,
         )
     except BaseException as error:
         if flight is not None:
