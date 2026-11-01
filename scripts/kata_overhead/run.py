@@ -31,6 +31,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixtures  # noqa: E402
+import syscalls  # noqa: E402
 
 CELL_ID = "abcdefghijklmnop"
 CELL_PORT = 8765
@@ -457,7 +458,8 @@ for entry in os.listdir("/proc"):
         continue
     processes.append({"pid": int(entry), "comm": name, "cmd": command[:200], **rollup})
     for line in cgroup.splitlines():
-        if line.startswith("0::") and len(line) > 4:
+        # Only the cell's own cgroups: a shim shares the host service's cgroup, which holds other containers.
+        if line.startswith("0::") and len(line) > 4 and cid in line:
             cgroups.add(line[3:])
 # A cgroup under another in the set is already counted by its parent.
 leaves = sorted(path for path in cgroups if not any(other != path and path.startswith(other.rstrip("/") + "/") for other in cgroups))
@@ -510,6 +512,22 @@ print(json.dumps({"cpu": cpu, "memory_current": read("/sys/fs/cgroup/memory.curr
                   "meminfo": read("/proc/meminfo").splitlines()[:6]}))
 '''
 
+# A traced container waits on a FIFO until the host has attached strace to its first process, so no syscall
+# is missed. The wrapper's own steps run before the attach; `exec` then replaces the shell with the command.
+TRACE_GATE = 'mkfifo /tmp/go && read -r _ < /tmp/go; exec "$@"'
+
+# The backup Job's restic calls (backup, forget, check, restore), against a local repository.
+RESTIC_SCRIPT = r'''
+set -e
+mkdir -p /data/host
+restic snapshots || restic init
+restic backup --json /data/vault /data/host > /tmp/backup.json
+restic snapshots
+restic forget --keep-last 1 --prune
+restic check
+restic restore latest --target /tmp/restore
+'''
+
 REBUILD_SCRIPT = r'''
 import json, time
 from pathlib import Path
@@ -535,10 +553,11 @@ class Lab:
         (self.out / "logs").mkdir(exist_ok=True)
         self.results = (self.out / "results.jsonl").open("a", encoding="utf-8")
         self.events = (self.out / "events.log").open("a", encoding="utf-8")
-        self.arms: list[str] = list(RUNTIMES)
+        self.arms: list[str] = [arm for arm in args.arms.split(",") if arm]
         self.stems: list[str] = []
         self.import_counts: dict = {}
         self.media_files: list[str] = []
+        self.slow = 1  # deadline multiplier: strace slows the traced cell several times over
 
     # -- records
     def log(self, message: str) -> None:
@@ -592,16 +611,21 @@ class Lab:
         argv += ["--entrypoint", "sh", self.image, "-c", script]
         return self.docker(*argv, timeout=timeout)
 
-    def oneshot(self, runtime: str, volume: str, entrypoint_args: list[str], *, entrypoint: str | None = None,
-                mounts: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 600,
-                limits: bool = False):
-        argv = ["run", "--rm", "--runtime", runtime, "--network", "none", *self.security(), "-v", f"{volume}:/data"]
+    def oneshot_options(self, runtime: str, volume: str, *, mounts: list[str] | None = None,
+                        env: dict[str, str] | None = None, limits: bool = False, extra: list[str] | None = None) -> list[str]:
+        argv = ["--runtime", runtime, "--network", "none", *self.security(), "-v", f"{volume}:/data", *(extra or [])]
         if limits:
             argv += ["--cpus", "2", "--memory", "3g"]
         for mount in mounts or []:
             argv += ["-v", mount]
         for key, value in {"EXOMEM_CLOUD_CELL": "1", "EXOMEM_CLOUD_CELL_ID": CELL_ID, **(env or {})}.items():
             argv += ["-e", f"{key}={value}"]
+        return argv
+
+    def oneshot(self, runtime: str, volume: str, entrypoint_args: list[str], *, entrypoint: str | None = None,
+                mounts: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 600,
+                limits: bool = False):
+        argv = ["run", "--rm", *self.oneshot_options(runtime, volume, mounts=mounts, env=env, limits=limits)]
         if entrypoint:
             argv += ["--entrypoint", entrypoint]
         argv += [self.image, *entrypoint_args]
@@ -613,12 +637,13 @@ class Lab:
         self.docker("volume", "create", name)
         self.helper(name, "chown 10001:10001 /data && chmod 2770 /data")
 
-    def start_cell(self, runtime: str, name: str, volume: str) -> tuple[str, float, float]:
-        """Returns (base url, `docker run -d` milliseconds, clock at the call)."""
+    def start_cell(self, runtime: str, name: str, volume: str, *, gated: bool = False) -> tuple[str, float, float]:
+        """Returns (base url, `docker run -d` milliseconds, clock at the call). A gated cell waits for the tracer."""
+        command = CELL_COMMAND.replace('&& exec "$@"', f"&& {TRACE_GATE}") if gated else CELL_COMMAND
         argv = ["run", "-d", "--name", name, "--runtime", runtime, "--network", self.network,
                 "--cpus", "2", "--memory", "3g", *self.security(),
                 "-v", f"{volume}:/data", *self.cell_env(),
-                "--entrypoint", "sh", self.image, "-c", CELL_COMMAND, "cell-process", "exomem",
+                "--entrypoint", "sh", self.image, "-c", command, "cell-process", "exomem",
                 "--transport", "http", "--host", "0.0.0.0", "--port", str(CELL_PORT)]
         t0 = now_ms()
         self.docker(*argv)
@@ -829,7 +854,7 @@ class Lab:
         self.log(f"seed snapshot {(self.snap / 'seed.tar').stat().st_size} bytes")
 
     def search_until_warm(self, mcp: Mcp, query: str, limit_s: float = 240.0) -> Call:
-        deadline = time.monotonic() + limit_s
+        deadline = time.monotonic() + limit_s * self.slow
         while True:
             answer = mcp.call("search", {"query": query})
             warming = answer.code == "RETRIEVAL_INDEX_WARMING" or "embeddings" in warming_components(answer.structured)
@@ -975,7 +1000,7 @@ class Lab:
         def write(index: int, marker: str) -> Call:
             body = (f"Benchmark note {index} for {arm} repeat {rep}. Edit anchor {marker}. "
                     + " ".join(fixtures.FILLER[index % len(fixtures.FILLER)].split()) + ".")
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 120 * self.slow
             while True:
                 answer = mcp.call("write", {"content": body, "title": f"gvbench {arm} {rep} {index} {marker}",
                                             "status": "draft"})
@@ -1018,7 +1043,7 @@ class Lab:
             if not acked.ok:
                 continue
             start = now_ms()
-            deadline = time.monotonic() + 180
+            deadline = time.monotonic() + 180 * self.slow
             while time.monotonic() < deadline:
                 answer = mcp.call("search", {"query": marker})
                 if answer.ok and hits_of(answer.structured):
@@ -1049,7 +1074,7 @@ class Lab:
                 continue
             states: list[str] = []
             final = ""
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 120 * self.slow
             while time.monotonic() < deadline:
                 status = mcp.call("media", {"operation": "status", "path": path})
                 state = ""
@@ -1136,6 +1161,158 @@ class Lab:
                         note=json.dumps({k: round(v) for k, v in steps.items()}))
         self.diag(f"import-trace-{arm}-{rep}", trace)
 
+    # -- syscall recording (runc only)
+    def container_pids(self, name: str) -> list[int]:
+        """Host process ids in the container's cgroup, leader first."""
+        leader = int(self.docker("inspect", "--format", "{{.State.Pid}}", name).stdout.strip())
+        group = next(line[3:] for line in Path(f"/proc/{leader}/cgroup").read_text().splitlines() if line.startswith("0::"))
+        members = [int(item) for item in Path(f"/sys/fs/cgroup{group}/cgroup.procs").read_text().split()]
+        return [leader] + [pid for pid in members if pid != leader]
+
+    def attach_and_release(self, name: str, out: Path) -> syscalls.Tracer:
+        """Attach strace to a gated container's first process, then open the gate."""
+        deadline = time.monotonic() + 90
+        while self.docker("exec", name, "test", "-p", "/tmp/go", check=False, timeout=30).returncode != 0:
+            if time.monotonic() > deadline:
+                raise HarnessError(f"{name} never reached its gate")
+            time.sleep(0.1)
+        leader = int(self.docker("inspect", "--format", "{{.State.Pid}}", name).stdout.strip())
+        tracer = syscalls.Tracer(out, [leader])
+        if not tracer.wait_attached(leader):
+            raise HarnessError(f"strace did not attach to {name}")
+        self.docker("exec", name, "sh", "-c", ": > /tmp/go", timeout=30)
+        return tracer
+
+    def trace_phase(self, name: str, out: Path) -> syscalls.Tracer:
+        pids = self.container_pids(name)
+        tracer = syscalls.Tracer(out, pids)
+        if not tracer.wait_attached(pids[0]):
+            self.log(f"strace did not attach to {pids[0]} for {out.name}")
+        return tracer
+
+    def traced_oneshot(self, role: str, volume: str, command: list[str], out: Path, *, mounts: list[str] | None = None,
+                       env: dict[str, str] | None = None, extra: list[str] | None = None) -> tuple[dict, int, str]:
+        """One role as a container that strace follows from its first instruction to its exit."""
+        name = f"kv-trace-{role}-{self.run_id}"
+        argv = ["run", "-d", "--name", name, *self.oneshot_options("runc", volume, mounts=mounts, env=env, limits=True, extra=extra),
+                "--entrypoint", "sh", self.image, "-c", TRACE_GATE, "tracee", *command]
+        self.docker(*argv)
+        try:
+            tracer = self.attach_and_release(name, out / f"{role}.strace")
+            code = int(self.docker("wait", name, timeout=1800).stdout.strip() or "-1")
+            table = tracer.finish(timeout=300)
+            logs = self.docker("logs", name, check=False)
+            (self.out / "logs" / f"trace-{role}.log").write_text((logs.stdout + logs.stderr)[-20000:])
+            return table, code, logs.stdout
+        finally:
+            self.docker("rm", "-f", name, check=False)
+
+    def error_probes(self, url: str) -> None:
+        """Requests the cell refuses, so that its error paths run once."""
+        headers = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
+        hello = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        good = {**headers, "authorization": f"Bearer {self.token}", "mcp-protocol-version": PROTOCOL}
+        with httpx.Client(base_url=url, timeout=60, trust_env=False) as client:
+            client.post("/mcp", headers=headers, json=hello)
+            client.post("/mcp", headers={**headers, "authorization": "Bearer wrong"}, json=hello)
+            client.post("/mcp", headers=good, content=b"{not json")
+            client.post("/mcp", headers=good, json={"jsonrpc": "2.0", "id": 2, "method": "nonsense", "params": {}})
+            client.get("/nonexistent")
+        mcp = Mcp(url, self.token)
+        try:
+            mcp.initialize()
+            mcp.raw("no_such_tool", {})
+            mcp.call("read", {"path": "Knowledge Base/missing/absent.md"})
+            mcp.call("search", {"query": ""})
+            mcp.call("write", {"content": "", "title": ""})
+            mcp.call("edit", {"path": "missing.md", "why": "probe", "old_string": "a", "new_string": "b"})
+            mcp.call("media", {"operation": "status", "path": f"{MEDIA_DIR}/absent.pdf"})
+        finally:
+            mcp.close()
+
+    def trace_serve(self, volume: str, import_id: str | None, out: Path) -> dict[str, dict]:
+        """The serving cell under strace, one table per phase of the workload."""
+        name = f"kv-trace-serve-{self.run_id}"
+        arm, rep, phases = "runc-trace", 0, {}
+        url, _, _ = self.start_cell("runc", name, volume, gated=True)
+        mcp = None
+        try:
+            tracer = self.attach_and_release(name, out / "serve-startup.strace")
+            ready = self.wait_http(url, "/health/ready", now_ms(), 900, name)
+            if ready is None:
+                phases["startup"] = tracer.stop()
+                raise HarnessError("the traced cell never became ready")
+            mcp = Mcp(url, self.token)
+            mcp.initialize()
+            phases["startup"] = tracer.stop()
+            steps = (
+                ("search", lambda: self.work_search(arm, rep, url, mcp)),
+                ("write", lambda: self.work_write(arm, rep, mcp)),
+                ("media", lambda: self.work_media(arm, rep, mcp, name)),
+                ("import", lambda: self.work_import_cell(arm, rep, mcp, import_id)),
+                ("errors", lambda: self.error_probes(url)),
+            )
+            for label, work in steps:
+                tracer = self.trace_phase(name, out / f"serve-{label}.strace")
+                try:
+                    work()
+                except Exception as error:  # noqa: BLE001 - recorded, the next phase goes on
+                    self.fail(arm, rep, f"section.{label}", f"{type(error).__name__}: {error}")
+                finally:
+                    phases[label] = tracer.stop()
+            mcp.close()
+            mcp = None
+            tracer = self.trace_phase(name, out / "serve-shutdown.strace")
+            self.docker("stop", "-t", "30", name, check=False, timeout=180)
+            phases["shutdown"] = tracer.finish(timeout=180)
+        finally:
+            if mcp is not None:
+                mcp.close()
+            self.stop_cell(name, "trace-serve")
+        return phases
+
+    def trace_session(self) -> None:
+        """Record the syscalls of each process role under runc: cell-init, import Job, restic backup Job, serve."""
+        out = self.out / "syscalls"
+        out.mkdir(exist_ok=True)
+        volume = f"kv-trace-{self.run_id}"
+        self.log("=== trace session (runc, strace -f -qq -c)")
+        self.new_volume(volume)
+        self.helper(volume, "tar -C /data -xpf /snap/seed.tar && chmod 2770 /data", mounts=[f"{self.snap}:/snap:ro"])
+        self.slow = 6
+        meta = {"strace": sh(["strace", "--version"], check=False).stdout.splitlines()[:1], "image": self.image}
+        documents, import_id = [], None
+        try:
+            roles = (
+                ("cell-init", ["env", "exomem", "cell-init", "--vault", "/data/vault", "--json"], {}),
+                ("import", ["env", "python", "-c", IMPORT_SCRIPT, IMPORT_NAME],
+                 {"mounts": [f"{self.fx / 'import' / IMPORT_NAME}:/input:ro"],
+                  "env": {"EXOMEM_IMPORT_MAX_MEMBERS": "500000", "EXOMEM_IMPORT_RESERVE_BYTES": "268435456"}}),
+                ("restic", ["sh", "-c", RESTIC_SCRIPT],
+                 {"extra": ["--tmpfs", "/repo:rw,size=512m,uid=10001,gid=10001,mode=0700"],
+                  "env": {"RESTIC_REPOSITORY": "/repo", "RESTIC_PASSWORD": "trace-only", "RESTIC_CACHE_DIR": "/tmp/restic-cache"}}),
+            )
+            for role, command, options in roles:
+                try:
+                    table, code, stdout = self.traced_oneshot(role, volume, command, out, **options)
+                except Exception as error:  # noqa: BLE001 - recorded, the next role goes on
+                    self.fail("runc-trace", 0, f"trace.{role}", f"{type(error).__name__}: {error}")
+                    continue
+                self.log(f"trace {role}: exit={code} distinct={len(table)}")
+                documents.append(syscalls.role_document(role, {"run": table}, exit_code=code, **meta))
+                if role == "import" and code == 0:
+                    import_id = json.loads(stdout.strip().splitlines()[-1])["import_id"]
+            try:
+                phases = self.trace_serve(volume, import_id, out)
+                documents.append(syscalls.role_document("serve", phases, **meta))
+            except Exception as error:  # noqa: BLE001 - recorded, the documents written so far stay
+                self.fail("runc-trace", 0, "trace.serve", f"{type(error).__name__}: {error}")
+        finally:
+            for document in documents:
+                (out / f"{document['role']}.json").write_text(json.dumps(document, indent=1))
+            (out / "summary.json").write_text(json.dumps(syscalls.roles_summary(documents), indent=1))
+            self.docker("volume", "rm", "-f", volume, check=False)
+
     # -- driver
     def run(self) -> None:
         self.docker("network", "create", "--driver", "bridge", "--internal", self.network)
@@ -1148,11 +1325,14 @@ class Lab:
                 return
             self.make_fixtures()
             self.seed()
-            for rep in range(1, self.args.repeats + 1):
-                # Each arm takes each position in the order once over a full cycle of repeats.
-                shift = (rep - 1) % len(self.arms)
-                for arm in self.arms[shift:] + self.arms[:shift]:
-                    self.session(arm, rep)
+            if "measure" in self.args.phases:
+                for rep in range(1, self.args.repeats + 1):
+                    # Each arm takes each position in the order once over a full cycle of repeats.
+                    shift = (rep - 1) % len(self.arms)
+                    for arm in self.arms[shift:] + self.arms[:shift]:
+                        self.session(arm, rep)
+            if "trace" in self.args.phases:
+                self.trace_session()
         finally:
             self.docker("network", "rm", self.network, check=False)
 
@@ -1165,9 +1345,12 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed-notes", type=int, default=200)
     parser.add_argument("--only", default="search,write,media,import,fs")
+    parser.add_argument("--arms", default=",".join(RUNTIMES), help="runtimes measured against each other")
+    parser.add_argument("--phases", default="measure", help="measure, trace, or both: trace records runc syscalls")
     parser.add_argument("--compat-only", action="store_true", help="probe the runtimes and stop")
     args = parser.parse_args()
     args.only = {part for part in args.only.split(",") if part}
+    args.phases = {part for part in args.phases.split(",") if part}
     lab = Lab(args)
     try:
         lab.run()

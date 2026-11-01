@@ -104,7 +104,7 @@ def main() -> int:
     parser.add_argument("--md-out", type=Path)
     args = parser.parse_args()
     rows = load(args.results)
-    tests = sorted({row["arm"] for row in rows} - {"runc"})
+    tests = sorted(arm for arm in {row["arm"] for row in rows} - {"runc"} if not arm.endswith("-trace"))
     summaries = {test: summarize(rows, "runc", test) for test in tests}
     document = "\n\n".join([ARMS, *(render(summary, test) for test, summary in summaries.items())])
     print(document)

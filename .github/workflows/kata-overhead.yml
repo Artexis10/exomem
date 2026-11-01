@@ -28,6 +28,9 @@ env:
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
   EXTRA_ARGS: ""
+  # "measure" times runc against Kata; "trace" records the syscalls of the runc cell with strace.
+  PHASES: "trace"
+  ARMS: "runc"
 
 jobs:
   measure:
@@ -88,6 +91,8 @@ jobs:
 
       - name: Install harness dependencies
         run: |
+          command -v strace >/dev/null || sudo apt-get install -y --no-install-recommends strace
+          strace --version | sed -n 1p
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet 'httpx>=0.28,<1'
 
@@ -97,7 +102,8 @@ jobs:
           umask 022
           "$RUNNER_TEMP/venv/bin/python" scripts/kata_overhead/run.py \
             --image "$CLOUD_IMAGE" --out "$RUNNER_TEMP/kv-out" --work "$RUNNER_TEMP/kv-work" \
-            --repeats "$REPEATS" --seed-notes "$SEED_NOTES" ${EXTRA_ARGS:+"$EXTRA_ARGS"}
+            --repeats "$REPEATS" --seed-notes "$SEED_NOTES" --phases "$PHASES" --arms "$ARMS" \
+            ${EXTRA_ARGS:+"$EXTRA_ARGS"}
 
       - name: Per-case table
         if: always()
