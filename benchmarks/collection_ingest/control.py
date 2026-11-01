@@ -7,6 +7,12 @@ the way an ideal adoption would, leaves out a counted set of pages, links, embed
 writes a drive log that says what a product would have reported, runs ``score.score`` and
 compares each planted count with the metric the scorer printed. Any mismatch exits non-zero.
 
+With a key from a ``raw`` profile the control also plants, among the raw items, a lost item
+(no page, no refusal), a refused item, a page with the wrong bytes, a page whose phrase
+search cannot find, an original the scorer cannot compare, an existing page that an import
+overwrote and one that went missing, and a Unicode twin whose page is gone while the other
+twin's page stays. The scorer must report each one by its count.
+
     python control.py --collection C --key K --workdir W --python PY --out METRICS.json
 """
 
@@ -14,8 +20,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import json
 import sys
+import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +32,15 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import raw_corpus  # noqa: E402
 import score  # noqa: E402
-from drive import REPO_ROOT, init_vault, kb_pages, place_collection  # noqa: E402
+from drive import (  # noqa: E402
+    REPO_ROOT,
+    init_vault,
+    kb_pages,
+    place_collection,
+    seed_existing_pages,
+)
 from mcp_session import isolated_env  # noqa: E402
 
 IMPORTED = "Knowledge Base/Sources/Imported"
@@ -32,6 +48,10 @@ NOTES = "Knowledge Base/Notes/Insights"
 CLASSIFIED = "Knowledge Base/Sources/Book/Media"
 MISSING_NOTE, REFUSED_ATT, ABSENT_ATT = (17, 5), (4, 1), (5, 3)  # (modulus, remainder) by item index
 DROPPED_LINK, DROPPED_EMBED, STRIPPED_NOTE, FILE_EMBED_ATT = 6, 5, (13, 2), 7
+# Planted rules over the raw items, by their index in the key (sorted by path).
+RAW_LOST, RAW_REFUSED, RAW_WRONG_BYTES, RAW_NO_PHRASE = (11, 3), (13, 5), (7, 2), (5, 1)
+OVERWRITTEN_COLLIDER, DELETED_BYSTANDER = "collide-artifact", "bystander-source"
+UNSAFE_NAME_REFUSAL = "NOT_FOUND"  # a code that an importer gives a name it cannot read; the key names none
 JOB_STATES = ("blocked", "failed", "running")
 COLLECTION = "Collection"
 
@@ -51,7 +71,88 @@ def write_page(vault: Path, rel: str, front: dict[str, Any], body: str) -> None:
     target.write_text(f"---\n{head}---\n{body}\n", encoding="utf-8")
 
 
-def build(key: dict[str, Any], collection: Path, vault: Path) -> dict[str, Any]:
+def page_bytes(front: dict[str, Any], body: bytes) -> bytes:
+    return f"---\n{yaml.safe_dump(front, allow_unicode=True, sort_keys=False)}---\n".encode() + body + b"\n"
+
+
+def build_raw(key: dict[str, Any], collection: Path, vault: Path,
+              existing: dict[str, Any]) -> dict[str, Any]:
+    """Write a page (and a stored file) for each raw item that the plant rules leave; return the counts."""
+    raw = [i for i in key["items"] if i["kind"] == "raw"]
+    colliders = {s["collides_with"]: s for s in (key.get("existing_vault") or {}).get("pages", [])
+                 if s["role"] == "collider"}
+    seeded = {row["id"]: row for row in existing.get("pages", [])}
+    day = existing.get("day", "")
+    count: Counter[str] = Counter()
+    lost_by_class: Counter[str] = Counter()
+    codes: Counter[str] = Counter()
+    refusals: list[dict[str, Any]] = []
+    altered = False
+    for n, item in enumerate(raw):
+        path, cls, form = item["path"], item["raw_class"], item["form"]
+        spec = colliders.get(path)
+        refuse = UNSAFE_NAME_REFUSAL if item["outcome"] == "filed-or-refused" else None
+        # The twin whose name is not in NFC loses its page; the other twin is kept, so the scorer
+        # must not let the kept twin's page stand in for the lost one.
+        gone_twin = cls == "unicode-twin" and unicodedata.normalize("NFC", path) != path
+        kept_twin = cls == "unicode-twin" and not gone_twin
+        if gone_twin or (spec is None and not kept_twin and hit(n, RAW_LOST)):
+            lost_by_class[cls] += 1
+            count["lost"] += 1
+            continue
+        if spec is None and not kept_twin and (refuse or hit(n, RAW_REFUSED)):
+            code = refuse or "PLANTED_REFUSAL"
+            refusals.append({"stage": "select.rejected", "path": f"{COLLECTION}/{path}", "code": code,
+                             "reason": "planted"})
+            count["refused"] += 1
+            codes[code] += 1
+            count["meets"] += bool(refuse)
+            continue
+        original = (collection / path).read_bytes()
+        phrase = item["probe"]["text"].encode() if item["probe"] else None
+        wrong = hit(n, RAW_WRONG_BYTES)
+        if form == "text":
+            body = ("§" + original.decode()[1:]).encode() if wrong else original
+            if hit(n, RAW_NO_PHRASE) and phrase:
+                body = body.replace(phrase, b"redacted")
+            held = "unknown" if not altered and not wrong else ("held" if original in body else "missing")
+            if held == "unknown":
+                altered = True
+                (vault / COLLECTION / path).write_bytes(original + b"\nAltered after the copy.\n")
+        else:
+            stored = vault / IMPORTED / f"raw-{n:04d}.bin"
+            stored.write_bytes(b"planted wrong bytes" if wrong else original)
+            held = "missing" if wrong else "held"
+            body = b"stored as a file" + (b" " + phrase if phrase and n % 2 == 0 else b"")
+        rel = f"{IMPORTED}/raw-{n:04d}.md"  # a flattened path can exceed the 255 byte name limit
+        if spec is not None:
+            rel = f"{IMPORTED}/{spec['stem'].replace('{today}', day)}-2.md"
+            if spec["id"] == OVERWRITTEN_COLLIDER:
+                rel = seeded[spec["id"]]["path"]  # the import replaced the page that was there
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_bytes(page_bytes(
+            {"imported_from": f"{COLLECTION}/{path}", "original_sha256": item["sha256"],
+             "original_bytes": item["bytes"], "tags": ["imported"]}, body))
+        count["filed"] += 1
+        count["meets"] += 1
+        count["held"] += held == "held"
+        count["missing"] += held == "missing"
+        count["unknown"] += held == "unknown"
+        count["form_as_key"] += held == "held"
+        if phrase:
+            count["probed"] += 1
+            count["found"] += phrase in body
+            if item["probe"]["promised"]:
+                count["promised"] += 1
+                count["promised_found"] += phrase in body
+    seeded_gone = vault / seeded[DELETED_BYSTANDER]["path"]
+    seeded_gone.unlink()
+    return {"count": count, "total": len(raw), "lost_by_class": dict(lost_by_class), "codes": dict(codes),
+            "refusals": refusals}
+
+
+def build(key: dict[str, Any], collection: Path, vault: Path,
+          existing: dict[str, Any] | None = None) -> dict[str, Any]:
     """Write the ideal-with-losses vault; return what the scorer should report."""
     items = [i for i in key["items"] if i["kind"] != "junk"]
     notes = [i for i in items if i["kind"] == "note"]
@@ -158,7 +259,9 @@ def build(key: dict[str, Any], collection: Path, vault: Path) -> dict[str, Any]:
     phrases = {(a["media_phrase"] or {}).get("text") for a in atts} - {None}
     landed_phrases = {(a["media_phrase"] or {}).get("text") for a in atts if a["path"] in page_of} - {None}
     expect["media_phrases"] = (len(landed_phrases), len(phrases))
-    return {"refused": refused, "jobs": jobs, "states": states, "expect": expect, "landed": len(page_of),
+    has_raw = any(i["kind"] == "raw" for i in key["items"])
+    return {"raw": build_raw(key, collection, vault, existing or {}) if has_raw else None,
+            "refused": refused, "jobs": jobs, "states": states, "expect": expect, "landed": len(page_of),
             "notes_landed": sum(1 for n in notes if n["path"] in page_of),
             "atts_landed": sum(1 for a in atts if a["path"] in page_of),
             "notes": notes, "page_of": page_of}
@@ -175,7 +278,9 @@ def run(args: argparse.Namespace) -> int:
     init = init_vault(args.python, env, vault, state)
     if init["exit_code"] != 0:
         raise SystemExit(f"exomem init failed: {init}")
-    built = build(key, args.collection, vault)
+    existing = ({"seeded": False} if "existing_vault" not in key else
+                seed_existing_pages(raw_corpus.vault_pages_path(args.key), vault, dt.date.today()))
+    built = build(key, args.collection, vault, existing)
     first = kb_pages(vault)
     # A re-run that duplicated four landed notes: the scorer must see exactly four new pages.
     duplicated = [p for p in built["page_of"].values() if p.startswith(IMPORTED)][:4]
@@ -188,15 +293,17 @@ def run(args: argparse.Namespace) -> int:
                 "collection_path": built["notes"][0]["path"]}, "A planted re-run duplicate.")
     refusals = [{"stage": "select.rejected", "path": f"{COLLECTION}/{p}", "code": "PLANTED_REFUSAL",
                  "reason": "planted"} for p in built["refused"]]
+    refusals += (built["raw"] or {}).get("refusals", [])
     log = {
         "format": 1, "profile": "control", "label": "positive control",
         "server": {"head": "control", "src_dirty": False}, "paths": {
             "vault": str(vault), "state": str(state), "collection_name": COLLECTION},
         "server_root": str(REPO_ROOT), "env_extra": {}, "search_mode_note": "control vault, lexical lane",
         "snapshot_after_first_run": first, "snapshot_after_rerun": kb_pages(vault),
+        "existing_vault": existing,
         "tool_calls_total": 0, "total_wall_s": 0.0, "call_failures": {}, "folder_kind_rules": "n/a",
         "collection_label": "n/a",
-        "journeys": [{"name": "first", "refusals": refusals, "phase_wall_ms": {}},
+        "journeys": [{"name": "first", "stopped_at": None, "refusals": refusals, "phase_wall_ms": {}},
                      {"name": "rerun", "refusals": [], "phase_wall_ms": {}}],
         "media": {"after_first_run": {"converged": True},
                   "after_rerun": {"converged": True, "final_status": {"counts": {}, "jobs": built["jobs"]}}},
@@ -213,6 +320,69 @@ def pairs(metric: dict[str, int]) -> tuple[int, int]:
     return metric["numerator"], metric["denominator"]
 
 
+def raw_checks(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any]) -> list[tuple[str, Any, Any]]:
+    """What the scorer must report for the raw items and the existing vault, from the planted counts."""
+    if built["raw"] is None:
+        return []
+    c, total = built["raw"]["count"], built["raw"]["total"]
+    r = m["raw"]["all"]
+    absent_planted = (len(built["notes"]) + len([i for i in key["items"] if i["kind"] == "attachment"])
+                      - built["notes_landed"] - built["atts_landed"] - len(built["refused"]))
+    checks: list[tuple[str, Any, Any]] = [
+        ("raw filed", pairs(r["filed"]), (c["filed"], total)),
+        ("raw refused", r["refused"], c["refused"]),
+        ("raw lost (planted loss caught)", r["lost"], c["lost"]),
+        ("raw lost by class", {n: v["lost"] for n, v in m["raw"]["by_class"].items() if v["lost"]},
+         built["raw"]["lost_by_class"]),
+        ("lost, all kinds (landing.lost)", m["landing"]["lost"]["numerator"], absent_planted + c["lost"]),
+        ("raw meets the key", pairs(r["meets_key"]), (c["meets"], total)),
+        ("raw original bytes held", pairs(r["original_bytes_held_of_filed"]),
+         (c["held"], c["held"] + c["missing"])),
+        ("raw original not comparable (unknown)", r["original_bytes_held_of_filed"]["unknown"], c["unknown"]),
+        ("raw gap reported for it", m["measurement_gaps"].get("raw_originals_not_comparable", 0), c["unknown"]),
+        ("raw held in the form the key states", pairs(r["form_as_key_of_filed"]),
+         (c["form_as_key"], c["filed"] - c["unknown"])),
+        ("raw form not compared (unknown)", r["form_as_key_of_filed"]["unknown"], c["unknown"]),
+        ("raw refusal reports the code seen", r["refused_by_code"],
+         built["raw"]["codes"]),
+        ("unicode twin with no page is lost, the kept twin is filed",
+         (m["raw"]["by_class"]["unicode-twin"]["lost"], m["raw"]["by_class"]["unicode-twin"]["filed"]["numerator"]),
+         (1, 1)),
+        ("raw phrase found by search", pairs(r["readable_observed_of_filed"]),
+         (c["found"], c["probed"])),
+        ("raw phrase found, promised items", pairs(r["readable_promised_of_filed"]),
+         (c["promised_found"], c["promised"])),
+    ]
+    vault = m["existing_vault"]
+    # A run that never seeded pages, or a key without raw items, is unknown, not a perfect zero.
+    checks += [
+        ("existing vault not seeded is unknown", score.existing_vault_section(key, {}, Path(), {}, [])["state"],
+         "unknown"),
+        ("no raw items is unknown", score.raw_section({}, [], {}, {}, [], {}, Path(), "")["state"], "unknown"),
+    ]
+    if key.get("existing_vault"):
+        pages = key["existing_vault"]["pages"]
+        colliders = [p for p in pages if p["role"] == "collider"]
+        bystanders = [p for p in pages if p["role"] == "bystander"]
+        kept = [p for p in pages if p["id"] not in (OVERWRITTEN_COLLIDER, DELETED_BYSTANDER)]
+        checks += [
+            ("existing pages unchanged", pairs(vault["seeded_pages_unchanged"]), (len(kept), len(pages))),
+            ("existing page overwritten", vault["seeded_pages_changed"], [OVERWRITTEN_COLLIDER]),
+            ("existing page missing", vault["seeded_pages_missing"], [DELETED_BYSTANDER]),
+            ("colliding items filed", pairs(vault["colliding_items"]["item_filed"]),
+             (len(colliders), len(colliders))),
+            ("colliding items renamed", pairs(vault["colliding_items"]["item_took_a_numbered_name"]),
+             (len(colliders) - 1, len(colliders))),
+            ("collider pages unchanged", pairs(vault["colliding_items"]["seeded_page_unchanged"]),
+             (len(colliders) - 1, len(colliders))),
+            ("bystander pages unchanged", pairs(vault["bystander_pages_unchanged"]),
+             (len(bystanders) - 1, len(bystanders))),
+            ("existing pages found by search", pairs(vault["seeded_pages_found_by_search"]),
+             (len(kept), len(pages))),  # a kept page is read back by its phrase; the other two are not
+        ]
+    return checks
+
+
 def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: int,
             dup_notes: int) -> int:
     e = built["expect"]
@@ -220,6 +390,11 @@ def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: 
     checks = [
         ("notes landed", pairs(m["landing"]["notes_landed"]), (built["notes_landed"], len(notes))),
         ("attachments landed", pairs(m["landing"]["attachments_landed"]), (built["atts_landed"], len(atts))),
+        ("first journey ran to the end", m["landing"]["lost"]["first_journey"], "ran to the end"),
+        ("a stopped first journey names its stop",
+         score.first_journey_state({"journeys": [{"name": "first", "stopped_at": "plan"}]}), "stopped at plan"),
+        ("a log without a first journey is not a clean run",
+         score.first_journey_state({"journeys": []}), "no first journey in the drive log"),
         ("refused by code", m["landing"]["items_refused_by_code"], {"PLANTED_REFUSAL": len(built["refused"])}),
         ("silently absent", m["landing"]["items_silently_absent"]["numerator"],
          len(notes) + len(atts) - built["notes_landed"] - built["atts_landed"] - len(built["refused"])),
@@ -244,6 +419,7 @@ def compare(m: dict[str, Any], built: dict[str, Any], key: dict[str, Any], dup: 
         ("recall ja (counterpart in top 5)",
          m["recall_at_5"]["note_probes"]["counterpart_in_top5"]["ja"]["numerator"], e["recall_ja"]),
     ]
+    checks += raw_checks(m, built, key)
     bad = 0
     for label, got, want in checks:
         status = "ok  " if got == want else "FAIL"
