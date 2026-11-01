@@ -1328,7 +1328,9 @@ def _render_source(
         lines.append(f"capture_input_digest: {yaml_scalar(capture_input_digest)}")
     lines.extend(extra_lines)
     if artifact_rel:
-        media_type = _media_type_for(artifact_name or artifact_rel)
+        # The stored file is what extraction reads, so its name decides the kind; the original's name
+        # can differ (a Markdown original is stored under a text suffix, or `.md.bin` at capture).
+        media_type = _media_type_for(artifact_rel)
         if media_type:
             lines.append(f"media_type: {media_type}")
         lines.append(f"evidence_file: {artifact_rel}")

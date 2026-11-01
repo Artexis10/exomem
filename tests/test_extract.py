@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
+import random
 import sys
 import types
 from importlib.machinery import ModuleSpec
@@ -242,6 +244,62 @@ def test_extract_textfile_reads_utf8(tmp_path) -> None:
     r = extract._extract_textfile(f)
     assert r.media_type == "text" and r.engine == "text"
     assert "zylo" in r.text
+
+
+@pytest.mark.parametrize(
+    ("bom", "codec", "engine"),
+    [
+        (codecs.BOM_UTF16_LE, "utf-16-le", "text:utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16-be", "text:utf-16"),
+        # The UTF-32 LE mark begins with the UTF-16 LE mark; reading it as UTF-16 garbles every character.
+        (codecs.BOM_UTF32_LE, "utf-32-le", "text:utf-32"),
+        (codecs.BOM_UTF8, "utf-8", "text:utf-8-sig"),
+    ],
+)
+def test_extract_textfile_reads_the_codec_a_byte_order_mark_names(tmp_path, bom, codec, engine) -> None:
+    f = tmp_path / "minutes.txt"
+    f.write_bytes(bom + "Minutes\nReference code cobalt-kettle-15851 applies.\n".encode(codec))
+    r = extract.extract_text(f)
+    assert r.text == "Minutes\nReference code cobalt-kettle-15851 applies."
+    assert r.engine == engine
+
+
+def test_extract_textfile_decodes_latin1_accents(tmp_path) -> None:
+    body = "Brève réunion à la côte; señor Müller prévoit ½ prix, 20°C, façade ouverte."
+    f = tmp_path / "notes.txt"
+    f.write_bytes(f"{body}\nReference code saffron-kettle-49822 applies.\n".encode("latin-1"))
+    r = extract.extract_text(f)
+    assert body in r.text
+    assert "saffron-kettle-49822" in r.text
+    assert r.engine == "text:cp1252"
+
+
+def test_extract_textfile_keeps_valid_characters_of_utf8_with_a_stray_byte(tmp_path) -> None:
+    # A single-byte guess would read every valid multi-byte character of this text as two wrong ones.
+    line = "Brève réunion à la côte; señor Müller prévoit ½ prix, 20°C, façade ouverte. Les élèves écoutent.\n"
+    data = bytearray((line * 30).encode("utf-8"))
+    data[len(data) // 2] = 0xFF
+    f = tmp_path / "stray.txt"
+    f.write_bytes(bytes(data))
+    r = extract.extract_text(f)
+    assert r.text == f.read_text(encoding="utf-8", errors="replace").strip()
+    assert r.text.count("Brève réunion") >= 29 and r.engine == "text"
+
+
+def test_extract_textfile_replaces_what_no_codec_explains_as_before(tmp_path) -> None:
+    noise = random.Random(0).randbytes(2000)
+    f = tmp_path / "noise.txt"
+    f.write_bytes(noise)
+    r = extract.extract_text(f)
+    assert r.text == f.read_text(encoding="utf-8", errors="replace").strip()
+    assert r.engine == "text"
+
+
+def test_extract_ics_decodes_a_utf16_calendar(tmp_path) -> None:
+    ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Réunion Appsignal 7731\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    f = tmp_path / "e.ics"
+    f.write_bytes(codecs.BOM_UTF16_LE + ics.encode("utf-16-le"))
+    assert "Réunion Appsignal 7731" in extract.extract_text(f).text
 
 
 def test_extract_eml_pulls_headers_and_body(tmp_path) -> None:

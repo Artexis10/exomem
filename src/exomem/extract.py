@@ -33,6 +33,7 @@ Two OPTIONAL deepen-the-moat transducers ship here, both DEFAULT-OFF + soft-fail
 
 from __future__ import annotations
 
+import codecs
 import itertools
 import json
 import logging
@@ -1561,15 +1562,78 @@ def _extract_rtf(path: Path, media_type: str) -> ExtractResult:
         from striprtf.striprtf import rtf_to_text
     except ImportError as e:
         raise ExtractionUnavailable(f"striprtf not installed: {e}") from e
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    raw = decode_plain_text(path.read_bytes()).text
     text = rtf_to_text(raw, errors="replace").strip()
     return ExtractResult(text=text, media_type=media_type, engine="striprtf")
 
 
+# The byte-order marks the Unicode standard fixes, each with the codec that reads it. UTF-32 LE
+# comes before UTF-16 LE because its mark begins with the UTF-16 LE mark.
+_BYTE_ORDER_MARKS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+# charset-normalizer scores a guess as 1 minus the share of the text that reads as mess. A probe
+# found 1.0 for most correct guesses and 0.82-0.90 for UTF-8 text with stray bytes, which a
+# single-byte guess turns into mojibake where replacement characters would keep every valid one.
+_DETECTION_CONFIDENCE = 0.9
+# Equally clean single-byte guesses differ only in how they read accented letters. Windows-1252 is
+# the Encoding Standard's default for legacy Western text; the library's own ranking read Latin-1
+# French, Swedish and Portuguese as Windows-1250, which turns a grave "e" into a "c" with a caron.
+_LEGACY_WESTERN_ENCODING = "cp1252"
+
+
+@dataclass(frozen=True)
+class DecodedText:
+    text: str
+    encoding: str  # the Python codec name that read it
+
+
+def decode_plain_text(data: bytes) -> DecodedText:
+    """The text of a plain-text file's bytes, and the encoding that read it.
+
+    A byte-order mark names the codec. Without one, strict UTF-8 reads it, then a confident
+    charset-normalizer guess, and last UTF-8 with replacement characters. Every line ending
+    reads as one newline, as `Path.read_text` reads it.
+    """
+    text, encoding = _decode_by_evidence(data)
+    return DecodedText(text.replace("\r\n", "\n").replace("\r", "\n"), encoding)
+
+
+def _decode_by_evidence(data: bytes) -> tuple[str, str]:
+    for mark, codec in _BYTE_ORDER_MARKS:
+        if data.startswith(mark):
+            try:
+                return data.decode(codec), codec
+            except UnicodeDecodeError:
+                break  # the mark opens bytes that are not that encoding; read them as any other
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    guess = _confident_guess(data)
+    if guess is not None:
+        return data.decode(guess, errors="replace"), guess
+    return data.decode("utf-8", errors="replace"), "utf-8"
+
+
+def _confident_guess(data: bytes) -> str | None:
+    from charset_normalizer import from_bytes
+
+    accepted = [m.encoding for m in from_bytes(data) if 1.0 - m.chaos >= _DETECTION_CONFIDENCE]
+    if _LEGACY_WESTERN_ENCODING in accepted:
+        return _LEGACY_WESTERN_ENCODING
+    return accepted[0] if accepted else None
+
+
 def _extract_textfile(path: Path) -> ExtractResult:
-    """Plain-text files: read as UTF-8 (undecodable bytes replaced). No dependency."""
-    text = path.read_text(encoding="utf-8", errors="replace").strip()
-    return ExtractResult(text=text, media_type="text", engine="text")
+    """Plain-text files, in the encoding their bytes show. The engine names a non-UTF-8 one."""
+    decoded = decode_plain_text(path.read_bytes())
+    engine = "text" if decoded.encoding == "utf-8" else f"text:{decoded.encoding}"
+    return ExtractResult(text=decoded.text.strip(), media_type="text", engine=engine)
 
 
 def _extract_eml(path: Path) -> ExtractResult:
@@ -1596,7 +1660,7 @@ _ICS_FIELDS = ("SUMMARY", "DESCRIPTION", "LOCATION", "DTSTART", "DTEND", "ORGANI
 def _extract_ics(path: Path) -> ExtractResult:
     """.ics → human-meaningful VEVENT fields. Minimal native parse (RFC 5545 line
     unfolding); no `icalendar` dependency for what is a low-volume format."""
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    raw = decode_plain_text(path.read_bytes()).text
     unfolded = re.sub(r"\r?\n[ \t]", "", raw)  # join folded continuation lines
     lines: list[str] = []
     for line in unfolded.splitlines():

@@ -916,8 +916,9 @@ def plan_item(
         if suffix.lower() == ".md":
             # An artifact is a `.md` file only when its bytes are not UTF-8 text, and the
             # graph reads every `.md` under the knowledge base as strict UTF-8.
-            # Storing the bytes under `.bin` keeps them out of the graph input set.
-            suffix = ".bin"
+            # Storing the bytes under `.md.txt` keeps them out of the graph input set, and the
+            # `.txt` suffix has the text extracted in the encoding its bytes show.
+            suffix = ".md.txt"
     page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
     reason = access.writable_reason(root, page)
     if reason is not None:
