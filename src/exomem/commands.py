@@ -81,6 +81,7 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import (
     find_types,
+    intent_disclosure,
     note_types,
     operation_entries,
     query_log,
@@ -836,6 +837,7 @@ def op_configure_memory(
     }
 
 
+@intent_disclosure.discloses_status
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -6471,6 +6473,7 @@ def op_get_video_frames(
 # ----- product command wrappers: public surface over canonical leaves -----
 
 
+@intent_disclosure.discloses_status
 def op_ask_memory(
     vault_root: Path,
     query: str = "",
@@ -6673,6 +6676,7 @@ def _abstention_reason(packet: dict) -> str:
     return str(abstention.get("reason") or "")
 
 
+@intent_disclosure.discloses_status
 def op_activate_context(
     vault_root: Path,
     turn: str = "",
@@ -7718,6 +7722,7 @@ def _op_activate_context_body(
     return packet
 
 
+@intent_disclosure.discloses_path
 def op_read_memory(
     vault_root: Path,
     path: str,
@@ -7881,6 +7886,7 @@ def op_read_memory(
     return result
 
 
+@intent_disclosure.discloses_status
 def op_browse_memory(
     vault_root: Path,
     path: str = "",
@@ -9358,6 +9364,21 @@ def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
     return path is not None or bool(query) or family is not None
 
 
+def _review_write_intent(
+    vault_root: Path, *, ref: str | None, wait_seconds: float | None, limit: int | None
+) -> dict:
+    """`write-intent`: poll one accepted write by its reference, or list the reader's own open writes."""
+    from . import intent_review
+
+    if ref is None:
+        if wait_seconds is not None:
+            raise ValueError("INVALID_REVIEW_ARGUMENTS: wait_seconds needs the `ref` of one write")
+        return intent_review.listing(vault_root, 25 if limit is None else max(1, min(limit, 100)))
+    if not intent_review.is_write_ref(ref):
+        raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no write intent for {ref!r}")
+    return intent_review.poll(vault_root, ref, wait_seconds or 0.0)
+
+
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -9376,6 +9397,7 @@ def op_review_memory(
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
     family: str | None = None,
+    wait_seconds: float | None = None,
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
@@ -9386,8 +9408,12 @@ def op_review_memory(
     mode="audit", categories=["unresolved_source_citation"] finds citations
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
 
+    A write answered `accepted` is saved and not yet applied: poll it with
+    mode="write-intent", ref=<intent_ref>, wait_seconds, or report it pending. Never resend it
+    under a new identity. `conflicted` needs a decision: triage_memory retry-write or discard-write.
+
     Args:
-        mode: vocabulary records questions; item/write-advisory-result need ref. No authority:
+        mode: write-intent polls one accepted write by ref, or lists open ones; vocabulary records questions; item/write-advisory-result need ref. No authority:
             apply through connect_memory accept-relation, adoption_studio
             apply-proposal or triage_memory. Modes: references/governance.md.
         categories: Category filter (attention, activation, audit) or upkeep family.
@@ -9413,7 +9439,12 @@ def op_review_memory(
             consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
+        wait_seconds: write-intent only: wait this long for the write to end.
     """
+    if mode == "write-intent":
+        return _review_write_intent(vault_root, ref=ref, wait_seconds=wait_seconds, limit=limit)
+    if wait_seconds is not None:
+        raise ValueError("INVALID_REVIEW_ARGUMENTS: wait_seconds is only supported by write-intent review")
     if mode == "vocabulary":
         question_submission = _review_question_submission(path, query, family)
         unrelated = any(

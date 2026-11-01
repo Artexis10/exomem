@@ -32,6 +32,7 @@ from typing import Any, BinaryIO
 from . import (
     capabilities,
     intent_accept,
+    intent_observability,
     intent_outcomes,
     mutation_journal,
     mutation_lock,
@@ -150,6 +151,15 @@ class _ApplierLock:
         finally:
             os.close(descriptor)
         return False
+
+
+def applier_alive(journal: write_intents.WriteIntentJournal) -> bool:
+    """Whether some process holds this vault's applier lock now. A lock this probe can take has no holder."""
+    lock = _ApplierLock(journal.applier_lock_path)
+    if lock.try_acquire():
+        lock.release()
+        return False
+    return True
 
 
 # -- the applier -------------------------------------------------------------------------------------
@@ -455,6 +465,7 @@ class Applier:
                 self._stall(intent, detail.cause)
                 return
             journal.requeue(intent.intent_id, str(detail.cause))
+            intent_observability.waited(str(detail.cause))
             if detail.cause != CAUSE_STOPPING:
                 self._stop.wait(LEASE_WAIT_SECONDS if detail.cause == CAUSE_WRITER_LEASE else RETRY_PAUSE_SECONDS)
             return

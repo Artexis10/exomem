@@ -6689,6 +6689,28 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "write-intent",
+                  "type": "string"
+                },
+                "limit": {},
+                "ref": {
+                  "type": "string",
+                  "description": "`exomem://review/<id>` for item mode (upkeep refs revalidate one item) or `exomem://write-advisory-result/<id>` for write-advisory-result; for a vocabulary relation question, a current relation-queue candidate ref alongside its source path."
+                },
+                "wait_seconds": {
+                  "type": "number",
+                  "description": "write-intent only: wait this long for the write to end."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "vocabulary",
                   "type": "string"
                 },

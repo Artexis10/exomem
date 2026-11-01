@@ -45,18 +45,18 @@
 
 ## 6. Observation and reads
 
-- [ ] 6.1 Add `review_memory(mode="write-intent")` with poll, wait and list, audience scoping, the projection for current authority, and the waiter-slot cap for poll waits. Proof: the owner sees all intents; another audience gets the unknown-reference answer; a poll with a wait returns the committed terminal; a poll with no free slot returns at once.
-- [ ] 6.2 Add `pending_writes` on direct reads and the status counts in recall, bootstrap and browse, with the best-effort journal read. Proof: a read after `accepted` names the intent; a read with an unreadable journal succeeds without `pending_writes`; a search after the commit returns the new terms.
+- [x] 6.1 Add `review_memory(mode="write-intent")` with poll, wait and list, audience scoping, the projection for current authority, and the waiter-slot cap for poll waits. Proof: the owner sees all intents; another audience gets the unknown-reference answer; a poll with a wait returns the committed terminal; a poll with no free slot returns at once.
+- [x] 6.2 Add `pending_writes` on direct reads and the status counts in recall, bootstrap and browse, with the best-effort journal read. Proof: a read after `accepted` names the intent; a read with an unreadable journal succeeds without `pending_writes`; a search after the commit returns the new terms.
 
 ## 7. Surfaces
 
 - [ ] 7.1 Describe `accepted` and `conflicted` in the MCP tool instructions and in `_Schema/references/mutation-results.md`. Proof: covered by 10.2.
 - [ ] 7.2 Studio: show "saved, applying", poll, and show write conflicts. Proof: Chrome DevTools inspection of an action under a held boundary.
-- [ ] 7.3 CLI: the accept deadline before the row, the unbounded wait after it, the Ctrl-C message, and `exomem writes list|show|retry|discard`. Proof: a CLI test with a held boundary and an interrupt.
+- [x] 7.3 CLI: the accept deadline before the row, the unbounded wait after it, the Ctrl-C message, and `exomem writes list|show|retry|discard`. Proof: a CLI test with a held boundary and an interrupt.
 
 ## 8. Observability
 
-- [ ] 8.1 Add `cause` and the intent rows to `logs/mutations.jsonl`, the metrics, and the doctor `write_journal` check. Proof: doctor fails on a fixture with a stale accepted intent and no live applier.
+- [x] 8.1 Add `cause` and the intent rows to `logs/mutations.jsonl`, the metrics, and the doctor `write_journal` check. Proof: doctor fails on a fixture with a stale accepted intent and no live applier.
 
 ## 9. Cleanup
 

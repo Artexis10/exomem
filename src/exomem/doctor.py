@@ -972,6 +972,72 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
     return _check("fast_ack_custody", "pass", message, details=details)
 
 
+#: An applier probe in the first seconds after an accept can meet the gap between two intents of a CLI applier.
+#: Waiting this long before "no applier is alive" fails keeps that gap from raising a false alarm.
+WRITE_JOURNAL_NO_APPLIER_GRACE_SECONDS = 30.0
+
+
+def _check_write_journal(vault_root: Path | None) -> DoctorCheck:
+    """The intent journal's health (design D10): depth, oldest age, undecided conflicts, format, applier.
+
+    Fails when an accepted write is stale in normal resource mode, or waits with no applier alive: that
+    write is saved and nothing will apply it. A journal that cannot be read fails when the journal is on,
+    because every eligible write then answers `journal_unavailable`.
+    """
+    from . import intent_accept, intent_observability, resource_status, write_intents
+
+    if vault_root is None:
+        return _check("write_journal", "pass", "No vault configured; the write journal was not inspected.")
+    try:
+        health = intent_observability.health(vault_root)
+    except write_intents.JournalRefusal as error:
+        on = intent_accept.mode() != "off"
+        return _check(
+            "write_journal",
+            "fail" if on else "warn",
+            f"The write journal cannot be read: {error}",
+            "Check the vault state directory's permissions and free space. A journal written by a newer "
+            "release needs that release's applier; upgrade this one.",
+        )
+    if health is None:
+        return _check("write_journal", "pass", "No write journal yet: no write has been accepted.")
+    depth = health["accepted"] + health["applying"]
+    age = health["oldest_accepted_age_seconds"]
+    normal = resource_status.resource_posture()["mode"] == "normal"
+    message = (
+        f"{depth} write(s) queued (oldest {'-' if age is None else f'{age:.0f}s'}); "
+        f"{health['conflicted']} undecided conflict(s); applier {'alive' if health['applier_alive'] else 'not running'}; "
+        f"format {health['format_version']}"
+    )
+    stale = age is not None and age > intent_observability.STALE_ACCEPTED_SECONDS
+    orphaned = (
+        depth > 0
+        and not health["applier_alive"]
+        and age is not None
+        and age > WRITE_JOURNAL_NO_APPLIER_GRACE_SECONDS
+    )
+    if orphaned or (stale and normal):
+        return _check(
+            "write_journal",
+            "fail",
+            message,
+            "Start the service, or run any journaling command such as `exomem writes list`, so an applier "
+            "starts and commits the queued writes in order. Read the service log if they stay queued.",
+            details=health,
+        )
+    if stale or health["conflicted"]:
+        return _check(
+            "write_journal",
+            "warn",
+            message,
+            "Decide each conflict with `exomem writes show <id>`, then `retry` or `discard`."
+            if health["conflicted"]
+            else "The oldest write waits longer than normal; resource mode may be slowing the applier.",
+            details=health,
+        )
+    return _check("write_journal", "pass", message, details=health)
+
+
 def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
     """State the collection store's unsupported writer setup for a vault that has a store.
 
@@ -3918,6 +3984,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
         _check_fast_ack_custody(vault_root),
+        _check_write_journal(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
         _check_relation_census(vault_root),

@@ -8,10 +8,18 @@ with no right to an intent gets the answer for an unknown reference.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
-from . import intent_accept, intent_applier, intent_outcomes, state_paths, write_intents
+from . import (
+    intent_accept,
+    intent_applier,
+    intent_outcomes,
+    request_budget,
+    state_paths,
+    write_intents,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +30,10 @@ ACTIONS = (
     ACTION_RETRY,
     ACTION_DISCARD,
 )  # nosemgrep: ep-word-set -- the closed decisions this review item offers
+
+#: The longest one poll may wait, whatever the caller asks. A poll with a request budget also ends before the
+#: budget less its delivery reserve; this bound covers the in-process caller that has no budget.
+MAX_POLL_WAIT_SECONDS = 120.0
 
 # Causes where a retry cannot succeed on its own, with the reason the owner reads.
 _BASIS_CAUSES = (
@@ -93,6 +105,20 @@ def _retry_refusal(intent: write_intents.Intent, *, owner: bool, rebase: bool) -
     return None
 
 
+def _terminal_for_reader(vault_root: Path, intent: write_intents.Intent) -> Any:
+    """The stored terminal as the synchronous path would project it for this reader's current authority.
+
+    None when the filter refuses it: the reader then learns the intent ended, not what it returned.
+    """
+    from .governance import egress
+
+    try:
+        return egress.postfilter(intent.command, intent.terminal, vault_root)
+    except Exception:  # noqa: BLE001 - a refusal or filter fault withholds the terminal; it never fails the poll
+        log.warning("the terminal of write %s was withheld from this reader", intent.intent_id, exc_info=True)
+        return None
+
+
 def item(vault_root: Path, ref: str) -> dict[str, Any]:
     """The review item of one write intent: cause, evidence, the decisions open to this reader, retained arguments."""
     _, journal = _manager_and_journal(vault_root)
@@ -131,8 +157,14 @@ def item(vault_root: Path, ref: str) -> dict[str, Any]:
         "evidence": conflict.get("evidence") or {},
         "conflict": {key: value for key, value in conflict.items() if key != "evidence"},
     }
+    if intent.wait_cause is not None and intent.active:
+        view["wait_cause"] = intent.wait_cause
     if intent.terminal is not None:
-        view["terminal"] = intent.terminal
+        terminal = _terminal_for_reader(vault_root, intent)
+        if terminal is None:
+            view["terminal_withheld"] = True
+        else:
+            view["terminal"] = terminal
     if intent.state != "conflicted":
         return view
     view["arguments"] = intent.arguments
@@ -230,3 +262,91 @@ def conflict_count(vault_root: Path) -> dict[str, Any]:
         )
         return {"count": None, "status": "unavailable"}
     return {"count": count}
+
+
+def _wait_budget(wait_seconds: float) -> float:
+    """How long a poll may wait: the ask, bounded, and within the request budget less its delivery reserve."""
+    wait = max(0.0, min(float(wait_seconds), MAX_POLL_WAIT_SECONDS))
+    budget = request_budget.current()
+    if budget is not None:
+        left = budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS - time.monotonic()
+        wait = min(wait, max(0.0, left))
+    return wait
+
+
+def poll(vault_root: Path, ref: str, wait_seconds: float = 0.0) -> dict[str, Any]:
+    """The state of one write intent, waiting up to `wait_seconds` for it to end (design D6).
+
+    The wait takes a waiter slot from the cap other request waits use. With no slot free, the poll returns the
+    current state at once and says so.
+    """
+    _, journal = _manager_and_journal(vault_root)
+    intent, _ = _intent_for(journal, ref)
+    from . import writer_lease
+
+    wait = _wait_budget(wait_seconds)
+    started = time.monotonic()
+    refused = False
+    if intent.active and wait > 0:
+        with writer_lease.request_waiter_slot() as admitted:
+            refused = not admitted
+            end = started + wait
+            while admitted and intent.active and end - time.monotonic() > 0:
+                intent_accept.wait_for_applier_progress(
+                    min(intent_accept.POST_ROW_POLL_SECONDS, end - time.monotonic())
+                )
+                try:
+                    latest = journal.get(intent.intent_id)
+                except write_intents.JournalRefusal:
+                    break
+                if latest is None:
+                    break
+                intent = latest
+    view = item(vault_root, ref)
+    view["waited_seconds"] = round(time.monotonic() - started, 3)
+    if refused:
+        view["wait_refused"] = "no_waiter_slot"
+    if view["state"] in write_intents.ACTIVE_STATES:
+        view["poll_after_ms"] = intent_accept.POLL_AFTER_MS
+    return view
+
+
+def listing(vault_root: Path, limit: int) -> dict[str, Any]:
+    """The reader's own non-terminal and conflicted writes, newest first, at most `limit` (design D6).
+
+    The owner lists every audience's. A vault with no journal has none, and creating one is not a read's job.
+    """
+    if not (state_paths.vault_state_dir(vault_root) / write_intents.JOURNAL_FILENAME).exists():
+        return {"writes": [], "returned": 0, "truncated": False}
+    audience, owner = _reader()
+    _, journal = _manager_and_journal(vault_root)
+    try:
+        rows = journal.open_intents(audience=None if owner else audience, limit=limit + 1)
+    except write_intents.JournalRefusal as error:
+        raise ValueError(f"WRITE_JOURNAL_UNAVAILABLE: {error}") from error
+    writes = [
+        {
+            "ref": f"{REF_PREFIX}{row.intent_id}",
+            "state": row.state,
+            "command": row.command,
+            "planned_paths": row.planned_paths,
+            "accepted_at": row.accepted_at,
+            "cause": (row.conflict or {}).get("cause") or (row.wait_cause if row.active else None),
+        }
+        for row in rows[:limit]
+    ]
+    return {"writes": writes, "returned": len(writes), "truncated": len(rows) > limit}
+
+
+def await_end(vault_root: Path, ref: str) -> dict[str, Any]:
+    """Wait with no bound until the write ends, for an in-process caller that loses no reply (design D1, D8).
+
+    The caller interrupts it (Ctrl-C), which leaves the intent queued for the next applier.
+    """
+    while True:
+        view = poll(vault_root, ref, MAX_POLL_WAIT_SECONDS)
+        if view["state"] not in write_intents.ACTIVE_STATES:
+            return view
+        if view.get("wait_refused"):
+            # No slot to park on: look again after the interval a poll advises, never in a tight loop.
+            time.sleep(intent_accept.POLL_AFTER_MS / 1000)

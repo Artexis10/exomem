@@ -323,7 +323,14 @@ def answer_for(intent: write_intents.Intent, *, receipt_id: str | None, idempote
         return accepted_envelope(intent, receipt_id=receipt_id, idempotency_key=idempotency_key)
     # `conflicted` waits for an owner decision. It is not `needs_review`, the draft handshake.
     envelope = accepted_envelope(intent, receipt_id=receipt_id, idempotency_key=idempotency_key)
-    envelope.update(state=intent.state, status=intent.state, next_action="Ask the vault owner to decide this write.")
+    envelope.update(
+        state=intent.state,
+        status=intent.state,
+        next_action=(
+            f'review_memory(mode="item", ref="{envelope["intent_ref"]}"), then triage_memory with '
+            'action="retry-write" or action="discard-write"'
+        ),
+    )
     envelope.pop("poll_after_ms")
     return envelope
 
@@ -386,6 +393,8 @@ class Accept:
     refusal: BaseException | None = None
     created: bool = False
     waited_ms: float | None = None
+    #: Why the write journaled: the busy cause, or the code of the other pre-commit refusal. For the `accepted` row.
+    cause: str | None = None
 
     @property
     def settled(self) -> bool:
@@ -396,6 +405,8 @@ class Accept:
         if self.settled:
             return
         self.waited_ms = None if cause is None else mutation_journal.boundary_wait_ms(cause)
+        if cause is not None:
+            self.cause = mutation_journal.refusal_cause(cause) or getattr(cause, "code", None)
         try:
             validation = "deferred" if deferred else self._validate_before_accept(narrow=narrow)
         except Exception as invalid:  # noqa: BLE001 - the command's own validation error answers the caller

@@ -79,6 +79,15 @@ def repeats_parked_refusal(code: str | None) -> bool:
     return code is not None and _PARKED_CODE.get() == code
 
 
+def refusal_cause(error: BaseException) -> str | None:
+    """The `cause` a `MUTATION_BUSY` carries on itself or on its cause: why the boundary was not available."""
+    for cause in _causes(error):
+        details = getattr(cause, "details", None)
+        if isinstance(details, dict) and isinstance(details.get("cause"), str):
+            return details["cause"]
+    return None
+
+
 def boundary_wait_ms(error: BaseException) -> float | None:
     """The boundary wait a `MUTATION_BUSY` carries on itself or on its cause.
 
@@ -171,6 +180,8 @@ def record_mutation(
     replica_id: str | None = None,
     scope: str | None = None,
     targets: list[str] | None = None,
+    cause: str | None = None,
+    intent_id: str | None = None,
 ) -> None:
     """Append one mutation-journal record. Never raises, never blocks the
     mutation it describes on a slow or failing disk."""
@@ -199,6 +210,11 @@ def record_mutation(
             "scope": scope,
             "target_count": len(target_list),
         }
+        # Only rows that have them carry these, so every earlier row keeps its shape.
+        if cause is not None:
+            record["cause"] = cause
+        if intent_id is not None:
+            record["intent_id"] = intent_id
         if not hosted:
             record["targets"] = target_list
         line = json.dumps(record, ensure_ascii=False) + "\n"
@@ -213,3 +229,32 @@ def record_mutation(
         except Exception:  # noqa: BLE001
             pass
         log.debug("mutation_journal record failed: %s", exc)
+
+
+#: The outcome each end state of an intent logs, linked to its `accepted` row by `intent_id` (design D10).
+INTENT_END_OUTCOMES = {  # nosemgrep: ep-word-set -- a closed map from the journal's own end states to log outcomes
+    "committed": "applied",
+    "rejected": "rejected",
+    "conflicted": "conflicted",
+    "discarded": "discarded",
+}
+
+
+def record_intent_end(intent: Any, *, cause: str | None = None) -> None:
+    """Log one row when an intent ends, with its accept-to-end time. Never raises."""
+    outcome = INTENT_END_OUTCOMES.get(intent.state)
+    if outcome is None:
+        return
+    end = intent.terminal_at or intent.updated_at
+    record_mutation(
+        request_id=intent.request_id,
+        tool=intent.command,
+        command=intent.command,
+        receipt_id=None,
+        outcome=outcome,
+        error_code=None,
+        duration_ms=round((end - intent.accepted_at) * 1000, 2),
+        targets=list(intent.planned_paths or ()),
+        cause=cause,
+        intent_id=intent.intent_id,
+    )

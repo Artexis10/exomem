@@ -42,6 +42,7 @@ from . import (
     call_spans,
     durable_write,
     intent_accept,
+    intent_observability,
     mutation_journal,
     mutation_lock,
     request_budget,
@@ -4629,6 +4630,23 @@ def _release_capture_waiter_slot() -> None:
         _capture_waiters = max(0, _capture_waiters - 1)
 
 
+@contextmanager
+def request_waiter_slot() -> Iterator[bool]:
+    """One parked-worker slot for a request wait; yields False, and holds nothing, when the cap is full.
+
+    A background thread parks no request worker, so it needs no slot and always gets one.
+    """
+    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
+    if counted and not _take_capture_waiter_slot():
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        if counted:
+            _release_capture_waiter_slot()
+
+
 def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     """The bounded server-side wait, capped by the caller's own deadline.
 
@@ -4767,10 +4785,9 @@ def _await_intent_commit(
     """
     if journal is None or not intent.active:
         return intent
-    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
-    if counted and not _take_capture_waiter_slot():
-        return intent
-    try:
+    with request_waiter_slot() as admitted:
+        if not admitted:
+            return intent
         while intent.active and window.left() > 0:
             intent_accept.wait_for_applier_progress(min(intent_accept.POST_ROW_POLL_SECONDS, window.left()))
             try:
@@ -4780,9 +4797,6 @@ def _await_intent_commit(
             if latest is None:
                 break
             intent = latest
-    finally:
-        if counted:
-            _release_capture_waiter_slot()
     return intent
 
 
@@ -6065,6 +6079,7 @@ class LeaseManager:
                 scope=implicit_idempotency_scope or idempotency_principal_scope,
                 targets=[str(mutation_subject)],
                 boundary_timing=(None, None),
+                error=refusal,
             )
             if isinstance(refusal, OpError) and refusal.code == "MUTATION_BUSY":
                 _count_busy_once(refusal)
@@ -7016,6 +7031,7 @@ class LeaseManager:
                 result = accept_attempt()
                 if result is _ACCEPTED:
                     return accepted_answer()
+                intent_observability.accept_result("inline")
             elif intent_accept.current_applier_dispatch() is not None:
                 # One attempt: the applier owns the wait, as a loop of bounded acquires (design D4).
                 result = run_idempotent()
@@ -7102,6 +7118,7 @@ class LeaseManager:
                 scope=implicit_idempotency_scope or idempotency_principal_scope,
                 targets=[str(mutation_subject)],
                 wide_hold=wide_hold,
+                error=error,
             )
             if handed_off:
                 store_attempt.deferred_refusal = journal_refusal
@@ -7224,15 +7241,21 @@ class LeaseManager:
                 scope=scope,
                 targets=[str(subject)],
                 boundary_timing=(accept.waited_ms, None),
+                cause=accept.cause,
+                intent_id=intent.intent_id,
             )
         try:
             journal = accept.open_journal()
         except write_intents.JournalRefusal:
             journal = None
         self._ensure_applier(journal)
+        if accept.created and journal is not None:
+            intent_observability.accepted(journal, intent, waited_ms=accept.waited_ms)
         if accept.key is not None:
             # A write with no retry identity answers at once: a short answer keeps its client's resend window short.
             intent = _await_intent_commit(journal, intent, accept.window)
+        if accept.created:
+            intent_observability.accept_result("committed" if intent.state == "committed" else "accepted")
         return intent_accept.answer_for(intent, receipt_id=receipt, idempotency_key=public_key)
 
     def _record_mutation_journal(
@@ -7248,8 +7271,14 @@ class LeaseManager:
         targets: list[str],
         wide_hold: Mapping[str, Any] | None = None,
         boundary_timing: tuple[float | None, float | None] | None = None,
+        error: BaseException | None = None,
+        cause: str | None = None,
+        intent_id: str | None = None,
     ) -> None:
         """Best-effort mutation-journal write. Never raises.
+
+        A busy refusal's row carries the `cause` of its `error`; an `accepted` row carries the `cause` that
+        made the write journal, and the `intent_id` that links the rows of one intent.
 
         `boundary_timing` is the `(wait_ms, hold_ms)` the row reports. A refusal that
         never held the boundary passes its own, so the row cannot borrow an earlier
@@ -7276,6 +7305,8 @@ class LeaseManager:
                 else ("writer" if self._fencing_token is not None else "follower")
             )
             scope_kind = scope.split(":", 1)[0] if scope else None
+            if cause is None and error is not None and error_code == "MUTATION_BUSY":
+                cause = mutation_journal.refusal_cause(error)
             record_mutation(
                 request_id=request_id,
                 tool=command,
@@ -7291,6 +7322,8 @@ class LeaseManager:
                 replica_id=self.config.replica_id,
                 scope=scope_kind,
                 targets=targets,
+                cause=cause,
+                intent_id=intent_id,
             )
         except Exception:  # noqa: BLE001 - the journal must never break a mutation
             pass
@@ -8465,6 +8498,7 @@ def record_caller_refusal(
             scope=None,
             targets=list(targets),
             boundary_timing=(mutation_journal.boundary_wait_ms(error), None),
+            error=error,
         )
         if code == "MUTATION_BUSY" and not mutation_journal.repeats_parked_refusal(code):
             mutation_lock.record_client_visible_busy()

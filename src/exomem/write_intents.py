@@ -15,6 +15,7 @@ arguments, K's replay window and a dispatch `request_id`. A unique index covers 
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -694,6 +695,69 @@ class WriteIntentJournal:
         return [_decode(row) for row in rows]
 
     @_unavailable_on_sqlite_error
+    def open_intents(self, *, audience: str | None = None, limit: int | None = None) -> list[Intent]:
+        """Active and conflicted intents, newest first: what a reader still has to watch or decide.
+
+        `audience` limits them to one principal audience; `limit` bounds the page.
+        """
+        states = (*ACTIVE_STATES, "conflicted")
+        marks = ", ".join("?" for _ in states)
+        query = f"SELECT * FROM intents WHERE state IN ({marks})"
+        params: tuple[Any, ...] = states
+        if audience is not None:
+            query += " AND audience = ?"
+            params = (*params, audience)
+        query += " ORDER BY seq DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (*params, limit)
+        conn = self._connect()
+        try:
+            rows = conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+        return [_decode(row) for row in rows]
+
+    @_unavailable_on_sqlite_error
+    def count_open(self, *, audience: str | None = None) -> dict[str, int]:
+        """Counts of `accepted` (accepted or applying) and `conflicted` intents, for one audience or all."""
+        marks = ", ".join("?" for _ in ACTIVE_STATES)
+        query = (
+            f"SELECT SUM(state IN ({marks})), SUM(state = 'conflicted') FROM intents "
+            "WHERE state IN (" + marks + ", 'conflicted')"
+        )
+        params: tuple[Any, ...] = (*ACTIVE_STATES, *ACTIVE_STATES)
+        if audience is not None:
+            query += " AND audience = ?"
+            params = (*params, audience)
+        conn = self._connect()
+        try:
+            active, conflicted = conn.execute(query, params).fetchone()
+        finally:
+            conn.close()
+        return {"accepted": int(active or 0), "conflicted": int(conflicted or 0)}
+
+    @_unavailable_on_sqlite_error
+    def queue_status(self) -> dict[str, Any]:
+        """Depth and the oldest waiting intent: what a health check and the queue gauges report."""
+        conn = self._connect()
+        try:
+            counts = dict(conn.execute("SELECT state, COUNT(*) FROM intents GROUP BY state").fetchall())
+            oldest = conn.execute(
+                "SELECT accepted_at, wait_cause FROM intents WHERE state = 'accepted' ORDER BY seq LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return {
+            "accepted": counts.get("accepted", 0),
+            "applying": counts.get("applying", 0),
+            "conflicted": counts.get("conflicted", 0),
+            "oldest_accepted_at": None if oldest is None else oldest[0],
+            "oldest_wait_cause": None if oldest is None else oldest[1],
+            "format_version": FORMAT_VERSION,
+        }
+
+    @_unavailable_on_sqlite_error
     def count_conflicted(self) -> int:
         conn = self._connect()
         try:
@@ -764,7 +828,12 @@ class WriteIntentJournal:
             conn.close()
         if drop_inputs:
             self._remove_staged(intent_id)
-        return None if row is None else _decode(row)
+        ended = None if row is None else _decode(row)
+        if ended is not None:
+            from . import intent_observability
+
+            intent_observability.ended(self, ended, cause=(conflict or {}).get("cause"))
+        return ended
 
     @_unavailable_on_sqlite_error
     def retry(
@@ -862,7 +931,12 @@ class WriteIntentJournal:
         finally:
             conn.close()
         self._remove_staged(intent_id)
-        return _decode(created)
+        retried = _decode(created)
+        from . import intent_observability
+
+        intent_observability.ended(self, dataclasses.replace(old, state="discarded", updated_at=now, terminal_at=now))
+        intent_observability.accepted(self, retried, log_row=True)
+        return retried
 
     @_unavailable_on_sqlite_error
     def purge_expired(self) -> int:

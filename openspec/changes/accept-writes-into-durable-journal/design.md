@@ -342,6 +342,7 @@ What would change this: oldest-intent age above 30 s at p90 under normal load af
 - `logs/mutations.jsonl` gains `cause` on busy rows. It also gains rows with outcome `accepted`, `applied`, `rejected`, `conflicted` and `discarded`, linked by `intent_id`. The internal `intents_queued` refusal is never a row.
 - Metrics: intents by outcome, queue depth, oldest non-terminal age, accept-to-commit time, the share committed before the accept deadline, the time each request waited, and applier waits by cause.
 - `exomem doctor` gains `write_journal`: depth, oldest age, undecided conflicts, format version, applier liveness, kind and version. It fails when the oldest `accepted` intent is older than 5 minutes in normal resource mode, or when no applier is alive while intents wait.
+- Gauges for queue depth and oldest age are new to the metrics registry, which had counters and histograms only. A gauge is never restored after a restart. The doctor treats "no applier alive" as a failure only once the oldest accepted intent is 30 s old, so the gap between two intents of a CLI applier raises no alarm. The lock records no applier kind or version, so the check reports liveness only.
 - Acceptance: over 7 days on the personal service, zero `MUTATION_BUSY` rows from eligible commands with a cause other than `journal_full` or `journal_unavailable`. Every accepted intent is counted as committed, rejected, conflicted, discarded or non-terminal.
 
 ## Risks / Trade-offs
