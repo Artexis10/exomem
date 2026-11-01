@@ -2659,17 +2659,20 @@ def _schedule_repair(
                         with _REPAIRS_LOCK:
                             _yield_targeted_repair(key, paths, error, lag_only=True)
                         return
+                    # "advanced" is not "targeted": the stored checkpoint moved but
+                    # the registry is still ahead, so a lag-only catch-up follows.
+                    if caught_up and getattr(store, "_last_catch_up_advanced", False):
+                        catch_up_result = "advanced"
+                    else:
+                        catch_up_result = "targeted" if caught_up else "declined"
                     _log_repair_finished(
-                        "catch_up",
-                        "targeted" if caught_up else "declined",
-                        RepairStage.TARGETED,
-                        catch_up_started,
+                        "catch_up", catch_up_result, RepairStage.TARGETED, catch_up_started
                     )
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
                         # next iteration consumes it with its own cause.
                         rebuild = False
-                        outcome = "targeted"
+                        outcome = catch_up_result
                         if not paths:
                             continue
                 pass_kind = "full" if rebuild else "targeted"
@@ -4739,13 +4742,14 @@ class _CatchUpPlan:
     """One scope's lag as a catch-up round planned it.
 
     `stored` is the checkpoint the catalogue held, `target` the registry
-    checkpoint the delta bridged to, and `paths` every registry path of that
-    delta.
+    checkpoint the delta bridged to, `paths` every registry path of that delta,
+    and `deleted` the paths among them that are absent at `target`.
     """
 
     stored: object
     target: object
     paths: frozenset[str]
+    deleted: frozenset[str]
 
 
 class LexicalStore:
@@ -4793,6 +4797,8 @@ class LexicalStore:
         # Whether the last refused replay met a page that a write still held an
         # open publication intent for.
         self._last_replay_publishing = False
+        # Whether the last catch-up round moved a stored checkpoint without
+        # reaching the registry's, so that a lag-only catch-up must follow.
         self._last_catch_up_advanced = False
         # Which bound ended the last pass that declined for a moving source.
         self._last_decline_cause: DeclineCause | None = None
@@ -6978,10 +6984,13 @@ class LexicalStore:
         a committed step whose mark is at or after the target, so the step read
         the page after the target. A path applied before the target is not
         enough: an event between that read and the target would leave a stale
-        row under the stamp. Readers that need a current catalogue still
-        compare the stored checkpoint with the registry, so the rest of the lag
-        stays visible and the next catch-up replays it. Returns whether a scope
-        advanced.
+        row under the stamp. A page absent at the target also needs no row in
+        the scope: absence is the one state that can recur exactly, so a row
+        that outlived it would sit behind a checkpoint that readers take as
+        current. Readers that need a current catalogue still compare the stored
+        checkpoint with the registry, so the rest of the lag stays visible and
+        the next catch-up replays it. A scope without lag has nothing to
+        record. Returns whether a stored checkpoint moved.
         """
         from . import freshness as freshness_module
         from .vault import VaultLockError, VaultLockTimeout
@@ -7004,6 +7013,8 @@ class LexicalStore:
                             scope_plan = plan.get(scope)
                             if scope_plan is None or scope_plan.stored != stored:
                                 continue
+                            if scope_plan.target == stored:
+                                continue  # no lag here: a stamp would move nothing
                             read_after_target = set().union(
                                 *(
                                     step.paths
@@ -7014,6 +7025,9 @@ class LexicalStore:
                             )
                             if not scope_plan.paths <= read_after_target:
                                 continue
+                            held = self._held_memberships(conn, scope_plan.deleted)
+                            if any(flags[_scope_column(scope)] for flags in held.values()):
+                                continue  # a row outlived the page it holds
                             with self._lock:
                                 self._bless(conn, scope, scope_plan.target, identity=identity)
                             advanced = True
@@ -7085,7 +7099,10 @@ class LexicalStore:
                     lagging |= delta.changed | delta.deleted
                     if plan is not None:
                         plan[scope] = _CatchUpPlan(
-                            stored, delta.to, frozenset(delta.changed | delta.deleted)
+                            stored,
+                            delta.to,
+                            frozenset(delta.changed | delta.deleted),
+                            frozenset(delta.deleted),
                         )
             finally:
                 conn.close()
@@ -8964,6 +8981,9 @@ class LexicalStore:
             self._last_rebuild_result = "source_changed"
             self._last_decline_cause = DeclineCause.UNOBSERVED_DRIFT
             return None
+        # A deferred page that is absent at its target holds no row: the apply
+        # dropped the row of every deleted path and never reinserted it. A row
+        # cannot outlive a deletion behind a checkpoint that readers take as current.
         candidates = set().union(*unproven.values())
         digest = freshness_module._digest_path
         needed: dict[str, set[str]] = {}
@@ -8974,6 +8994,8 @@ class LexicalStore:
             for path in candidates - wanted:
                 if digest(path) in named:
                     continue  # this scope proved the path itself
+                # Both scopes share one row. Co-published registries name a page in
+                # both, so a scope that holds it and does not is behind: fail closed.
                 if held.get(digest(path), (False, False))[index] or self._membership(
                     Path(path)
                 )[index]:
@@ -8981,9 +9003,6 @@ class LexicalStore:
             if wanted:
                 needed[scope] = wanted
         deadline = time.monotonic() + _REPLAY_OBSERVATION_WAIT_SECONDS
-        # A deferred page that is absent at its target holds no row: the apply
-        # dropped the row of every deleted path and never reinserted it. A row
-        # cannot outlive a deletion behind a checkpoint that readers take as current.
         waited = False
         for scope, wanted in needed.items():
             checkpoint = checkpoints.get(scope) or bridged[scope].from_
@@ -8994,8 +9013,6 @@ class LexicalStore:
                 if self._await_observed_rewrites(
                     scope, checkpoint, bridged[scope], wanted, deadline
                 ) is None:
-                # Both scopes share one row. Co-published registries name a page in
-                # both, so a scope that holds it and does not is behind: fail closed.
                     return None
                 continue
             fresh = freshness_module.recall_delta_since(self.vault_root, scope, checkpoint)

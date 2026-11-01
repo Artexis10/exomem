@@ -162,8 +162,10 @@ validation.
   before otherwise
 - **AND** a delta that needs a source proof defers no page
 - **AND** a page whose rows both scopes share is deferred only when every scope
-  that covers it names it after its target
-- **AND** the repair telemetry counts the deferred pages of each pass
+  that covers it either names it after its target or proved the page in its own
+  delta
+- **AND** the repair telemetry counts the deferred pages of each pass that
+  published, and reports none for a pass that declined
 - **AND** `lexical_repair_finished` names which bound ended a pass that
   declined, as `declined_for`
 
@@ -176,6 +178,18 @@ validation.
   lagging until a later replay applies that event
 - **AND** the next replay or catch-up serves the page's newest content
 
+#### Scenario: A deleted page never outlives its deletion behind a current checkpoint
+
+- **WHEN** a page is absent at the checkpoint that a replacement or a catch-up
+  records
+- **THEN** the catalogue holds no row for that page in that scope, because
+  readers compare the content state of a checkpoint without its generation and
+  absence is the one state that can recur exactly
+- **AND** a replay never defers a page that is absent at its target while its
+  row holds a present state
+- **AND** a catch-up round records no checkpoint for a scope while such a row
+  exists
+
 #### Scenario: A full repair publishes under a sustained import
 
 - **WHEN** an import writes new pages and rewrites the same index pages on every
@@ -186,13 +200,20 @@ validation.
 
 #### Scenario: A catch-up outpaced by sustained writes still advances
 
-- **WHEN** an off-barrier catch-up round applies every path of the delta from
-  the stored checkpoint to the round's starting registry checkpoint
-- **AND** new events arrive before the round can prove the registry's latest
-  checkpoint
-- **THEN** the catch-up records the round's starting checkpoint
+- **WHEN** an off-barrier catch-up round runs out of steps because new events
+  keep arriving
+- **AND** a scope lags, and a registry checkpoint that the round planned for it
+  has every path of its delta applied by a committed step that read the page
+  after that checkpoint
+- **AND** every page that is absent at that checkpoint has no row in the scope
+- **THEN** the catch-up records the newest such checkpoint for that scope
 - **AND** queues a lag-only catch-up for the newer events instead of a full
   repair
+- **AND** the worker's finish line reports the result `advanced`, not `targeted`
+- **AND** a scope without lag, or without such a checkpoint, records nothing,
+  and the round counts as advanced only when some stored checkpoint moved
+- **AND** a round in which no stored checkpoint moved declines as outpaced, and
+  the full pass runs
 
 #### Scenario: A write still publishing during the census walk is replayed, not refused
 

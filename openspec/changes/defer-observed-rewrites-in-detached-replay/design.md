@@ -17,11 +17,17 @@ The replay therefore waits once, under the existing bounds, for the registry to 
 
 Two limits keep the invariant exact:
 - A delta that needs a source proof defers nothing, because its target comes from a walk, not from observed events.
-- Both scopes share a page's rows, so a page defers only when every scope that covers it names it after its target.
+- Both scopes share a page's rows, so a page defers only when every scope that covers it either names it after its target or proved the page in its own delta. A scope that proved the page needs no later event, and a replay that waited for one would wait for an event that never comes.
+- A page that is absent at the target never keeps a present row behind the checkpoint. Readers compare the content state of a checkpoint, with no generation. A present page cannot return to an old state, because its ctime is part of the state, but absence can recur exactly. A row that outlived a deletion would then sit behind a checkpoint that readers take as current, and a search would return the deleted page. The replay already guarantees this: it drops the row of every deleted path and never reinserts it. The catch-up stamp checks it (D2).
 
 ### D2. A catch-up records the checkpoint it fully applied
 
-A catch-up round today records a checkpoint only when the registry stays still through the round. The round instead records its starting checkpoint R once every page of the delta from the stored checkpoint to R was applied after R. Newer events become a lag-only request, not a full repair. This changes how the live catalogue is stamped, so it ships as its own commit with its own review focus.
+A catch-up round today records a checkpoint only when the registry stays still through the round. A round that runs out of steps instead records, per scope, the newest registry checkpoint it planned that the round fully applied. That is usually the checkpoint the round started at. A planned checkpoint qualifies when:
+- the scope lags, so that recording it moves the stored checkpoint;
+- every page of the delta from the stored checkpoint to it was applied by a committed step that read the page after the checkpoint;
+- every page that is absent at the checkpoint has no row in the scope, for the reason in D1.
+
+A scope that fails these records nothing. The round counts as advanced only when some stored checkpoint moved. Otherwise it declines as outpaced and the full pass runs. Newer events become a lag-only request, not a full repair, and the worker's finish line reports the result `advanced`. This changes how the live catalogue is stamped, so it ships as its own commit with its own review focus.
 
 ## Risks / Trade-offs
 
