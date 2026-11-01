@@ -114,6 +114,19 @@ class FakeCloud:
         self.refuse_when = lambda members: False
         self.refuse_registration = False
         self.refusal_code = "STORAGE_ALLOWANCE_EXCEEDED"
+        self.holding = False  # A landing stays `uploaded` until `release()`, or until the third row read once `read_count` is 0.
+        self.held: list[str] = []
+        self.fail_next_read = False
+        self.read_count: int | None = None
+        self.fail_prepare_once = False
+
+    def release(self) -> None:
+        """Cloud finishes every import that it held."""
+        for import_id in self.held:
+            self.rows[import_id].update(observed_state="done")
+            self.completed.append(import_id)
+            self.rig.cell.landed(import_id, len([name for name in self.members[import_id] if name != import_stage.SERIES_FILE]))
+        self.held.clear()
 
     def _api(self, request):
         path = request.url.path
@@ -137,10 +150,23 @@ class FakeCloud:
             self.registered_calls.append(len(self.rig.cell.calls))
             return httpx2.Response(200, json={"import": self.rows[body["import_id"]]})
         import_id = path.removeprefix(base + "/").split("/")[0]
+        if import_id not in self.rows:
+            return httpx2.Response(404, json={"error": {"code": "IMPORT_NOT_FOUND"}})
         row = self.rows[import_id]
+        if request.method == "GET" and import_id in self.held:
+            if self.fail_next_read:
+                self.fail_next_read = False
+                raise httpx2.ConnectError("interrupted")
+            if self.read_count is not None:
+                self.read_count += 1
+                if self.read_count >= 3:
+                    self.release()
         if request.method == "POST" and row["observed_state"] == "failed":
             return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
         if request.method == "POST" and path.endswith("/prepare-upload"):
+            if self.fail_prepare_once:
+                self.fail_prepare_once = False
+                raise httpx2.ConnectError("interrupted")
             size = json.loads(request.content)["ciphertext_bytes"]
             row["requested_state"] = "prepared"
             row["part_urls"] = [{"part_number": n + 1, "part_size_bytes": min(5000, size - offset),
@@ -156,6 +182,10 @@ class FakeCloud:
             self.members[import_id] = {m.name: archive.extractfile(m).read() for m in archive if m.isfile()}
         if self.refuse_when(self.members[import_id]):
             row.update(observed_state="failed", error_code=self.refusal_code)
+            return
+        if self.holding:
+            row.update(requested_state="uploaded", observed_state="uploaded")
+            self.held.append(import_id)
             return
         row.update(requested_state="uploaded", observed_state="done")
         self.completed.append(import_id)
@@ -883,6 +913,69 @@ def test_a_window_whose_member_changed_after_a_failed_attempt_is_sent_again_unde
 
     assert rig.cloud.all_sent() == ["a01.bin"]
     assert "a02.bin" in rig.said()
+
+
+def test_a_window_whose_copy_was_deleted_while_cloud_still_imports_it_lands_once(rig):
+    """Catches a window sent again under a new import while Cloud still imports the first one."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError) as first:
+        rig.run(poll_seconds=0.001)
+    assert first.value.code == "NETWORK_ERROR"
+    for held in rig.tmp.glob("checkpoint/window-*/archive.age"):
+        held.unlink()  # The person follows the CLI's own advice to delete the encrypted copy.
+    rig.cloud.read_count = 0  # Cloud finishes the first import on the third read of its row.
+
+    for _ in range(3):  # Each rerun is the same command.
+        try:
+            rig.run(poll_seconds=0.001)
+            break
+        except CloudImportError:
+            continue
+    rig.cloud.release()
+
+    assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_window_whose_encrypted_copy_changed_before_complete_keeps_its_import_and_says_the_rerun_replays_it(rig):
+    """Catches a client abandon that gives the window a new import while the old one may still be open."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.fail_prepare_once = True
+    with pytest.raises(CloudImportError):
+        rig.run()
+    for held in rig.tmp.glob("checkpoint/window-*/archive.age"):
+        held.write_bytes(held.read_bytes() + b"x")
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "CIPHERTEXT_CHANGED"
+    assert abandoned.value.resume and "start a new run" not in abandoned.value.message
+
+    rig.run()
+
+    assert len(rig.cloud.rows) == 1 and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_member_change_does_not_give_a_new_import_to_a_window_that_cloud_is_still_importing(rig):
+    """Catches a renewal after a changed member while the old import is live, which lands the window twice."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError):
+        rig.run(poll_seconds=0.001)
+    for held in rig.tmp.glob("checkpoint/window-*/*"):
+        held.unlink()
+    (rig.source / "a02.bin").write_bytes(b"changed before the retry")
+
+    rig.cloud.read_count = 0  # Cloud finishes what it holds on the third read of a row.
+
+    for _ in range(3):  # Each rerun is the same command.
+        try:
+            rig.run(poll_seconds=0.001)
+            break
+        except CloudImportError:
+            continue
+    rig.cloud.release()
+
+    assert len(rig.cloud.rows) == 1 and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
 def test_a_resumed_run_whose_first_call_fails_still_says_what_is_not_in_exomem(rig):

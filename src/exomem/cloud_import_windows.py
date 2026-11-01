@@ -15,6 +15,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import httpx2
 from fastmcp import Client
 
 from . import adoption_run, import_selection, import_stage, media_capacity
@@ -22,6 +23,7 @@ from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
 from .cloud_import_client import (
+    _STOP_ON_CLOUD,
     PREFLIGHT,
     CloudImportClientConfig,
     CloudImportError,
@@ -366,8 +368,8 @@ class _Run:
                 kept.append(fresh)
         checkpoint = self.record.parent / window.dir
         if gone:
-            if not (checkpoint / "checkpoint.json").exists():
-                window.renew()  # The member set differs from any earlier attempt's declaration.
+            if not (checkpoint / "checkpoint.json").exists() and await self._attempt_is_over(window):
+                window.renew()  # The member set differs from any earlier attempt's declaration, and Cloud is not importing that one.
             # The record is the partition: a member that changed is not sent and not planned again, and the person keeps it.
             window.paths = [item.rel for item in kept]
             self.series.skipped.extend(gone)
@@ -392,13 +394,19 @@ class _Run:
                 self.refused = window.cost
                 self.progress.say("The Job refused the window for space; planning it again from the current budget.")
                 return
-            # An attempt that ended and removed its checkpoint is dead on Cloud, which replays its ID; the rerun uses a new one.
-            ended = not error.resume and not (checkpoint / "checkpoint.json").exists()
-            if ended:
+            message, resume = error.message, error.resume
+            if error.ended:
+                # Cloud reported that this import ended and replays its ID; the rerun uses a new one.
                 window.renew()
                 self.series.write(self.record)
-            raise Stopped(error.phase, error.code, f"{error.message}. {not_sent_notice(self.series.not_landed())}",
-                          error.import_id, resume=error.resume or ended) from None
+                resume = True
+            elif error.why:
+                # The client gave up its checkpoint, but Cloud's import may be open: the rerun replays the same ID, and Cloud's state decides.
+                message = (f"{error.why}. The checkpoint is removed. Cloud import {error.import_id} stays as it is, and the next run "
+                           f"replays it. To stop it, {_STOP_ON_CLOUD}")
+                resume = True
+            raise Stopped(error.phase, error.code, f"{message}. {not_sent_notice(self.series.not_landed())}",
+                          error.import_id, resume=resume) from None
         if window.import_id != result["import_id"]:  # The import resumed from a checkpoint that holds its own ID.
             window.attempts = [import_id for import_id in window.ids() if import_id != result["import_id"]]
             window.import_id = result["import_id"]
@@ -406,6 +414,23 @@ class _Run:
         self.series.write(self.record)
         self.refused = None
         await self.settle(window)
+
+    async def _attempt_is_over(self, window: SentWindow) -> bool:
+        """True when the window's last import ended on Cloud or never uploaded, so a new ID cannot land the window twice."""
+        if not window.import_id:
+            return True
+        url = self.config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports/" + window.import_id
+        try:
+            response = await self.api.request("GET", url)
+            response.raise_for_status()
+        except httpx2.HTTPStatusError as error:
+            if error.response.status_code == 404:  # Cloud never saw the import.
+                return True
+            raise
+        row = response.json()["import"]
+        # The Cloud import protocol fixes these states.
+        # nosemgrep: ep-word-membership -- The protocol fixes the terminal and pre-upload states.
+        return row["observed_state"] in ("failed", "expired", "discarded") or row["requested_state"] in ("requested", "prepared")
 
     async def settle(self, window: SentWindow) -> None:
         """A landed window of a resend clears its members from the old residual records, once."""
