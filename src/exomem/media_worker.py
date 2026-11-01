@@ -1604,19 +1604,12 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 — a bad image must not kill the worker
             log.exception("CLIP embedding failed for %s", job.binary_path.name)
             return
-        # An image commit writes only the CLIP index, which no semantic input or canonical
+        # The CLIP commit writes only the CLIP index, which no semantic input or canonical
         # page reads, so it must not advance the commit generation and stale the stamps of
-        # concurrent writes. A video commit also persists scene frames, so it stays canonical.
-        if is_video:
-            clip_guard = get_manager().mutation_guard(
-                self._vault_root,
-                operation="background_media_clip_commit",
-                holder_kind="background",
-            )
-        else:
-            clip_guard = get_manager().projection_guard(
-                self._vault_root, operation="background_media_clip_commit"
-            )
+        # concurrent writes. Scene frames take their own mutation_guard when they persist.
+        clip_guard = get_manager().projection_guard(
+            self._vault_root, operation="background_media_clip_commit"
+        )
         with clip_guard:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return

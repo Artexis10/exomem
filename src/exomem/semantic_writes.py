@@ -3079,14 +3079,21 @@ def _commit_existing(
     # fallback for a commit that lands after this point.
     census_token = preflight.census_token
     current_generation = read_commit_generation(root)
-    revalidated_early = census_token is None or current_generation != census_token[1]
+    # A missing stamp or generation is structural (a restricted principal, an unreadable
+    # generation): an early run could not produce a stamp the boundary accepts, so it
+    # goes straight to the in-boundary revalidation, as before.
+    revalidated_early = (
+        census_token is not None
+        and current_generation is not None
+        and current_generation != census_token[1]
+    )
     if revalidated_early:
         log_active_mutation_phase("semantic_revalidate_before_boundary")
         if timings is not None:
             timings.annotate(
                 "commit.revalidate",
                 before_boundary=True,
-                captured_generation=None if census_token is None else census_token[1],
+                captured_generation=census_token[1],
                 current_generation=current_generation,
             )
         with (

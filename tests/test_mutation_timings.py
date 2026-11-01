@@ -319,14 +319,7 @@ def test_validate_only_preflight_is_labelled_a_preview(tmp_path: Path) -> None:
 
 
 class _RefusingManager:
-    """A lease manager whose mutation boundary can never be acquired.
-
-    It keeps the real configuration, so the commit generation stays readable and
-    the stamp stays current: the commit must reach the boundary, not revalidate first.
-    """
-
-    def __init__(self) -> None:
-        self.config = writer_lease.active_manager().config
+    """A lease manager whose mutation boundary can never be acquired."""
 
     def mutation_guard(self, *args, **kwargs):
         @contextmanager
@@ -353,8 +346,7 @@ def test_boundary_acquire_is_measured_even_when_acquisition_fails(
     preflight = semantic_writes.preflight_existing(
         tmp_path, path=PAGE, after_source=after_source, operation="edit", timings=timings
     )
-    refusing = _RefusingManager()
-    monkeypatch.setattr(writer_lease, "active_manager", lambda: refusing)
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: _RefusingManager())
     metrics_module.reset()
 
     with pytest.raises(RuntimeError, match="boundary unavailable"):
@@ -383,8 +375,7 @@ def test_a_broken_metrics_registry_cannot_mask_the_boundary_error(
     preflight = semantic_writes.preflight_existing(
         tmp_path, path=PAGE, after_source=after_source, operation="edit", timings=timings
     )
-    refusing = _RefusingManager()
-    monkeypatch.setattr(writer_lease, "active_manager", lambda: refusing)
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: _RefusingManager())
     monkeypatch.setattr(
         semantic_writes.metrics,
         "observe_duration_ms",
