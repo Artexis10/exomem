@@ -6866,7 +6866,11 @@ class LeaseManager:
                     idempotency_key=effective_public_idempotency_key,
                 ),
             )
-        projected = project_terminal(result, response_detail)
+        from .command_surface import outcome_verb_of
+
+        projected = project_terminal(
+            result, response_detail, outcome_verb=outcome_verb_of(command, kwargs)
+        )
         from .governance import scrubber as governance_scrubber
 
         return governance_scrubber._trusted_issuance_projection(

@@ -230,6 +230,7 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
     )
 
     assert mutation_terminal.project_terminal(terminal, "compact") == {
+        "user_summary": "Saved -> Knowledge Base/Notes/Insights/decisive.md",
         "ok": True,
         "state": "committed",
         "terminal": True,
@@ -615,6 +616,7 @@ def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() 
     projected = mutation_terminal.project_terminal(terminal, "full")
 
     assert projected == {
+        "user_summary": "Saved 2 files -> Knowledge Base/one.md and 1 more",
         "ok": True,
         "state": "committed",
         "terminal": True,
@@ -688,6 +690,7 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
     )
 
     assert mutation_terminal.project_terminal(terminal) == {
+        "user_summary": "Already saved -> Knowledge Base/Records/log.md",
         "ok": True,
         "status": "replayed",
         "mutated": False,
@@ -745,6 +748,7 @@ def test_compact_lifecycle_record_receipt_retains_its_closed_receipt_fields() ->
     )
 
     assert projected == {
+        "user_summary": "Saved -> Knowledge Base/Records/log/_collection.md",
         "ok": True,
         "state": "committed",
         "terminal": True,

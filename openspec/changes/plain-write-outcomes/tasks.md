@@ -7,7 +7,7 @@
 
 ## 2. User summary
 
-- [ ] 2.1 Add `outcome_verb` to `Command` and build `user_summary` in `project_terminal`.
+- [ ] 2.1 Declare `outcome_verb` on `Command` and on the `manage_memory_file` operation rows, and build `user_summary` in `project_terminal`.
 
 ## 3. Narration rule
 

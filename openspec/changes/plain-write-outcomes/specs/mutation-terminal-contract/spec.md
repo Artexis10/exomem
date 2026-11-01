@@ -17,7 +17,7 @@ Committed and replayed product mutations SHALL return a compact default projecti
 #### Scenario: A committed save leads with a plain summary
 - **WHEN** a governed product mutation saves one file without an explicit response detail
 - **THEN** the first key of the response is `user_summary`, reading "Saved -> <path>"
-- **AND** a delete reads "Deleted -> <path>" and a replay reads "Already saved -> <path>"
+- **AND** a delete reads "Deleted -> <path>", a move reads "Moved <from> -> <to>", and a replay reads "Already saved -> <path>"
 
 ## ADDED Requirements
 

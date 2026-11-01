@@ -23,6 +23,9 @@ from typing import Any, Literal, get_args
 
 Effect = Literal["read", "write"]
 
+#: What a completed write did to the vault, in the one word the user-facing summary leads with.
+OutcomeVerb = Literal["saved", "updated", "moved", "deleted"]
+
 #: How the MCP surface publishes a command that has renderings. `nested` carries the
 #: operation in one `operation` object, and `grouped` lists only the grouped command.
 #: `grouped` remains an internal spelling for compatibility and historical measurements;
@@ -77,6 +80,7 @@ class OperationEntry:
     constraints: tuple[LiteralConstraint, ...] = ()
     #: Public discriminator when the grouped selector would collide with another job.
     public_kind: str | None = None
+    outcome_verb: OutcomeVerb = "saved"
 
     @property
     def kind(self) -> str:
@@ -243,6 +247,13 @@ class CommandOperations:
     def actions(self) -> frozenset[str]:
         return frozenset(entry.action for entry in self.entries)
 
+    def outcome_verb(self, action: object) -> OutcomeVerb:
+        """The verb a completed write of this selector value reports; "saved" when none declares one."""
+        for entry in self.entries:
+            if entry.action == action and entry.effect == "write":
+                return entry.outcome_verb
+        return "saved"
+
     def every_field(self) -> frozenset[str]:
         """Every field some operation accepts, which is the grouped command's whole signature."""
         return frozenset().union(*(entry.fields for entry in self.entries))
@@ -293,6 +304,7 @@ def _entry(
     destructive: bool = False,
     constraints: tuple[LiteralConstraint, ...] = (),
     public_kind: str | None = None,
+    outcome_verb: OutcomeVerb = "saved",
 ) -> OperationEntry:
     return OperationEntry(
         action=action,
@@ -303,6 +315,7 @@ def _entry(
         destructive=destructive,
         constraints=constraints,
         public_kind=public_kind,
+        outcome_verb=outcome_verb,
     )
 
 
@@ -542,8 +555,8 @@ def _literal(field: str, value: bool | str | None, omitted: bool = False, *, imp
     return LiteralConstraint(tuple(field.split(".")), value, allow_omitted=omitted, implied=implied)
 
 
-def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False):
-    return (action, tool, fields, required, kind, constraints, destructive)
+def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb="saved"):
+    return (action, tool, fields, required, kind, constraints, destructive, verb)
 
 
 # Fields remain grouped by the leaf job that owns them. Conditional values are closed API
@@ -634,13 +647,13 @@ _REMAINING = {
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),
         _row("trash-list", "browse_memory", ("date",)),
         _row("propose-reclassification", "browse_memory", ("path", "source_kind", "domain", "reason"), ("path",)),
-        *(_row(action, "change_files", ("path", "content", "frontmatter", "overwrite", "allow_curated", "kind", "parents", "validate_only", "draft_id", "draft_hash", "draft_token", "semantic_transition_token", "relation_disposition", "relation_review_hash", "relation_review_reason", "promotion_reason"), ("path",), constraints=(_literal("validate_only", False, True),), destructive=action == "append") for action in ("create", "append")),
+        *(_row(action, "change_files", ("path", "content", "frontmatter", "overwrite", "allow_curated", "kind", "parents", "validate_only", "draft_id", "draft_hash", "draft_token", "semantic_transition_token", "relation_disposition", "relation_review_hash", "relation_review_reason", "promotion_reason"), ("path",), constraints=(_literal("validate_only", False, True),), destructive=action == "append", verb="updated" if action == "append" else "saved") for action in ("create", "append")),
         *(_row(action, "browse_memory", ("path", "content", "frontmatter", "overwrite", "allow_curated", "kind", "parents", "validate_only", "draft_id", "draft_hash", "draft_token", "semantic_transition_token", "relation_disposition", "relation_review_hash", "relation_review_reason", "promotion_reason"), ("path",), kind=f"validate-{action}", constraints=(_literal("validate_only", True, implied=True),)) for action in ("create", "append")),
-        _row("move", "change_files", ("old_path", "new_path", "update_wikilinks", "allow_curated", "promotion_reason"), ("old_path", "new_path"), destructive=True),
-        _row("delete", "change_files", ("path", "confirm", "recursive", "force_orphan", "force_superseded", "allow_curated", "expected_dead_inbound"), ("path",), destructive=True),
+        _row("move", "change_files", ("old_path", "new_path", "update_wikilinks", "allow_curated", "promotion_reason"), ("old_path", "new_path"), destructive=True, verb="moved"),
+        _row("delete", "change_files", ("path", "confirm", "recursive", "force_orphan", "force_superseded", "allow_curated", "expected_dead_inbound"), ("path",), destructive=True, verb="deleted"),
         _row("recover", "change_files", ("trash_path", "path", "restore_path"), ()),
-        _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "reason"), ("reason",), destructive=True),
-        _row("revert-reclassification", "change_files", ("path", "reason"), ("path",), destructive=True),
+        _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "reason"), ("reason",), destructive=True, verb="moved"),
+        _row("revert-reclassification", "change_files", ("path", "reason"), ("path",), destructive=True, verb="moved"),
     ), True),
     "episode_memory": ("action", (
         _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client")),
@@ -824,13 +837,13 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
     available = frozenset(p.name for p in parameters if p.name != selector and p.name != "response_detail")
     signature_required = frozenset(p.name for p in parameters if p.required and p.name != selector)
     entries = []
-    for action, tool, fields, required, kind, constraints, destructive in rows:
+    for action, tool, fields, required, kind, constraints, destructive, verb in rows:
         fields = (available if retain else frozenset(required) | frozenset(item.path[0] for item in constraints)) if fields is None else frozenset(fields)
         # Singletons retain their exact required fields from the original signature.
         required = signature_required if selector is None else frozenset(required)
         effect = _TOOL_HELP[tool][0]
         entries.append(_entry(action, tool, fields, required, effect=effect,
-                              constraints=constraints, public_kind=kind, destructive=destructive))
+                              constraints=constraints, public_kind=kind, destructive=destructive, outcome_verb=verb))
     specs = []
     for name in dict.fromkeys(entry.rendering for entry in entries):
         variants = [entry for entry in entries if entry.rendering == name]

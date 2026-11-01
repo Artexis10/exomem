@@ -13575,7 +13575,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "first_run_safe": True,
     },
     "audit": {"surface": "primary", "actions": ("review",), "first_run_safe": True},
-    "edit": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    "edit": {"surface": "primary", "actions": ("update",), "first_run_safe": False, "outcome_verb": "updated"},
     "replace": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
     "link": {"surface": "primary", "actions": ("connect", "save"), "first_run_safe": False},
     "suggest_links": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
@@ -13597,7 +13597,10 @@ _PRODUCT_METADATA: dict[str, dict] = {
     },
     "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
     "reconcile": {"surface": "advanced", "actions": ("update",), "first_run_safe": False},
-    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False},
+    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False, "outcome_verb": "updated"},
+    "append_to_file": {"outcome_verb": "updated"},
+    "move_file": {"outcome_verb": "moved"},
+    "delete": {"outcome_verb": "deleted"},
     "record_memory": {
         "surface": "primary",
         "actions": ("ask", "review", "save", "update", "record"),
@@ -13700,6 +13703,7 @@ def _build_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
                 restricted_refusal_floor=name in floored,
+                outcome_verb=meta.get("outcome_verb", "saved"),
             )
         )
     return tuple(cmds)
@@ -13815,7 +13819,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False, "outcome_verb": "updated"},
     ),
     (
         "observe_memory",
@@ -14384,6 +14388,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
+                outcome_verb=meta.get("outcome_verb", "saved"),
             )
         )
     return tuple(cmds)

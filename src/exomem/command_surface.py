@@ -35,6 +35,7 @@ from .call_spans import (  # noqa: F401 - re-exported for existing importers
 )
 from .governance import operations as governance_operations
 from .mutation_terminal import ResponseDetail
+from .operation_entries import OutcomeVerb
 
 _log = logging.getLogger(__name__)
 
@@ -373,6 +374,9 @@ class Command:
     )
     #: The command's own argument rules, which every spelling of it shares.
     argument_rules: ArgumentRules | None = field(default=None, compare=False, hash=False)
+    #: What a completed call does to the vault, so the user-facing summary of a write
+    #: says "Deleted" and not "Saved". A grouped command takes it from its operation rows.
+    outcome_verb: OutcomeVerb = "saved"
 
     def __post_init__(self) -> None:
         if self.renderings and self.argument_rules is None:
@@ -422,6 +426,14 @@ class Command:
             self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS,
             public_title=self.public_title or self.public_name.replace("_", " ").title(),
         )
+
+
+def outcome_verb_of(command: object, arguments: Mapping[str, typing.Any]) -> OutcomeVerb:
+    """The verb a completed call of `command` reports; a bare command stand-in says "saved"."""
+    operations = operation_entries.OPERATIONS.get(getattr(command, "name", ""))
+    if operations is not None and operations.selector is not None:
+        return operations.outcome_verb(arguments.get(operations.selector))
+    return getattr(command, "outcome_verb", "saved")
 
 
 def gateway_required_error(name: str):
