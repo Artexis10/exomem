@@ -4,7 +4,7 @@
 
 The system SHALL acquire the vault mutation boundary before invoking a write-capable command leaf or committing an upload. If safe ownership cannot be obtained within the configured bound, the operation MUST fail with a stable machine-readable busy or unavailable error before creating, modifying, moving, or deleting any vault or sidecar file.
 
-A direct `/upload` commit that finds the boundary held by a holder still inside its allowance SHALL wait it out within the request's budget, under the same arrival-order queue, waiter cap and refusal causes (`holder_overdue`, `capture_wait_exhausted`, `capture_waiters_full`) as a keyed command write, because the handler has read or written no vault byte before it holds the boundary. A tus upload session whose commit ends retryable with a busy or warming code SHALL be committed again by the server, with backoff and before the session expires, without waiting for the client's next read of the session.
+A direct `/upload` commit that finds the boundary held by a holder still inside its allowance SHALL wait it out within the request's budget, under the same arrival-order queue, waiter cap and refusal causes (`holder_overdue`, `capture_wait_exhausted`, `capture_waiters_full`) as a keyed command write, because the handler has read or written no vault byte before it holds the boundary. A source capture of client artifacts SHALL wait out the boundary the same way, because it stages its bytes outside the vault before it holds the boundary, and its body SHALL run once. A tus upload session whose commit ends retryable with a busy or warming code SHALL be committed again by the server, with backoff and before the session expires, without waiting for the client's next read of the session.
 
 #### Scenario: Lock wait exceeds its bound
 
@@ -23,6 +23,13 @@ A direct `/upload` commit that finds the boundary held by a holder still inside 
 - **WHEN** a `/upload` commit finds the boundary held by a holder still inside its allowance
 - **AND** the holder releases within the request's wait budget
 - **THEN** the upload commits once and the client receives its success response
+- **AND** no busy refusal reaches the client
+
+#### Scenario: A source capture meets a boundary held by another capture
+
+- **WHEN** a source capture of client artifacts finds the boundary held by another capture still inside its allowance
+- **AND** the holder releases within the capture's wait budget
+- **THEN** the source capture stores its file once and the client receives its stored outcome
 - **AND** no busy refusal reaches the client
 
 #### Scenario: A tus commit stays busy past its own wait

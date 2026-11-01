@@ -5238,7 +5238,11 @@ class LeaseManager:
 
     @contextmanager
     def absorbing_mutation_guard(
-        self, vault_root: os.PathLike[str] | str, *, operation: str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        operation: str,
+        request_id: str | None = None,
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, waiting out an ordinary busy boundary before the body runs.
 
@@ -5251,7 +5255,9 @@ class LeaseManager:
         waiter slot end with the acquire: it no longer waits.
         """
         if not _writes_absorb_contention():
-            with self.mutation_guard(vault_root, operation=operation) as mutation:
+            with self.mutation_guard(
+                vault_root, request_id=request_id, operation=operation
+            ) as mutation:
                 yield mutation
             return
 
@@ -5262,7 +5268,9 @@ class LeaseManager:
 
             def acquire() -> VaultMutationCoordinator:
                 with mutation_lock.absorbing_busy():
-                    return held.enter_context(self.mutation_guard(vault_root, operation=operation))
+                    return held.enter_context(
+                        self.mutation_guard(vault_root, request_id=request_id, operation=operation)
+                    )
 
             yield self._absorb_contention(
                 operation,

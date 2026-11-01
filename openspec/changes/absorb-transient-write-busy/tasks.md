@@ -14,6 +14,7 @@
 - [x] 3.1 Route the direct `/upload` commit acquisitions through the keyed-write wait, with its queue, waiter cap and refusal causes. Follow-up PR: absorbing_mutation_guard on every /upload guard.
 - [x] 3.2 Re-attempt a tus session commit that ends retryable with a busy or warming code, with backoff, until the session expires. Follow-up PR: one re-attempt timer per session, 2 s doubling to 60 s.
 - [x] 3.3 Tests: a direct upload and a tus upload each commit once while another holder keeps the boundary for less than the wait budget. Follow-up PR: held-boundary /upload and tus tests.
+- [x] 3.4 Route the source capture guards of client artifacts (`capture_source`, `preserve_artifacts`) through the same wait. Follow-up PR: absorbing guard on source captures; the boundary hold still scales with artifact size and is a separate change.
 
 ## 4. Proof and closure
 

@@ -831,6 +831,7 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
     """
 
     def guard():  # noqa: ANN202
+        # Not absorbing: this runs after the evidence committed, and a failed reconcile only warns.
         return manager.mutation_guard(
             vault_root,
             request_id=active_mutation_request_id(),
@@ -1269,11 +1270,10 @@ def _capture_source_adoption(
         manager = active_manager()
         payload: dict | None = None
         try:
-            with manager.mutation_guard(
+            with manager.absorbing_mutation_guard(
                 vault_root,
                 request_id=active_mutation_request_id(),
-                operation="capture_source_artifacts_commit",
-                holder_kind="command",
+                operation="capture_source_adoption_commit",
             ):
                 raced = _existing_receipt(
                     vault_root, envelope, lane="source", destination=destination,
@@ -1405,11 +1405,10 @@ def _preserve_evidence_adoption(
 
         manager = active_manager()
         try:
-            with manager.mutation_guard(
+            with manager.absorbing_mutation_guard(
                 vault_root,
                 request_id=active_mutation_request_id(),
-                operation="preserve_artifacts_commit",
-                holder_kind="command",
+                operation="preserve_artifacts_adoption_commit",
             ):
                 raced = _existing_receipt(
                     vault_root, envelope, lane="evidence", destination=destination, raw_protection=raw_protection,
@@ -1550,11 +1549,10 @@ def capture_source_artifacts(
                 # page. A batch would otherwise land several pages under one
                 # name and rely on uniquify to tell them apart.
                 item_title = title if len(staged) == 1 else f"{title} — {artifact.filename}"
-                with manager.mutation_guard(
+                with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="capture_source_artifacts_commit",
-                    holder_kind="command",
                 ):
                     result = add_module.add(
                         vault_root,
@@ -1733,11 +1731,10 @@ def preserve_artifacts(
                         }
                     continue
                 transcription = transcribed.get(index)
-                with manager.mutation_guard(
+                with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="preserve_artifacts_commit",
-                    holder_kind="command",
                 ):
                     with artifact.path.open("rb") as stream:
                         result = preserve_stream(
