@@ -4404,17 +4404,17 @@ _CAPTURE_WAIT_CEILING_SECONDS = 600.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
 _CAPTURE_WAITERS_FULL_REMEDIATION = (
     "The write did not commit. Other writes are already waiting on the boundary and "
-    "the server keeps workers free for reads: retry with the same idempotency key "
-    "after retry_after_ms."
+    "the server keeps workers free for reads: retry after retry_after_ms, with the "
+    "same idempotency key if the write carried one."
 )
 _CAPTURE_HOLDER_OVERDUE_REMEDIATION = (
     "The write did not commit. The mutation boundary's holder has run past its "
     "allowance and looks stuck: inspect coordination_status or cell health, then "
-    "retry with the same idempotency key once it clears."
+    "retry once it clears, with the same idempotency key if the write carried one."
 )
 _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
     "The write did not commit. The boundary stayed busy for the whole bounded wait: "
-    "retry with the same idempotency key after retry_after_ms."
+    "retry after retry_after_ms, with the same idempotency key if the write carried one."
 )
 
 
@@ -4423,6 +4423,28 @@ def _writes_absorb_contention() -> bool:
         "0",
         "false",
     }
+
+
+_RETRIED_IN_BACKGROUND: ContextVar[bool] = ContextVar("exomem_retried_in_background", default=False)
+
+
+@contextmanager
+def retried_in_background() -> Iterator[None]:
+    """Run a write whose caller holds no request worker and retries it with its own backoff.
+
+    Such a write meets a busy or warming boundary once and returns the refusal at once: it
+    takes no waiter slot and no place in line, so a parked background commit never refuses
+    or delays a request's write.
+    """
+    token = _RETRIED_IN_BACKGROUND.set(True)
+    try:
+        yield
+    finally:
+        _RETRIED_IN_BACKGROUND.reset(token)
+
+
+def _waits_out_contention() -> bool:
+    return _writes_absorb_contention() and not _RETRIED_IN_BACKGROUND.get()
 
 
 # A waiting write parks one of the process's sync workers (anyio's limiter,
@@ -4512,6 +4534,8 @@ def _wait_out_write_warmup(
         return warming, refuse_cause, 0.0
     if not _writes_absorb_contention():
         return warming, "absorb_disabled", 0.0
+    if _RETRIED_IN_BACKGROUND.get():
+        return warming, "background_retry", 0.0
     if time.monotonic() >= deadline:
         return warming, "warm_wait_exhausted", 0.0
     if not _take_capture_waiter_slot():
@@ -5250,7 +5274,7 @@ class LeaseManager:
         because it may have consumed the request stream. The caller's place in line and its
         waiter slot end with the acquire: it no longer waits.
         """
-        if not _writes_absorb_contention():
+        if not _waits_out_contention():
             with self.mutation_guard(vault_root, operation=operation) as mutation:
                 yield mutation
             return
@@ -6844,7 +6868,7 @@ class LeaseManager:
         the same way and nothing is stored. A remote caller never sets it, because one that
         gave up during the wait and sent the write again would commit it twice.
         """
-        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _writes_absorb_contention()
+        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _waits_out_contention()
         store_attempt = _ACTIVE_STORE_ATTEMPT.get()
         if store_attempt is not None:
             return self._run_store_attempt(

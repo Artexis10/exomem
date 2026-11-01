@@ -615,10 +615,13 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
         _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
         return
     from .mutation_journal import retrying_park
+    from .writer_lease import retried_in_background
 
     try:
         # A refusal with the code of the park this retry started from adds no row and no count.
-        with retrying_park(running.parked):
+        # The commit thread holds no request worker and the re-attempt timer waits, so the
+        # commit meets the boundary once instead of waiting in line with requests.
+        with retrying_park(running.parked), retried_in_background():
             receipt = committer(part, record)
     except CommitFailed as exc:
         if not exc.retryable:

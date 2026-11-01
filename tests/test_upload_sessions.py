@@ -868,6 +868,32 @@ def test_a_commit_that_stays_busy_is_committed_again_by_the_server_under_the_tra
     assert [(seen.surface, seen.resolved) for seen in principals] == [("transfer", False)]
 
 
+def test_a_busy_session_commit_leaves_the_waiter_slots_to_requests(vault, monkeypatch) -> None:
+    """Parked uploads that each held a waiter slot would refuse a request's write as waiters_full."""
+    from exomem import writer_lease
+
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "30")
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 120.0)  # never fires here
+    slots = []
+    real_take = writer_lease._take_capture_waiter_slot
+    monkeypatch.setattr(writer_lease, "_take_capture_waiter_slot", lambda: slots.append(1) or real_take())
+    client = _client(vault, monkeypatch)
+    data = b'{"samples": [{"heart_rate": 62}]}'
+
+    with held_boundary(vault, monkeypatch, release_when_refused=False):
+        location, secret = _create(client, data)
+        started = time.monotonic()
+        assert _patch(client, location, secret, 0, data).status_code == 204
+        session_id = location.rsplit("/", 1)[1]
+        _wait_for(
+            lambda: upload_sessions.open_session(vault, session_id, secret).record.get("code") == "MUTATION_BUSY",
+            "the busy commit to end retryable",
+        )
+        # It met the boundary once and parked, long before the 30 s a request would wait.
+        assert time.monotonic() - started < 10
+    assert slots == []
+
+
 def test_a_busy_session_has_one_re_attempt_waiting_and_a_cancelled_one_has_none(vault, monkeypatch) -> None:
     """Two waiting timers would each commit again; a cancelled session must not be committed."""
     monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 120.0)  # never fires here
