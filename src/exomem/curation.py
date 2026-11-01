@@ -1782,6 +1782,28 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
 _UNWRITTEN_ARGUMENTS = frozenset({"why", "reason", "relation_review_reason", "old_string"})
 
 
+def _written_arguments(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The step's arguments without the schema fields whose text never reaches the page.
+
+    Only the step schema's own levels are filtered: the step arguments, an edit's
+    operation and its `edits`. Deeper keys come from the user's data.
+    """
+
+    def written(fields: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in fields.items() if key not in _UNWRITTEN_ARGUMENTS}
+
+    result = written(args)
+    operation = result.get("operation")
+    if isinstance(operation, Mapping):
+        result["operation"] = operation = written(operation)
+        edits = operation.get("edits")
+        if isinstance(edits, list):
+            operation["edits"] = [
+                written(edit) if isinstance(edit, Mapping) else edit for edit in edits
+            ]
+    return result
+
+
 def _planned_link_targets(
     vault_root: Path, args: Mapping[str, Any], pages: Sequence[tuple[str, str | None]]
 ) -> list[str]:
@@ -1797,11 +1819,11 @@ def _planned_link_targets(
         return []
     resolver = WikilinkResolver.from_entries(vault_root, pages)
     found: set[str] = set()
-    texts: list[Any] = [args]
+    texts: list[Any] = [_written_arguments(args)]
     while texts:
         value = texts.pop()
         if isinstance(value, Mapping):
-            texts.extend(item for key, item in value.items() if key not in _UNWRITTEN_ARGUMENTS)
+            texts.extend(value.values())
         elif isinstance(value, list):
             texts.extend(value)
         elif isinstance(value, str):

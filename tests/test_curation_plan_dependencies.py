@@ -388,10 +388,18 @@ def test_an_edit_that_stales_the_saved_relation_review_needs_a_review_at_proposa
 def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_review(
     vault: Path,
 ) -> None:
-    target = _seed_note(vault, "curation-target", "## Observations\n\n- [finding] Keeps the record. ^target\n")
+    target = _seed_note(
+        vault, "curation-target", "## Observations\n\n- [finding] Keeps the record. ^target\n"
+    )
     _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
     edit = _edit_step(
-        vault, target, {"kind": "replace_string", "old_string": "Keeps the record", "new_string": "Keeps the whole record"}
+        vault,
+        target,
+        {
+            "kind": "replace_string",
+            "old_string": "Keeps the record",
+            "new_string": "Keeps the whole record",
+        },
     )
     for key in ("relation_disposition", "relation_review_reason"):
         edit["args"]["operation"].pop(key)
