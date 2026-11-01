@@ -289,6 +289,9 @@ def test_a_consistent_copy_without_a_local_anchor_reads_as_unanchored_but_valid(
     (finding,) = audit.audit(copy, categories=["governance_receipts"]).findings
     assert finding.severity == "warn"
     assert instance_id in finding.detail and "no local anchor" in finding.detail
+    # Audit findings name vault-relative paths, which a synced copy shares.
+    assert (copy / finding.path).resolve() == Path(instance["path"]).resolve()
+    assert not Path(finding.path).is_absolute()
 
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(receipt_state_root))
     assert receipts.verify_chain(vault)["unanchored_instances"] == 0

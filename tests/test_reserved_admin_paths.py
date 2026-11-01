@@ -2393,11 +2393,6 @@ def test_dispatcher_injects_nonserializable_governance_owner_authority(
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
 
-    from exomem.governance import egress
-
-    # This test checks owner-authority injection; the stub manager has no receipt store.
-    monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
-
     result = writer_lease.invoke_command(
         dispatch,
         tmp_path,

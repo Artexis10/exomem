@@ -1202,8 +1202,6 @@ def test_legacy_maintenance_aliases_keep_their_dry_runs_and_their_local_writes(
             return {"admitted": True}
 
     monkeypatch.setattr(writer_lease, "get_manager", RecordingManager)
-    # These tests check dispatch routing; a remote caller's receipt needs a real store.
-    monkeypatch.setattr("exomem.governance.egress.emit_boundary_receipt", lambda _collector: None)
     descriptor = capabilities.ActiveSurfaceDescriptor(
         surface=surface, profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
     )
@@ -1314,8 +1312,6 @@ def test_remote_maintenance_reads_and_local_writes_reach_manager_dispatch(
             return {"admitted": True}
 
     monkeypatch.setattr(writer_lease, "get_manager", RecordingManager)
-    # These tests check dispatch routing; a remote caller's receipt needs a real store.
-    monkeypatch.setattr("exomem.governance.egress.emit_boundary_receipt", lambda _collector: None)
     context = (
         nullcontext()
         if surface is None

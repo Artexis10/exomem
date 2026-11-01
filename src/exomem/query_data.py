@@ -42,7 +42,7 @@ from .query_compat import (
     coerce_num as _coerce_num, get_field as _get_field, match as _match, sort_key,
     distinct_key, group_key, latest_aggregate, numeric_aggregate, profile_kind,
 )
-from .vault import VaultPathError, VaultPathResolution, resolve_under_vault
+from .vault import VaultPathError, VaultPathResolution, missing_path_reason, resolve_under_vault
 
 log = logging.getLogger(__name__)
 
@@ -472,17 +472,6 @@ def _profile_payload(rows: list[dict], cols: list[str], fmt: str, rel: str) -> d
         "columns": [_profile_column(c, [_get_field(r, c) for r in rows]).as_dict() for c in cols],
     }
     return {"profile": profile, "dataset_card": build_dataset_card(profile)}
-
-
-def missing_path_reason(path: str) -> str:
-    """The refusal text for a dataset path the caller may not read.
-
-    It names the path as the caller typed it, as `resolve_under_vault` does for an
-    absent one, and never the resolved spelling: the two differ only for a file
-    that exists, so the resolved one would tell a withheld file from a missing one.
-    """
-    requested = str(path).strip().replace("\\", "/").lstrip("/")
-    return f"path does not exist: {requested}"
 
 
 def query_data(

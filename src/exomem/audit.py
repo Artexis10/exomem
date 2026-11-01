@@ -1944,7 +1944,7 @@ def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
         AuditFinding(
             category="governance_receipts",
             severity="warn",
-            path=instance["path"],
+            path=Path(instance["path"]).resolve().relative_to(vault_root.resolve()).as_posix(),
             detail=(
                 f"receipt instance {instance_id} has no local anchor, so a "
                 "consistent rewrite of it cannot be told from the original"

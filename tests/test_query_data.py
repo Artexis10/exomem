@@ -430,6 +430,29 @@ def test_a_restricted_caller_gets_the_missing_text_for_every_spelling_of_a_withh
     assert str(caught.value) == f"NOT_FOUND: path does not exist: {typed}"
 
 
+def test_a_refused_missing_dataset_leaves_no_release_in_the_receipt(vault: Path) -> None:
+    """A receipt that records the release of a file that never existed is false evidence.
+
+    Rows that were read are released; a path that refused released nothing.
+    """
+    from test_restricted_refusal_floor import EXTERNAL, _restrict_external
+
+    from exomem import commands, writer_lease
+    from exomem.governance import egress, receipts
+    from exomem.governance.principal import request_scope
+
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "query_dataset")
+    recorded = len(receipts.event_records(vault))
+
+    with request_scope(EXTERNAL), pytest.raises(ValueError, match="NOT_FOUND"):
+        writer_lease.invoke_command(command, vault, path="Knowledge Base/Notes/Open/missing.csv")
+
+    records = receipts.event_records(vault)[recorded:]
+    assert records, "a restricted caller's refusal still takes its receipt"
+    assert [o["decision"] for r in records for o in r["outcomes"]] == []
+
+
 def test_the_owner_keeps_the_specific_refusal_for_a_folder_or_an_unsupported_file(
     vault: Path,
 ) -> None:

@@ -12,6 +12,7 @@ import hashlib
 import json
 import statistics
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,107 @@ def test_the_other_path_doors_refuse_withheld_and_missing_alike_at_the_floor(
     assert min(shown[0], absent[0]) >= floor_s
 
 
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("list_directory", {"path": "Knowledge Base/Notes/Hidden/absent"}),
+        ("suggest_links", {"path": "Knowledge Base/Notes/Hidden/missing-example.md"}),
+        ("query_data", {"path": "Knowledge Base/Notes/Hidden/missing-example.csv"}),
+    ],
+)
+def test_a_legacy_alias_refuses_at_its_product_commands_floor(
+    vault: Path, name: str, arguments: dict
+) -> None:
+    """An old tool name reaches the same read as its product command, so it keeps the same clock."""
+    floor_s = projection_timing.RESTRICTED_REFUSAL_FLOOR_MS / 1000.0
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    command = next(item for item in commands.COMMANDS if item.name == name)
+
+    def refusal() -> float:
+        started = time.perf_counter()
+        with request_scope(EXTERNAL), pytest.raises(ValueError, match="NOT_FOUND"):
+            writer_lease.invoke_command(command, vault, **arguments)
+        return time.perf_counter() - started
+
+    refusal()  # the first call of a door pays its own caches
+    assert refusal() >= floor_s
+
+
+def test_an_empty_inbound_answer_to_a_restricted_caller_completes_at_the_floor(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A withheld target answers `[]` like a missing one, and its decision must not show on the clock.
+
+    The answer is a success, so the dispatcher holds it only when the door asks.
+    A visible target and the owner get their links without the wait.
+    """
+    floor_s = projection_timing.RESTRICTED_REFUSAL_FLOOR_MS / 1000.0
+    withheld = "Knowledge Base/Notes/Hidden/withheld-example.md"
+    missing = "Knowledge Base/Notes/Hidden/missing-example.md"
+    visible = "Knowledge Base/Notes/Open/released-example.md"
+    _write_page(vault, withheld, memory_refs.new_id())
+    _write_page(vault, visible, memory_refs.new_id())
+    source = vault / "Knowledge Base/Notes/Open/links-out.md"
+    source.write_text(
+        "---\ntype: insight\n---\n\nSee [[withheld-example]] and [[released-example]].\n",
+        encoding="utf-8",
+    )
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    connect = next(item for item in commands.PRODUCT_COMMANDS if item.name == "connect_memory")
+
+    def inbound(target: str) -> tuple[float, dict]:
+        started = time.perf_counter()
+        answer = writer_lease.invoke_command(
+            connect, vault, operation="inbound-links", target=target
+        )
+        return time.perf_counter() - started, answer
+
+    with request_scope(EXTERNAL):
+        inbound(withheld)  # the first call of a door pays its own caches
+        inbound(missing)
+        shown, absent = inbound(withheld), inbound(missing)
+    assert shown[1] == absent[1]
+    assert shown[1]["inbound"] == []
+    assert min(shown[0], absent[0]) >= floor_s
+
+    # A floor raised far above the work makes any padding unmistakable.
+    monkeypatch.setattr(projection_timing, "RESTRICTED_REFUSAL_FLOOR_MS", 2_000)
+    with request_scope(EXTERNAL):
+        elapsed, answer = inbound(visible)
+    assert [row["path"] for row in answer["inbound"]] == ["Knowledge Base/Notes/Open/links-out.md"]
+    assert elapsed < 1.5
+    with library_scope():
+        elapsed, answer = inbound(withheld)
+    assert answer["count"] == 1
+    assert elapsed < 1.5
+
+
+def test_a_write_through_a_floored_command_decides_on_the_policy_it_finds(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a read answers from one policy load; a write must see a change made before it decides."""
+    connect = next(item for item in commands.PRODUCT_COMMANDS if item.name == "connect_memory")
+    seen: list[tuple[bool, bool]] = []
+
+    def leaf(vault_root: Path, **_kwargs: object) -> dict:
+        before = policy.load(vault_root)
+        _restrict_external(vault_root, folder="Hidden", ceiling=egress.LEVEL_NONE)
+        seen.append((before.empty, policy.load(vault_root).empty))
+        return {}
+
+    class Manager:
+        def invoke(self, current, injected, kwargs, **_dispatch_kwargs):
+            return current.leaf(*injected, **kwargs)
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    with library_scope():
+        writer_lease.invoke_command(
+            replace(connect, leaf=leaf), vault, operation="create-entity", name="Example"
+        )
+
+    assert seen == [(True, False)]
+
+
 def test_an_early_refusal_leaves_the_full_withheld_receipt(vault: Path) -> None:
     """The owner's audit record of a refused read keeps its hash, size and ref."""
     identity = memory_refs.new_id()
@@ -200,6 +302,21 @@ def test_a_restricted_notice_returns_without_the_floor(
     assert "path" not in result
     # Well inside the patched 2 s floor, which a padded notice would wait out.
     assert elapsed < 1.5
+
+
+def test_a_page_served_with_a_notice_still_seeds_a_link_ranking(vault: Path) -> None:
+    """A seed page is refused as absent only when the release gate withholds it entirely."""
+    page = "Knowledge Base/Notes/Noticed/noticed-example.md"
+    _write_page(vault, page, memory_refs.new_id())
+    _restrict_external(vault, folder="Noticed", ceiling=egress.LEVEL_NOTICE)
+    connect = next(item for item in commands.PRODUCT_COMMANDS if item.name == "connect_memory")
+
+    with request_scope(EXTERNAL):
+        answer = writer_lease.invoke_command(
+            connect, vault, operation="suggest-links", path=page
+        )
+
+    assert "NOT_FOUND" not in json.dumps(answer)
 
 
 def test_a_restricted_withheld_refusal_writes_no_read_log_row(

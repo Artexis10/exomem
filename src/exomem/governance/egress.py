@@ -523,9 +523,11 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
                     ),
                 },
             )
-        # A boundary that touched nothing still takes a receipt where governance
-        # applies, so a broken store refuses it as it refuses a boundary that did.
-        if collector.outcomes or _governance_applies(collector.vault_root):
+        # A restricted caller's boundary that touched nothing still takes a
+        # receipt, so a broken store refuses its probe of a missing item as it
+        # refuses a probe of a withheld one. Nothing can be withheld from any
+        # other caller, so it keeps the receipt-free path.
+        if collector.outcomes or caller_restricted(collector.vault_root):
             receipts.append_event(
                 collector.vault_root,
                 event_type="disclosure",
@@ -534,12 +536,6 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
             )
     except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
         raise ReceiptUnavailableError() from exc
-
-
-def _governance_applies(vault_root: Path) -> bool:
-    """A restricted caller, or a compiled policy: the owner on an empty policy has neither."""
-    root = Path(vault_root)
-    return not _file_policy_empty(root, policy_module.load(root)) or caller_restricted(root)
 
 
 def _bounded_outcomes(
@@ -5959,48 +5955,44 @@ def _rewrite_error_attribute(error: BaseException, name: str, value: Any) -> Non
             pass
 
 
-#: Parameters that carry a vault reference BY CONTRACT. The exemption is seeded
-#: from these alone, never from every kwarg.
-#:
-#: Walking all kwargs looks harmless — each value is caller-supplied, which is
-#: the whole safety argument — but it hands the caller a de-anonymisation
-#: channel: put a known path in any free-text field (`why`, `intent`, `title`,
-#: `query`) and a redacted collision list stops rendering it as `[withheld]`,
-#: revealing WHICH slot that path occupies. A list-shaped field turns that from
-#: one probe per candidate into one probe per thousand. Restricting the seed to
-#: reference-typed parameters keeps the justification ("the caller named this AS
-#: a reference") and removes the channel.
-_REFERENCE_KWARGS = frozenset(
-    {
-        "path",
-        "paths",
-        "id",
-        "ids",
-        "ref",
-        "refs",
-        "old_path",
-        "new_path",
-        "source_path",
-        "target_path",
-        "manifest_path",
-        "collection",
-        "only_paths",
-        "selector_paths",
-        # A source page the caller names and a link target: both are paths by contract.
-        "sources",
-        "target",
-    }
+# Temporary second copy of reference-argument knowledge. Some commands take a
+# reference that `reserved_paths._COMMAND_PATH_ROLES` does not declare yet
+# (`link.ref`, `maintain_memory.paths`/`refs`/`collection`,
+# `adoption_studio.paths`, `triage_memory.source_path`). Without these names a
+# withheld reference in their errors would read `[withheld]` while a missing one
+# is echoed. Declaring those roles also adds reserved preflight to write doors,
+# so it belongs to the write-destination admission work. Delete this set when
+# those roles are declared there.
+_UNDECLARED_REFERENCE_ARGUMENTS = frozenset(
+    {"paths", "ref", "refs", "collection", "source_path"}
 )
 
 
-def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[str]:
+def _caller_supplied_references(
+    command_name: str, kwargs: Mapping[str, Any] | None
+) -> frozenset[str]:
     """Canonical keys for every reference the CALLER put in the request.
 
-    See `postfilter_error` for why these must survive filtering verbatim, and
-    `_REFERENCE_KWARGS` for why only reference-typed parameters seed the set.
+    See `postfilter_error` for why these must survive filtering verbatim. Only
+    the arguments that the dispatched command declares as naming vault state
+    (`reserved_paths.path_roles_for_command`) seed the set, never every kwarg.
+
+    Walking all kwargs looks harmless — each value is caller-supplied, which is
+    the whole safety argument — but it hands the caller a de-anonymisation
+    channel: put a known path in any free-text field (`why`, `intent`, `title`,
+    `query`) and a redacted collision list stops rendering it as `[withheld]`,
+    revealing WHICH slot that path occupies. A list-shaped field turns that from
+    one probe per candidate into one probe per thousand. Seeding from the
+    command's own reference arguments keeps the justification ("the caller named
+    this AS a reference") and removes the channel.
     """
     if not kwargs:
         return frozenset()
+    named = {
+        role.argument
+        for role in reserved_paths.path_roles_for_command(command_name)
+        if role.names_state
+    } | _UNDECLARED_REFERENCE_ARGUMENTS
     out: set[str] = set()
 
     def _walk(value: Any) -> None:
@@ -6020,7 +6012,7 @@ def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[s
             for item in value:
                 _walk(item)
 
-    _walk({k: v for k, v in kwargs.items() if k in _REFERENCE_KWARGS})
+    _walk([value for key, value in kwargs.items() if key in named])
     return frozenset(out)
 
 
@@ -6066,13 +6058,12 @@ def postfilter_error(
     Mutates in place and returns the same object, so the caller re-raises with
     its original type, error code and traceback intact.
     """
-    del command_name  # an error is free text; there is no per-command shape
     vault_root = Path(vault_root)
     gate = _ArtifactReferenceGate(
         vault_root,
         principal=None,
         purpose=None,
-        exempt=_caller_supplied_references(request_kwargs),
+        exempt=_caller_supplied_references(command_name, request_kwargs),
     )
     blocked = False
 
@@ -7543,6 +7534,21 @@ def restricted_release_filter(
     """
     if bound_writer(vault_root) is not None:
         return release_walk_filter(vault_root, principal=principal, purpose=purpose)
+    who = _file_mode_restricted_caller(vault_root, principal)
+    if who is None:
+        return None
+    return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+def _file_mode_restricted_caller(
+    vault_root: Path, principal: RequestPrincipal | None
+) -> RequestPrincipal | None:
+    """The file-mode caller that something could be withheld from, or `None`.
+
+    The principal, its RAW authority and the connector ceiling decide it; the
+    policy cannot, because `release_walk_filter` returns a filter for every
+    caller that this names.
+    """
     who = principal if principal is not None else current_principal()
     if who is None:
         who = effective_principal()
@@ -7550,7 +7556,7 @@ def restricted_release_filter(
             return None
     if raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who):
         return None
-    return release_walk_filter(vault_root, principal=who, purpose=purpose)
+    return who
 
 
 def caller_restricted(
@@ -7564,8 +7570,17 @@ def caller_restricted(
     The question every count, cut or diagnostic computed before admission
     asks. Policy state (`gate_state`) is a different question: RAW withholds
     a protected page from a guest on an ungoverned vault too.
+
+    It is `restricted_release_filter(...) is not None` without building the
+    filter: a bound preview filters every caller, and in file mode the caller
+    decides it. So it loads no policy and reads no collection ownership, and
+    a receipt can ask it after the read scope has finished.
     """
-    return restricted_release_filter(vault_root, principal=principal, purpose=purpose) is not None
+    del purpose  # every purpose gets a filter or none alike
+    return (
+        bound_writer(vault_root) is not None
+        or _file_mode_restricted_caller(vault_root, principal) is not None
+    )
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;

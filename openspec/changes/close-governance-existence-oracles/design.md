@@ -14,7 +14,7 @@ The four doors take the existing attribute; the dispatcher and the surfaces need
 
 ### D3. Empty-outcome receipts only where governance applies
 
-The receipt schema already admits `outcomes: []`. Only a restricted caller can be withheld anything, so only its probes can turn a receipt-store fault into an existence oracle. The rule is: append when the caller is restricted. Appending for the owner as well, for example whenever the policy is non-empty, was rejected: it closes no oracle, writes a receipt for every owner zero-hit read, and makes owner reads such as `coordination_status` refuse during a receipt-store fault. The decision reuses the policy that the boundary already loaded, so it adds no policy load.
+The receipt schema already admits `outcomes: []`. Only a restricted caller can be withheld anything, so only its probes can turn a receipt-store fault into an existence oracle. The rule is: append when the caller is restricted. Appending for the owner as well, for example whenever the policy is non-empty, was rejected: it closes no oracle, writes a receipt for every owner zero-hit read, and makes owner reads such as `coordination_status` refuse during a receipt-store fault. The decision reads only the caller and the bound writer, so it loads no policy.
 
 ### D4. Report anchor state; do not invalidate unanchored chains
 

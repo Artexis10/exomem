@@ -2598,14 +2598,24 @@ def test_a_restricted_probe_that_touches_nothing_is_receipted(vault: Path) -> No
     assert record["outcomes"] == []
 
 
-def test_an_owner_zero_hit_search_on_a_governed_vault_is_receipted(vault: Path) -> None:
-    """A non-empty policy governs every caller, the owner included."""
+def test_an_owner_call_that_touched_nothing_needs_no_receipt_store(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is withheld from the owner, so a governed vault's store fault refuses no owner read.
+
+    The empty receipt is for a restricted caller, whose missing and withheld
+    items must fail alike. The owner has no withheld items to tell apart.
+    """
     _restricted_vault(vault)
+
+    def fail(*_args, **_kwargs):
+        raise receipts.ReceiptError("sidecar unavailable")
+
+    monkeypatch.setattr(receipts, "append_event", fail)
     with library_scope():
         _through_dispatcher(vault, "search", query="zzqxnonexistentterm")
-    (record,) = _receipt_records(vault)
-    assert record["event_type"] == "disclosure"
-    assert record["outcomes"] == []
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Nowhere")
 
 
 @pytest.mark.parametrize(
@@ -3951,25 +3961,25 @@ def test_inbound_links_ungoverned_is_untouched(vault: Path) -> None:
     assert result["count"] >= 1
 
 
-def test_release_permits_link_target_escaping_the_vault_is_never_opened(
+def test_link_target_pages_escaping_the_vault_are_never_opened(
     vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """`_release_permits_link_target` joined the raw `target` string with
-    `vault_root` and stat'd (then, for a `.md`-shaped candidate, read) the
-    result with no containment check, so a `../` traversal or an absolute
-    path reached the filesystem outside the vault before any decision was
-    made.
+    """The inbound-links target lookup (now `_link_target_pages`) joined the
+    raw `target` string with `vault_root` and stat'd (then, for a
+    `.md`-shaped candidate, read) the result with no containment check, so a
+    `../` traversal or an absolute path reached the filesystem outside the
+    vault before any decision was made.
 
     `op_list_inbound_links` itself already refuses a `../` or absolute
     `target` earlier, through `_resolve_memory_identifier`'s
     `reserved_paths.classify_logical` check, before this function ever runs
-    — so this exercises `_release_permits_link_target` directly, the way a
+    — so this exercises `_link_target_pages` directly, the way a
     future or internal caller could still reach it, exactly as the receipt
     hash in `_outcome_for_decision` is confined even though its own caller
     is expected to have already decided the candidate.
 
     Every escaping form must answer exactly as the function's own contract
-    for a target that resolves to nothing under the vault (`True`, i.e. not
+    for a target that resolves to nothing under the vault (no pages, i.e. not
     the release plane's business), and none may touch a file outside the
     vault to get there."""
     write_scope(vault)
@@ -4000,7 +4010,7 @@ def test_release_permits_link_target_escaping_the_vault_is_never_opened(
     forms = [traversal_md, traversal_bare, absolute]
 
     for target in forms:
-        assert commands._release_permits_link_target(vault, target) is True, target
+        assert commands._link_target_pages(vault, target) == [], target
 
     assert opened_outside == []
 

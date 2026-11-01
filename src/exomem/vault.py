@@ -6491,6 +6491,18 @@ def _write_target_withheld(vault_root: Path, resolved: Path, vault_resolved: Pat
     return egress.write_target_withheld(vault_root, rel)
 
 
+def missing_path_reason(path: str) -> str:
+    """The NOT_FOUND text for a vault path that does not exist.
+
+    It names the path as the caller typed it, normalised as `resolve_under_vault`
+    normalises it, never the resolved spelling: the two differ only for a file
+    that exists, so a door that refuses a withheld file with this text answers
+    exactly as for an absent one.
+    """
+    requested = str(path).strip().replace("\\", "/").lstrip("/")
+    return f"path does not exist: {requested}"
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -6577,10 +6589,7 @@ def resolve_under_vault(
         not candidate.exists()
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
     ):
-        raise VaultPathError(
-            code="NOT_FOUND",
-            reason=f"path does not exist: {rel}",
-        )
+        raise VaultPathError(code="NOT_FOUND", reason=missing_path_reason(rel))
     if must_be_file and candidate.exists() and not candidate.is_file():
         raise VaultPathError(
             code="NOT_A_FILE",

@@ -176,6 +176,15 @@ class PathRole:
     role: str
     value_kind: str = "path"
 
+    @property
+    def names_state(self) -> bool:
+        """Whether each value is itself a path or a ref.
+
+        An artifact handle is the one kind that is not: it is a client file
+        record, and its fields, such as a display name, are the caller's free text.
+        """
+        return self.value_kind != "external-artifacts"
+
 
 @dataclass(frozen=True, slots=True)
 class ReservedPathHit:

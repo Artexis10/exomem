@@ -181,6 +181,7 @@ from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
 from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
+from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .query_compat import public_filter_annotation as _public_filter_annotation
@@ -3199,20 +3200,21 @@ def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.G
 
     A context or a link ranking seeded from a page is assembled from that
     page, so whether it assembles at all is a fact about the page. An absent
-    page already raises here, through the same read `op_get` takes. A page
-    that may be released is returned for a caller that goes on with it.
+    page already raises here, through the same read `op_get` takes. The
+    release gate's own decision refuses a page withheld entirely, without
+    rendering it; a page it would serve with a notice (L1-L4) goes on, as in
+    `op_get`. A page that goes on is returned for the caller to use.
     """
     try:
         page = get_page_module.get_page(vault_root, path=path)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    released = egress_module.annotate_page(
+    if egress_module.page_withheld_entirely(
         vault_root,
         page.as_dict(include_raw=False),
         snapshot_content=page.content,
         stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
-    )
-    if released is None:
+    ):
         raise ValueError(
             f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
         )
@@ -5667,20 +5669,13 @@ def op_query_data(
             date_from=date_from,
             date_to=date_to,
             date_column=date_column,
-            authorize_path=lambda rel_path: (
-                egress_module.release_level_for_path_only(
-                    vault_root,
-                    rel_path,
-                    receipt_decision="released",
-                )
-                >= egress_module.LEVEL_FULL
-            ),
+            authorize_path=partial(_authorize_dataset_path, vault_root),
         )
     except query_data_module.QueryDataError as e:
         # A folder may exist only to hold pages withheld from this caller, and a
         # policy path cannot name a folder, so a restricted caller is told it is absent.
         if e.code == "NOT_A_FILE" and egress_module.caller_restricted(vault_root):
-            raise ValueError(f"NOT_FOUND: {query_data_module.missing_path_reason(path)}") from e
+            raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}") from e
         raise ValueError(f"{e.code}: {e.reason}") from e
     representation = (
         "profile"
@@ -5691,8 +5686,21 @@ def op_query_data(
         vault_root, result.as_dict(), representation=representation
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: {query_data_module.missing_path_reason(path)}")
+        raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}")
     return released
+
+
+def _authorize_dataset_path(vault_root: Path, rel_path: str) -> bool:
+    """Decide a dataset path before anything says whether it exists.
+
+    The path may not exist, so a release recorded here could be false
+    evidence; `annotate_dataset` records the release of rows that were read.
+    A refusal leaves the withheld receipt that a direct read leaves.
+    """
+    if egress_module.release_level_for_path_only(vault_root, rel_path) >= egress_module.LEVEL_FULL:
+        return True
+    egress_module.release_level_for_path_only(vault_root, rel_path, receipt_decision="withheld")
+    return False
 
 
 def op_create_file(
@@ -6316,31 +6324,41 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # indistinguishable from both "nothing links here" and "never existed";
     # raising NOT_FOUND would invent a signal the surface otherwise never
     # emits, which is its own oracle.
-    permitted = _release_permits_link_target(vault_root, target)
-    # The count is the length of the list the caller receives: a link from a
-    # page it may not see is decided here, before counting, rather than left
-    # for the entry filter to drop beside a count that still includes it. A
-    # withheld target takes this pass too, and its rows are dropped after it,
-    # so that it costs what a missing target costs.
-    if visible is not None:
+    #
+    # Policy state is the right question for the gate: with no policy RAW is
+    # the only floor, and a protected target lists the same links its absent
+    # twin does, since an inbound link resolves by name whether or not its
+    # target exists. So the target's pages are found and decided only under a policy.
+    governed = not egress_module.gate_state(Path(vault_root))[0].empty
+    pages = _link_target_pages(vault_root, target) if governed else []
+    if governed and not all(_link_target_released(vault_root, page) for page in pages):
+        payload["inbound"] = []
+        payload["count"] = 0
+    elif visible is not None:
+        # The count is the length of the list the caller receives: a link from
+        # a page it may not see is decided here, before counting, rather than
+        # left for the entry filter to drop beside a count that still includes it.
         payload["inbound"] = [
             row for row in payload["inbound"] if visible(str(row.get("path") or ""))
         ]
         payload["count"] = len(payload["inbound"])
-    if not permitted:
-        payload["inbound"] = []
-        payload["count"] = 0
-    # The echoed `target` is the normalised form, which can be strictly more
-    # specific than the input (a bare basename resolves to a full vault path),
-    # and the terminal filter strips it only for a withheld target. A caller
-    # that restriction applies to already holds what it sent, so it gets none.
-    if visible is not None or not permitted:
+    if visible is not None:
+        # The echoed `target` is the normalised form, which can be strictly
+        # more specific than the input (a bare basename resolves to a full
+        # vault path), and the terminal filter strips it only for a withheld
+        # target. A restricted caller already holds what it sent.
         payload.pop("target", None)
+        # Deciding a withheld target reads it, so its answer would come later
+        # than a missing target's, and later still for a larger page. Both
+        # complete at the refusal floor. A target the caller sees is its own
+        # knowledge, so it is not held.
+        if governed and (not pages or not all(visible(page) for page in pages)):
+            projection_timing_module.floor_restricted_outcome()
     return payload
 
 
-def _release_permits_link_target(vault_root: Path, target: object) -> bool:
-    """False only when `target` names a real vault page released below the floor.
+def _link_target_pages(vault_root: Path, target: object) -> list[str]:
+    """The vault pages that `target` names: none for a target that names no page.
 
     A target that resolves to nothing under the vault is not a vault item and
     is therefore not the release plane's business (finding N6) — the caller is
@@ -6351,23 +6369,10 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
     on its own, so a path-only check would have left the cheapest probe open.
     """
     if not isinstance(target, str) or not target.strip():
-        return True
-    from .governance import egress as egress_module
-
-    # Policy state is the right question here: with no policy RAW is the only
-    # floor, and a protected target lists the same links its absent twin does,
-    # since an inbound link resolves by name whether or not its target exists.
-    policy, _ = egress_module.gate_state(Path(vault_root))
-    if policy.empty:
-        return True
-
-    def _permits(rel_path: str) -> bool:
-        level = egress_module.release_level_for(vault_root, rel_path)
-        return level is not None and level >= egress_module.RELEASE_FLOOR
-
+        return []
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
-        for candidate in {clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}:
+        for candidate in (clean,) if clean.lower().endswith(".md") else (clean, f"{clean}.md"):
             try:
                 candidate_abs, confined = resolve_under_vault(vault_root, candidate)
             except VaultPathError:
@@ -6376,16 +6381,22 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
                 # business, and never stat'd or read to get there.
                 continue
             if candidate_abs.is_file():
-                return _permits(confined)
-        return True
+                return [confined]
+        return []
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
     # not a vault item.
     stem = clean[: -len(".md")] if clean.lower().endswith(".md") else clean
-    matches = [p for p in Path(vault_root).rglob(f"{stem}.md") if p.is_file()]
-    if not matches:
-        return True
-    return all(_permits(str(p.relative_to(Path(vault_root))).replace("\\", "/")) for p in matches)
+    return [
+        str(p.relative_to(Path(vault_root))).replace("\\", "/")
+        for p in Path(vault_root).rglob(f"{stem}.md")
+        if p.is_file()
+    ]
+
+
+def _link_target_released(vault_root: Path, rel_path: str) -> bool:
+    level = egress_module.release_level_for(vault_root, rel_path)
+    return level is not None and level >= egress_module.RELEASE_FLOOR
 
 
 def op_get_video_frames(
@@ -13534,19 +13545,9 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "overview": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "search": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
-    "fetch": {
-        "surface": "primary",
-        "actions": ("ask",),
-        "first_run_safe": True,
-        "restricted_refusal_floor": True,
-    },
+    "fetch": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "find": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
-    "get": {
-        "surface": "primary",
-        "actions": ("ask",),
-        "first_run_safe": True,
-        "restricted_refusal_floor": True,
-    },
+    "get": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "add": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
     "note": {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
     "preserve": {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
@@ -13648,6 +13649,14 @@ _SPEC: tuple[tuple, ...] = (
 
 
 def _build_commands() -> tuple[Command, ...]:
+    # A legacy name takes the floor of the product command that absorbs it, so
+    # an alias of a floored door cannot drift from it.
+    floored = frozenset(
+        route
+        for *_, routes, product_meta in _PRODUCT_SPEC
+        if product_meta.get("restricted_refusal_floor")
+        for route in routes
+    )
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces in _SPEC:
         meta = _PRODUCT_METADATA.get(name, {})
@@ -13673,22 +13682,11 @@ def _build_commands() -> tuple[Command, ...]:
                 product_actions=tuple(meta.get("actions", ())),
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
-                restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
+                restricted_refusal_floor=name in floored,
             )
         )
     return tuple(cmds)
 
-
-COMMANDS: tuple[Command, ...] = _build_commands()
-
-#: Boot refusal (design D3 risk mitigation). Coverage is derived from THIS
-#: registry and default-deny, so a command added without declaring how it
-#: renders through the release plane fails at import — the process refuses to
-#: start rather than serving an ungated surface. This is the check that would
-#: have caught `fetch` and the eight structure surfaces on the day each was
-#: written, instead of at security review.
-egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
-egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 # Preferred spellings are closed API tokens; execution names keep receipts and policies stable.
 _PRODUCT_SPEC: tuple[tuple, ...] = (
@@ -14130,6 +14128,18 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         },
     ),
 )
+
+# The legacy registry reads its floor from the product spec above, so it is built here.
+COMMANDS: tuple[Command, ...] = _build_commands()
+
+#: Boot refusal (design D3 risk mitigation). Coverage is derived from THIS
+#: registry and default-deny, so a command added without declaring how it
+#: renders through the release plane fails at import — the process refuses to
+#: start rather than serving an ungated surface. This is the check that would
+#: have caught `fetch` and the eight structure surfaces on the day each was
+#: written, instead of at security review.
+egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
+egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 
 #: The argument rules each converted command's own leaf owns. A rendering validates

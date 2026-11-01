@@ -1860,23 +1860,54 @@ def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
 
 
 @pytest.mark.parametrize(
-    ("parameter", "value"),
-    [("sources", [ERROR_WITHHELD]), ("target", ERROR_WITHHELD)],
+    ("command_name", "parameter", "value"),
+    [
+        ("compile_source", "sources", [ERROR_WITHHELD]),
+        ("list_inbound_links", "target", ERROR_WITHHELD),
+        ("ask_memory", "relation_of", ERROR_WITHHELD),
+        ("recover_from_trash", "restore_path", ERROR_WITHHELD),
+    ],
 )
-def test_a_source_or_link_target_the_caller_named_is_echoed_in_an_error(
-    vault: Path, parameter: str, value: object
+def test_a_reference_the_command_declares_is_echoed_in_an_error(
+    vault: Path, command_name: str, parameter: str, value: object
 ) -> None:
-    """`compile_source` names pages in `sources`, `list_inbound_links` one in `target`.
+    """Each argument that names a page in the command's path roles is the caller's own.
 
-    Neither was a reference parameter, so an error that echoed the caller's own
-    path read `[withheld]` for a withheld page and the path for a missing one.
+    An error that echoed it read `[withheld]` for a withheld page and the path
+    for a missing one, so the redaction itself said which one it was.
     """
     _govern_patterns_shut(vault)
-    error = ValueError(f"SOURCES_NOT_FOUND: [{ERROR_WITHHELD!r}]")
+    error = ValueError(f"NOT_FOUND: [{ERROR_WITHHELD!r}]")
     with _external_scope():
-        egress.postfilter_error("compile_source", error, vault, request_kwargs={parameter: value})
+        egress.postfilter_error(command_name, error, vault, request_kwargs={parameter: value})
     assert ERROR_WITHHELD in str(error)
     assert egress.WITHHELD_REFERENCE not in str(error)
+
+
+@pytest.mark.parametrize(
+    ("command_name", "parameter"),
+    [
+        # `target` names a page for `connect_memory`, but not for this command.
+        ("compile_source", "target"),
+        ("connect_memory", "why_in_kb"),
+    ],
+)
+def test_a_path_in_an_argument_the_command_does_not_declare_stays_redacted(
+    vault: Path, command_name: str, parameter: str
+) -> None:
+    """A withheld path the caller puts in any other field does not unlock the error.
+
+    Otherwise a collision list redacted around it would show which slot that
+    path occupies.
+    """
+    _govern_patterns_shut(vault)
+    error = ValueError(f"AMBIGUOUS_REFERENCE: [{ERROR_WITHHELD!r}]")
+    with _external_scope():
+        egress.postfilter_error(
+            command_name, error, vault, request_kwargs={parameter: ERROR_WITHHELD}
+        )
+    assert ERROR_WITHHELD not in str(error)
+    assert egress.WITHHELD_REFERENCE in str(error)
 
 
 def test_an_ungoverned_vault_keeps_its_error_text(vault: Path) -> None:
