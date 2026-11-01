@@ -7840,9 +7840,7 @@ def op_read_memory(
         history_continuation: Position from the previous revision_history envelope.
         continuation: Next-page token of a view.
         follow_corrections: False reads the historical Source; unit reads stay exact.
-        offset: Character offset into a long Source's extracted text. A Source whose text is
-            longer than one window returns one window from here (default 0), with
-            `window.next_offset` for the next; a part page reads as its Source.
+        offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
