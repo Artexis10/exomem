@@ -33,6 +33,7 @@ from test_collection_store_s1_gate import (
     LATER,
     OTHER,
     ROW,
+    _preserved,
     _published,
     _until,
     ab_bytes,
@@ -408,12 +409,15 @@ def test_a_busy_consistency_read_does_not_cost_a_publication_interval(tmp_path, 
                 started.stop()
 
 
-def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(service):
+def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(service, monkeypatch):
     """Defect: the installed service never opens its store, so C refuses or reads its views as
     files; A/B rows reach the store or C traffic changes A/B bytes; or the in-service owner
     route refuses SERVICE_ACTIVE or drops the owner's acknowledgement of skipped changes; or an
     inventory lists C's generated view as a file collection."""
     root = service.root
+    # A slow runner can publish the fixture's row before the next write; the next write then waits out
+    # the 60 s window and the publisher never settles inside the test's wait.
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
     assert call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
                 item_key=ROW, why="file write")["outcome"] == "committed"
     before = ab_bytes(root)
@@ -475,10 +479,11 @@ def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote
         with capabilities.active_surface(descriptor):
             return call(root, "maintain_memory", **arguments)
 
-    _published(SimpleNamespace(meta=lambda: store_meta(root)))
+    found = SimpleNamespace(root=root, meta=lambda: store_meta(root))
+    _published(found)
     path = replica.replica_path(root)
     path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
-    _until(lambda: schema.META_REPLICA_DIVERGENCE in store_meta(root))
+    _preserved(found)
     preview = remote(mode="collections-store-adopt-local")
     applied = remote(mode="collections-store-adopt-local", apply=True, plan_id=preview["plan_id"],
                      why="adopt over the remote surface")
