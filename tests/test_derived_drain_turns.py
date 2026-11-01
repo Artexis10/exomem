@@ -1,9 +1,10 @@
 """The derived drain takes the vault mutation boundary once per phase, not once per unit.
 
-A writer that holds the boundary must cost the drain one refusal per pass and no
+A writer that holds the boundary past the claims' lease must cost the drain no
 component attempts, one release window must prove every claimed batch, an early
-cut must end a turn but never the pass, and the drain pauses for requests only
-outside its boundary turns.
+cut must end a turn but never the pass, a refused completion must not throw away
+its dispatch, a long mutation's loans must carry one unit each, and the drain
+pauses for requests only outside its boundary turns.
 """
 
 from __future__ import annotations
@@ -53,9 +54,12 @@ def _short_timeout_manager(
 class _Writer:
     """A writer on another thread that takes the boundary and keeps it until released."""
 
-    def __init__(self, manager: writer_lease.LeaseManager, vault: Path) -> None:
+    def __init__(
+        self, manager: writer_lease.LeaseManager, vault: Path, *, hold_seconds: float = 30.0
+    ) -> None:
         self._manager = manager
         self._vault = vault
+        self._hold_seconds = hold_seconds
         self._held = threading.Event()
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
@@ -69,7 +73,7 @@ class _Writer:
     def _hold(self) -> None:
         with self._manager.consistency_guard(self._vault, operation="test_writer"):
             self._held.set()
-            self._done.wait(timeout=30)
+            self._done.wait(timeout=self._hold_seconds)
 
     def release(self) -> None:
         self._done.set()
@@ -77,11 +81,12 @@ class _Writer:
             self._thread.join(timeout=5)
 
 
-def test_a_held_boundary_costs_one_refusal_per_pass_and_spends_no_attempt(
+def test_a_boundary_held_past_the_claim_lease_gets_the_claims_back_without_an_attempt(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     receipts = _ready_batches(vault, 3)
     manager = _short_timeout_manager(vault, monkeypatch)
+    monkeypatch.setattr(derived_drain, "CLAIM_LEASE_SECONDS", 3.0)
     writer = _Writer(manager, vault)
     coordinator = manager._mutation_coordinator_for(vault)
     refusals_before = coordinator.snapshot()["contention"]["busy_refusals"]
@@ -103,7 +108,7 @@ def test_a_held_boundary_costs_one_refusal_per_pass_and_spends_no_attempt(
         writer.release()
         manager.close()
 
-    assert refusals == 1
+    assert refusals >= 1
     statuses = [
         derived_receipts.component_status(
             vault, receipt, derived_receipts.DerivedComponent.LEXSTORE
@@ -119,7 +124,7 @@ def test_one_release_window_proves_every_claimed_batch(
 ) -> None:
     receipts = _ready_batches(vault, 3)
     manager = _short_timeout_manager(vault, monkeypatch)
-    writer = _Writer(manager, vault)
+    writer = _Writer(manager, vault, hold_seconds=0.3)
     dispatched: list[str] = []
 
     def dispatch(_root: Path, status: derived_receipts.DerivedComponentStatus) -> bool:
@@ -169,6 +174,104 @@ def test_one_pass_finishes_a_dependency_chain_when_every_turn_is_cut(
         manager.close()
 
     assert derived_receipts._load_receipt(vault, receipt.batch_id).state == "completed"
+
+
+def test_a_refused_completion_turn_asks_again_within_the_lease_and_never_redoes_dispatch(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipts = _ready_batches(vault, 3)
+    manager = _short_timeout_manager(vault, monkeypatch)
+    # The write outlasts several acquisition timeouts but not the claims' lease.
+    writer = _Writer(manager, vault, hold_seconds=0.5)
+    coordinator = manager._mutation_coordinator_for(vault)
+    refusals_before = coordinator.snapshot()["contention"]["busy_refusals"]
+    dispatched: list[str] = []
+
+    def dispatch(_root: Path, status: derived_receipts.DerivedComponentStatus) -> bool:
+        writer.take()  # a write arrives while the drain is dispatching
+        dispatched.append(status.batch_id)
+        return True
+
+    try:
+        derived_drain.drain_once(
+            vault,
+            dispatch=dispatch,
+            observe_current_generation=lambda _root: "generation-1",
+            limit=16,
+            now=10.0,
+        )
+        refusals = coordinator.snapshot()["contention"]["busy_refusals"] - refusals_before
+    finally:
+        writer.release()
+        manager.close()
+
+    assert refusals >= 1
+    assert sorted(dispatched) == sorted(receipt.batch_id for receipt in receipts)
+    assert all(
+        derived_receipts._load_receipt(vault, receipt.batch_id).state == "completed"
+        for receipt in receipts
+    )
+
+
+def test_the_drain_works_through_a_long_mutation_one_lent_unit_at_a_time(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipts = _ready_batches(vault, 3)
+    manager = _short_timeout_manager(vault, monkeypatch)
+    coordinator = manager._mutation_coordinator_for(vault)
+    held, done = threading.Event(), threading.Event()
+    loans: list[int] = []
+
+    def long_mutation() -> None:
+        # Holds the boundary throughout and lends it between its units, as an import does.
+        with manager.consistency_guard(vault, operation="test_import"):
+            held.set()
+            while not done.is_set():
+                if coordinator.next_borrower_deadline() is not None:
+                    loans.append(coordinator.lend(until=time.monotonic() + 1.0))
+                time.sleep(0.002)
+
+    units_per_loan: dict[int, int] = {}
+    undeclared_on_loan: list[str] = []
+
+    def on_loan(name, real, *, declared: bool):
+        def run(*args, **kwargs):
+            if coordinator.current_thread_borrows_boundary():
+                if declared:
+                    loan = len(loans)  # the loan in progress has not returned yet
+                    units_per_loan[loan] = units_per_loan.get(loan, 0) + 1
+                else:
+                    undeclared_on_loan.append(name)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(derived_receipts, name, run)
+
+    for name in ("prove_committed", "complete_component"):
+        on_loan(name, getattr(derived_receipts, name), declared=True)
+    for name in ("retire_imported_visibility", "prove_recovery_batch"):
+        on_loan(name, getattr(derived_receipts, name), declared=False)
+    mutation = threading.Thread(target=long_mutation, daemon=True)
+    mutation.start()
+    assert held.wait(timeout=5)
+    try:
+        derived_drain.drain_once(
+            vault,
+            dispatch=lambda _root, _status: True,
+            observe_current_generation=lambda _root: "generation-1",
+            limit=16,
+            now=10.0,
+        )
+    finally:
+        done.set()
+        mutation.join(timeout=5)
+        manager.close()
+
+    assert all(
+        derived_receipts._load_receipt(vault, receipt.batch_id).state == "completed"
+        for receipt in receipts
+    )
+    assert set(units_per_loan.values()) == {1}
+    assert undeclared_on_loan == []
 
 
 def test_a_signal_cannot_cut_the_busy_gap_short(

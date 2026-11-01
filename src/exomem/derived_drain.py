@@ -289,21 +289,27 @@ class _BoundaryBusy(Exception):
     """A mutation boundary stayed held for a whole acquisition timeout."""
 
 
-def _raise_if_busy(error: Exception) -> None:
+def _is_busy(error: Exception) -> bool:
     from .cli_ops import OpError
 
-    if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+    return isinstance(error, OpError) and error.code == "MUTATION_BUSY"
+
+
+def _raise_if_busy(error: Exception) -> None:
+    if _is_busy(error):
         raise _BoundaryBusy() from error
 
 
 class _Turn:
     """One hold of the mutation boundary, shared by every unit of work it covers."""
 
-    __slots__ = ("_coordinator", "_started")
+    __slots__ = ("_coordinator", "_started", "borrowed")
 
     def __init__(self, coordinator: VaultMutationCoordinator) -> None:
         self._coordinator = coordinator
         self._started = time.monotonic()
+        # Lent between two units of a long mutation, whose next unit waits for it back.
+        self.borrowed = coordinator.current_thread_borrows_boundary()
 
     def spent(self) -> bool:
         """Whether to end the turn after this unit: a writer waits and the turn had its slice.
@@ -311,9 +317,13 @@ class _Turn:
         A unit under the boundary cannot yield, so the turn ends between units
         after the same slice a bulk pass works between yields
         (`foreground_priority.MAX_BULK_WORK_SECONDS`). Without it a writer
-        waits out every proof of the turn; when it ends a turn early, the
-        rest of the pass waits for the next one and spends no attempt.
+        waits out every unit of the turn; when it ends a turn early, the rest
+        of the pass waits for the next one and spends no attempt. A borrowed
+        turn is spent after one unit: a loan is for one brief derived unit, and
+        its owner's next unit waits until it returns.
         """
+        if self.borrowed:
+            return True
         return (
             time.monotonic() - self._started >= foreground_priority.MAX_BULK_WORK_SECONDS
             and self._coordinator.waiter_count() > 0
@@ -321,20 +331,41 @@ class _Turn:
 
 
 @contextmanager
-def _boundary_turn(vault_root: Path, operation: str) -> Iterator[_Turn]:
-    """Hold the boundary once for a phase; every inner guard re-enters it."""
+def _boundary_turn(
+    vault_root: Path, operation: str, *, retry_until: float | None = None
+) -> Iterator[_Turn]:
+    """Hold the boundary once for a phase; every inner guard re-enters it.
+
+    The turn may borrow the boundary that a long mutation lends between its
+    units; the caller then runs only the units that declare a loan safe. With
+    `retry_until`, a refused acquisition is asked again while another one
+    still fits before that monotonic time.
+    """
     from .writer_lease import active_manager
 
     with ExitStack() as held:
-        try:
-            coordinator = held.enter_context(
-                active_manager().consistency_guard(
-                    vault_root, operation=operation, holder_kind="derived-worker"
+        while True:
+            asked = time.monotonic()
+            try:
+                coordinator = held.enter_context(
+                    active_manager().consistency_guard(
+                        vault_root,
+                        operation=operation,
+                        holder_kind="derived-worker",
+                        may_borrow=True,
+                    )
                 )
-            )
-        except Exception as error:
-            _raise_if_busy(error)
-            raise
+                break
+            except Exception as error:
+                if retry_until is None or not _is_busy(error):
+                    _raise_if_busy(error)
+                    raise
+                # Price the next attempt at what this refused one cost, and keep
+                # as much again for the work after it, so the turn ends in time.
+                cost = time.monotonic() - asked
+                if time.monotonic() + 2 * cost > retry_until:
+                    raise _BoundaryBusy() from error
+                foreground_priority.check_cancelled()
         yield _Turn(coordinator)
 
 
@@ -349,8 +380,9 @@ class _Pass:
     turn (imported handoff, recovery proofs, claims, and one proof per claimed
     batch), dispatch outside any turn, then completion turns that also claim
     and prove the successors a completed level promoted. An early cut ends a
-    turn, never the pass: the next turn resumes the recovery, claim or proof
-    it left. Completions are never cut.
+    turn, never the pass: the next turn resumes the completion, recovery,
+    claim or proof it left. A refused turn ends the pass, unless it carries
+    dispatched claims and their lease still covers another attempt.
     """
 
     def __init__(
@@ -378,6 +410,9 @@ class _Pass:
         # dispatches at half the lease, which leaves the rest for the unit
         # already running and the completion turn's acquisition timeout.
         self.dispatch_until = time.monotonic() + CLAIM_LEASE_SECONDS / 2
+        # Every claim of the pass is still leased until here, so a refused turn
+        # that would complete dispatched claims may ask again up to it.
+        self.lease_until = time.monotonic() + CLAIM_LEASE_SECONDS
         self.outstanding: dict[tuple[str, str], DerivedComponentStatus] = {}
         self.recovery: list[tuple[str, RecoveryOutcome]] = []
         self.completed: list[str] = []
@@ -403,6 +438,7 @@ class _Pass:
         # A failed claim backs off past this pass's clock, so nothing is
         # retried within it.
         claim_due = True
+        hand_on_due = True
         first = True
         # Turns last while the pass has work and the dispatch window is open.
         # Every turn completes, recovers or proves at least one unit before a
@@ -412,20 +448,36 @@ class _Pass:
         while True:
             foreground_priority.check_cancelled()
             operation = "derived_receipt_proof" if first else "derived_component_completion"
-            with _boundary_turn(self.vault_root, operation) as turn:
-                if first:
+            # Dispatched claims are done work: a refusal asks again while their
+            # lease lasts instead of handing them back to be dispatched again.
+            retry_until = self.lease_until if handled else None
+            with _boundary_turn(self.vault_root, operation, retry_until=retry_until) as turn:
+                # A loan covers only proofs and completions, which declare it
+                # safe; the imported handoff and recovery wait for an owned turn.
+                owned = not turn.borrowed
+                if owned and hand_on_due:
                     self._hand_on_imported()
-                worked = bool(handled or unhealthy)
-                completed_now = [*settled, *self._complete(handled)]
+                    hand_on_due = False
+                recovering = owned and bool(unhealthy)
+                worked = bool(handled) or recovering
+                completed, handled = self._complete(turn, handled)
+                completed_now = [*settled, *completed]
+                settled = []
                 claim_due = (claim_due or bool(completed_now)) and self.claimed < self.limit
-                unhealthy = self._recover(turn, unhealthy)
+                if recovering:
+                    unhealthy = self._recover(turn, unhealthy)
                 proven = []
-                if not unhealthy and not (worked and turn.spent()):
+                if not (owned and unhealthy) and not (worked and turn.spent()):
                     if claim_due and not waiting:
                         waiting = list(self._claim(self.limit - self.claimed))
                         claim_due = False
+                    worked = worked or bool(waiting)
                     proven, waiting = self._prove(turn, waiting)
             first = False
+            if turn.borrowed and not worked:
+                break  # only owned-turn work is left: another loan would cost the lender for nothing
+            if handled:
+                continue  # a cut left dispatched claims to complete
             if time.monotonic() >= self.dispatch_until:
                 break
             handled, settled = self._dispatch(proven)
@@ -644,16 +696,15 @@ class _Pass:
                 self._retry(status, failure_code)
         return handled, settled
 
-    def _complete(self, handled: Sequence[DerivedComponentStatus]) -> list[str]:
-        """Complete handled claims under the caller's turn; return their batches.
+    def _complete(
+        self, turn: _Turn, handled: Sequence[DerivedComponentStatus]
+    ) -> tuple[list[str], list[DerivedComponentStatus]]:
+        """Complete handled claims until the turn is spent.
 
-        Never cut short. Cutting here makes a writer wait less, but each extra
-        turn is another chance of a refusal that ends the pass and redoes its
-        dispatch; with holds longer than the acquisition timeout that cost the
-        drain more than the turn saved the writer.
+        Returns the batches completed and the handled claims left for the next turn.
         """
         completed: list[str] = []
-        for status in handled:
+        for index, status in enumerate(handled):
             failure_code = "generation_changed"
             try:
                 with call_spans.span("derived.component_completion"):
@@ -679,7 +730,9 @@ class _Pass:
                 call_ledger.note_derived_event("component_completed")
             else:
                 self._retry(status, failure_code)
-        return completed
+            if turn.spent():
+                return completed, list(handled[index + 1 :])
+        return completed, []
 
     def _retry(self, status: DerivedComponentStatus, failure_code: str) -> None:
         self.outstanding.pop(_claim_key(status), None)
