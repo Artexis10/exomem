@@ -22,8 +22,8 @@ Subcommands:
   migration, no custody environment
 - `cell-export` — Exomem Cloud owner export Job: the canonical ZIP of a held
   cell, uploaded to controller-presigned parts; reports sizes and digests only
-- `cell-media-census` — Exomem Cloud backup Job: the count and bytes of the cell's
-  evicted originals from its media ledger, or `unknown unknown` when it cannot say
+- `cell-media-census` — Exomem Cloud backup Job: the cell's last census of its
+  evicted originals from its drain record, or `unknown unknown` when it cannot say
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`

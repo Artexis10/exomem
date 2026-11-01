@@ -1396,15 +1396,14 @@ def _run_backup_job(tmp_path, exomem: str):
 def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     # The Job and cellctl must agree on the termination message, or no cell
     # ever grows. The cell image's exomem is stubbed: it finds the vault and
-    # counts three evicted originals for the cell's own store identity.
+    # prints the record that the cell wrote, three evicted originals.
     import os
 
-    from cellctl.manifests import media_store_identity
+    from .test_k8s_client import CURRENT_HOLD
 
-    from .test_k8s_client import CELL_ID, CURRENT_HOLD
-
-    arguments = f"cell-media-census --vault {tmp_path}/data/vault --store {media_store_identity(CELL_ID)}"
-    census = f'[ "$*" = "{arguments}" ] && echo "3 4096"'
+    census_time = datetime.fromisoformat(CURRENT_HOLD) + timedelta(minutes=30)
+    arguments = f"cell-media-census --vault {tmp_path}/data/vault"
+    census = f'[ "$*" = "{arguments}" ] && echo "3 4096 {census_time.isoformat()}"'
 
     observed, data = _run_backup_job(tmp_path, census)
 
@@ -1412,21 +1411,19 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert observed.backup_job_total_bytes == filesystem.f_blocks * filesystem.f_frsize
     assert 0 < observed.backup_job_used_bytes <= observed.backup_job_total_bytes
-    # D12: the media report is the census the cell image printed, and its capture time is the hold start,
-    # which the volume it read cannot predate.
-    assert observed.backup_job_media_census == MediaCensus(
-        evicted=3, evicted_bytes=4096, captured_at=datetime.fromisoformat(CURRENT_HOLD))
+    # D12: the media report is the record the cell image printed, with the cell's own census time.
+    assert observed.backup_job_media_census == MediaCensus(evicted=3, evicted_bytes=4096, captured_at=census_time)
 
 
 @pytest.mark.parametrize("exomem", [
-    pytest.param("echo '3 4096'; exit 1", id="the census fails after it printed"),
+    pytest.param("echo '3 4096 2026-10-31T01:30:00+00:00'; exit 1", id="the census fails after it printed"),
     pytest.param("echo 'usage: exomem'; exit 2", id="an older image has no such command"),
     pytest.param("exec sleep 600", id="the census does not finish"),
 ])
 def test_a_backup_job_whose_census_does_not_complete_reports_the_media_census_as_unknown(
         tmp_path, monkeypatch, exomem) -> None:
-    # The backup itself succeeded, so its snapshot still counts. A census that fails or hangs says unknown,
-    # never a count and never 0, which would drain a cell that holds media.
+    # The backup itself succeeded, so its snapshot still counts. A record that cannot be read, or a read that
+    # hangs, says unknown at the hold start, never a count and never 0, which would drain a cell that holds media.
     from cellctl import backup_source
 
     from .test_k8s_client import CURRENT_HOLD

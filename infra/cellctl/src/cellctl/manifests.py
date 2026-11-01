@@ -1300,9 +1300,9 @@ def render_backup_job(
         # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
         # the id alone and the Job successful: the backup itself succeeded.
         f"{{ {FILESYSTEM_USE_COMMAND} >> /dev/termination-log || true; }}",
-        # D12: "<evicted count> <evicted bytes> <capture time>" on a line of its own. The capture time
-        # is the hold start: the Job reads a clone, or the stopped cell's volume, taken after it.
-        media_census_command(media_store_identity(spec.cell_id), spec.hold_started_at),
+        # D12: the cell's drain record, "<evicted count> <evicted bytes> <census time>", on a line of its own.
+        # The census time is the cell's. A record that the Job cannot read reports unknown at the hold start.
+        media_census_command(spec.hold_started_at),
     ]
     return {
         "apiVersion": "batch/v1",

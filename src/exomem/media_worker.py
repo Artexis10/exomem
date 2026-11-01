@@ -2380,6 +2380,7 @@ class MediaWorker:
 
         queued = media_store.enqueue_offloads(self._vault_root) + self._scan_pending_ocr() + self._scan_unindexed_images()
         media_store.evict_to_target(self._vault_root)
+        _drain(self._vault_root)
         return queued
 
     def _scan_pending_ocr(self) -> int:
@@ -2583,6 +2584,17 @@ def _evict(vault_root: Path) -> None:
         media_store.evict_to_target(vault_root)
     except Exception:  # noqa: BLE001 - the next job or tick checks again
         log.warning("media worker: eviction deferred", exc_info=True)
+    _drain(vault_root)
+
+
+def _drain(vault_root: Path) -> None:
+    """Hydrate a turned-off store's evicted originals that fit and count the rest, on the same tick (D12)."""
+    from . import media_store
+
+    try:
+        media_store.drain_tick(vault_root)
+    except Exception:  # noqa: BLE001 - the next tick tries again
+        log.warning("media worker: drain deferred", exc_info=True)
 
 
 def run_child(

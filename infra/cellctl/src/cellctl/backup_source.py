@@ -11,10 +11,13 @@ only the standard library: the product suite (tests/test_backup_vault_check.py) 
 and runs the command against the real exomem package.
 
 The media census is the same kind of command: it names `exomem cell-media-census`
-in the cell image, which the product suite (tests/test_media_store.py) runs.
+in the cell image, which prints the record the cell wrote (tests/test_media_drain_record.py runs it,
+and checks that the cell's record parses here).
 """
 
+import re
 import shlex
+from datetime import datetime
 
 # The check's own answer, exit 3: the source holds no vault.
 SOURCE_NOT_A_VAULT = "BACKUP_SOURCE_NOT_A_VAULT"
@@ -33,20 +36,44 @@ VAULT_CHECK_COMMAND = (
     "printf '%s' \"$code\" > /dev/termination-log; exit 1; }; }"
 )
 
-# The census must not push the Job past its deadline, so it gets its own; a census that does not finish is unknown.
-MEDIA_CENSUS_SECONDS = 120
+# The census copies one file, so it needs the seconds that the cell image takes to start, not the minutes that a
+# walk of the vault took; a census that does not finish is unknown.
+MEDIA_CENSUS_SECONDS = 10
 MEDIA_CENSUS_UNKNOWN = "unknown unknown"
 
 
-def media_census_command(store: str, captured_at: str) -> str:
-    """Append the media report to the termination message: "<count> <bytes> <capture time>" on a line of its own.
+def media_census_command(captured_at: str) -> str:
+    """Append the media report to the termination message: "<count> <bytes> <census time>" on a line of its own.
 
-    The cell image counts the cell's evicted originals from its ledger. The Job reads the data volume read-only,
-    so it gives the image the store identity instead of the policy file. Any failure of the census, including
-    a timeout, leaves "unknown unknown", which keeps a turned-off cell's media access (D12).
+    The cell image prints the record that the cell wrote beside its media ledger (D12). The Job mounts the volume
+    read-only, so it reads that file and no store, lease or database. A record that is missing, linked, oversize
+    or malformed, or a timeout, leaves "unknown unknown" and the hold start, which keeps a turned-off cell's media access.
     """
+    unknown = f"{MEDIA_CENSUS_UNKNOWN} {captured_at}"
     return (
-        f"{{ census=$(timeout {MEDIA_CENSUS_SECONDS} exomem cell-media-census --vault /data/vault --store {shlex.quote(store)})"
-        f" || census={shlex.quote(MEDIA_CENSUS_UNKNOWN)}; "
-        f"printf '\\n%s %s' \"$census\" {shlex.quote(captured_at)} >> /dev/termination-log || true; }}"
+        f"{{ census=$(timeout {MEDIA_CENSUS_SECONDS} exomem cell-media-census --vault /data/vault)"
+        f" || census={shlex.quote(unknown)}; "
+        "printf '\\n%s' \"$census\" >> /dev/termination-log || true; }"
     )
+
+
+# The report line is a closed protocol format that the cell writes (media_drain_record.format_line) and the Job copies:
+# "<evicted count> <evicted bytes> <census time>". MEDIA_CENSUS_UNKNOWN is an incomplete census. A line with one count
+# known and one unknown is no census, since a known 0 beside it would read as drained.
+_MEDIA_CENSUS = re.compile(
+    rf"(?:(?P<evicted>[0-9]{{1,19}}) (?P<bytes>[0-9]{{1,19}})|{re.escape(MEDIA_CENSUS_UNKNOWN)}) (?P<captured>\S+)")
+
+
+def parse_media_census(line: str) -> tuple[int | None, int | None, datetime] | None:
+    """The census a report line carries as (count, bytes, census time), counts None when unknown; None when unreadable."""
+    match = _MEDIA_CENSUS.fullmatch(line)
+    if match is None:
+        return None
+    try:
+        captured_at = datetime.fromisoformat(match["captured"])
+    except ValueError:
+        return None
+    if captured_at.tzinfo is None:
+        return None
+    evicted, evicted_bytes = (None if match[key] is None else int(match[key]) for key in ("evicted", "bytes"))
+    return evicted, evicted_bytes, captured_at

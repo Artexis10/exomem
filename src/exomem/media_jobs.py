@@ -772,6 +772,12 @@ class MediaJobStore:
                 conn.execute("CREATE TABLE IF NOT EXISTS media_owner_census ("
                              "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
                              "used_bytes INTEGER, observed_at TEXT NOT NULL)")
+                # The last complete census of a draining cell's evicted originals, and whether that census found
+                # none (D12): one row. The evicted, bytes and captured_at columns are NULL until a census completes.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_drain ("
+                             "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+                             "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
+                             "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.

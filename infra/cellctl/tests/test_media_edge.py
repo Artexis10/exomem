@@ -10,6 +10,7 @@ import json
 import math
 import shutil
 import subprocess
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
@@ -23,7 +24,7 @@ from kubernetes.client.rest import ApiException
 from cellctl import db, main, manifests, media_edge, reconcile
 from cellctl.decide import GROWTH_THRESHOLD_PERCENT
 from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, MEDIA_STORE_CONFIG_KEY, namespace_name
-from cellctl.state import ClusterObservation, MediaCensus
+from cellctl.state import CellRow, ClusterObservation, MediaCensus
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
@@ -600,6 +601,52 @@ async def test_a_later_report_with_no_evicted_original_removes_key_credential_an
         assert (await fleet.rows())[CANARY].media_key_wrapped == bundle
     finally:
         await fleet.close()
+
+
+def _drained_cell(drained_at: datetime) -> tuple[reconcile.ClusterConfig, CellRow]:
+    """A turned-off cell whose record shows no evicted original as of `drained_at`, and the cluster that turned it off."""
+    record = {"turned_off_at": NOW.isoformat(), "evicted": 0, "evicted_bytes": 0, "captured_at": drained_at.isoformat()}
+    row = CellRow(cell_id=CANARY, tenant_id=uuid.uuid4(), storage_gib=10, rollout_priority=0, desired_state="running",
+                  desired_image="image", generation=1, media_key_wrapped=b"bundle",
+                  custody_observation=json.dumps({reconcile.MEDIA_STORE_RECORD: record}))
+    config = reconcile.ClusterConfig(object_storage_bucket="backups", media_edge=_edge(cell_ids=()))
+    assert reconcile._media_mode(config, row) == reconcile.MEDIA_RETAINED
+    return config, row
+
+
+def _mode_after(config: reconcile.ClusterConfig, row: CellRow, census: MediaCensus) -> tuple[str | None, bool]:
+    """The cell's media mode once the pass records `census`, and whether the pass changed the record."""
+    record = reconcile._media_store_record(config, row, census)
+    kept = json.loads(row.custody_observation)[reconcile.MEDIA_STORE_RECORD]
+    recorded = dataclasses.replace(row, custody_observation=json.dumps({reconcile.MEDIA_STORE_RECORD: record}))
+    return reconcile._media_mode(config, recorded), record != kept
+
+
+def test_a_drained_cell_stays_retained_when_a_later_report_is_unknown() -> None:
+    # The Job could not read the cell's record on one night. The drained cell must not be keyed and restarted for that.
+    config, row = _drained_cell(NOW + timedelta(minutes=10))
+
+    unknown = MediaCensus(evicted=None, evicted_bytes=None, captured_at=NOW + timedelta(days=1))
+
+    assert _mode_after(config, row, unknown) == (reconcile.MEDIA_RETAINED, False)
+
+
+def test_a_known_later_count_above_zero_keys_a_drained_cell_again() -> None:
+    # A restore brought an evicted original back: the cell needs its key to read it.
+    config, row = _drained_cell(NOW + timedelta(minutes=10))
+
+    restored = MediaCensus(evicted=2, evicted_bytes=2 << 20, captured_at=NOW + timedelta(days=1))
+
+    assert _mode_after(config, row, restored) == (reconcile.MEDIA_DRAINING, True)
+
+
+def test_a_report_no_later_than_the_drained_census_changes_nothing() -> None:
+    # The backup of an older volume repeats an earlier census, whose count says nothing about the cell now.
+    config, row = _drained_cell(NOW + timedelta(minutes=10))
+
+    older = MediaCensus(evicted=2, evicted_bytes=2 << 20, captured_at=NOW + timedelta(minutes=5))
+
+    assert _mode_after(config, row, older) == (reconcile.MEDIA_RETAINED, False)
 
 
 async def test_the_edge_access_label_stays_while_served_or_draining_and_leaves_with_the_credential(cell_db) -> None:

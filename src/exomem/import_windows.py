@@ -408,16 +408,31 @@ def report(root: Path, *, after: str | None = None, series_id: str | None = None
     elif config is not None and config.get("enabled") is True:
         reply["window_budget"] = _budget_section(root, config, windows, series)
     elif config is not None and config.get("enabled") is False:
-        reply["retained_store"] = {"shortfall": _figure(lambda: _shortfall(root, config))}
+        reply["retained_store"] = _retained_section(root, config)
     return reply
 
 
-def _shortfall(root: Path, config: dict) -> int:
-    """The bytes of evicted originals that do not fit below the growth threshold; the store drains at zero (D12)."""
+def _retained_section(root: Path, config: dict) -> dict:
+    """A turned-off store's drain: the shortfall, the last complete census, whether it latched, and what cannot hydrate (D12)."""
+    def shortfall() -> int:
+        try:
+            return media_store.retained_shortfall(root, config)
+        except media_store.MediaStoreError as error:
+            raise _Unknown(str(error)) from error
+
     try:
-        return media_store.retained_shortfall(root, config)
+        record = media_store.drain_record(root)
     except media_store.MediaStoreError as error:
-        raise _Unknown(str(error)) from error
+        census = drained = {"unknown": str(error)}
+    else:
+        census = ({"unknown": "no census has completed"} if record is None or record.evicted is None else
+                  {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at})
+        drained = record is not None and record.latched
+    try:
+        above = {"count": media_store.evicted_above_capacity(root, config)}
+    except media_store.MediaStoreError as error:
+        above = {"unknown": str(error)}
+    return {"shortfall": _figure(shortfall), "census": census, "drained": drained, "above_hydration_capacity": above}
 
 
 def _census_or_unknown(root: Path) -> list[Window]:
