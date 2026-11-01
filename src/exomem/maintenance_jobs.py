@@ -19,6 +19,10 @@ The receipt of a finished job is bounded however large the vault is: a status
 read returns the totals, the chunk count, the leaf's small notes and a reduced
 leaf report. The paths, with the IDs a job minted, are read page by page
 (``job_status`` with a ``cursor``), each page at most half of the 64 KiB response bound.
+
+A preview of one of these modes outlasts a request on a large vault, so the owner's remote preview runs
+as a read-only job too: same row, same thread, no mutation boundary. Its receipt holds the preview
+report with its ``plan_id`` and lists the planned pages as entries.
 """
 
 from __future__ import annotations
@@ -66,6 +70,9 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-set -- closed ma
     "reconcile": ("rebuild_graph",),
 }
 JOB_MODES = frozenset(JOB_FLAGS)
+#: Marks a preview in a row's flags. It is a flag, not a column, because the dedupe key already includes
+#: the flags (an identical running preview joins, a write never does) and the store needs no migration.
+_PREVIEW_FLAG = "preview"
 #: Job kinds whose leaf is not chunked. Their job dispatch keeps the wide mutation boundary for the whole run,
 #: as the CLI does, and a stop lands between phases. A reconcile phase writes derived state that other
 #: phases read, and the CLI's whole-run hold is the measured behaviour to keep; narrowing it is separate work.
@@ -124,6 +131,8 @@ class _Live:
     #: Checkpoints the leaf has passed; a dispatch that passed none has written nothing.
     checkpoints: int = 0
     committed_paths: list[str] = field(default_factory=list)
+    #: Pages a preview's leaf reported as planned, kept until the preview ends well (see ``record_planned``).
+    planned: list[tuple[str, str | None]] = field(default_factory=list)
 
 
 _JOB: contextvars.ContextVar[_Live | None] = contextvars.ContextVar("exomem_maintenance_job", default=None)
@@ -279,13 +288,18 @@ def sweep_dead(vault_root: Path) -> int:
 # --------------------------------------------------------------------------- owner-only access
 
 
-def require_owner(vault_root: Path) -> None:
-    """Refuse every caller but the vault owner, naming no job."""
+def is_owner(vault_root: Path) -> bool:
+    """Whether the calling principal is the vault owner with unrestricted access."""
     from .governance import raw_protection
     from .governance.principal import effective_principal
 
     who = effective_principal()
-    if not (raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(Path(vault_root), who)):
+    return bool(raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(Path(vault_root), who))
+
+
+def require_owner(vault_root: Path) -> None:
+    """Refuse every caller but the vault owner, naming no job."""
+    if not is_owner(vault_root):
         raise OpError(
             "MAINTENANCE_OWNER_REQUIRED",
             "maintenance jobs are owner-only",
@@ -345,6 +359,15 @@ def is_job_write(kwargs: Mapping[str, Any]) -> bool:
     )
 
 
+def is_job_preview(kwargs: Mapping[str, Any]) -> bool:
+    """Whether these arguments, already known to be read-only, preview a job kind's plan.
+
+    A call that names a `plan_id` or a `why` is not a preview: it stays on the synchronous path,
+    where the leaf refuses it as it always has.
+    """
+    return kwargs.get("mode") in JOB_MODES and kwargs.get("plan_id") is None and kwargs.get("why") is None
+
+
 def narrows_boundary(kwargs: Mapping[str, Any], surface: str | None) -> bool:
     """Whether this maintain_memory call holds the narrow boundary in the writer manager.
 
@@ -366,6 +389,8 @@ _COMMITTED = "committed"
 _SKIPPED = "skipped_changed"
 _PENDING = "pending"
 _UNKNOWN = "outcome_unknown"
+#: A page a preview says its plan would write. A preview writes nothing, so no other kind appears beside it.
+_PLANNED = "planned"
 
 
 def _totals(conn: sqlite3.Connection, run_id: str | None = None) -> dict[str, dict[str, int]]:
@@ -393,13 +418,18 @@ def _view(
         "skipped_changed": counts.get(_SKIPPED, 0),
         # A write that was about to start in a job that is no longer running may have happened.
         _UNKNOWN: counts.get(_PENDING, 0) if state != RUNNING else 0,
+        _PLANNED: counts.get(_PLANNED, 0),
     }
+    flags = json.loads(row["flags"])
+    preview = bool(flags.pop(_PREVIEW_FLAG, False))
     view: dict[str, Any] = {
         "run_id": row["run_id"],
         "mode": row["mode"],
-        "flags": json.loads(row["flags"]),
-        "plan_id": row["plan_id"],
-        "why": row["why"],
+        "preview": preview,
+        "flags": flags,
+        # A preview has neither yet: its plan_id is in its receipt once it ends, and it takes no why.
+        "plan_id": row["plan_id"] or None,
+        "why": row["why"] or None,
         "surface": row["surface"],
         "principal": row["audience"],
         "state": state,
@@ -417,8 +447,9 @@ def _view(
         entries = sum(counts.values())
         view["receipt"] = {
             **totals,
+            # A planned page belongs to no write chunk.
             "chunks": conn.execute(
-                "SELECT COUNT(DISTINCT chunk) FROM entries WHERE run_id = ?", (row["run_id"],)
+                "SELECT COUNT(DISTINCT chunk) FROM entries WHERE run_id = ? AND kind != ?", (row["run_id"], _PLANNED)
             ).fetchone()[0],
             "notes": json.loads(row["notes"]) if row["notes"] else {},
             "result": stored.get("result"),
@@ -556,6 +587,7 @@ def start_leaf(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any
 
     Captures the caller at admission, so the job runs as the principal that was
     admitted. The request that calls it only claims the job and returns a handle.
+    The arguments of a write name its plan (`is_job_write`); any other are a preview, which runs read-only.
     """
     from . import capabilities
     from .governance import principal as principal_module
@@ -581,14 +613,18 @@ def _start(
 
     vault_root = Path(injected[0])
     mode = str(kwargs["mode"])
+    preview = not is_job_write(kwargs)
     # Only the arguments the mode's plan binds: defaults that every surface fills differently stay out of the identity.
     flags = {name: kwargs[name] for name in JOB_FLAGS[mode] if kwargs.get(name) is not None}
+    if preview:
+        flags[_PREVIEW_FLAG] = True
     job, started = _claim(
         vault_root,
         mode=mode,
         flags=flags,
-        plan_id=str(kwargs["plan_id"]),
-        why=str(kwargs["why"]),
+        # A preview has no plan_id until it ends and takes no why; the store needs a value in both columns.
+        plan_id="" if preview else str(kwargs["plan_id"]),
+        why="" if preview else str(kwargs["why"]),
         surface=admitted_surface.surface if admitted_surface is not None else SURFACE,
         audience=principal.audience_id,
         launch=lambda live: _launch(live, command, injected, kwargs, principal, admitted_surface),
@@ -597,6 +633,7 @@ def _start(
         "run_id": job["run_id"],
         "state": job["state"],
         "mode": job["mode"],
+        "preview": job["preview"],
         "plan_id": job["plan_id"],
         "started": started,
         "next": capabilities.active_call_route(command.name, {"mode": MODE_STATUS, "run_id": job["run_id"]}),
@@ -737,6 +774,9 @@ def _run(
             if isinstance(result, Mapping) and "graph_sync" in result:
                 # The dispatcher joined the graph after the leaf, so its outcome replaces the leaf's "pending".
                 note(graph=result["graph_sync"])
+            if live.planned:
+                # Only a preview that ended well lists its pages: a stopped one has no plan_id to start from.
+                _insert(live, 0, _PLANNED, live.planned)
         state, error_code, outcome = COMPLETED, None, {"result": _bounded(result)}
     except JobStop as stop:
         state, error_code, outcome = stop.state, stop.code, {}
@@ -925,6 +965,16 @@ def record_paths(paths: Sequence[str], *, committed: bool) -> None:
     _insert(live, live.chunks, _COMMITTED if committed else _PENDING, [(path, None) for path in paths])
     if committed:
         live.committed_paths.extend(paths)
+
+
+def record_planned(items: Iterable[tuple[str, str | None]]) -> None:
+    """List the pages a preview's plan would write, as `(path, what the plan does to it)`, in the job's receipt.
+
+    Only a preview calls this. The job keeps the list until the preview ends well; outside a job it does nothing.
+    """
+    live = _JOB.get()
+    if live is not None:
+        live.planned = list(items)
 
 
 def _insert(live: _Live, chunk: int, kind: str, items: Sequence[tuple[str, str | None]]) -> dict[str, int]:
