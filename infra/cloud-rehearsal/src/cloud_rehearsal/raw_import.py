@@ -71,6 +71,7 @@ MAIN_COLLECTION = {"profile": "standard", "seed": 7}
 EARLIER_COLLECTION = {"profile": "small", "seed": 8}
 MAIN_LABEL, EARLIER_LABEL = "Collection", "Earlier collection"
 MEDIA_DEADLINE_S = 300.0
+LOCAL_MEDIA_DEADLINE_S = 900.0  # about 100 attachments with OCR on one runner core
 LISTED_ITEMS = 100  # a group's report names this many items per state; the counts cover all of them
 SCORE_TIMEOUT_S = 3600
 
@@ -190,16 +191,29 @@ def compare_arms(key: Mapping[str, Any], cloud: Mapping[str, Any] | None,
             for group in cloud_states}
 
 
+def jobs_idle(media: Mapping[str, Any] | None) -> bool | None:
+    """Whether the last media status showed no pending or running job; None when it carried no job counts.
+
+    This reads the job queue, not the wait's convergence flag: deferred index upserts stay counted on a stdio
+    server that never drains them, and index state lives outside the vault, so they cannot change what is copied
+    or scored."""
+    status = (media or {}).get("final_status")
+    counts = status.get("counts") if isinstance(status, Mapping) else None
+    if not isinstance(counts, Mapping):
+        return None
+    return not (counts.get("pending", 0) or counts.get("running", 0))
+
+
 def arm_gaps(label: str, metrics: Mapping[str, Any] | None, key: Mapping[str, Any], *, stopped_at: str | None,
-             converged: bool | None) -> list[str]:
+             jobs_idle: bool | None) -> list[str]:
     """Why this arm's reads cannot carry a pass: each reason is a measurement that is partial or absent."""
     if metrics is None:
         return [f"{label}: not scored"]
     gaps = [f"{label}: {tool} read failed {count} times" for tool, count in sorted((metrics.get("measurement_gaps") or {}).items())]
     if stopped_at:
         gaps.append(f"{label}: the journey stopped at {stopped_at}")
-    if converged is not True:
-        gaps.append(f"{label}: the media queue had {'not converged' if converged is False else 'no convergence reading'}")
+    if jobs_idle is not True:
+        gaps.append(f"{label}: {'media jobs were still pending or running' if jobs_idle is False else 'no media job counts were read'}")
     pages = (metrics.get("per_item") or {}).get("pages_per_item", {})
     if not any(pages.get(i["path"], 0) >= 1 for i in key["items"] if i["kind"] == "note"):
         gaps.append(f"{label}: no key note landed, so there is nothing to compare")
@@ -371,7 +385,7 @@ def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path) -> dict[st
 def local_arm(plan: RawImportPlan, collection: Path, key: Path) -> dict[str, Any]:
     """The same journey on a personal server: `drive.py --profile personal`, then `score.py`.
 
-    `drive.py` exits 0 when a journey stops, so the log says whether it stopped and whether the media queue converged.
+    `drive.py` exits 0 when a journey stops, so the log says whether it stopped and whether media jobs were still running.
     """
     work = plan.root / "local"
     log, metrics_path = plan.root / "local.drive.json", plan.root / "local.metrics.json"
@@ -380,11 +394,13 @@ def local_arm(plan: RawImportPlan, collection: Path, key: Path) -> dict[str, Any
     try:
         run_scorer(plan, "drive.py", "--collection", str(collection), "--workdir", str(work), "--profile", "personal",
                    "--python", str(plan.python), "--server-root", str(images.REPO_ROOT), "--log", str(log),
-                   "--label", "raw-import local arm")
+                   "--label", "raw-import local arm",
+                   "--media-deadline", str(LOCAL_MEDIA_DEADLINE_S))
         drive_log = json.loads(log.read_text(encoding="utf-8"))
         stopped = [journey["stopped_at"] for journey in drive_log["journeys"] if journey.get("stopped_at")]
         out["stopped_at"] = ", ".join(stopped) or None
-        out["converged"] = all(drive_log["media"][phase].get("converged") is True for phase in ("after_first_run", "after_rerun"))
+        idle = [jobs_idle(drive_log["media"][phase]) for phase in ("after_first_run", "after_rerun")]
+        out["jobs_idle"] = None if None in idle else all(idle)
         out["metrics"] = score_vault(plan, key, log, metrics_path)
     except (CommandFailed, OSError, KeyError, ValueError) as error:
         out["failure"] = f"{type(error).__name__}: {error}"[:1500]
@@ -462,17 +478,16 @@ async def adopt(ctx: Context, plan: RawImportPlan, tenant: Tenant, session: Any,
     """Send `collection` to the tenant's cell and file it with the journey `drive.py` runs locally."""
     stage_path, row = await import_collection(ctx, plan, tenant, collection, name)
     started = time.perf_counter()
-    # The scorer reads the refusals of the journey named "first". The CLI stages the collection in one folder
-    # inside the stage, so the folder-kind rule probes name that folder, as the local arm's do.
-    journey = drive.Journey(session, "first", label, collection, [], path=stage_path,
-                            collection_root=f"{stage_path}/{collection.name}", request=drive.hosted_request,
+    # The scorer reads the refusals of the journey named "first". The CLI archives each file by its path inside
+    # the collection, so the stage root is the collection and the folder-kind rules probe `<stage>/<folder>`.
+    journey = drive.Journey(session, "first", label, collection, [], path=stage_path, request=drive.hosted_request,
                             initialize_kb=initialize_kb)
     rules_state: dict[str, Any] = {"folder_kind_rules": "not-probed", "collection_label": "not-tried"}
     summary = await journey.run(collection_label="try", rules_state=rules_state, probe_rules=True, include_rules=[])
     media = await drive.wait_for_media(session, "first", MEDIA_DEADLINE_S, drive.hosted_media_status)
     return {"stage_path": stage_path, "import": import_summary(row), "cli": cli_coverage(collection, row),
             "journey": summary, "rules_state": rules_state, "media": media,
-            "stopped_at": summary.get("stopped_at"), "converged": media.get("converged"),
+            "stopped_at": summary.get("stopped_at"), "jobs_idle": jobs_idle(media),
             "seconds": round(time.perf_counter() - started, 1)}
 
 
@@ -525,7 +540,7 @@ def arm_report(metrics: Mapping[str, Any] | None) -> dict[str, Any] | None:
 def target_report(adopted: Mapping[str, Any], scored: Mapping[str, Any], groups: Mapping[str, Any], verdict: str,
                   gaps: Sequence[str]) -> dict[str, Any]:
     return {"verdict": verdict, "gaps": list(gaps), "journey": adopted["stopped_at"] or "finished",
-            "media_converged": adopted["converged"], "import": adopted["import"], "cli": adopted["cli"],
+            "media_jobs_idle": adopted["jobs_idle"], "import": adopted["import"], "cli": adopted["cli"],
             "vault_copy": scored["vault_copy"], "imported_from_prefix": scored["imported_from_prefix"],
             "cloud": arm_report(scored["metrics"]), "groups": groups}
 
@@ -549,7 +564,7 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
 
     local = await asyncio.to_thread(local_arm, plan, collection, key_path)
     local_metrics = local.pop("metrics")
-    local_gaps = arm_gaps("local", local_metrics, key, stopped_at=local.get("stopped_at"), converged=local.get("converged"))
+    local_gaps = arm_gaps("local", local_metrics, key, stopped_at=local.get("stopped_at"), jobs_idle=local.get("jobs_idle"))
     out["local"] = {**local, "scored": local_metrics is not None, "headline": arm_report(local_metrics), "gaps": local_gaps}
 
     async def connect(tenant: Tenant) -> CloudSession:
@@ -565,7 +580,7 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         scored = await score_cloud_vault(ctx, plan, ctx.a, session, adopted, key_path, "new", plan.root / "cloud-new-vault")
         cloud_metrics = scored["metrics"] or {}
         groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
-        gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], converged=adopted["converged"]), *local_gaps]
+        gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], jobs_idle=adopted["jobs_idle"]), *local_gaps]
         verdicts["new"] = target_verdict(groups, (), gaps)
         out["targets"]["new"] = target_report(adopted, scored, groups, verdicts["new"], gaps)
         # Target 2: tenant B's vault, which holds a different collection first.
@@ -581,8 +596,8 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         baseline_gaps = []
         if earlier_adopted["stopped_at"]:
             baseline_gaps.append(f"earlier collection: the journey stopped at {earlier_adopted['stopped_at']}")
-        if earlier_adopted["converged"] is not True:
-            baseline_gaps.append("earlier collection: the media queue had not converged before the snapshot")
+        if earlier_adopted["jobs_idle"] is not True:
+            baseline_gaps.append("earlier collection: media jobs were not idle before the snapshot")
         if not earlier_landed:
             baseline_gaps.append("earlier collection: none of its key notes landed, so no page is protected")
         session.calls.clear()
@@ -592,7 +607,7 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         page_problems = check_existing_pages(before, after) if before.sourced else None
         cloud_metrics = scored["metrics"] or {}
         groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
-        gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], converged=adopted["converged"]),
+        gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], jobs_idle=adopted["jobs_idle"]),
                 *local_gaps, *baseline_gaps]
         verdicts["existing"] = target_verdict(groups, page_problems, gaps)
         out["targets"]["existing"] = {

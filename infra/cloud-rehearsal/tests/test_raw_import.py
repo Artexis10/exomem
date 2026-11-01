@@ -109,8 +109,8 @@ def _scored(**extra):
     return {"measurement_gaps": {}, "per_item": _arm(**{"a.md": 1}), **extra}
 
 
-def _gaps(metrics, stopped_at=None, converged=True):
-    return raw_import.arm_gaps("local", metrics, _key("a.md"), stopped_at=stopped_at, converged=converged)
+def _gaps(metrics, stopped_at=None, jobs_idle=True):
+    return raw_import.arm_gaps("local", metrics, _key("a.md"), stopped_at=stopped_at, jobs_idle=jobs_idle)
 
 
 def test_a_complete_arm_has_no_gaps():
@@ -125,9 +125,22 @@ def test_a_stopped_journey_is_a_gap():
     assert _gaps(_scored(), stopped_at="apply") == ["local: the journey stopped at apply"]
 
 
-def test_a_media_queue_that_had_not_converged_is_a_gap_and_so_is_no_reading():
-    assert _gaps(_scored(), converged=False) == ["local: the media queue had not converged"]
-    assert _gaps(_scored(), converged=None) == ["local: the media queue had no convergence reading"]
+def test_running_media_jobs_are_a_gap_and_so_is_no_job_count():
+    assert _gaps(_scored(), jobs_idle=False) == ["local: media jobs were still pending or running"]
+    assert _gaps(_scored(), jobs_idle=None) == ["local: no media job counts were read"]
+
+
+def test_blocked_jobs_and_undrained_index_upserts_leave_the_queue_idle():
+    # A stdio server never drains deferred index upserts, and blocked jobs wait on an engine, not on time.
+    status = {"counts": {"pending": 0, "running": 0, "blocked": 3, "failed": 0}, "index_refresh": {"count": 8}}
+    assert raw_import.jobs_idle({"converged": False, "final_status": status}) is True
+
+
+def test_a_pending_or_running_job_is_not_idle_and_a_status_without_counts_is_no_reading():
+    assert raw_import.jobs_idle({"final_status": {"counts": {"pending": 1, "running": 0}}}) is False
+    assert raw_import.jobs_idle({"final_status": {"counts": {"pending": 0, "running": 2}}}) is False
+    assert raw_import.jobs_idle({"final_status": {"index_refresh": None}}) is None
+    assert raw_import.jobs_idle({"final_status": None}) is None
 
 
 def test_an_arm_that_landed_no_note_is_a_gap_so_two_empty_arms_do_not_pass():

@@ -139,12 +139,9 @@ class Journey:
     """One start->finish pass; accumulates what the product refused along the way."""
 
     def __init__(self, session: LedgerSession, name: str, collection: str, collection_dir: Path,
-                 overrides: list[str], *, path: str | None = None, collection_root: str | None = None,
+                 overrides: list[str], *, path: str | None = None,
                  request: Any = local_request, initialize_kb: bool = True):
-        """``collection`` is the label; ``path`` is where the product reads it, vault-relative (default: the label).
-
-        ``collection_root`` is the folder the collection's own subfolders hang from, when that is one level below
-        ``path`` (a Cloud stage holds the collection in the one folder inside ``_Imports/<id>``)."""
+        """``collection`` is the label; ``path`` is where the product reads it, vault-relative (default: the label)."""
         self.session = session
         self.overrides = overrides
         self.request = request
@@ -152,7 +149,6 @@ class Journey:
         self.name = name
         self.collection = collection
         self.path = path or collection
-        self.collection_root = collection_root or self.path
         self.collection_dir = collection_dir
         self.run_id: str | None = None
         self.phase_ms: dict[str, float] = {}
@@ -253,7 +249,7 @@ class Journey:
             selected = True
         elif probe_rules and rules_state.get("folder_kind_rules") != "unsupported":
             rules = [
-                {"path": f"{self.collection_root}/{folder}", "source_kind": kind, "domain": domain}
+                {"path": f"{self.path}/{folder}", "source_kind": kind, "domain": domain}
                 for folder, (kind, domain) in RULE_PROBE.items()
                 if (self.collection_dir / folder).is_dir()
             ]
