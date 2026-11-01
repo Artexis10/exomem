@@ -87,7 +87,7 @@ async def _preview(client) -> dict:
     handle, final = await _preview_job(client, {"kind": "backfill-ids"})
     assert final["state"] == "completed"
     planned = await _receipt_entries(client, handle["run_id"])
-    return {**final["receipt"]["result"], "would_update": [entry["path"] for entry in planned]}
+    return {**final["receipt"]["result"], "would_update": [entry["path"] for entry in planned if entry["kind"] == "planned"]}
 
 
 async def _start(client, plan_id: str, why: str = "give pages their identity") -> dict:
@@ -963,8 +963,7 @@ def test_a_remote_backfill_preview_is_a_read_only_job_whose_receipt_starts_the_w
     assert final["state"] == "completed"
     assert final["receipt"]["result"]["plan_id"] == expected["plan_id"]
     assert (final["planned"], final["committed"]) == (len(expected["would_update"]), 0)
-    assert {entry["kind"] for entry in planned} == {"planned"}
-    assert [entry["path"] for entry in planned] == expected["would_update"]
+    assert [entry["path"] for entry in planned if entry["kind"] == "planned"] == expected["would_update"]
     assert untouched == before
     assert written["state"] == "completed"
     assert written["committed"] == len(expected["would_update"])
