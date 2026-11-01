@@ -95,6 +95,21 @@ class EarlierImport:
     spelled_from: str | None = None
 
 
+def _collection_spelling(path: str | None, collection_path: str | None) -> str | None:
+    """How `path` spells its original inside the collection, or None when it cannot say.
+
+    That is the tail of `path` whose normalised form is `collection_path`, so the spelling
+    survives a collection staged again under another root. Without a collection path it
+    is the whole path.
+    """
+    if path is None or collection_path is None:
+        return path
+    depth = collection_path.count("/") + 1
+    parts = path.split("/")
+    tail = "/".join(parts[-depth:])
+    return tail if len(parts) >= depth and nfc(tail) == collection_path else None
+
+
 def _text_field(value: Any) -> str | None:
     return nfc(value) if isinstance(value, str) and value.strip() else None
 
@@ -242,9 +257,14 @@ def latest_earlier_import(
     if not matches:
         return None
     # A twin original, whose name differs only in Unicode normalisation, matches the
-    # same pages. The pages spelled as this original is spelled are its own; a
-    # collection staged again under another normalisation spells none of them so.
-    spelled = [entry for entry in matches if entry.spelled_from == original_path]
+    # same pages. The pages that spell it inside the collection as this original does
+    # are its own; a collection staged again under another normalisation spells none
+    # of them so, and the normalised match decides as before.
+    own = _collection_spelling(original_path, collection_path if collection is not None else None)
+    spelled = [
+        entry for entry in matches
+        if own is not None and _collection_spelling(entry.spelled_from, entry.collection_path) == own
+    ]
     return max(spelled or matches, key=lambda entry: (entry.captured, entry.path))
 
 
