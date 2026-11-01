@@ -36,15 +36,18 @@ jobs:
       - name: Install gVisor runsc (pinned release, checksum verified)
         run: |
           set -euo pipefail
-          base="https://storage.googleapis.com/gvisor/releases/release/${RUNSC_RELEASE}/x86_64"
+          # The dated release on GitHub carries the x86_64 tarball and its published SHA512SUMS.
+          base="https://github.com/google/gvisor/releases/download/release-${RUNSC_RELEASE}"
           mkdir -p "$RUNNER_TEMP/runsc"
           cd "$RUNNER_TEMP/runsc"
-          curl -fsSLO "$base/runsc"
-          curl -fsSLO "$base/runsc.sha512"
-          cat runsc.sha512
-          sha512sum -c runsc.sha512
-          chmod a+rx runsc
-          sudo install -m 0755 runsc /usr/local/bin/runsc
+          curl -fsSLO "$base/gvisor-x86_64.tar.bz2"
+          curl -fsSLO "$base/SHA512SUMS"
+          cat SHA512SUMS
+          grep ' gvisor-x86_64.tar.bz2$' SHA512SUMS | sha512sum -c -
+          tar -xjf gvisor-x86_64.tar.bz2
+          find . -maxdepth 3 -type f | sort
+          runsc_bin="$(find . -type f -name runsc | head -n1)"
+          sudo install -m 0755 "$runsc_bin" /usr/local/bin/runsc
           runsc --version
           # Systrap is the default platform in current releases; name it, and directfs, so the run records both.
           sudo runsc install --runtime=runsc -- --platform=systrap --directfs=true
