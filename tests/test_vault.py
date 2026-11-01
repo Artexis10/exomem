@@ -823,6 +823,25 @@ def test_preparing_a_bounded_content_guard_preserves_its_read_limit(
         prepared[0].recheck(tmp_path)
 
 
+def test_a_refused_guarded_read_names_the_file_and_the_condition_it_failed(
+    tmp_path: Path,
+) -> None:
+    # A bare "not a bounded regular file" left a transient refusal undiagnosable.
+    (tmp_path / "Episodes").mkdir()
+    target = tmp_path / "Episodes" / "linked.md"
+    target.write_bytes(b"episode bytes")
+    os.link(target, tmp_path / "outside-copy.md")
+    with pytest.raises(vault.PathGuardError) as linked:
+        vault.read_bounded_guarded_bytes(tmp_path, "Episodes/linked.md", limit=64)
+    assert linked.value.code == "PATH_GUARD_UNSAFE"
+    assert "Episodes/linked.md has 2 hard links" in linked.value.reason
+
+    (tmp_path / "outside-copy.md").unlink()
+    with pytest.raises(vault.PathGuardError) as oversized:
+        vault.read_bounded_guarded_bytes(tmp_path, "Episodes/linked.md", limit=4)
+    assert "Episodes/linked.md is 13 bytes, over the 4-byte read limit" in oversized.value.reason
+
+
 def test_guarded_reader_retries_a_transient_windows_sharing_refusal_from_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

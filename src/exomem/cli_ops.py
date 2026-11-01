@@ -63,6 +63,10 @@ _REMEDIATION: dict[str, str] = {
     ),
     "AMBIGUOUS_UNIT_REFERENCE": ("Re-read the parent and select one exact current unit reference."),
     "RELATION_REVIEW_STABLE_ID_REQUIRED": RELATION_REVIEW_STABLE_ID_REMEDIATION,
+    "PATH_GUARD_UNSAFE": (
+        "The named vault file failed a safety check. Retry once shortly; if it repeats, "
+        "remove the extra hard link or shrink the file named in the message."
+    ),
     "INVALID_RELATION_REVIEW": (
         "Send relation_disposition=reviewed_none, relation_review_reason and the "
         "relation_review_hash from the validate_only result together; send none of them "
