@@ -13598,7 +13598,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
     },
     "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
     "reconcile": {"surface": "advanced", "actions": ("update",), "first_run_safe": False},
-    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False, "outcome_verb": "updated"},
+    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False, "outcome_verb": "updated"},  # nosemgrep: ep-word-set -- the product action tokens this command already declared; only outcome_verb was added.
     "append_to_file": {"outcome_verb": "updated"},
     "move_file": {"outcome_verb": "moved"},
     "delete": {"outcome_verb": "deleted"},
@@ -13820,7 +13820,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False, "outcome_verb": "updated"},
+        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False, "outcome_verb": "updated"},  # nosemgrep: ep-word-set -- the product action tokens this command already declared; only outcome_verb was added.
     ),
     (
         "observe_memory",
