@@ -572,6 +572,8 @@ explicit audit/cleanup. This protocol SHALL NOT claim cross-file all-or-none
 power-loss atomicity. A qualifying typed relation or genuinely empty-corpus
 bootstrap SHALL not require a reviewed-none decision from the caller.
 
+Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning: "This page needs no relation review; relation_disposition and relation_review_reason were ignored." When the page needs a review, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result. Validation SHALL NOT compare the hash. When the caller supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
+
 #### Scenario: Second disconnected page can be created after review
 - **WHEN** validation for a second page returns no qualifying candidate and the commit repeats the draft with matching reviewed-none fields
 - **THEN** portable review state is prepared before the page commit marker, and the returned visible page has a current disposition
@@ -591,6 +593,21 @@ bootstrap SHALL not require a reviewed-none decision from the caller.
 #### Scenario: Review disposition survives derived-state loss
 - **WHEN** all rebuildable indexes/databases are removed and the vault is rebuilt
 - **THEN** a still-current portable reviewed-none disposition is recovered from governed vault content
+
+#### Scenario: A page that needs no review ignores the review fields
+- **WHEN** a commit for a page with a qualifying connectivity signal carries `relation_disposition="reviewed_none"` and a reason but no hash
+- **THEN** the page commits with a receipt of kind `qualifying` and no review artifact
+- **AND** the result carries one warning that the review fields were ignored
+
+#### Scenario: A page that needs review names the missing hash
+- **WHEN** a commit for a page that needs review carries the disposition and reason but no `relation_review_hash`
+- **THEN** the write is refused with `INVALID_RELATION_REVIEW` and `missing=["relation_review_hash"]`
+- **AND** the message tells the caller to copy the hash from the `validate_only` result
+
+#### Scenario: Validation names fields a commit would find missing or ignored
+- **WHEN** `validate_only` carries a review field for a page that needs review but omits the hash
+- **THEN** `relation_review_fields.missing` lists `relation_review_hash`
+- **AND** the same call for a page that needs no review lists the supplied fields under `relation_review_fields.ignored`
 
 ### Requirement: Existing-Page Review Decisions And Transition Recovery Are Separate
 For an existing page with a unique valid stable memory UUID, a reviewed-none lifecycle decision SHALL be an immutable portable artifact at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/<after-fingerprint>.json`. Its canonical bounded schema SHALL contain the schema/kind, normalized UUID, exact resulting review-content fingerprint, bounded non-empty reason, and a decision hash derived only from those stable decision fields. Its identity SHALL NOT depend on operation, prior bytes/path, transition token, log/index plan, or auxiliary digest. Transition-specific crash recovery SHALL use one separately guarded replaceable slot at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/prepared.json`. Its canonical bounded schema SHALL contain the schema/kind, canonical transition UUID, operation, normalized page UUID, exact before/after paths and source hashes, after fingerprint, decision reference plus exact decision-bytes hash or JSON null when no decision is needed, transition-token hash, ordered auxiliary digest, and optional `carried_from` decision reference. The prepared slot SHALL NOT itself satisfy relation review. A current reviewed-none disposition SHALL require an exact unique UUID plus current-fingerprint decision match.

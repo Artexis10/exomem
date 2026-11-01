@@ -25,7 +25,7 @@ The system SHALL construct a versioned canonical terminal record after the canon
 
 ### Requirement: Compact Success Is The Default Projection
 
-Committed product mutations SHALL return a compact default projection led by `ok`, `status`, `mutated`, primary `path`, original `request_id`, stable receipt identity, and `warnings_count`. `response_detail="full"` SHALL add the complete leaf result under `diagnostics`; `response_detail="legacy"` SHALL return the pre-change raw leaf result during the compatibility window.
+Committed and replayed product mutations SHALL return a compact default projection led by `user_summary`, then `ok`, `status`, `mutated`, primary `path`, original `request_id`, stable receipt identity, and `warnings_count`. `user_summary` SHALL be one plain sentence built only from fields the stored terminal holds, so a replay yields the same text: a verb from the command's closed `outcome_verb` (saved, updated, moved or deleted), then the path, or the first path and the count of the others. A governed replay SHALL read "Already" plus the lower-cased verb. A refusal or a validation result SHALL carry no `user_summary`. `response_detail="full"` SHALL add the complete leaf result under `diagnostics`; `response_detail="legacy"` SHALL return the pre-change raw leaf result during the compatibility window.
 
 #### Scenario: Default committed response is decisive
 - **WHEN** a governed product mutation succeeds without an explicit response detail
@@ -36,6 +36,11 @@ Committed product mutations SHALL return a compact default projection led by `ok
 - **WHEN** the same mutation is requested with `response_detail="full"`
 - **THEN** the compact terminal fields are unchanged
 - **AND** the complete existing leaf payload is available under `diagnostics`
+
+#### Scenario: A committed save leads with a plain summary
+- **WHEN** a governed product mutation saves one file without an explicit response detail
+- **THEN** the first key of the response is `user_summary`, reading "Saved -> <path>"
+- **AND** a delete reads "Deleted -> <path>", a move reads "Moved <from> -> <to>", and a replay reads "Already saved -> <path>"
 
 ### Requirement: Pre-Commit And Uncertain Errors Remain Unambiguous
 The terminal projector MUST NOT convert rejected, busy, pending, committed-failure, or committed-uncertain outcomes into successful result dictionaries. `MUTATION_BUSY` SHALL remain retryable only when no commit occurred, and post-commit uncertainty SHALL retain its committed semantics and same-identity remediation. Committed-uncertain SHALL be returned only when the canonical commit is proven and persisting the terminal record itself failed; a failure in derived-state acknowledgement after a persisted terminal is not uncertainty and SHALL NOT produce this error.
@@ -63,3 +68,11 @@ Completed idempotency rows created before terminal versioning SHALL remain repla
 - **WHEN** the idempotency store contains a valid completed raw result from the previous release
 - **THEN** the result replays without leaf execution or reconciliation failure
 - **AND** the row expires under the existing retention policy
+
+### Requirement: One Narration Rule Reaches The Agent Through Two Carriers
+
+The system SHALL define the rule for narrating a write to the user once, as `mutation_terminal.NARRATION_RULE`: tell the user `user_summary`; mention codes, ids, hashes, retries and sync state only if asked; state a blocker plainly. The compact bootstrap `write.canonical_loop` SHALL carry that sentence as its final step, and the shipped skill scaffold SHALL carry the same sentence, because a client with the skill installed receives the session profile, which omits the `write` block. The scaffold SHALL also say that working on Exomem does not make an unrelated conversation diagnostic, and every standalone workflow skill SHALL embed the same operating rules.
+
+#### Scenario: Both carriers hold the rule
+- **WHEN** the compact bootstrap and the shipped skill scaffold are read
+- **THEN** each contains `NARRATION_RULE` verbatim
