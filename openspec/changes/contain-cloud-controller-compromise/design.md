@@ -122,6 +122,7 @@ The subcommands:
 - `cell-import`
 - `cell-export`
 - `cell-export-verify`
+- `cell-backup-migrate`, which runs once per existing cell (D5)
 
 **Backup and restore move off shell strings.**
 - `exomem cell-backup` runs the vault check, `restic init` if needed, `restic backup`, the snapshot-ID capture, `forget`/`prune` and the termination message. Every step that the joined shell string runs today moves inside the subcommand.
@@ -159,7 +160,7 @@ A mismatch refuses the operation and logs a cataloged, content-free event (D7).
 
 The fix in both cases:
 - **Exports.** The tenant's browser generates an `age` key pair when it requests the export. Substrate takes the public recipient from the authenticated browser session, and stores it in a column that only Substrate's role writes, never `cellctl`'s. It also puts the recipient into the signed export grant. The cell encrypts the archive to that recipient before upload, and the browser decrypts it after download. The private key never leaves the browser.
-- **Export integrity.** `age` does not prove who made a ciphertext, so `cellctl` could swap in a forged archive that the browser's key still decrypts. The cell therefore reports the archive's SHA-256 on a route that the gateway calls with a signed proof (D1), which excludes `cellctl`. Substrate shows that digest to the browser, and the browser checks it before it accepts the download.
+- **Export integrity.** `age` does not prove who made a ciphertext, so `cellctl` could swap in a forged archive that the browser's key still decrypts. The export Job runs under a hold that stops the serving cell, so it cannot serve anything itself. It therefore records the ciphertext's SHA-256 and the export ID on the volume, outside the export root. The restarted serving cell reports that digest on a route that the gateway calls with a signed proof (D1), which excludes `cellctl`. Substrate takes the digest only from that route, never from the `archive_sha256` column, which `cellctl` writes. When the digest is missing, the client refuses the download. Substrate shows that digest to the browser, and the browser checks it before it accepts the download.
 - **Export verification.** The verify Job cannot read an archive encrypted to the browser's key. So the export Job checks the plaintext archive with the canonical reader as it streams, before encryption. The verify Job then checks the uploaded ciphertext's size and SHA-256 against what the cell reported.
 - **Imports.** The serving cell publishes its import recipient on a route that the gateway calls with a signed proof (D1). `cellctl` cannot reach that port, so the path excludes it. Substrate puts the recipient into the signed import grant, and the cell checks that the grant's recipient is its own before it decrypts.
 
@@ -182,21 +183,32 @@ The fix in both cases:
 **Decision: O2, in two modes.** The operator chose these on 2026-11-01.
 - **Standard mode.** The escrow copy is encrypted to the operator's presence-gated recipient. `cellctl` holds nothing that decrypts a backup. The operator can still open the escrow copy deliberately, and the privacy copy says so.
 - **Tenant-locked mode (opt-in).** This is the tenant lock of `make-cloud-cells-operator-resistant` D3. The escrow copy is encrypted to the tenant's own key, from their recovery code or passkey, and no platform copy is written. The operator then cannot decrypt the cell's backups, or read it while it is stopped, locked or deleted, once earlier platform copies expire. A tenant who loses their recovery code loses their backups, and a restore after volume loss needs the tenant.
+- **The mode statement.** Substrate signs a statement with the grant key (D2). It holds the mode, the escrow recipient, the cell ID, the tenant ID, a generation number and an expiry.
+  - A standard-mode statement must name the pinned operator recipient.
+  - A tenant-locked statement names the tenant's recipient, and only a tenant-authenticated request makes Substrate sign one.
+  - The cell reads the statement on the tenant-lock key channel (`make-cloud-cells-operator-resistant` D3, task 5.1), which excludes `cellctl`.
+  - The cell keeps the highest generation that it has seen on its volume and refuses an older statement. So `cellctl` can neither substitute a recipient nor downgrade a locked cell by replaying an old standard-mode statement.
+  - A cell whose volume carries the tenant's inner layer never writes an operator escrow copy. Leaving the lock takes a newer, tenant-authenticated statement.
+- **Tenant-locked cells keep their keys inside the inner layer.** The backup password sits inside the tenant's inner layer, not only on the outer volume, whose passphrase the platform keeps. A restore after volume loss receives the password on the tenant-lock key channel, never through a cluster Secret.
 - **Neither mode stops one thing:** whoever controls the node can read a running, unlocked cell. Only a confidential cell (`make-cloud-cells-operator-resistant` D8) closes that.
 
 The steps:
 - **Generate.** On first start, `exomem cell-init` generates the restic password and writes it to the cell's encrypted volume, at a path outside both backup roots (`/data/vault` and `/data/host`). Otherwise the password would sit inside the repository that it protects. It also stays outside the export root.
-- **Escrow.** It writes an escrow copy, encrypted with `age` to the pinned escrow recipient (D2), to the cell's own prefix in the locked backup bucket (`lock-cloud-backups-against-deletion`). So no running service can destroy it before retention ends.
+- **Escrow.** It writes an escrow copy, encrypted with `age`, to the cell's own prefix in the locked backup bucket (`lock-cloud-backups-against-deletion`), so no running service can destroy it before retention ends. The recipient comes only from a valid **mode statement** (see below), never from a value that `cellctl` renders.
 - **Back up.** `cell-backup` reads the password from the volume. The backup Job already mounts the volume.
 - **Restore with the volume.** A restore onto an existing volume uses that password.
 - **Restore after volume loss.** The operator decrypts the escrow copy with their presence-gated identity (`make-cloud-cells-operator-resistant` D6) and supplies the password to the restore through a one-time Secret.
 - **What `cellctl` keeps.** It still mints per-cell object-store keys, so it can read ciphertext but cannot decrypt it.
 
-**Existing cells.** Each existing cell re-keys its restic repository in four steps:
-1. `restic key add` with a cell-generated password.
-2. Write the escrow copy.
-3. `restic key remove` for the platform password.
+**Existing cells move to a new repository.** Restic's `key add` and `key remove` change only key files, and every key file wraps the same master key. A re-key would therefore leave every snapshot readable to anyone who holds the old platform password and a copy of an old key file. Instead, each cell runs a new subcommand, `exomem cell-backup-migrate`:
+1. `restic init` a new repository with the cell-held password, with `--copy-chunker-params` so deduplication continues.
+2. `restic copy` every snapshot from the old repository. This re-encrypts every snapshot under the new master key.
+3. Write the escrow copy.
 4. Destroy the platform-wrapped password.
+
+This is the same move as `lock-cloud-backups-against-deletion` D5, which copies each repository into the locked bucket, so there is one migration, not two.
+
+**Residual.** Snapshots in the old repository stay readable with the old platform password until the old repository is gone.
 
 **Relation to the cell root key.** `make-cloud-cells-operator-resistant` D1 wraps the backup password under the cell root key, which the platform master key wraps. Under O2 the backup password leaves that hierarchy. The volume passphrase and the media key bundle stay under it, because the volume must open unattended when a pod is rescheduled.
 

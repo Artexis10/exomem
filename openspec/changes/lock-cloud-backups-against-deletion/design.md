@@ -30,12 +30,12 @@ The backups therefore move to a new bucket with Object Lock enabled and default 
 - **Retention runs from creation, not from deletion.** The default retention sets each version's lock to its creation time plus N days. Restic keeps long-lived packs for stable data. A pack written 25 days ago with a 30-day default is locked for only 5 more days. If an attacker hides it today and the hide is noticed a week later, the pack is gone.
 - **Locks are extended on a schedule.** Compliance mode allows a lock to be extended, never shortened. A daily job extends the lock of each current version in the backup bucket to today plus 30 days. So whenever a delete happens, every version that it hides stays locked for at least 23 days afterwards (see the 24-day rule below).
   - The job holds a key that can only list files and extend retention. In compliance mode, that key cannot shorten or remove anything.
-  - It runs as its own small CronJob, with its own service account, in its own namespace, outside both the `exo-cell-*` namespaces and `cellctl`'s namespace. Admission, not RBAC, keeps `cellctl` out: `cellctl`'s ClusterRole can write Jobs and Secrets in any namespace, but its admission rule refuses every write outside `exo-cell-*`. It has no CronJob permission and no Secret read. A chart check requires that the extender's namespace can never be one that admission rule 1 lets `cellctl` write: no `exo-cell-*` name, not `cellctl`'s own namespace, and not the local-storage reservation namespace.
+  - It runs as its own small CronJob, with its own service account, in its own namespace, outside both the `exo-cell-*` namespaces and `cellctl`'s namespace. Admission, not RBAC, keeps `cellctl` out: `cellctl`'s ClusterRole can write Jobs and Secrets in any namespace, but its admission rule 1 refuses its writes outside `exo-cell-*`, apart from the few exceptions listed next. It has no CronJob permission and no Secret read. A chart check requires that the extender's namespace can never be one that admission rule 1 lets `cellctl` write: no `exo-cell-*` name, not `cellctl`'s own namespace, and not the local-storage reservation namespace.
   - A missed run reduces the margin by one day, and an alert fires on a missed run.
   - It extends only versions whose lock ends within 24 days. Between runs a lock counts down, so its smallest remaining time is the threshold minus one day. A threshold of 24 days therefore keeps the margin at least 23 days, or 22 after one missed run. Each version is still extended only about every 6 days, not daily. The threshold is always the margin plus one day.
 - **An extension is irreversible, so the extender fails closed.** In compliance mode, nobody can undo a lock date that was set too far ahead. A bug that set years instead of days would lock every version, and its storage cost, for years.
   - Two configured values drive the rest: the retention R (30 days) and the margin M (23 days). The bucket's default retention and the extension target are R. The guard is R plus one day. The threshold is M plus one day. The chart refuses a configuration where M plus one day is not less than R.
-  - The job refuses any retention date more than 31 days ahead, and alerts instead of applying it.
+  - The job refuses any retention date more than R plus one day ahead (31 days), and alerts instead of applying it.
   - The guard does not trust the local clock alone. Before each run, the job compares local time with the provider's response time. It refuses and alerts when they differ by more than a few minutes, so a fast clock cannot set a lock far in the future.
   - Its key is admin-tier custody under `make-cloud-cells-operator-resistant` D6.
 - **30 days.** This margin covers the time to notice a mass deletion and recover from it.
@@ -56,7 +56,7 @@ A runbook procedure lists a cell's file versions as of a point in time and resto
 ### D5. Migration
 
 1. New cells start in the locked bucket.
-2. Each existing cell copies its repository with `restic copy` to the new bucket, one cell at a time.
+2. Each existing cell copies its repository with `restic copy` into a new repository in the new bucket, one cell at a time. The new repository has a new master key and the cell-held password (`contain-cloud-controller-compromise` D5), so this one move also retires the platform password.
 3. Each cell then switches its repository.
 4. The old repository stays until the cell's newest copied snapshot is 30 days old, then cellctl removes it.
 

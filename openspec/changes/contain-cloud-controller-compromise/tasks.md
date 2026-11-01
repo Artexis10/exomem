@@ -23,7 +23,8 @@
 ## 5. Backup custody
 
 - [ ] 5.1 Generate the backup password in `cell-init`, write the escrow copy, and read the password in `cell-backup`.
-- [ ] 5.2 Re-key existing cells one at a time, owner first, and destroy each platform-wrapped password. Evidence: a rehearsal cell restores from escrow after its volume is deleted.
+- [ ] 5.2 Move existing cells one at a time, owner first, into new repositories with `exomem cell-backup-migrate` (new master key, `restic copy`), together with `lock-cloud-backups-against-deletion` task 3.1. Destroy each platform-wrapped password. Evidence: the old platform password opens no snapshot in the new repository, and a rehearsal cell restores from escrow after its volume is deleted.
+- [ ] 5.3 Deliver signed mode statements on the tenant-lock key channel, keep the highest generation on the volume, and refuse a downgrade. Evidence: a forged or replayed standard-mode statement to a locked rehearsal cell produces no operator escrow copy.
 
 ## 6. Retirements and alerts
 

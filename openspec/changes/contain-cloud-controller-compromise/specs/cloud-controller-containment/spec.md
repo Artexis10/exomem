@@ -115,7 +115,7 @@ A refused operation SHALL log a cataloged, content-free event that names the cel
 
 A cell SHALL encrypt an owner export, before upload, to the recipient that the signed export grant names. The tenant's client SHALL generate that recipient.
 
-The cell SHALL report the archive's SHA-256 on a gateway-authenticated route that the controller cannot reach. The tenant's client SHALL accept a download only when its digest matches.
+The cell SHALL report the archive's SHA-256 on a gateway-authenticated route that the controller cannot reach. The tenant's client SHALL accept a download only when its digest matches, and SHALL refuse it when no digest is available. Substrate SHALL take the digest only from that route.
 
 A cell SHALL decrypt an import only when the signed import grant names the cell's own import recipient. Substrate SHALL obtain that recipient from the cell through the gateway, on a path that the controller cannot reach.
 
@@ -136,9 +136,19 @@ A cell SHALL decrypt an import only when the signed import grant names the cell'
 
 ### Requirement: The controller cannot decrypt a cell's backups
 
-Each cell SHALL generate its own backup repository password and keep it on its encrypted volume, outside every backup and export root. It SHALL write an escrow copy, encrypted to the pinned escrow recipient, under its own object-store prefix.
+Each cell SHALL generate its own backup repository password and keep it on its encrypted volume, outside every backup and export root. It SHALL write an escrow copy, under its own object-store prefix, encrypted only to the recipient that a valid signed mode statement names. The cell SHALL keep the highest statement generation it has seen and refuse an older one. A standard-mode statement SHALL name the pinned operator recipient.
 
 No platform service SHALL hold the password or a key that decrypts it. In standard mode the escrow recipient SHALL be the operator's presence-gated identity. In tenant-locked mode it SHALL be the tenant's own key, and the platform SHALL write no copy that it can open. A restore after the loss of the cell's volume SHALL need the holder of the escrow recipient's identity.
+
+#### Scenario: The controller downgrades a locked cell
+
+- **WHEN** the controller replays an older standard-mode statement to a tenant-locked cell, or renders its own recipient
+- **THEN** the cell writes no escrow copy to that recipient
+
+#### Scenario: An existing cell migrates
+
+- **WHEN** an existing cell moves to a cell-held password
+- **THEN** its snapshots are copied into a new repository with a new master key, and the old platform password opens none of the new repository's snapshots
 
 #### Scenario: A tenant-locked cell's backup
 
