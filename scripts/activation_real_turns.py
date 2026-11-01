@@ -57,7 +57,7 @@ from private_vault_snapshot import (  # noqa: E402
 
 #: EXOMEM_* env vars this script keeps from the inherited environment; every
 #: other one is stripped before the first turn runs (module docstring).
-_KEPT_EXOMEM_ENV = frozenset({"EXOMEM_DISABLE_EMBEDDINGS"})
+_KEPT_EXOMEM_ENV = frozenset({"EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_ACTIVATION_SOURCE_SLOTS"})
 
 
 class TurnsFileError(ValueError):
