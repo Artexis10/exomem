@@ -2535,6 +2535,16 @@ def _commit_existing_locked(
             )
     except vault.PathGuardError:
         _recheck_origin_guards(root, origin_guards)
+        relation_review.refuse_busy_if_only_auxiliary_changed(
+            root,
+            (
+                preflight.primary_guard,
+                *required_guards,
+                *origin_guards,
+                *preflight.read_dependency_guards,
+                *source_guards,
+            ),
+        )
         raise
     try:
         catalog_publication.publish_markdown_batch(catalog_target)
@@ -5178,6 +5188,7 @@ def _commit_structural(
         for bound in bound_origins:
             _validate_origin_inputs(root, bound)
 
+    closure_guards = tuple(guard for item in planned for guard in item.closure_plan.required_guards)
     token = semantic_index.set_parent_states(
         {
             destination: semantic_index.from_semantic_page_state(state)
@@ -5197,7 +5208,7 @@ def _commit_structural(
             required_guards=(
                 *vocabulary_guards,
                 *origin_guards,
-                *(guard for item in planned for guard in item.closure_plan.required_guards),
+                *closure_guards,
             ),
             _vocabulary_auxiliaries=manifests[0] if len(manifests) == 1 else manifests,
             _validate_prepared_bindings=validate_bound_origins if bound_origins else None,
@@ -5206,7 +5217,16 @@ def _commit_structural(
         if error.code == "PATH_VARIANT_EXISTS":
             raise SemanticWriteError(error.code, error.reason) from error
         _recheck_origin_guards(root, origin_guards)
-        if vocabulary_guards:
+        relation_review.refuse_busy_if_only_auxiliary_changed(
+            root,
+            (
+                *vocabulary_guards,
+                *origin_guards,
+                *closure_guards,
+                *(write.guard for write in primary_writes if write.guard is not None),
+            ),
+        )
+        if relation_review.any_guard_changed(root, vocabulary_guards):
             raise SemanticWriteError(
                 "STALE_VOCABULARY_BINDING",
                 "domain vocabulary changed during commit; validate a fresh draft",
@@ -5411,6 +5431,7 @@ def _commit_creation(
                         preflight.semantic_state
                     ),
                     extra_required_guards=(*vocabulary_guards, *closure_plan.required_guards),
+                    vocabulary_guards=vocabulary_guards,
                     origin_required_guards=_origin_commit_guards(
                         root, preflight.origin_inputs, catalog_writes
                     ),

@@ -394,19 +394,11 @@ def _write_existing_page(vault: Path, rel: str, *, page_id: str, body: str = "Be
 def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     vault: Path,
 ) -> None:
-    """Two `edit_memory` calls on different primary pages both complete under
-    the narrow boundary, with no deadlock and no corruption.
+    """Two `edit_memory` calls on different pages commit, each without a retry by its caller.
 
-    Both edits share auxiliary write targets (`log.md`, the top/sub indexes)
-    whose guards `edit.commit_edit` captures before `commit_existing`'s own
-    (now narrow) boundary is acquired — a genuinely new race this change
-    introduces for that shared auxiliary specifically (the wide boundary
-    used to serialize guard-capture and commit together for every caller on
-    one manager; the narrow boundary only serializes the commit). A losing
-    guard is refused honestly (`PATH_GUARD_CHANGED`), never silently
-    dropped, so a single immediate retry is the correct, expected recovery —
-    the same "semantically honest interleaving" class already accepted for
-    `STALE_SEMANTIC_WRITE` (see this change's write-latency spec delta).
+    Both share auxiliary targets (`log.md`, the indexes) that are planned before the narrow
+    boundary is taken. A loser's auxiliary changed while it waited, so the server runs it
+    again; the caller sees one success, never a staleness error to retry by hand.
     """
     rel_a = "Knowledge Base/Notes/Insights/narrow-edit-a.md"
     rel_b = "Knowledge Base/Notes/Insights/narrow-edit-b.md"
@@ -418,33 +410,18 @@ def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     errors: list[BaseException] = []
 
     def edit(rel: str, new_body: str) -> None:
-        for attempt in range(2):
-            try:
-                results.append(
-                    _invoke_edit_memory(
-                        vault,
-                        manager,
-                        path=rel,
-                        why="narrow-boundary interleaving check",
-                        new_body=new_body,
-                    )
+        try:
+            results.append(
+                _invoke_edit_memory(
+                    vault,
+                    manager,
+                    path=rel,
+                    why="narrow-boundary interleaving check",
+                    new_body=new_body,
                 )
-                return
-            except (vault_module.PathGuardError, ValueError) as error:
-                # A losing auxiliary guard now surfaces as the documented
-                # retryable STALE_SEMANTIC_WRITE (translated at the commit
-                # seam) rather than a raw PathGuardError; one retry is the
-                # correct, expected recovery either way.
-                retryable = isinstance(
-                    error, vault_module.PathGuardError
-                ) or "STALE_SEMANTIC_WRITE" in str(error)
-                if attempt == 0 and retryable:
-                    continue
-                errors.append(error)
-                return
-            except BaseException as error:  # noqa: BLE001 - inspect thread outcome
-                errors.append(error)
-                return
+            )
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
 
     threads = [
         threading.Thread(target=edit, args=(rel_a, "Updated A.")),
@@ -453,13 +430,115 @@ def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=10.0)
+        thread.join(timeout=30.0)
 
     assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert len(results) == 2
     assert "Updated A." in (vault / rel_a).read_text(encoding="utf-8")
     assert "Updated B." in (vault / rel_b).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("operation", ["remember", "edit_memory"])
+def test_a_write_whose_navigation_changed_while_it_waited_commits_once_without_a_stale_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """An upload rewrites log.md and the index between a write's planning and its acquire.
+
+    The caller used to get STALE_SEMANTIC_WRITE for a change it did not make. The server now
+    plans again and the write commits once, with one log entry, and a resend replays.
+    """
+    import io
+
+    from exomem import preserve
+
+    manager = _standalone_manager(vault.parent / "state")
+    rel = "Knowledge Base/Notes/Insights/navigation-race.md"
+    if operation == "remember":
+        kwargs = _validated_kwargs(vault, title="Navigation race", slug="navigation-race")
+        run = lambda: manager.invoke(  # noqa: E731
+            _remember_command(), (vault,), kwargs, idempotency_key="navigation-race-key"
+        )
+        marker = "Navigation race"
+    else:
+        _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000d1")
+        kwargs = {"path": rel, "why": "navigation race marker", "new_body": "After."}
+        run = lambda: manager.invoke(  # noqa: E731
+            _edit_memory_command(), (vault,), kwargs, idempotency_key="navigation-race-key"
+        )
+        marker = "navigation race marker"
+
+    planned = threading.Event()
+    competitor_done = threading.Event()
+    attempts: list[int] = []
+    real_prewarm = semantic_writes._prewarm_embeddings
+
+    def pause_after_planning_on_the_first_attempt() -> None:
+        attempts.append(1)
+        if len(attempts) == 1:
+            planned.set()
+            assert competitor_done.wait(30)
+        real_prewarm()
+
+    monkeypatch.setattr(
+        semantic_writes, "_prewarm_embeddings", pause_after_planning_on_the_first_attempt
+    )
+    outcome: list[dict] = []
+    errors: list[BaseException] = []
+
+    def write() -> None:
+        try:
+            outcome.append(run())
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
+
+    thread = threading.Thread(target=write)
+    thread.start()
+    assert planned.wait(30)
+    with manager.mutation_guard(vault, request_id="competitor", operation="upload_preserve"):
+        preserve.preserve_stream(
+            vault,
+            scope="Race",
+            category="Navigation",
+            filename="race.bin",
+            stream=io.BytesIO(b"bytes that move the log and the index"),
+        )
+    competitor_done.set()
+    thread.join(60)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert len(attempts) >= 2, "the write was not run again after its navigation changed"
+    log = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
+    assert log.count(marker) == 1
+    assert "race.bin" in log
+    attempted = len(attempts)
+    replay = run()
+    assert replay == outcome[0]
+    assert len(attempts) == attempted, "the resend ran the write again instead of replaying"
+    assert (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8").count(marker) == 1
+
+
+def test_a_refused_batch_is_busy_only_while_every_basis_guard_still_holds(vault: Path) -> None:
+    """A changed basis guard keeps the caller's own staleness error; only a moved auxiliary is busy.
+
+    The commit seams reach this check after the batch rolled back, with the boundary held,
+    and a stamp-current write cannot be made to fail its own basis guard through the public API.
+    """
+    rel = "Knowledge Base/Notes/Insights/basis-guard.md"
+    page = _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000e1")
+    guard = vault_module.PathGuard.capture(
+        vault, rel, leaf_policy="content", expected_content_hash=content_hash(page.read_text(encoding="utf-8"))
+    )
+
+    with pytest.raises(OpError) as busy:
+        relation_review.refuse_busy_if_only_auxiliary_changed(vault, (guard,))
+    assert busy.value.code == "MUTATION_BUSY"
+    assert busy.value.details["committed"] is False
+    assert busy.value.details["cause"] == "auxiliary_changed"
+
+    page.write_text(page.read_text(encoding="utf-8").replace("Before.", "Someone else."), encoding="utf-8")
+    assert relation_review.refuse_busy_if_only_auxiliary_changed(vault, (guard,)) is None
 
 
 def test_commit_existing_revalidates_on_census_mismatch_and_surfaces_stale_write(
