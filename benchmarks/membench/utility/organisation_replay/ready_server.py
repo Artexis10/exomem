@@ -106,8 +106,9 @@ class _Warm:
             while True:
                 self.probes += 1
                 # The product's boot warm turn, called as `server_runtime._warm_request_path`
-                # calls it: no log, no session, no heat, and outside `op_activate_context`,
-                # the wrapper that serves the due-state carrier.
+                # calls it: no log, no session, and outside `op_activate_context`, the
+                # wrapper that serves the due-state carrier. It runs the one-time cold heat
+                # seed earlier than the actor's first recall would, the same in both arms.
                 packet = commands._op_activate_context_body(  # noqa: SLF001
                     self.vault_root,
                     server_runtime._REQUEST_PATH_WARM_TURN,  # noqa: SLF001
