@@ -1284,7 +1284,7 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
                         # candidates, so no pass revisits it and no budget counts its absent bytes as room.
                         conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
                         conn.commit()
-                        return False
+                        return True  # The row left the candidates, as in the evicted branch, so paging must not count it as kept.
                 conn.execute("DELETE FROM media_cache WHERE binary_rel = ?", (relative,))
             conn.commit()
             return True
