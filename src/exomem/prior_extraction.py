@@ -108,5 +108,5 @@ def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, 
     withheld = preserve.low_confidence_text(before)
     if withheld:
         # The words OCR withheld stay with the extraction they belong to.
-        lines += [preserve.LOW_CONFIDENCE_OCR_HEADING, "", preserve._cap_extracted_text(withheld), ""]
+        lines += [preserve.low_confidence_block(preserve._cap_extracted_text(withheld))]
     return "\n".join(lines)

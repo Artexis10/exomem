@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -12,14 +13,18 @@ from exomem import (
     extract,
     find_types,
     media_jobs,
+    media_processing,
     media_worker,
     ocr_models,
     preserve,
     prior_extraction,
+    semantic_segments,
 )
 from exomem.find import find
+from exomem.governance import catalog_publication
 from exomem.ocr_facts import OcrFacts
 from exomem.ocr_models import OcrReading, OcrWord
+from exomem.vault import parse_frontmatter
 
 # A Tesseract that writes the .txt and the 12-column .tsv real Tesseract writes (the header
 # row, then one row per word), so the whole path from the subprocess to `find` is ours.
@@ -227,3 +232,92 @@ def test_a_scanned_pdf_page_keeps_all_of_its_text(tmp_path, monkeypatch: pytest.
     monkeypatch.setattr(ocr_models, "read_image", lambda _cmd, _image: reading)
 
     assert extract.extract_text(tmp_path / "scan.pdf").text == "[page 1]\nsteady qz"
+
+
+def test_text_that_holds_the_section_heading_stays_in_the_extraction() -> None:
+    # A screenshot of this very heading is OCR text, and a heading proves no ownership.
+    page = preserve.render_sidecar_extraction(
+        _SIDECAR,
+        text="notes\n## Low-confidence OCR\nmore",
+        engine="tesseract",
+        ocr=OcrFacts(confidence=80.0, low_confidence_text="qz"),
+    )
+
+    assert preserve.extracted_text(page) == "notes\n## Low-confidence OCR\nmore"
+    assert preserve.low_confidence_text(page) == "qz"
+    assert "more" in preserve.without_low_confidence_ocr(page)
+    assert "qz" not in preserve.without_low_confidence_ocr(page)
+
+
+def test_a_photo_whose_every_word_is_doubted_has_empty_text_and_still_counts_as_extracted() -> None:
+    facts = OcrFacts(confidence=31.0, low_confidence_text="qz")
+    page = preserve.render_sidecar_extraction(
+        _SIDECAR,
+        text=extract.ExtractResult("", "image", "tesseract", ocr=facts).sidecar_text,
+        engine="tesseract",
+        ocr=facts,
+    )
+
+    assert preserve.extracted_text(page) == ""
+    assert extract.NO_TEXT_DETECTED not in page
+    assert media_processing.has_completed_transcript(page, media_type="image")
+
+
+def test_a_photo_with_no_words_at_all_says_no_text_was_detected() -> None:
+    page = preserve.render_sidecar_extraction(
+        _SIDECAR,
+        text=extract.ExtractResult("", "image", "tesseract", ocr=OcrFacts(confidence=None)).sidecar_text,
+        engine="tesseract",
+    )
+
+    assert preserve.extracted_text(page) == extract.NO_TEXT_DETECTED
+    assert media_processing.has_completed_transcript(page, media_type="image")
+
+
+def test_a_frame_sidecar_gives_the_scene_matcher_its_kept_words_only(tmp_path: Path) -> None:
+    page = preserve.render_sidecar_extraction(
+        _SIDECAR, text="steady", engine="tesseract", ocr=OcrFacts(confidence=80.0, low_confidence_text="qz")
+    )
+    sidecar = tmp_path / "frame.jpg.md"
+    sidecar.write_text(page, encoding="utf-8")
+
+    assert semantic_segments._frame_ocr_tokens(sidecar) == {"steady"}
+
+
+def test_a_re_rendered_sidecar_does_not_turn_the_withheld_words_into_searchable_notes(vault) -> None:
+    data = b"\x89PNG label"
+    stub = preserve.preserve_bytes(vault, scope="Rental", category="image", filename="label.png", data=data)
+    sidecar = vault / stub.sidecar_path
+    preserve.update_sidecar_extraction(
+        vault, sidecar, text="harbour lantern", engine="tesseract",
+        ocr=OcrFacts(confidence=80.0, low_confidence_text="zyxqv blorft"),
+    )
+    binary = vault / stub.path
+    seen = binary.stat()
+    provenance = media_processing._BinaryProvenance(
+        relative_path=stub.path, original_filename=binary.name, sha256=hashlib.sha256(data).hexdigest(),
+        size=seen.st_size, mtime_ns=seen.st_mtime_ns, ctime_ns=seen.st_ctime_ns,
+        device=seen.st_dev, inode=seen.st_ino,
+    )
+
+    rendered = media_processing._render_pending_sidecar(
+        binary=binary, media_type="image", provenance=provenance, original=sidecar.read_text(encoding="utf-8")
+    )
+
+    frontmatter, body, _marker = parse_frontmatter(rendered)
+    searchable = find_types.ParsedPage(Path("p.md"), "p.md", frontmatter, body, "p", 0.0).search_body
+    assert "harbour lantern" in searchable
+    assert "zyxqv" not in searchable and "blorft" not in searchable
+
+
+def test_the_governed_projection_body_leaves_out_the_withheld_words() -> None:
+    page = preserve.render_sidecar_extraction(
+        _SIDECAR, text="harbour lantern", engine="tesseract", ocr=OcrFacts(confidence=80.0, low_confidence_text="zyxqv")
+    )
+    frontmatter, body, _marker = parse_frontmatter(page)
+    parsed = find_types.ParsedPage(Path("p.md"), "p.md", frontmatter, body, "p", 0.0)
+
+    projected = catalog_publication.search_fields(parsed)["body"]
+
+    assert "harbour lantern" in projected
+    assert "zyxqv" not in projected

@@ -514,7 +514,7 @@ def test_a_photo_with_no_legible_text_is_found_by_its_image_and_shows_no_ocr_noi
     library = _photo_library(vault, vectors)
     sidecar = vault / library[5]
     preserve.update_sidecar_extraction(
-        vault, sidecar, text="(no text detected)", engine="tesseract",
+        vault, sidecar, text="", engine="tesseract",
         ocr=OcrFacts(confidence=31.0, low_confidence_text="zyxqv blorft"),
     )
 

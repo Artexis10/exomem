@@ -1506,7 +1506,10 @@ _EXTRACTED_HEADING = "## Extracted text"
 #: The section after the extracted text that holds the OCR words under the confidence floor. It
 #: stays in the sidecar, and no search field reads it (`without_low_confidence_ocr`).
 LOW_CONFIDENCE_OCR_HEADING = "## Low-confidence OCR"
-_OCR_CONFIDENCE_FIELD = "ocr_confidence"
+#: The machine-written line before that heading, and the cut for the section: a heading proves no
+#: ownership, because the OCR text may hold one, as the notes and artifact sentinels below show.
+SIDECAR_LOW_CONFIDENCE_SENTINEL = "<!-- exomem:sidecar-low-confidence-ocr -->"
+OCR_CONFIDENCE_FIELD = "ocr_confidence"
 SIDECAR_ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
 SIDECAR_PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
 _LEGACY_ARTIFACT_BLOCK_RE = re.compile(
@@ -1545,13 +1548,14 @@ def _extraction_end(content: str, start: int) -> tuple[int, str]:
     return len(content), _END_OF_FILE
 
 
-def _low_confidence_start(content: str, start: int, end: int) -> int | None:
-    """Where `## Low-confidence OCR` begins inside the extraction that spans `[start, end)`.
+def low_confidence_block(words: str) -> str:
+    """The section that holds `words`, from its sentinel to its last line."""
+    return f"{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n{LOW_CONFIDENCE_OCR_HEADING}\n\n{words}\n"
 
-    The section is the last thing a sidecar's extraction holds, so the last heading line wins
-    over one that the OCR text itself contains.
-    """
-    found = content.rfind(f"\n{LOW_CONFIDENCE_OCR_HEADING}\n", start, end + 1)
+
+def _low_confidence_start(content: str, start: int, end: int) -> int | None:
+    """Where the low-confidence section begins inside the extraction that spans `[start, end)`."""
+    found = content.rfind(f"\n{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n", start, end + 1)
     return None if found == -1 else found + 1
 
 
@@ -1581,7 +1585,8 @@ def low_confidence_text(content: str) -> str:
     section = _low_confidence_start(content, start, end)
     if section is None:
         return ""
-    return content[section + len(LOW_CONFIDENCE_OCR_HEADING) : end].strip()
+    opening = f"{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n{LOW_CONFIDENCE_OCR_HEADING}"
+    return content[section:end].removeprefix(opening).strip()
 
 
 def without_low_confidence_ocr(content: str) -> str:
@@ -1591,7 +1596,7 @@ def without_low_confidence_ocr(content: str) -> str:
     The section runs to the machine-owned boundary after the extraction, so the artifact block
     and the preserved notes behind it stay.
     """
-    if LOW_CONFIDENCE_OCR_HEADING not in content:
+    if SIDECAR_LOW_CONFIDENCE_SENTINEL not in content:
         return content
     text = with_newline(content, "\n")
     heading = text.find(_EXTRACTED_HEADING)
@@ -1685,7 +1690,7 @@ _SPEAKER_FIELDS = ("speakers", "speaker_verification")
 _ASR_FIELD_PREFIX = "asr_"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
-    "processing_retryable", "processing_next_action", _OCR_CONFIDENCE_FIELD, *_SPEAKER_FIELDS,
+    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD, *_SPEAKER_FIELDS,
 })
 
 
@@ -1784,8 +1789,8 @@ def asr_language_pin(content: str) -> tuple[str | None, bool]:
 def _set_ocr_confidence(content: str, ocr: OcrFacts | None) -> str:
     """Record the mean word confidence of this extraction's OCR, or drop the one an earlier extraction left."""
     if ocr is None or ocr.confidence is None:
-        return _remove_frontmatter_fields(content, lambda key: key == _OCR_CONFIDENCE_FIELD)
-    return _set_frontmatter_field(content, _OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
+        return _remove_frontmatter_fields(content, lambda key: key == OCR_CONFIDENCE_FIELD)
+    return _set_frontmatter_field(content, OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
 
 
 def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
@@ -2044,7 +2049,7 @@ def _set_extracted_text(content: str, text: str, low_confidence: str = "") -> st
     """
     block = f"{_EXTRACTED_HEADING}\n\n{text}\n"
     if low_confidence:
-        block += f"\n{LOW_CONFIDENCE_OCR_HEADING}\n\n{low_confidence}\n"
+        block += "\n" + low_confidence_block(low_confidence)
     idx = content.find(_EXTRACTED_HEADING)
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block

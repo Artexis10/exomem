@@ -46,10 +46,10 @@ def without_low_confidence_ocr(body: str, frontmatter: Mapping[str, Any]) -> str
     Only a page that records OCR output has the section: a media sidecar, or the prior-extraction
     page that keeps its `ocr_confidence`. A note an author titled the same way keeps its text.
     """
-    if not (frontmatter.get("media_type") or "ocr_confidence" in frontmatter):
-        return body
     from . import preserve
 
+    if not (frontmatter.get("media_type") or preserve.OCR_CONFIDENCE_FIELD in frontmatter):
+        return body
     return preserve.without_low_confidence_ocr(body)
 
 
