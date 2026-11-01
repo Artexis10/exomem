@@ -213,3 +213,34 @@ def test_a_boundary_held_past_the_wait_at_file_two_fails_that_file_and_keeps_fil
     assert (vault / first["stored_path"]).is_file()
     assert [second["outcome"], third["outcome"]] == ["failed", "failed"], result
     assert second["code"] == third["code"] == "MUTATION_BUSY"
+    # A repeat of the identical call replays the settled batch, so the reason must send the
+    # caller to a new call for the failed files.
+    assert "new call" in second["reason"] and "failed files" in second["reason"]
+
+
+def test_a_busy_raised_after_a_files_commit_is_not_reported_as_a_failed_item(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import add as add_module
+    from exomem.cli_ops import OpError
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_each(tmp_path))
+    real_add = add_module.add
+    calls: list[str] = []
+
+    def add_that_ends_busy_after_committing_file_b(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        result = real_add(*args, **kwargs)
+        calls.append(kwargs["artifact"].filename)
+        if kwargs["artifact"].filename == "file-b.bin":
+            # `_mutation_busy` reports committed false wherever it is raised, even after the commit.
+            raise OpError("MUTATION_BUSY", "busy after its commit", details={"committed": False})
+        return result
+
+    monkeypatch.setattr(add_module, "add", add_that_ends_busy_after_committing_file_b)
+    writer, _holder = _managers(vault.parent / "state")
+    try:
+        result = _capture_command(writer, vault, ("file-a", "file-b"))
+    except OpError:
+        return
+    assert "file-b.bin" in calls
+    assert all(file.get("code") != "MUTATION_BUSY" for file in result.get("files", [])), result

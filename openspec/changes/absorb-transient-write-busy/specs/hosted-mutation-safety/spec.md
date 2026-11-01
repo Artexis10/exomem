@@ -41,6 +41,9 @@ A write whose server-planned navigation auxiliary (index, subindex or log) chang
 - **WHEN** a multi-file `capture_source` or `preserve_artifacts` batch finds the boundary held past the wait at file k
 - **THEN** file k ends as `failed` with the retryable code `MUTATION_BUSY`, and each later file is tried on its own
 - **AND** every earlier file keeps its stored outcome and the batch ends committed-partial
+- **AND** a busy raised after a file's own commit is never reported as that file's failure
+- **AND** the batch's identity is settled once any file commits, so a repeat of the identical call replays the batch and does not retry file k
+- **AND** the `reason` of file k tells the caller to retry it in a new call that names only the failed files
 
 #### Scenario: A credential issuance meets a held boundary
 

@@ -667,13 +667,27 @@ def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, st
     return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": reason}
 
 
-def _busy_failed(file_id: str, error: OpError) -> dict[str, str]:
+#: Once any file commits, the batch's identity is settled and a repeat of the identical call
+#: replays it, so a busy file is retried by a new call that names only the failed files.
+_BUSY_FILE_REASON = (
+    "The boundary was busy; this file was not stored. "
+    "Retry it in a new call that names only the failed files."
+)
+
+
+def _busy_failed(file_id: str) -> dict[str, str]:
     """A file's commit refused before it began: failed with the retryable busy code, so the batch keeps its other files."""
-    return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": error.message[:300]}
+    return {"file_id": file_id, "outcome": "failed", "code": "MUTATION_BUSY", "reason": _BUSY_FILE_REASON}
 
 
-def _refused_before_commit(error: OpError) -> bool:
-    return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+def _refused_before_commit(error: OpError, *, body_started: bool) -> bool:
+    # `_mutation_busy` reports committed false even when raised after the canonical commit
+    # (e.g. at catalog publication), so only a busy raised before the file's body ran is safe.
+    return (
+        not body_started
+        and error.code == "MUTATION_BUSY"
+        and error.details.get("committed") is False
+    )
 
 
 #: The three terminal states one preserved file can end in. `outcome` mirrors
@@ -1547,6 +1561,7 @@ def capture_source_artifacts(
     refusals: list[OpError] = []
     try:
         for index, artifact in staged.items():
+            body_started = False
             try:
                 if (
                     not artifact.file_id
@@ -1564,6 +1579,7 @@ def capture_source_artifacts(
                     request_id=active_mutation_request_id(),
                     operation="capture_source_artifacts_commit",
                 ):
+                    body_started = True
                     result = add_module.add(
                         vault_root,
                         source_schema,
@@ -1610,9 +1626,9 @@ def capture_source_artifacts(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
                 )
             except OpError as error:
-                if not _refused_before_commit(error):
+                if not _refused_before_commit(error, body_started=body_started):
                     raise
-                outcomes[index] = _busy_failed(artifact.file_id, error)
+                outcomes[index] = _busy_failed(artifact.file_id)
                 refusals.append(error)
     finally:
         _release_staged(vault_root, staged, outcomes)
@@ -1704,6 +1720,7 @@ def preserve_artifacts(
     refusals: list[OpError] = []
     try:
         for index, artifact in staged.items():
+            body_started = False
             try:
                 if (
                     not artifact.file_id
@@ -1755,6 +1772,7 @@ def preserve_artifacts(
                     request_id=active_mutation_request_id(),
                     operation="preserve_artifacts_commit",
                 ):
+                    body_started = True
                     with artifact.path.open("rb") as stream:
                         result = preserve_stream(
                             vault_root,
@@ -1830,9 +1848,9 @@ def preserve_artifacts(
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
             except OpError as error:
-                if not _refused_before_commit(error):
+                if not _refused_before_commit(error, body_started=body_started):
                     raise
-                outcomes[index] = _busy_failed(artifact.file_id, error)
+                outcomes[index] = _busy_failed(artifact.file_id)
                 refusals.append(error)
     finally:
         _release_staged(vault_root, staged, outcomes)
