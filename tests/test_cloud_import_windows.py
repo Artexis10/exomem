@@ -48,6 +48,9 @@ class FakeCell(Cell):
         self.calls: list[dict] = []
         self.acknowledged: list[tuple[str, list[str], int]] = []
         self.refill: int | None = None
+        self.windows_unknown: str | None = None
+        self.largest: int = 960
+        self.inline: int = 4 << 20
         self.before_reply = lambda call: None
 
     async def status(self, *, series_id=None, next_window_bytes=None, after=None) -> dict:
@@ -69,7 +72,10 @@ class FakeCell(Cell):
         residual = sum(len(w.get("members", [])) for w in windows if w["state"] == "discarded")
         keep = {"keep": bool(unfiled or residual),
                 "message": f"Keep the source folder: {unfiled} unfiled and {residual} discarded, not filed." if unfiled or residual else None}
-        reply = {"import_windows": {"counts": {}, "windows": windows, "keep_source": keep, "next_after": None}}
+        # The real `report()` leaves `import_windows` out when the cell holds no window record.
+        reply = {"import_windows": {"counts": {}, "windows": windows, "keep_source": keep, "next_after": None}} if windows else {}
+        if self.windows_unknown:  # The cell cannot list its records: no `windows` key at all, as the real reply has it.
+            reply = {"import_windows": {"unknown": self.windows_unknown, "keep_source": {"keep": True, "message": "Keep the source folder."}}}
         if not self.older:
             allowance = ({"unknown": self.allowance} if isinstance(self.allowance, str)
                          else {"allowance_bytes": BIG, "remaining_bytes": self.allowance})
@@ -77,7 +83,7 @@ class FakeCell(Cell):
                 "window_budget": self.figure(self.budget), "reachable_budget": self.figure(self.reachable),
                 "job_pinned": self.figure(self.pinned), "effective_file_limit": self.figure(self.effective),
                 "classification": {"object_bound": None, "hydration_bytes": HYDRATION, "volume_fraction": 0.25,
-                                   "volume_bytes": VOLUME, "inline_text_limit": 4 << 20, "largest_offloadable_file": 960},
+                                   "volume_bytes": VOLUME, "inline_text_limit": self.inline, "largest_offloadable_file": self.largest},
                 "media_allowance": allowance, "volume": {"used_bytes": self.used}}
         return reply
 
@@ -107,6 +113,33 @@ class FakeCloud:
         self.limits: dict | None = None
         self.refuse_when = lambda members: False
         self.refuse_registration = False
+        self.refusal_code = "STORAGE_ALLOWANCE_EXCEEDED"
+        self.holding = False  # A landing stays `uploaded` until `release()`, or until the third row read once `read_count` is 0.
+        self.held: list[str] = []
+        self.fail_next_read = False
+        self.read_count: int | None = None
+        self.fail_prepare_once = False
+        self.short_parts_once = False
+        self.creates = 0  # Every create request, including the ones that Cloud refuses.
+
+    @staticmethod
+    def holds_cell(row: dict) -> bool:
+        """Substrate's unique index of open imports (migration 0061): a cell holds at most one such row."""
+        closed = row["observed_state"] in ("done", "failed", "expired", "discarded")
+        return not closed or (row["requested_state"] == "discard_requested" and row["observed_state"] != "discarded")
+
+    def open_another_import(self) -> None:
+        """An import that this series did not create, such as an upload from Home, is open on the cell."""
+        self.rows["another-import"] = {"declaration": {}, "import_id": "another-import", "requested_state": "requested",
+                                       "observed_state": "key_ready", "recipient": self.recipient}
+
+    def release(self) -> None:
+        """Cloud finishes every import that it held."""
+        for import_id in self.held:
+            self.rows[import_id].update(observed_state="done")
+            self.completed.append(import_id)
+            self.rig.cell.landed(import_id, len([name for name in self.members[import_id] if name != import_stage.SERIES_FILE]))
+        self.held.clear()
 
     def _api(self, request):
         path = request.url.path
@@ -116,19 +149,47 @@ class FakeCloud:
         if request.method == "POST" and path == base:
             if self.refuse_registration:
                 return httpx2.Response(503, json={"error": {"code": "STORE_UNAVAILABLE"}})
+            self.creates += 1
             body = json.loads(request.content)
-            self.rows[body["import_id"]] = {"import_id": body["import_id"], "requested_state": "requested",
+            known = self.rows.get(body["import_id"])
+            if known is not None:  # Cloud replays a known ID whatever its state, and refuses a changed declaration.
+                declared = {key: body[key] for key in ("kind", "declared_bytes", "declared_files")}
+                if declared != known["declaration"]:
+                    return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
+                return httpx2.Response(200, json={"import": known})
+            if any(self.holds_cell(row) for row in self.rows.values()):  # The insert violates the open-import index.
+                return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
+            self.rows[body["import_id"]] = {"declaration": {key: body[key] for key in ("kind", "declared_bytes", "declared_files")},
+                                            "import_id": body["import_id"], "requested_state": "requested",
                                             "observed_state": "key_ready", "recipient": self.recipient}
             self.registered_at.append(self.rig.now)
             self.registered_calls.append(len(self.rig.cell.calls))
             return httpx2.Response(200, json={"import": self.rows[body["import_id"]]})
         import_id = path.removeprefix(base + "/").split("/")[0]
+        if import_id not in self.rows:
+            return httpx2.Response(404, json={"error": {"code": "IMPORT_NOT_FOUND"}})
         row = self.rows[import_id]
+        if request.method == "GET" and import_id in self.held:
+            if self.fail_next_read:
+                self.fail_next_read = False
+                raise httpx2.ConnectError("interrupted")
+            if self.read_count is not None:
+                self.read_count += 1
+                if self.read_count >= 3:
+                    self.release()
+        if request.method == "POST" and row["observed_state"] == "failed":
+            return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
         if request.method == "POST" and path.endswith("/prepare-upload"):
+            if self.fail_prepare_once:
+                self.fail_prepare_once = False
+                raise httpx2.ConnectError("interrupted")
             size = json.loads(request.content)["ciphertext_bytes"]
-            row["requested_state"] = "prepared"
+            row["requested_state"] = "requested"  # Substrate keeps `requested` until the upload completes.
             row["part_urls"] = [{"part_number": n + 1, "part_size_bytes": min(5000, size - offset),
                                  "url": f"https://storage.example/{import_id}/{n + 1}"} for n, offset in enumerate(range(0, size, 5000))]
+            if self.short_parts_once:  # The issued parts do not cover the encrypted copy.
+                self.short_parts_once = False
+                row["part_urls"][0]["part_size_bytes"] -= 1
         elif request.method == "POST" and path.endswith("/complete"):
             self._land(import_id, row)
         return httpx2.Response(200, json={"import": row})
@@ -139,7 +200,11 @@ class FakeCloud:
         with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
             self.members[import_id] = {m.name: archive.extractfile(m).read() for m in archive if m.isfile()}
         if self.refuse_when(self.members[import_id]):
-            row.update(observed_state="failed", error_code="STORAGE_ALLOWANCE_EXCEEDED")
+            row.update(observed_state="failed", error_code=self.refusal_code)
+            return
+        if self.holding:
+            row.update(requested_state="uploaded", observed_state="uploaded")
+            self.held.append(import_id)
             return
         row.update(requested_state="uploaded", observed_state="done")
         self.completed.append(import_id)
@@ -255,8 +320,8 @@ def test_an_unknown_budget_waits_and_reports_the_reason(rig):
 def test_a_window_that_another_series_landing_no_longer_fits_is_not_created(rig):
     """Catches a create that trusts the first reading: the CLI reads the budget again right before it."""
     rig.files(a01__bin=800)
-    # Calls: the first read, the preflight read, the resume read, the sizing read (3), then the read before the create (4).
-    gate = 4
+    # Calls: the first read (0), the resume read (1), the sizing read (2), then the read before the create (3).
+    gate = 3
 
     def another_series_lands(call):
         if call["number"] == gate:
@@ -627,3 +692,433 @@ def test_a_resend_sends_no_member_of_a_window_that_is_not_discarded_yet(rig):
 
     assert len(rig.cloud.completed) == landed
     assert rig.cell.acknowledged == []
+
+
+# -- Review round 1
+
+
+def _stopped_after_two_windows(rig: Rig, count: int = 4) -> list[str]:
+    """`count` one-member windows; the run stops once two have landed. Returns the two landed import IDs."""
+    rig.files(**{f"a{n}__bin": 800 for n in range(1, count + 1)})
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+    original = rig.cell.landed
+
+    def landed(import_id, size):
+        original(import_id, size)
+        if len(rig.cloud.completed) == 2:
+            rig.cell.allowance = 0
+
+    rig.cell.landed = landed
+    with pytest.raises(CloudImportError):
+        rig.run()
+    rig.cell.landed = original
+    rig.cell.allowance = BIG
+    return list(rig.cloud.completed)
+
+
+def test_a_rerun_waits_while_the_cell_cannot_list_its_receipts_and_resends_no_landed_window(rig):
+    """Catches a rerun that reads an unknown receipt listing as "no receipts" and sends every landed window again."""
+    _stopped_after_two_windows(rig)
+    rig.cell.windows_unknown = "the window records cannot be listed"
+    rerun_starts = len(rig.cell.calls)
+    rig.cell.before_reply = lambda call: setattr(rig.cell, "windows_unknown", None) if call["number"] > rerun_starts + 3 else None
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a2.bin", "a3.bin", "a4.bin"]
+    assert len(rig.cloud.rows) == 4
+    assert "cannot be listed" in rig.said()
+
+
+def test_a_rerun_stops_with_the_notice_when_the_receipt_listing_stays_unknown(rig):
+    """Catches a rerun that never stops on a listing that stays unknown."""
+    _stopped_after_two_windows(rig)
+    rig.cell.windows_unknown = "the window records cannot be listed"
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+    assert len(rig.cloud.rows) == 2
+
+
+def test_a_resend_stops_when_the_cell_cannot_list_the_residual_records(rig):
+    """Catches a resend that reads an unknown listing as "nothing to resend" and ends ok."""
+    _series_with_a_residual(rig)
+    rig.cell.windows_unknown = "the window records cannot be listed"
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(resend_residual=True)
+
+    assert "cannot be listed" in stop.value.message and "keep" in stop.value.message.lower()
+
+
+def test_a_resume_on_a_cell_that_reports_no_window_budget_stops_instead_of_sending_the_folder_as_one_import(rig):
+    """Catches a resume that takes the one-import path and sends every member again."""
+    _stopped_after_two_windows(rig)
+    rig.cell.older = True
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+    assert len(rig.cloud.rows) == 2
+
+
+def test_a_failed_status_call_after_a_window_landed_stops_with_the_notice(rig):
+    """Catches a mid-series error that says nothing about the members that are not in Exomem."""
+    from fastmcp.exceptions import ToolError
+
+    rig.files(a1__bin=800, a2__bin=800)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+
+    def fail(call):
+        if rig.cloud.completed:
+            raise ToolError("boom")
+
+    rig.cell.before_reply = fail
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+
+
+def test_a_failed_acknowledge_call_in_a_resend_stops_with_the_notice(rig):
+    """Catches a failed clearing call that says nothing about the members that are not in Exomem."""
+    from fastmcp.exceptions import ToolError
+
+    _series_with_a_residual(rig)
+    rig.cell.discard(_window_of(rig, "a2.bin"), ["a2.bin"])
+
+    async def broken(import_id, paths):
+        raise ToolError("boom")
+
+    rig.cell.acknowledge = broken
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(resend_residual=True)
+
+    assert NOT_IN_EXOMEM in stop.value.message
+
+
+def test_a_changed_or_vanished_unsent_member_is_skipped_and_listed_and_the_rest_goes_on(rig):
+    """Catches a rerun that stops for ever on a member that changed, with a restart that would send everything again."""
+    _stopped_after_two_windows(rig, count=5)
+    (rig.source / "a3.bin").write_bytes(b"changed after the series began")
+    (rig.source / "a4.bin").unlink()
+
+    rig.run()
+    rig.run()  # A second rerun neither stops nor sends anything.
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a2.bin", "a5.bin"]
+    assert "a3.bin" in rig.said() and "a4.bin" in rig.said()
+
+
+def test_a_stop_right_after_a_window_lands_does_not_send_that_window_again(rig):
+    """Catches a rerun that sends a window twice when the stop came before the record said it landed."""
+    from exomem.cloud_import_windows import Series
+
+    rig.files(a1__bin=800, a2__bin=800)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+    write, failed = Series.write, []
+
+    def flaky(self, path):
+        if not failed and any(window.state == "landed" for window in self.windows):
+            failed.append(True)
+            raise OSError("the disk is full")
+        write(self, path)
+
+    Series.write = flaky
+    try:
+        with pytest.raises(CloudImportError):
+            rig.run()
+    finally:
+        Series.write = write
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a2.bin"]
+    assert len(rig.cloud.rows) == 2
+
+
+@pytest.mark.parametrize("limits", [{"space_factor": "2", "reserve_bytes": 1000}, {"space_factor": 2, "reserve_bytes": 1.5}])
+def test_a_published_limit_that_cannot_be_read_waits_as_unknown_instead_of_meaning_no_limit(rig, limits):
+    """Catches an unreadable published limit that is read as "no limit" and sends the window."""
+    rig.files(a1__bin=800)
+    rig.cloud.limits = limits
+
+    with pytest.raises(CloudImportError):
+        rig.run()
+
+    assert rig.cloud.completed == []
+    assert "limit" in rig.said()
+
+
+def test_the_cli_classifies_text_with_the_inline_limit_that_the_cell_reports(rig):
+    """Catches a classification by the CLI's own copy of the rule: a 500-byte note that the cell does not read as text."""
+    rig.files(a01__md=500, b01__bin=800)
+    rig.cell.inline = 100
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+
+    rig.run()
+
+    assert rig.cloud.sent(rig.cloud.completed[0]) == {"a01.md"}  # Offloadable files go first; with the local rule it is text and goes last.
+
+
+def test_the_cli_classifies_artifacts_with_the_largest_offloadable_file_that_the_cell_reports(rig):
+    """Catches a classification by the CLI's own copy of the rule: a 3000-byte file that the cell would offload."""
+    rig.files(a01__bin=3000)
+    rig.cell.largest = 5000
+    rig.cell.allowance = 0
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert "allowance exhausted" in stop.value.message
+
+
+def test_a_series_that_the_preflight_refuses_records_no_demand(rig):
+    """Catches a demand that a refused series leaves behind at the cell."""
+    rig.files(a1__bin=800)
+    rig.cell.effective = 100
+
+    with pytest.raises(CloudImportError):
+        rig.run()
+
+    assert [call["next_window_bytes"] for call in rig.cell.calls if call["next_window_bytes"] is not None] == []
+
+
+# -- Review round 2
+
+
+def test_a_rerun_after_a_restore_that_lost_every_receipt_sends_the_landed_windows_again(rig):
+    """Catches an absent window listing read as unknown: the rerun waits two hours and stops instead of sending again."""
+    _stopped_after_two_windows(rig)
+    rig.cell.windows.clear()  # The cell holds no window record, so its reply has no `import_windows` key.
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a1.bin", "a2.bin", "a2.bin", "a3.bin", "a4.bin"]
+
+
+def _fail_the_first_landing(rig: Rig) -> CloudImportError:
+    rig.files(a01__bin=800, a02__bin=800)
+    refused = []
+    rig.cloud.refusal_code = "ARCHIVE_UNREADABLE"
+    rig.cloud.refuse_when = lambda members: not refused and not refused.append(True)
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+    assert stop.value.code == "ARCHIVE_UNREADABLE"
+    return stop.value
+
+
+def test_a_window_whose_attempt_ended_failed_is_sent_again_under_a_new_import_and_lands_once(rig):
+    """Catches a window pinned to the import ID of a dead attempt, which Cloud replays on every rerun."""
+    assert _fail_the_first_landing(rig).resume, "the stop must say that a rerun goes on"
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+    assert len(rig.cloud.rows) == 2
+
+
+def test_a_window_whose_member_changed_after_a_failed_attempt_is_sent_again_under_a_new_import(rig):
+    """Catches a rerun that gets IMPORT_CONFLICT for a changed declaration under the old import ID."""
+    _fail_the_first_landing(rig)
+    (rig.source / "a02.bin").write_bytes(b"changed before the retry")
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a01.bin"]
+    assert "a02.bin" in rig.said()
+
+
+def test_a_window_whose_copy_was_deleted_while_cloud_still_imports_it_lands_once(rig):
+    """Catches a window sent again under a new import while Cloud still imports the first one."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError) as first:
+        rig.run(poll_seconds=0.001)
+    assert first.value.code == "NETWORK_ERROR"
+    for held in rig.tmp.glob("checkpoint/window-*/archive.age"):
+        held.unlink()  # The person follows the CLI's own advice to delete the encrypted copy.
+    rig.cloud.read_count = 0  # Cloud finishes the first import on the third read of its row.
+
+    for _ in range(3):  # Each rerun is the same command.
+        try:
+            rig.run(poll_seconds=0.001)
+            break
+        except CloudImportError:
+            continue
+    rig.cloud.release()
+
+    assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_window_whose_encrypted_copy_changed_before_complete_keeps_its_import_and_says_the_rerun_replays_it(rig):
+    """Catches a client abandon that gives the window a new import while the old one may still be open."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.fail_prepare_once = True
+    with pytest.raises(CloudImportError):
+        rig.run()
+    for held in rig.tmp.glob("checkpoint/window-*/archive.age"):
+        held.write_bytes(held.read_bytes() + b"x")
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "CIPHERTEXT_CHANGED"
+    assert abandoned.value.resume and "start a new run" not in abandoned.value.message
+
+    rig.run()
+
+    assert len(rig.cloud.rows) == 1 and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_member_change_does_not_give_a_new_import_to_a_window_that_cloud_is_still_importing(rig):
+    """Catches a renewal after a changed member while the old import is live, which lands the window twice."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError):
+        rig.run(poll_seconds=0.001)
+    for held in rig.tmp.glob("checkpoint/window-*/*"):
+        held.unlink()
+    (rig.source / "a02.bin").write_bytes(b"changed before the retry")
+
+    rig.cloud.read_count = 0  # Cloud finishes what it holds on the third read of a row.
+
+    for _ in range(3):  # Each rerun is the same command.
+        try:
+            rig.run(poll_seconds=0.001)
+            break
+        except CloudImportError:
+            continue
+    rig.cloud.release()
+
+    assert len(rig.cloud.rows) == 1 and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_resumed_run_whose_first_call_fails_still_says_what_is_not_in_exomem(rig):
+    """Catches a failure on the first network call of a rerun that carries no notice."""
+    from fastmcp.exceptions import ToolError
+
+    _stopped_after_two_windows(rig)
+
+    def fail(call):
+        raise ToolError("boom")
+
+    rig.cell.before_reply = fail
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+
+
+def test_a_skipped_member_adds_to_the_cells_keep_the_source_message_and_does_not_replace_it(rig):
+    """Catches a final message that drops what the cell says about unfiled members."""
+    _stopped_after_two_windows(rig, count=5)
+    (rig.source / "a3.bin").write_bytes(b"changed after the series began")
+
+    rig.run()
+
+    assert "unfiled" in rig.said() and "1 files were not sent" in rig.said()
+
+
+# -- Review round 4
+
+
+def _stop_with_cloud_importing_slowly_then_change_a_member(rig: Rig) -> None:
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError):
+        rig.run(poll_seconds=0.001)
+    for folder in rig.tmp.glob("checkpoint/window-*"):
+        (folder / "checkpoint.json").unlink()
+    (rig.source / "a02.bin").write_bytes(b"changed after the upload")
+
+
+# -- Review round 5: one open import per cell, and the window's identity rules (a) to (d) in cloud_import_windows.py
+
+
+def _first_window(rig: Rig) -> dict:
+    """The first window of the series record: its import ID and the IDs of its earlier attempts."""
+    return json.loads((rig.tmp / "checkpoint" / "series.json").read_text())["windows"][0]
+
+
+def test_rule_d_a_window_whose_create_meets_another_open_import_stops_at_once_and_goes_on_once_that_import_ends(rig):
+    """R1 and rule (d): catches a conflict read as a dead attempt, which renews and creates again until RecursionError."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.open_another_import()
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.code == "IMPORT_CONFLICT" and stop.value.resume
+    assert "another import is open; cancel it in Home or wait for it to end" in stop.value.message
+    assert NOT_IN_EXOMEM in stop.value.message
+    assert rig.cloud.creates == 1
+    first = _first_window(rig)["import_id"]
+    rig.cloud.rows["another-import"].update(observed_state="done")
+    assert rig.run()["import_ids"] == [first] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_a_member_change_after_an_abandoned_upload_stops_while_that_attempt_holds_the_cell(rig):
+    """R2: catches a never-uploaded attempt read as over: the new import conflicts with it and the run loops."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.short_parts_once = True
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "PARTS_INVALID"
+    (rig.source / "a02.bin").write_bytes(b"changed after the abandon")
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.resume and "earlier attempt of this window" in stop.value.message
+    assert len(rig.cloud.rows) == 1 and rig.cloud.creates == 2
+
+
+@pytest.mark.parametrize("requested, observed", [
+    ("requested", "key_ready"), ("uploaded", "importing"), ("uploaded", "done"), ("discard_requested", "failed")])
+def test_rule_a_a_window_keeps_its_import_while_cloud_holds_its_earlier_attempt_open_or_done(rig, requested, observed):
+    """Rule (a): catches a new import ID while the earlier attempt is open or done, which lands the window twice or loops."""
+    _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+    before = _first_window(rig)["import_id"]
+    rig.cloud.rows[before].update(requested_state=requested, observed_state=observed)  # The cell lists no receipt for it.
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(poll_seconds=0.001)
+
+    assert stop.value.resume and "earlier attempt of this window" in stop.value.message
+    assert _first_window(rig)["import_id"] == before and _first_window(rig)["attempts"] == []
+    assert len(rig.cloud.rows) == 1
+
+
+def test_rule_b_a_window_gets_one_new_import_per_ended_attempt_and_retries_its_send_once(rig):
+    """Rule (b): catches a renewal that repeats: a retry or rerun that meets another open import keeps the new ID."""
+    _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+    old = _first_window(rig)["import_id"]
+    rig.cloud.rows[old].update(observed_state="failed")
+    rig.cloud.open_another_import()
+
+    for creates in (3, 4):  # The renewal and its one retry, then a rerun that keeps the new ID.
+        with pytest.raises(CloudImportError) as stop:
+            rig.run(poll_seconds=0.001)
+        assert "another import is open" in stop.value.message and stop.value.resume
+        assert rig.cloud.creates == creates and _first_window(rig)["attempts"] == [old]
+
+
+@pytest.mark.parametrize("observed", ["failed", "expired", "discarded"])
+def test_rule_c_after_cloud_ends_the_earlier_attempt_the_next_run_sends_the_window_once_under_a_new_import(rig, observed):
+    """Rule (c): catches an ended attempt that is not read as over, so the window stays pinned to it and never goes on."""
+    _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+    with pytest.raises(CloudImportError):
+        rig.run(poll_seconds=0.001)  # Cloud still holds the earlier attempt.
+    old = _first_window(rig)["import_id"]
+    rig.cloud.rows[old].update(observed_state=observed)
+    rig.cloud.holding = False  # Cloud lands the new import at once.
+
+    result = rig.run(poll_seconds=0.001)
+
+    assert rig.cloud.all_sent() == ["a01.bin"]
+    assert len(rig.cloud.rows) == 2 and old not in result["import_ids"]

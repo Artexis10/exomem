@@ -66,6 +66,10 @@ class CloudImportError(Exception):
         self.import_id = import_id
         # False when a rerun cannot continue this import; the message then says what a rerun does instead.
         self.resume = resume
+        # True when Cloud reported that the import itself ended (failed, expired or discarded).
+        self.ended = False
+        # Set when the client abandoned a checkpoint it could not resume; Cloud's import may still be open.
+        self.why: str | None = None
 
 
 # Home's Cancel reaches every cell; the `import_cancel` action may not reach an older one, so both are named.
@@ -130,6 +134,8 @@ class Window:
 
     selection: import_selection.Selection
     series_file: bytes
+    # The import ID that the series records before the send, so a rerun finds the window's receipt by it.
+    import_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -326,11 +332,13 @@ def _abandoned(record: Path, ciphertext: Path, import_id: str, code: str, why: s
     """Remove a checkpoint that cannot resume, and say what happens next and how to stop the open import."""
     record.unlink(missing_ok=True)
     ciphertext.unlink(missing_ok=True)
-    return CloudImportError(
+    error = CloudImportError(
         phase, code,
         f"{why}. The checkpoint is removed. Cancel Cloud import {import_id}: {_STOP_ON_CLOUD}, "
         "then start a new run, which starts a new import",
         import_id, resume=False)
+    error.why = why
+    return error
 
 
 def _coded(where: _Where, error: Exception) -> CloudImportError:
@@ -450,7 +458,7 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
                     _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore,
                                progress=progress, max_members=max_members))
             _check_resources(plan, checkpoint, progress, free_bytes, reserve_bytes)
-            state = {"source": str(source), "config": asdict(config), "import_id": str(uuid.uuid4()),
+            state = {"source": str(source), "config": asdict(config), "import_id": (window.import_id if window else None) or str(uuid.uuid4()),
                      "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
                      "envelope": envelope.model_dump() if envelope else None, "selection": options}
             where.import_id = state["import_id"]
@@ -482,9 +490,11 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             if item["observed_state"] in ("failed", "expired", "discarded"):
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
-                raise CloudImportError(where.phase, safe_code(item.get("error_code")) or "IMPORT_ENDED",
-                                       "the Cloud import ended without finishing, and the checkpoint is removed; "
-                                       "a new run starts a new import", state["import_id"], resume=False)
+                ended = CloudImportError(where.phase, safe_code(item.get("error_code")) or "IMPORT_ENDED",
+                                         "the Cloud import ended without finishing, and the checkpoint is removed; "
+                                         "a new run starts a new import", state["import_id"], resume=False)
+                ended.ended = True
+                raise ended
             if predicate(item):
                 return item
             if time.monotonic() >= deadline:
@@ -492,7 +502,7 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             await asyncio.sleep(poll_seconds)
 
     def finished(result: dict) -> dict:
-        if "ciphertext_bytes" in state:
+        if "ciphertext_bytes" in state and ciphertext.exists():
             progress.say(f"Removed the encrypted copy ({human_bytes(state['ciphertext_bytes'])}) from {checkpoint}.")
         ciphertext.unlink(missing_ok=True)
         record.unlink(missing_ok=True)
@@ -503,6 +513,10 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
         where.phase = REGISTER
         await call("POST", base, json={name: state[name] for name in (
             "import_id", "kind", "declared_bytes", "declared_files")})
+        if state.get("completed"):
+            # Cloud holds the whole upload, so the encrypted copy is no longer needed: wait on Cloud's state.
+            where.phase = SERVER_IMPORT
+            return finished(await wait_for(lambda row: row["observed_state"] == "done"))
         item = await wait_for(lambda row: row.get("recipient") or row["observed_state"] == "done")
         if item["observed_state"] == "done":
             return finished(item)
@@ -582,6 +596,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             await call("POST", endpoint + "/complete", json={**cipher, "part_etags": [
                 {"part_number": part["part_number"], "etag": state["parts"][str(part["part_number"]) ]}
                 for part in parts]})
+            state["completed"] = True
+            _private_json(record, state)
         where.phase = SERVER_IMPORT
         result = await wait_for(lambda row: row["observed_state"] == "done")
         return finished(result)
