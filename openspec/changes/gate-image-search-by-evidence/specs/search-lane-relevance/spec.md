@@ -29,11 +29,11 @@ The CLIP lane in `find` SHALL admit an image or video keyframe only when its sim
 
 ### Requirement: The CLIP Lane Trace Reports The Band
 
-The lane trace SHALL report the band as `applied`, `uncalibrated`, `off` or `not_attempted`. It SHALL report the number of distinct pages that the band withheld from the results the lane would return without it.
+The lane trace SHALL report the band as `applied`, `uncalibrated`, `off` or `not_attempted`. It SHALL report the number of distinct pages that the band removed from the rows the lane fetches before the band, which are the highest-scoring index rows among the request's allowed images.
 
 #### Scenario: The trace counts pages, not index rows
 
-- **WHEN** the band withholds several keyframes of one video from the lane's top results
+- **WHEN** the band removes several keyframes of one video from the rows the lane fetched
 - **THEN** the trace counts that video once
 
 #### Scenario: An empty candidate set is not called uncalibrated
