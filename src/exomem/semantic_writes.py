@@ -2533,18 +2533,20 @@ def _commit_existing_locked(
                 _vocabulary_auxiliaries=manifest,
                 _validate_prepared_bindings=validate_bindings,
             )
-    except vault.PathGuardError:
+    except vault.PathGuardError as error:
         _recheck_origin_guards(root, origin_guards)
-        relation_review.refuse_busy_if_only_auxiliary_changed(
-            root,
-            (
-                preflight.primary_guard,
-                *required_guards,
-                *origin_guards,
-                *preflight.read_dependency_guards,
-                *source_guards,
-            ),
-        )
+        if error.code != "PATH_VARIANT_EXISTS":
+            vault.refuse_busy_if_planned_write_moved(
+                root,
+                (
+                    preflight.primary_guard,
+                    *required_guards,
+                    *origin_guards,
+                    *preflight.read_dependency_guards,
+                    *source_guards,
+                ),
+                (write for write in writes if write is not primary_write),
+            )
         raise
     try:
         catalog_publication.publish_markdown_batch(catalog_target)
@@ -5149,6 +5151,7 @@ def _commit_structural(
         root, planned, operation=operation, status_basis=status_basis, judged=judged
     )
     writes = [*shared_writes, *(write for item in planned for write in item.auxiliaries)]
+    auxiliary_writes = tuple(writes)
     primary_writes = [
         vault.PlannedWrite(
             root / item.preflight.destination,
@@ -5217,7 +5220,7 @@ def _commit_structural(
         if error.code == "PATH_VARIANT_EXISTS":
             raise SemanticWriteError(error.code, error.reason) from error
         _recheck_origin_guards(root, origin_guards)
-        relation_review.refuse_busy_if_only_auxiliary_changed(
+        vault.refuse_busy_if_planned_write_moved(
             root,
             (
                 *vocabulary_guards,
@@ -5225,8 +5228,9 @@ def _commit_structural(
                 *closure_guards,
                 *(write.guard for write in primary_writes if write.guard is not None),
             ),
+            auxiliary_writes,
         )
-        if relation_review.any_guard_changed(root, vocabulary_guards):
+        if vault.any_guard_changed(root, vocabulary_guards):
             raise SemanticWriteError(
                 "STALE_VOCABULARY_BINDING",
                 "domain vocabulary changed during commit; validate a fresh draft",
@@ -5430,8 +5434,8 @@ def _commit_creation(
                     semantic_state=semantic_index.from_semantic_page_state(
                         preflight.semantic_state
                     ),
-                    extra_required_guards=(*vocabulary_guards, *closure_plan.required_guards),
                     vocabulary_guards=vocabulary_guards,
+                    closure_guards=closure_plan.required_guards,
                     origin_required_guards=_origin_commit_guards(
                         root, preflight.origin_inputs, catalog_writes
                     ),

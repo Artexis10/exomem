@@ -10,7 +10,7 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -3358,36 +3358,6 @@ def prevalidated_attempt(
     )
 
 
-def any_guard_changed(root: Path, guards: Iterable[vault.PathGuard | vault.DirectoryCensusGuard]) -> bool:
-    """Whether any of `guards` no longer holds."""
-    try:
-        for guard in guards:
-            guard.recheck(root)
-    except vault.PathGuardError:
-        return True
-    return False
-
-
-def refuse_busy_if_only_auxiliary_changed(
-    root: Path, basis_guards: Iterable[vault.PathGuard | vault.DirectoryCensusGuard]
-) -> None:
-    """After a refused batch, report a moved auxiliary as retryable busy, never as staleness.
-
-    Navigation auxiliaries (index, subindexes, log) are planned before the boundary is taken,
-    so a writer outside the line can change one while this write waits. The refused batch
-    rolled back and the boundary is still held. If every guard of the write's own basis still
-    holds, only a planned auxiliary moved: nothing is wrong with the caller's input, and a
-    re-run re-plans it. If a basis guard fails, return and let the caller report its own error.
-    """
-    if any_guard_changed(root, basis_guards):
-        return
-    from . import mutation_lock
-
-    busy = mutation_lock._mutation_busy(None)  # noqa: SLF001 - the one shape of a retryable busy
-    busy.details["cause"] = "auxiliary_changed"
-    raise busy
-
-
 def _translate(error: Exception) -> Exception:
     if isinstance(error, RelationReviewError):
         return error
@@ -4004,8 +3974,8 @@ def commit_prepared_creation_draft(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     semantic_state: Any | None = None,
-    extra_required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
     vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
+    closure_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
     origin_required_guards: tuple[vault.PathGuard, ...] = (),
     _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> CreationDraftCommit:
@@ -4077,7 +4047,7 @@ def commit_prepared_creation_draft(
             resumed = False
             required_guards: tuple[
                 vault.PathGuard | vault.DirectoryCensusGuard, ...
-            ] = (*extra_required_guards, *origin_required_guards)
+            ] = (*vocabulary_guards, *closure_guards, *origin_required_guards)
             writes: list[vault.PlannedWrite] = []
             if existing_artifact is not None:
                 if attempt.artifact_bytes_hash is None:
@@ -4187,15 +4157,18 @@ def commit_prepared_creation_draft(
                 raise RelationReviewError(
                     "DRAFT_ID_IN_USE", "draft identity became reserved"
                 ) from error
-            except vault.PathGuardError:
+            except vault.PathGuardError as guard_error:
                 try:
                     vault.recheck_path_guards(root, origin_required_guards)
                 except vault.PathGuardError as origin_error:
                     raise RelationReviewError(
                         "ORIGIN_INPUT_STALE", "retained input changed during commit"
                     ) from origin_error
-                refuse_busy_if_only_auxiliary_changed(root, (*required_guards, primary_guard))
-                if any_guard_changed(root, vocabulary_guards):
+                if guard_error.code != "PATH_VARIANT_EXISTS":
+                    vault.refuse_busy_if_planned_write_moved(
+                        root, (*required_guards, primary_guard), guarded_auxiliaries
+                    )
+                if vault.any_guard_changed(root, vocabulary_guards):
                     raise RelationReviewError(
                         "STALE_VOCABULARY_BINDING",
                         "domain vocabulary changed during commit; validate a fresh draft",
@@ -4207,6 +4180,11 @@ def commit_prepared_creation_draft(
                         raise RelationReviewError(
                             "DRAFT_ID_IN_USE", "draft identity became reserved"
                         ) from lifecycle_error
+                if vault.any_guard_changed(root, closure_guards):
+                    raise RelationReviewError(
+                        "STALE_SEMANTIC_WRITE",
+                        "a concurrent write changed a source this write cites; retry the operation",
+                    ) from None
                 raise
             written_paths = tuple(item.relative_to(root).as_posix() for item in written)
             review_record = record if record is not None and record.kind != "qualifying" else None
