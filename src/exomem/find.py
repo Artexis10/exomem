@@ -7919,7 +7919,7 @@ def writer_resolver_snapshot(
             if entries is not None:
                 measured["corpus_entries"] = 1
                 return WikilinkResolver.from_entries(root, entries)
-            if "declined_changed_during_proof" not in declined:
+            if f"declined_{semantic_contract.CHANGED_DURING_PROOF}" not in declined:
                 break
         if not allow_disk:
             measured["disk_declined"] = 1
