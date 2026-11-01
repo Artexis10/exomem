@@ -48,6 +48,9 @@ class FakeCell(Cell):
         self.calls: list[dict] = []
         self.acknowledged: list[tuple[str, list[str], int]] = []
         self.refill: int | None = None
+        self.windows_unknown: str | None = None
+        self.largest: int = 960
+        self.inline: int = 4 << 20
         self.before_reply = lambda call: None
 
     async def status(self, *, series_id=None, next_window_bytes=None, after=None) -> dict:
@@ -70,6 +73,8 @@ class FakeCell(Cell):
         keep = {"keep": bool(unfiled or residual),
                 "message": f"Keep the source folder: {unfiled} unfiled and {residual} discarded, not filed." if unfiled or residual else None}
         reply = {"import_windows": {"counts": {}, "windows": windows, "keep_source": keep, "next_after": None}}
+        if self.windows_unknown:  # The cell cannot list its records: no `windows` key at all, as the real reply has it.
+            reply = {"import_windows": {"unknown": self.windows_unknown, "keep_source": {"keep": True, "message": "Keep the source folder."}}}
         if not self.older:
             allowance = ({"unknown": self.allowance} if isinstance(self.allowance, str)
                          else {"allowance_bytes": BIG, "remaining_bytes": self.allowance})
@@ -77,7 +82,7 @@ class FakeCell(Cell):
                 "window_budget": self.figure(self.budget), "reachable_budget": self.figure(self.reachable),
                 "job_pinned": self.figure(self.pinned), "effective_file_limit": self.figure(self.effective),
                 "classification": {"object_bound": None, "hydration_bytes": HYDRATION, "volume_fraction": 0.25,
-                                   "volume_bytes": VOLUME, "inline_text_limit": 4 << 20, "largest_offloadable_file": 960},
+                                   "volume_bytes": VOLUME, "inline_text_limit": self.inline, "largest_offloadable_file": self.largest},
                 "media_allowance": allowance, "volume": {"used_bytes": self.used}}
         return reply
 
@@ -255,8 +260,8 @@ def test_an_unknown_budget_waits_and_reports_the_reason(rig):
 def test_a_window_that_another_series_landing_no_longer_fits_is_not_created(rig):
     """Catches a create that trusts the first reading: the CLI reads the budget again right before it."""
     rig.files(a01__bin=800)
-    # Calls: the first read, the preflight read, the resume read, the sizing read (3), then the read before the create (4).
-    gate = 4
+    # Calls: the first read (0), the resume read (1), the sizing read (2), then the read before the create (3).
+    gate = 3
 
     def another_series_lands(call):
         if call["number"] == gate:
@@ -627,3 +632,198 @@ def test_a_resend_sends_no_member_of_a_window_that_is_not_discarded_yet(rig):
 
     assert len(rig.cloud.completed) == landed
     assert rig.cell.acknowledged == []
+
+
+# -- Review round 1
+
+
+def _stopped_after_two_windows(rig: Rig, count: int = 4) -> list[str]:
+    """`count` one-member windows; the run stops once two have landed. Returns the two landed import IDs."""
+    rig.files(**{f"a{n}__bin": 800 for n in range(1, count + 1)})
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+    original = rig.cell.landed
+
+    def landed(import_id, size):
+        original(import_id, size)
+        if len(rig.cloud.completed) == 2:
+            rig.cell.allowance = 0
+
+    rig.cell.landed = landed
+    with pytest.raises(CloudImportError):
+        rig.run()
+    rig.cell.landed = original
+    rig.cell.allowance = BIG
+    return list(rig.cloud.completed)
+
+
+def test_a_rerun_waits_while_the_cell_cannot_list_its_receipts_and_resends_no_landed_window(rig):
+    """Catches a rerun that reads an unknown receipt listing as "no receipts" and sends every landed window again."""
+    _stopped_after_two_windows(rig)
+    rig.cell.windows_unknown = "the window records cannot be listed"
+    rerun_starts = len(rig.cell.calls)
+    rig.cell.before_reply = lambda call: setattr(rig.cell, "windows_unknown", None) if call["number"] > rerun_starts + 3 else None
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a2.bin", "a3.bin", "a4.bin"]
+    assert len(rig.cloud.rows) == 4
+    assert "cannot be listed" in rig.said()
+
+
+def test_a_rerun_stops_with_the_notice_when_the_receipt_listing_stays_unknown(rig):
+    """Catches a rerun that never stops on a listing that stays unknown."""
+    _stopped_after_two_windows(rig)
+    rig.cell.windows_unknown = "the window records cannot be listed"
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+    assert len(rig.cloud.rows) == 2
+
+
+def test_a_resend_stops_when_the_cell_cannot_list_the_residual_records(rig):
+    """Catches a resend that reads an unknown listing as "nothing to resend" and ends ok."""
+    _series_with_a_residual(rig)
+    rig.cell.windows_unknown = "the window records cannot be listed"
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(resend_residual=True)
+
+    assert "cannot be listed" in stop.value.message and "keep" in stop.value.message.lower()
+
+
+def test_a_resume_on_a_cell_that_reports_no_window_budget_stops_instead_of_sending_the_folder_as_one_import(rig):
+    """Catches a resume that takes the one-import path and sends every member again."""
+    _stopped_after_two_windows(rig)
+    rig.cell.older = True
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+    assert len(rig.cloud.rows) == 2
+
+
+def test_a_failed_status_call_after_a_window_landed_stops_with_the_notice(rig):
+    """Catches a mid-series error that says nothing about the members that are not in Exomem."""
+    from fastmcp.exceptions import ToolError
+
+    rig.files(a1__bin=800, a2__bin=800)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+
+    def fail(call):
+        if rig.cloud.completed:
+            raise ToolError("boom")
+
+    rig.cell.before_reply = fail
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+
+
+def test_a_failed_acknowledge_call_in_a_resend_stops_with_the_notice(rig):
+    """Catches a failed clearing call that says nothing about the members that are not in Exomem."""
+    from fastmcp.exceptions import ToolError
+
+    _series_with_a_residual(rig)
+    rig.cell.discard(_window_of(rig, "a2.bin"), ["a2.bin"])
+
+    async def broken(import_id, paths):
+        raise ToolError("boom")
+
+    rig.cell.acknowledge = broken
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(resend_residual=True)
+
+    assert NOT_IN_EXOMEM in stop.value.message
+
+
+def test_a_changed_or_vanished_unsent_member_is_skipped_and_listed_and_the_rest_goes_on(rig):
+    """Catches a rerun that stops for ever on a member that changed, with a restart that would send everything again."""
+    _stopped_after_two_windows(rig, count=5)
+    (rig.source / "a3.bin").write_bytes(b"changed after the series began")
+    (rig.source / "a4.bin").unlink()
+
+    rig.run()
+    rig.run()  # A second rerun neither stops nor sends anything.
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a2.bin", "a5.bin"]
+    assert "a3.bin" in rig.said() and "a4.bin" in rig.said()
+
+
+def test_a_stop_right_after_a_window_lands_does_not_send_that_window_again(rig):
+    """Catches a rerun that sends a window twice when the stop came before the record said it landed."""
+    from exomem.cloud_import_windows import Series
+
+    rig.files(a1__bin=800, a2__bin=800)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+    write, failed = Series.write, []
+
+    def flaky(self, path):
+        if not failed and any(window.state == "landed" for window in self.windows):
+            failed.append(True)
+            raise OSError("the disk is full")
+        write(self, path)
+
+    Series.write = flaky
+    try:
+        with pytest.raises(CloudImportError):
+            rig.run()
+    finally:
+        Series.write = write
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a2.bin"]
+    assert len(rig.cloud.rows) == 2
+
+
+@pytest.mark.parametrize("limits", [{"space_factor": "2", "reserve_bytes": 1000}, {"space_factor": 2, "reserve_bytes": 1.5}])
+def test_a_published_limit_that_cannot_be_read_waits_as_unknown_instead_of_meaning_no_limit(rig, limits):
+    """Catches an unreadable published limit that is read as "no limit" and sends the window."""
+    rig.files(a1__bin=800)
+    rig.cloud.limits = limits
+
+    with pytest.raises(CloudImportError):
+        rig.run()
+
+    assert rig.cloud.completed == []
+    assert "limit" in rig.said()
+
+
+def test_the_cli_classifies_text_with_the_inline_limit_that_the_cell_reports(rig):
+    """Catches a classification by the CLI's own copy of the rule: a 500-byte note that the cell does not read as text."""
+    rig.files(a01__md=500, b01__bin=800)
+    rig.cell.inline = 100
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+
+    rig.run()
+
+    assert rig.cloud.sent(rig.cloud.completed[0]) == {"a01.md"}  # Offloadable files go first; with the local rule it is text and goes last.
+
+
+def test_the_cli_classifies_artifacts_with_the_largest_offloadable_file_that_the_cell_reports(rig):
+    """Catches a classification by the CLI's own copy of the rule: a 3000-byte file that the cell would offload."""
+    rig.files(a01__bin=3000)
+    rig.cell.largest = 5000
+    rig.cell.allowance = 0
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert "allowance exhausted" in stop.value.message
+
+
+def test_a_series_that_the_preflight_refuses_records_no_demand(rig):
+    """Catches a demand that a refused series leaves behind at the cell."""
+    rig.files(a1__bin=800)
+    rig.cell.effective = 100
+
+    with pytest.raises(CloudImportError):
+        rig.run()
+
+    assert [call["next_window_bytes"] for call in rig.cell.calls if call["next_window_bytes"] is not None] == []

@@ -130,6 +130,8 @@ class Window:
 
     selection: import_selection.Selection
     series_file: bytes
+    # The import ID that the series records before the send, so a rerun finds the window's receipt by it.
+    import_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -450,7 +452,7 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
                     _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore,
                                progress=progress, max_members=max_members))
             _check_resources(plan, checkpoint, progress, free_bytes, reserve_bytes)
-            state = {"source": str(source), "config": asdict(config), "import_id": str(uuid.uuid4()),
+            state = {"source": str(source), "config": asdict(config), "import_id": (window.import_id if window else None) or str(uuid.uuid4()),
                      "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
                      "envelope": envelope.model_dump() if envelope else None, "selection": options}
             where.import_id = state["import_id"]
