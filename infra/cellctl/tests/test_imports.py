@@ -628,3 +628,48 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
     finally:
         await app.close()
         await controller.close()
+
+
+def _failed_discard(report: dict):
+    """The decision on the pass that sees the discard Job failed with `report`, and the row it leaves."""
+    row = CellRow(CELL, uuid.uuid4(), 10, 0, "running", None, 1, hold_kind="import", hold_started_at=NOW)
+    item = ImportRow(str(uuid.uuid4()), CELL, "adopt", 4, 1, "discard_requested", NOW,
+                     observed_state="cleanup_running")
+    observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell", statefulset_hold_kind="import")
+    failed_at = NOW + timedelta(minutes=1)
+    decision = decide_import(row, item, observed, {"discard": ImportJob(exists=True, failed=True, report=report)},
+                             now=failed_at)
+    pending = replace(item, observed_state="cleanup_pending", updated_at=failed_at, **{
+        name: decision.import_updates[name] for name in ("error_code", "urls_expire_at")
+        if name in decision.import_updates})
+    return decision, row, pending, failed_at
+
+
+def _next_attempt(row, pending, failed_at, wait: timedelta):
+    released = replace(row, hold_kind=None, hold_started_at=None)
+    unheld = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell")
+    return decide_import(released, pending, unheld, {}, now=failed_at + wait)
+
+
+def test_a_failed_cleanup_records_the_code_its_report_names():
+    decision, *_ = _failed_discard({"ok": False, "error": "IMPORT_RENAMES_PENDING", "retry": "owner"})
+    assert decision.import_updates["error_code"] == "IMPORT_RENAMES_PENDING"
+    assert decision.import_updates["observed_state"] == "cleanup_pending"
+    unnamed, *_ = _failed_discard({})
+    assert unnamed.import_updates["error_code"] == "IMPORT_FAILED"
+
+
+def test_a_discard_that_waits_on_the_owner_does_not_stop_the_cell_again_for_a_day():
+    _, row, pending, failed_at = _failed_discard({"ok": False, "error": "IMPORT_RENAMES_PENDING", "retry": "owner"})
+    assert _next_attempt(row, pending, failed_at, timedelta(hours=2)) is None
+    assert _next_attempt(row, pending, failed_at, timedelta(hours=23, minutes=59)) is None
+    retry = _next_attempt(row, pending, failed_at, timedelta(hours=24))
+    assert retry.hold_kind == "import" and retry.replicas == 0
+    assert retry.import_updates["observed_state"] == "cleanup_running"
+
+
+def test_a_discard_that_failed_for_a_reason_a_retry_may_fix_stops_the_cell_again_after_an_hour():
+    _, row, pending, failed_at = _failed_discard({"ok": False, "error": "IMPORT_FAILED"})
+    assert _next_attempt(row, pending, failed_at, timedelta(minutes=59)) is None
+    retry = _next_attempt(row, pending, failed_at, timedelta(hours=1))
+    assert retry.hold_kind == "import" and retry.import_updates["observed_state"] == "cleanup_running"

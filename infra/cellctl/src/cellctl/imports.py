@@ -88,6 +88,17 @@ class ImportJob:
     pods_present: bool = False
 
 
+# The cell's Job report says "retry": "owner" for a refusal that waits on someone other than cellctl.
+RETRY_OWNER_KEY = "retry"
+RETRY_OWNER = "owner"
+
+
+def _report_error(job: ImportJob) -> str:
+    reported = job.report.get("error")
+    # The trusted cell command emits fixed uppercase error tokens, never exception text.
+    return reported if isinstance(reported, str) and re.fullmatch(r"[A-Z_]{1,64}", reported) else "IMPORT_FAILED"
+
+
 def job_name(import_id: str, phase: str) -> str:
     return f"import-{uuid.UUID(import_id).hex}-{phase}"
 
@@ -152,7 +163,8 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
         updated = item.updated_at or item.created_at
         if active_hold == "import" or remaining:
             return release()  # A failed attempt must drain before another acquires the volume.
-        if now - updated < config.import_cleanup_retry:
+        # An owner refusal stored its next attempt time (see the cleanup_job.failed branch below).
+        if now < (item.urls_expire_at or updated + config.import_cleanup_retry):
             return None
         start = now
         decision = held()
@@ -185,9 +197,7 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
         elif now - item.created_at > UPLOAD_DEADLINE:
             failure = failure or "IMPORT_EXPIRED"
         if not failure and (imported.failed or prepared.failed):
-            reported = (imported if imported.failed else prepared).report.get("error")
-            # The trusted cell command emits fixed uppercase error tokens, never exception text.
-            failure = reported if isinstance(reported, str) and re.fullmatch(r"[A-Z_]{1,64}", reported) else "IMPORT_FAILED"
+            failure = _report_error(imported if imported.failed else prepared)
     cancelled = item.requested_state in ("cancelled", "discard_requested")
     if running or cancelled or failure or imported.succeeded or cleanup_started:
         if not running:
@@ -198,6 +208,14 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             decision.import_updates.update(observed_state="cleanup_running", error_code=failure)
         decision.stop_import_jobs = [phase for phase in remaining if phase != cleanup_phase and
                                      (jobs[phase].active or cancelled or failure)]
+        if cleanup_job.failed:
+            # The cleanup Job's report does not outlive this pass: the Job is deleted below. Record its code now.
+            decision.import_updates["error_code"] = _report_error(cleanup_job)
+            if cleanup_job.report.get(RETRY_OWNER_KEY) == RETRY_OWNER:
+                # A person or operator settles the cause, so the next attempt waits the owner interval. The
+                # import row has no column for a retry time, and urls_expire_at is cleared by every pass
+                # that is not this one, so it carries "not before" while the import is cleanup_pending.
+                decision.import_updates["urls_expire_at"] = now + config.import_cleanup_owner_retry
         if cleanup_job.failed or now - start >= config.import_cleanup_deadline:
             decision.import_updates["observed_state"] = "cleanup_pending"
             decision.stop_import_jobs = remaining
