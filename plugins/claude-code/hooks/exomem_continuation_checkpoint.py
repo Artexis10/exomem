@@ -91,6 +91,10 @@ MAX_PRUNE_CATALOG_ENTRIES = 512
 #: that manifest's temporary file, which is released before the session
 #: directory takes its slot.
 NEW_SESSION_CATALOG_SLOTS = 2
+#: Time the room check may hold the root lock while it evicts. Other hook runs
+#: wait 0.5 s for that lock (`_advisory_lock_at`), so half of it leaves them room;
+#: a session left short of room is refused, and the next new session evicts again.
+MAX_CATALOG_ROOM_SECONDS = 0.25
 
 
 def _over_budget(deadline: float, inspected: int) -> bool:
@@ -3571,11 +3575,7 @@ def _tombstone_expired_candidate(
                 _rename_directory_at(root_handle, name, tombstone)
         except BaseException:
             if evict and _existing_kind(root_handle, name) is not None:
-                try:
-                    _unregister_prune_catalog_entry(root_handle, root_lock, tombstone)
-                    _register_prune_catalog_entry(root_handle, root_lock, name)
-                except OSError:
-                    pass
+                _return_catalog_slot(root_handle, root_lock, tombstone, name)
             raise
         if not evict:
             _unregister_prune_catalog_entry(root_handle, root_lock, name)
@@ -3583,10 +3583,9 @@ def _tombstone_expired_candidate(
             if _existing_kind(root_handle, name) is None:
                 try:
                     _rename_directory_at(root_handle, tombstone, name)
-                    _register_prune_catalog_entry(root_handle, root_lock, name)
-                    _unregister_prune_catalog_entry(root_handle, root_lock, tombstone)
                 except OSError:
-                    pass
+                    return None
+                _return_catalog_slot(root_handle, root_lock, tombstone, name)
             return None
         return tombstone, state_identity
     finally:
@@ -3805,6 +3804,28 @@ def _register_prune_catalog_entry(
         os.close(fd)
 
 
+def _return_catalog_slot(
+    root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
+    tombstone: str,
+    name: str,
+) -> None:
+    """List `name` again after its tombstone rename was undone or never happened.
+
+    The tombstone's slot is released first, because on a full catalog `name`
+    needs it. Each step runs on its own, so a failed release still lets the
+    registration try.
+    """
+    try:
+        _unregister_prune_catalog_entry(root, root_lock, tombstone)
+    except OSError:
+        pass
+    try:
+        _register_prune_catalog_entry(root, root_lock, name)
+    except OSError:
+        pass
+
+
 def _ensure_prune_catalog_room(
     root: _SecureDirectory,
     root_lock: _AdvisoryLock,
@@ -3823,6 +3844,7 @@ def _ensure_prune_catalog_room(
     """
     if root_lock.fd is None:
         raise OSError("prune catalog room requires the root lock")
+    deadline = time.monotonic() + MAX_CATALOG_ROOM_SECONDS
     try:
         fd = _open_prune_catalog(root, create=False)
     except FileNotFoundError:
@@ -3856,9 +3878,11 @@ def _ensure_prune_catalog_room(
         elif stat.S_ISDIR(info.st_mode) and not name.startswith(".") and name != keep:
             sessions.append((info.st_mtime_ns, name))
     now = time.time_ns()
+    attempts = 0
     for _changed_ns, name in sorted(sessions):
-        if free >= NEW_SESSION_CATALOG_SLOTS:
+        if free >= NEW_SESSION_CATALOG_SLOTS or _over_budget(deadline, attempts):
             return
+        attempts += 1
         try:
             evicted = _tombstone_expired_candidate(
                 root, root_lock, home, client, name, now, force_fallback=False, evict=True
