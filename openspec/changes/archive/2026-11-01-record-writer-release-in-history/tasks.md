@@ -5,5 +5,5 @@
 
 ## 2. Delivery
 
-- [ ] 2.1 Merge with independent review and full CI.
-- [ ] 2.2 Archive this change after the containing release is installed.
+- [x] 2.1 Merge with independent review and full CI.
+- [x] 2.2 Archive this change after the containing release is installed.
