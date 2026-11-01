@@ -3008,3 +3008,37 @@ def test_the_census_is_unknown_when_one_sidecar_cannot_be_read(vault: Path, sele
 
     assert (code, out) == (1, "unknown unknown\n")
     assert "MEDIA_CENSUS_UNKNOWN" in err and str(vault) not in err
+
+
+def test_the_backup_jobs_census_command_reports_the_cell_images_census_on_line_two(
+        vault: Path, selected_store, tmp_path):
+    """Catches a Job command that names no census the cell image has, or writes a line that cellctl cannot read."""
+    import importlib.util
+    import os
+    import sys
+
+    from exomem import media_store
+
+    source = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "backup_source.py"
+    module_spec = importlib.util.spec_from_file_location("cellctl_backup_source", source)
+    assert module_spec is not None and module_spec.loader is not None
+    backup_source = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(backup_source)
+    paths = [_stored(vault, f"original-{size}", size) for size in (200, 300)]
+    evicted = sum(path.stat().st_size for path in paths)
+    for path in paths:
+        assert media_store.evict(vault, path)
+    termination_log = tmp_path / "termination-log"
+    termination_log.write_text("0123 1 2", encoding="utf-8")  # Line one: the snapshot and the use.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "exomem").write_text(f'#!/bin/sh\nexec "{sys.executable}" -m exomem "$@"\n', encoding="utf-8")
+    (bin_dir / "exomem").chmod(0o755)
+    script = backup_source.media_census_command(selected_store[0]["store"], "2026-10-31T01:00:00+00:00")
+    script = script.replace("/data/vault", str(vault)).replace("/dev/termination-log", str(termination_log))
+    # The Job has no policy file: the census takes the store identity from its argument.
+    job_env = {key: value for key, value in os.environ.items() if key != "EXOMEM_MEDIA_STORE_CONFIG"}
+
+    subprocess.run(["sh", "-c", script], check=True, env={**job_env, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert termination_log.read_text(encoding="utf-8") == f"0123 1 2\n2 {evicted} 2026-10-31T01:00:00+00:00"

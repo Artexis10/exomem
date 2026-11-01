@@ -20,6 +20,7 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
 
 from .backup_source import FAILURE_CODES as BACKUP_FAILURE_CODES
+from .backup_source import MEDIA_CENSUS_UNKNOWN
 from .capacity import (
     AttachmentReservation,
     CapacityObservation,
@@ -46,7 +47,6 @@ from .manifests import (
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
-    MEDIA_CENSUS_UNKNOWN,
     MEDIA_EDGE_ACCESS_LABEL,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
@@ -1283,7 +1283,7 @@ def _backup_report(message: str | None) -> tuple[str | None, int | None, int | N
 
 
 # add-cloud-media-store D12: the backup Job's second line, "<evicted count> <evicted bytes>
-# <capture time>", a format manifests.render_backup_job fixes. MEDIA_CENSUS_UNKNOWN is an incomplete census;
+# <capture time>", a format backup_source.media_census_command fixes. MEDIA_CENSUS_UNKNOWN is an incomplete census;
 # a line with one count known and one unknown is no census, since a known 0 beside it would read as drained.
 _MEDIA_CENSUS = re.compile(
     rf"(?:(?P<evicted>[0-9]{{1,19}}) (?P<bytes>[0-9]{{1,19}})|{re.escape(MEDIA_CENSUS_UNKNOWN)}) (?P<captured>\S+)")

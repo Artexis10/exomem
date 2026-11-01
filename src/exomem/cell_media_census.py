@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
         count, size = media_store.evicted_census(args.vault, originals.StoreBinding(args.store))
     except media_store.MediaStoreError as error:
         print("unknown unknown")
-        print(f"{error.code}: {error}", file=sys.stderr)
+        print(error, file=sys.stderr)
         return 1
     print(count, size)
     return 0
