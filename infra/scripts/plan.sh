@@ -9,7 +9,7 @@ terraform_bin="${TERRAFORM_BIN:-terraform}"
 python_bin="${PYTHON_BIN:-python3}"
 
 usage() {
-  echo "usage: $0 <foundation|durability> <saved-plan-path> [terraform plan args...]" >&2
+  echo "usage: $0 <foundation|durability|cell-data> <saved-plan-path> [terraform plan args...]" >&2
   exit 2
 }
 
@@ -19,7 +19,7 @@ plan_path="$2"
 shift 2
 
 case "${root_name}" in
-  foundation|durability) ;;
+  foundation|durability|cell-data) ;;
   *) usage ;;
 esac
 

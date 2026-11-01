@@ -7456,13 +7456,18 @@ def _op_activate_context_body(
         if working_set_module.budget_exhausted("working_set.catalogue"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
 
-        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
-            """What the turn's own words reached: the guarded anchors compile, run for the user turn alone,
-            over the map's caller view.
+        # What the slice's compile read of the request's conversation; `absent` until one does.
+        slice_conversation = working_set_conversation_module.ABSENT
 
-            It carries no thread and no `anchor`, and mints, learns and records nothing: the map's
-            continuity token encodes no anchor. A stage it cannot run is a state of the slice.
+        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
+            """What the turn and its conversation reached: the guarded anchors compile, run for the user turn
+            and the request's conversation over the map's caller view.
+
+            It carries no continuity refs, no thread, no `anchor` and no attribution, and mints, learns and
+            records nothing: the map's continuity token encodes no anchor. A stage it cannot run is a state of
+            the slice.
             """
+            nonlocal slice_conversation
             if not turn.strip():
                 return context_views_module.TurnLeads(context_views_module.SLICE_EMPTY)
             # The resolver weighs a name against every anchor it is given, so a restricted caller is given
@@ -7486,10 +7491,14 @@ def _op_activate_context_body(
                         evidence_stamp=evidence_stamp,
                     ),
                     abstain=_abstain,
+                    trigger=trigger,
+                    conversation=conversation,
                     caller=caller,
                 )
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
-            return context_views_module.turn_leads(compiled.packet)
+            leads = context_views_module.turn_leads(compiled.packet)
+            slice_conversation = leads.conversation
+            return leads
 
         # The map generation the caller holds. A token from anchors mode, an older one or a malformed one
         # carries none, and the caller then gets the whole map.
@@ -7520,7 +7529,13 @@ def _op_activate_context_body(
             return _abstain(activation_result_module.UNAVAILABLE)
         _withhold_vault_generation(vault_root, packet)
         packet["generation"]["continuity_thread"] = "absent"
-        packet["generation"]["conversation"] = working_set_conversation_module.ABSENT
+        packet["generation"]["conversation"] = slice_conversation
+        if not packet.get("abstained"):
+            packet["generation"]["continuity"] = working_set_runtime_module.maps_continuity_state(
+                continuity,
+                roles_hash=packet["generation"]["roles_hash"],
+                conventions_hash=packet["generation"]["conventions_hash"],
+            )
         map_generation = packet["generation"].get("map_generation")
         if map_generation is not None and not packet.get("abstained"):
             # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
