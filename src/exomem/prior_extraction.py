@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from . import lifecycle_statuses, memory_refs, preserve
+from .extraction_parts import Layout
 from .vault import parse_frontmatter, with_newline, yaml_scalar
 
 
@@ -61,13 +62,13 @@ def render(
     ordinal: int,
     date_iso: str,
     text: str,
-    parts: tuple[str, ...] = (),
+    parts: Layout | None = None,
 ) -> str:
     """The page that keeps the extraction `before` holds, marked as superseded by the sidecar.
 
     The page is a former extraction of the same source, so it takes the sidecar's own
     `type`, `source_type` and `tags`. `text` is the first part of that extraction and `parts`
-    the links of the part pages that hold the rest, as `extraction_parts` gives them.
+    the layout of the part pages that hold the rest, as `extraction_parts.layout` gives it.
     """
     before = with_newline(before, "\n")
     frontmatter = parse_frontmatter(before)[0]

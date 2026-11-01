@@ -262,5 +262,21 @@ def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
     return collapse(snippet)
 
 
+def anchor_in(text: str, query_norm: str) -> tuple[int, int] | None:
+    """Where the query first matches `text`: the first literal token, else the first stem match.
+
+    Returns `(start, length)`, or None when nothing in the text carries the query.
+    """
+    from . import bm25 as bm25_module
+
+    lowered = text.lower()
+    for token in query_norm.split():
+        index = lowered.find(token)
+        if index != -1:
+            return index, len(token)
+    stems = _query_stems_for_anchor(query_norm)
+    return bm25_module.first_stem_span(text, stems) if stems else None
+
+
 def collapse(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()

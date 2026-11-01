@@ -142,6 +142,16 @@ class ParsedPage:
         return str(pm) if pm else None
 
     @property
+    def part_of(self) -> str | None:
+        """The Source page that holds this part of its extracted text, when this page is a part."""
+        return part_source_path(self.frontmatter.get("part_of"))
+
+    @property
+    def emitted_parent(self) -> str | None:
+        """The page a hit on this one is emitted as: a scene frame's video, or a part's Source."""
+        return self.parent_media + ".md" if self.parent_media else self.part_of
+
+    @property
     def frame_ts(self) -> float | None:
         v = self.frontmatter.get("frame_ts")
         if v is None:
@@ -226,6 +236,13 @@ class ParsedPage:
         return find_policy.dominant_script(self.title + " " + self.search_body)
 
 
+def part_source_path(link: object) -> str | None:
+    """The vault-relative page path that a part's `part_of` link names."""
+    if isinstance(link, str) and link.startswith("[[") and link.endswith("]]"):
+        return link[2:-2] + ".md"
+    return None
+
+
 @dataclass(frozen=True)
 class RankingPage:
     """Selection-free ranking inputs from one admitted page generation."""
@@ -244,6 +261,11 @@ class RankingPage:
     outbound_targets: tuple[str, ...]
     title: str = ""
     superseded_by: tuple[str, ...] = ()
+    part_of: str | None = None
+
+    @property
+    def emitted_parent(self) -> str | None:
+        return self.parent_media + ".md" if self.parent_media else self.part_of
 
     @classmethod
     def from_page(cls, page: ParsedPage) -> RankingPage:
@@ -264,6 +286,7 @@ class RankingPage:
             outbound_targets=find_results.wikilink_targets(page.body),
             title=page.title,
             superseded_by=tuple(page.superseded_by),
+            part_of=page.part_of,
         )
 
 
@@ -301,6 +324,10 @@ class Hit:
     clip_frame_ts: float | None = None
     scene_frame: str | None = None
     scene_frame_ts: float | None = None
+    #: For a Source whose extracted text continues on part pages: the part that matched and the
+    #: matched passage (`text`, `part`, `offset` into the whole text, `length`).
+    matched_part: int | None = None
+    passage: dict[str, object] | None = None
     transcript_ts: float | None = None
     status: str | None = None
     superseded_by: list[str] = field(default_factory=list)
@@ -351,6 +378,9 @@ class Hit:
             out["scene_frame"] = self.scene_frame
             if self.scene_frame_ts is not None:
                 out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
+        if self.matched_part is not None:
+            out["matched_part"] = self.matched_part
+            out["passage"] = self.passage
         if self.transcript_ts is not None:
             out["transcript_match_at"] = _format_timestamp(self.transcript_ts)
         if self.outside_kb:
@@ -421,6 +451,9 @@ class Hit:
             out["scene_frame"] = self.scene_frame
             if self.scene_frame_ts is not None:
                 out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
+        if self.matched_part is not None:
+            out["matched_part"] = self.matched_part
+            out["passage"] = self.passage
         if self.transcript_ts is not None:
             out["transcript_match_at"] = _format_timestamp(self.transcript_ts)
         if self.outside_kb:

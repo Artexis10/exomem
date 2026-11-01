@@ -66,7 +66,7 @@ from .vault import (
 )
 
 if TYPE_CHECKING:
-    from .extraction_parts import Plan
+    from .extraction_parts import Layout, Plan
 
 log = logging.getLogger(__name__)
 
@@ -776,7 +776,7 @@ def preserve(
                 date_iso=stamp_iso,
                 description=desc_clean,
                 text=pieces[0] if pieces else None,
-                parts=parts.links(vault_root, sidecar_path, len(pieces)),
+                parts=parts.layout(vault_root, sidecar_path, pieces),
                 media_type=media_type,
                 evidence_file=rel_artifact if media_type else None,
                 extracted_by=extracted_by,
@@ -1214,7 +1214,7 @@ def _render_sidecar(
     adoption_receipt: Mapping[str, object] | None = None,
     inspection: Inspection | None = None,
     transcription_of: Mapping[str, object] | None = None,
-    parts: tuple[str, ...] = (),
+    parts: Layout | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -1233,7 +1233,7 @@ def _render_sidecar(
     the text, then the engine string; `upload` when the uploader supplied it).
     These make the binary a first-class `find()` result that points at the file.
 
-    `text` is the first part of the extraction; `parts` lists the links of the part pages
+    `text` is the first part of the extraction; `parts` is the layout of the part pages
     that hold the rest (`extraction_parts`).
 
     `parent_media` + `frame_ts` mark a derived artifact — a scene frame extracted
@@ -1265,8 +1265,7 @@ def _render_sidecar(
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
-    if parts:
-        lines.extend(_part_field_lines(parts))
+    lines.extend(_part_field_lines(parts))
     # Upload supplies byte identity, not a reviewed semantic classification.
     # Dataset backfill can add the descriptor after an owner review. Retaining
     # unresolved semantics prevents new raw releases under semantic policies.
@@ -1655,7 +1654,7 @@ def sidecar_extraction_writes(
     content = render_sidecar_extraction(
         before,
         text=pieces[0],
-        parts=parts.links(vault_root, sidecar_path, len(pieces)),
+        parts=parts.layout(vault_root, sidecar_path, pieces),
         **fields,
     )
     write = PlannedWrite(
@@ -1667,17 +1666,19 @@ def sidecar_extraction_writes(
     return plan, write
 
 
-def _part_fields(parts: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+def _part_fields(parts: Layout | None) -> tuple[tuple[str, str], ...]:
     """The Source page's front matter for the part pages that hold the rest of its extraction."""
-    if not parts:
+    if parts is None:
         return ()
     return (
-        ("extraction_parts", str(len(parts) + 1)),
-        ("next_part", yaml_scalar(f"[[{parts[0]}]]")),
+        ("extraction_parts", str(len(parts.offsets))),
+        ("extraction_chars", str(parts.chars)),
+        ("part_offsets", "[" + ", ".join(str(offset) for offset in parts.offsets) + "]"),
+        ("next_part", yaml_scalar(f"[[{parts.links[0]}]]")),
     )
 
 
-def _part_field_lines(parts: tuple[str, ...]) -> list[str]:
+def _part_field_lines(parts: Layout | None) -> list[str]:
     return [f"{field}: {value}" for field, value in _part_fields(parts)]
 
 
@@ -1707,12 +1708,12 @@ def render_sidecar_extraction(
     asr: AsrFacts | None = None,
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
-    parts: tuple[str, ...] = (),
+    parts: Layout | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
-    `text` is the part of the extraction that stays on the page, and `parts` the links of the
-    part pages that hold the rest, as `extraction_parts.plan` gives them.
+    `text` is the part of the extraction that stays on the page, and `parts` the layout of the
+    part pages that hold the rest, as `extraction_parts.layout` gives it.
 
     `asr` records what the speech engine decided; facts of an earlier extraction never
     survive into the new one. `prior_extractions` lists, in order, the vault-relative

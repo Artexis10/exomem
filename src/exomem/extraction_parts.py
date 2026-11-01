@@ -32,9 +32,11 @@ from .vault import (
 
 FOLDER_SUFFIX = ".parts"
 _PART_PREFIX = "part-"
-#: Front matter of the Source page that describes its parts, and that of a part page.
-#: Both are the page schema's own field names, a closed set.
-SOURCE_FIELDS = ("extraction_parts", "next_part")
+#: Front matter of the Source page that describes its parts: how many there are (itself included),
+#: where each starts in the whole text, how long the whole text is, and the first further part.
+#: A closed set of the page schema's own field names. A reader seeks to any position from
+#: these alone, without opening a part.
+SOURCE_FIELDS = ("extraction_parts", "extraction_chars", "part_offsets", "next_part")
 _HEADER_BYTES = 4096
 
 
@@ -91,7 +93,7 @@ def split(text: str) -> list[str]:
     raw = text.encode("utf-8")
     if len(raw) <= limit:
         return [text]
-    text = text.strip()
+    text = with_newline(text, "\n").strip()
     pieces: list[str] = []
     start = 0
     start_byte = 0
@@ -144,7 +146,6 @@ def render_part(
         f"part_of: {yaml_scalar(f'[[{source_link}]]')}",
         f"part: {number}",
         f"parts: {total}",
-        f"chars: {len(text)}",
     ]
     if next_link is not None:
         lines.append(f"next_part: {yaml_scalar(f'[[{next_link}]]')}")
@@ -185,9 +186,38 @@ def count_of(frontmatter: Mapping[str, object]) -> int:
     return value if isinstance(value, int) and value > 1 else 1
 
 
-def links(vault_root: Path, page: Path, count: int) -> tuple[str, ...]:
-    """The links of parts 2 to `count` of `page`, in order."""
-    return tuple(link_to(vault_root, part_path(page, number)) for number in range(2, count + 1))
+@dataclass(frozen=True)
+class Layout:
+    """Where the pieces of one extraction sit: what the Source page records about its parts."""
+
+    #: The links of parts 2.., in order.
+    links: tuple[str, ...]
+    #: Where each part starts in the whole text; the first is 0.
+    offsets: tuple[int, ...]
+    #: The length of the whole text.
+    chars: int
+
+
+def layout(vault_root: Path, page: Path, pieces: list[str]) -> Layout | None:
+    """The layout of `pieces` on `page`, or None when the text fits on the page alone."""
+    if len(pieces) < 2:
+        return None
+    offsets = [0]
+    for piece in pieces:
+        offsets.append(offsets[-1] + len(piece))
+    return Layout(
+        tuple(link_to(vault_root, part_path(page, number)) for number in range(2, len(pieces) + 1)),
+        tuple(offsets[:-1]),
+        offsets[-1],
+    )
+
+
+def offsets_of(frontmatter: Mapping[str, object]) -> tuple[int, ...] | None:
+    """The start of each part that a Source page lists, or None when it lists none."""
+    listed = frontmatter.get("part_offsets")
+    if isinstance(listed, list) and len(listed) == count_of(frontmatter) and all(isinstance(n, int) for n in listed):
+        return tuple(listed)
+    return None
 
 
 @dataclass(frozen=True)

@@ -30,8 +30,10 @@ from typing import Any
 from . import (
     call_spans,
     cli_ops,
+    extraction_parts,
     find_candidates,
     find_corpus,
+    find_parts,
     find_policy,
     find_results,
     find_types,
@@ -499,7 +501,7 @@ def _keyword_cache_delta_is_safe(
             return False, ()
         if page is None:
             continue
-        if page.parent_media or _make_excerpt(page, query_norm) is not None:
+        if page.emitted_parent or _make_excerpt(page, query_norm) is not None:
             return False, ()
     if freshness.external_pending(vault_root):
         return False, ()
@@ -709,7 +711,7 @@ class FreshnessSnapshot:
             # managed readers never substitute file reads for unavailable metadata.
             resolve = page_of or (lambda path: _resolve_page(self._root, path, self._pending))
             parents = {
-                path: page.parent_media + ".md" if page.parent_media else None
+                path: page.emitted_parent
                 for path in paths if (page := resolve(path)) is not None
             }
         # Parent authority does not depend on existence: an ordinary orphan stays
@@ -4408,7 +4410,10 @@ def _eligible_filter_paths(
         # scene-frame child whose match is emitted as its parent video.
         if not _indexable(page):
             continue
-        emitted = pages.get(page.parent_media + ".md", page) if page.parent_media else page
+        emitted = pages.get(page.emitted_parent, page) if page.emitted_parent else page
+        if page.part_of and emitted is page:
+            # A part is its Source's text, never a memory of its own.
+            continue
         if not _indexable(emitted):
             continue
         matches = eligibility_by_emitted_path.get(emitted.rel_path)
@@ -4908,8 +4913,8 @@ def _managed_page_metadata(
     requested = set(paths)
     if pending is not None:
         for row in pending.current_pages():
-            if row.rel_path in paths and row.page.parent_media:
-                requested.add(row.page.parent_media + ".md")
+            if row.rel_path in paths and row.page.emitted_parent:
+                requested.add(row.page.emitted_parent)
     catalogue_paths = set(pending.shadow(requested)) if pending is not None else requested
     metadata = {}
     if catalogue_paths:
@@ -5002,7 +5007,7 @@ def _managed_page_metadata(
                     # An optional bound stays unknown when its held proof is unavailable.
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
-                page.parent_media + ".md" if page.parent_media else None,
+                page.emitted_parent,
                 page.updated,
                 page.media_file,
                 page.frame_ts,
@@ -5206,10 +5211,12 @@ def _indexed_eligible_filter_paths(
         # scene-frame child whose match is emitted as its parent video.
         if page is None or not _indexable(page):
             continue
-        if page.parent_media:
-            emitted = _resolve_page(vault_root, page.parent_media + ".md", pending) or page
-        else:
-            emitted = page
+        emitted = (
+            _resolve_page(vault_root, page.emitted_parent, pending) if page.emitted_parent else None
+        ) or page
+        if page.part_of and emitted is page:
+            # A part is its Source's text, never a memory of its own.
+            continue
         if not _indexable(emitted):
             continue
         matches = eligibility_by_emitted_path.get(emitted.rel_path)
@@ -5461,8 +5468,7 @@ def _find_managed_browse(
             if (
                 _browse_order_key(current.rel_path, current.updated)
                 != _browse_order_key(current.rel_path, expected.updated)
-                or (current.parent_media + ".md" if current.parent_media else None)
-                != expected.parent
+                or current.emitted_parent != expected.parent
             ):
                 raise RetrievalIndexWarming(site="browse_ordering_stale")
         if not _passes_filters(
@@ -5503,9 +5509,26 @@ def _find_managed_browse(
     return hits
 
 
+def _part_match(
+    vault_root: Path, page: ParsedPage, matched: ParsedPage, query_norm: str, *, chunk: str | None = None
+) -> dict[str, object] | None:
+    """The part and passage that a hit on `page` matched, when its extracted text has parts.
+
+    `matched` is the page whose text matched: a part page, or `page` itself for part 1.
+    """
+    offsets = extraction_parts.offsets_of(page.frontmatter)
+    number = matched.frontmatter.get("part") if matched.part_of else 1
+    if offsets is None or not isinstance(number, int) or not 1 <= number <= len(offsets):
+        return None
+    return find_parts.matched_passage(
+        vault_root, matched.rel_path, number=number, base=offsets[number - 1], chunk=chunk, query_norm=query_norm
+    )
+
+
 def _keyword_hit(
     vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
     *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
+    part_match: dict[str, object] | None = None,
 ) -> Hit:
     """The keyword result projection, including its parent-first frame fallback."""
     hit = Hit(
@@ -5513,7 +5536,7 @@ def _keyword_hit(
         updated=page.updated, excerpt=excerpt, media_type=page.media_type, media_file=page.media_file,
         status=page.status, superseded_by=page.superseded_by,
         scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
-        snapshot_hash=page.snapshot_hash,
+        snapshot_hash=page.snapshot_hash, **(part_match or {}),
     )
     hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
     # The persisted video handler defines this media family and its frame fallback.
@@ -5547,7 +5570,7 @@ def _find_managed_keyword(
             # These keys transport held parser facts, not caller-configured vocabulary.
             pending_rows.append({
                 "path": path,
-                "parent": page.parent_media + ".md" if page is not None and page.parent_media else None,
+                "parent": page.emitted_parent if page is not None else None,
                 "updated": page.updated if page is not None else None,
                 "hash": page.snapshot_hash if page is not None else None,
                 "media_file": page.media_file if page is not None else None,
@@ -5610,6 +5633,7 @@ def _find_managed_keyword(
             vault_root, page, query_norm, excerpt,
             scene_frame=source.media_file if child else None,
             scene_frame_ts=source.frame_ts if child else None,
+            part_match=_part_match(vault_root, page, source, query_norm),
         )
         sources = {page.rel_path: group.hashes[page.rel_path], source.rel_path: group.hashes[source.rel_path]}
         if hit.scene_frame is None and group.frame_path is not None:
@@ -5765,20 +5789,27 @@ def _find_keyword(
         # (parent gone) surfaces standalone. Filters apply to the EMITTED page.
         scene_frame: str | None = None
         scene_frame_ts: float | None = None
-        if page.parent_media:
-            parent_page = _resolve_page(
-                vault_root, page.parent_media + ".md", pending
-            )
+        part_match: dict[str, object] | None = None
+        if page.emitted_parent:
+            parent_page = _resolve_page(vault_root, page.emitted_parent, pending)
             if page_memo is not None:
-                page_memo[page.parent_media + ".md"] = parent_page
+                page_memo[page.emitted_parent] = parent_page
+            if parent_page is None and page.part_of:
+                # A part is its Source's text, never a memory of its own.
+                continue
             if parent_page is not None:
                 existing = by_path.get(parent_page.rel_path)
-                if existing is not None:
-                    if existing.scene_frame is None:
-                        existing.scene_frame = page.media_file
-                        existing.scene_frame_ts = page.frame_ts
-                    continue
-                scene_frame, scene_frame_ts = page.media_file, page.frame_ts
+                if page.part_of:
+                    if existing is not None:
+                        continue
+                    part_match = _part_match(vault_root, parent_page, page, query_norm)
+                else:
+                    if existing is not None:
+                        if existing.scene_frame is None:
+                            existing.scene_frame = page.media_file
+                            existing.scene_frame_ts = page.frame_ts
+                        continue
+                    scene_frame, scene_frame_ts = page.media_file, page.frame_ts
                 page = parent_page
         if page.rel_path in by_path:
             continue
@@ -5796,6 +5827,7 @@ def _find_keyword(
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt or "",
             scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
+            part_match=part_match or _part_match(vault_root, page, page, query_norm),
         )
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
@@ -6245,9 +6277,9 @@ def _find_semantic(
                 # connectivity / visual similarity / a child frame's text, not this
                 # page's lexical overlap). Prefer the matched frame's OCR text as the
                 # "why", else the sidecar's leading body.
-                attr = frame_attribution.get(rel_path)
-                if attr is not None:
-                    fpage = _page_of(attr[0] + ".md")
+                child_path = bundle.frame_sources.get(rel_path)
+                if child_path is not None:
+                    fpage = _page_of(child_path)
                     if fpage is not None:
                         keyword_excerpt = _make_excerpt(fpage, query_norm)
                 if keyword_excerpt is None:
@@ -6287,6 +6319,7 @@ def _find_semantic(
                     continue
                 sources[chunk_page.rel_path] = chunk_page.snapshot_hash
             frame_path = bundle.frame_sources.get(rel_path)
+            frame_page = None
             if frame_path is not None:
                 frame_page = _page_of(frame_path)
                 if frame_page is None:
@@ -6309,6 +6342,12 @@ def _find_semantic(
                 if hit_activation is not None:
                     hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
             attr = frame_attribution.get(rel_path)
+            if frame_page is not None and frame_page.part_of is not None:
+                attr = None  # a part is text of the Source, not a scene frame
+            # The page whose text matched: where the semantic chunk came from, else the part
+            # that collapsed into this Source, else the Source itself.
+            matched_page = (chunk_page if ref is not None else frame_page) or page
+            part_match = _part_match(vault_root, page, matched_page, query_norm, chunk=chunk)
             hit = Hit(
                 path=page.rel_path,
                 type=page.page_type,
@@ -6335,6 +6374,7 @@ def _find_semantic(
                 scene_frame=attr[0] if attr else None,
                 scene_frame_ts=attr[1] if attr else None,
                 snapshot_hash=page.snapshot_hash,
+                **(part_match or {}),
             )
             hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
             if hit.scene_frame is None and page.media_type == "video" and page.media_file:

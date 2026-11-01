@@ -6515,7 +6515,7 @@ class LexicalStore:
             updated = page.updated or "0000-00-00"
             # Scene-frame children carry the parent video they collapse into;
             # unparseable rows (page is None) stay NULL like ordinary pages.
-            emitted_parent_path = page.parent_media + ".md" if page.parent_media else None
+            emitted_parent_path = page.emitted_parent
             eligibility = _eligibility_columns(page)
             eligibility_view = _eligibility_view_json(page)
             content_hash = getattr(page, "snapshot_hash", None)
@@ -10426,7 +10426,7 @@ class LexicalStore:
                 if page is None:
                     continue
                 expected_title = page.title
-                expected_parent = page.parent_media + ".md" if page.parent_media else None
+                expected_parent = page.emitted_parent
                 stored_eligibility = tuple(None if value is None else str(value) for value in row[4:])
                 if (
                     row[1] != expected_title
