@@ -4,7 +4,9 @@
 Turn owner-reviewed governance intent into deterministic compiled policy,
 bounded grants, and crash-recoverable receipt-first activation without giving
 the language model authority to invent enforcement facts.
+
 ## Requirements
+
 ### Requirement: Natural-language propose and validated commit
 
 The client/LLM SHALL interpret natural-language user intent and supply structured
@@ -308,11 +310,23 @@ operation may silently ignore audience behavior. Toward an audience below an
 item's ceiling, these operations SHALL return counts and rule ids only, never
 titles or excerpts of restricted items.
 
+`list` SHALL return rule ids and grant ids to the owner only; a non-owner receives empty lists. `coordination_status` SHALL return mutation-lock contention to the owner only.
+
 #### Scenario: Explain shows the effective chain
 
 - **WHEN** `explain` is called for an item and audience
 - **THEN** it returns the effective ceiling and the ordered participating rules
   without leaking restricted content
+
+#### Scenario: A non-owner lists no policy ids
+
+- **WHEN** a non-owner calls `govern_memory` `list` on a governed vault
+- **THEN** the response carries empty `rules` and `grants` lists and no fingerprint or scopes
+
+#### Scenario: A non-owner sees no lock contention
+
+- **WHEN** a non-owner calls `coordination_status`
+- **THEN** the mutation boundary carries no `contention` block
 
 ### Requirement: Enforcement is independent of the authoring tool
 
