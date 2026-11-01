@@ -4804,6 +4804,10 @@ class _FairCaptureQueue:
     """First-come-first-served order, within one process, for keyed writes
     waiting on the boundary.
 
+    Still needed: the `off` mode, the collection-store writes and `/upload` commits (tranche 2) wait here,
+    and the waiter slot cap is shared with `request_waiter_slot`. seam: task 11.3 removes the queue once
+    task 11.2 has moved those writes onto the journal.
+
     A write that meets a busy boundary or invalidated preparation joins. A
     write that arrives while others wait joins behind them instead of racing
     for the lock, so the waiter who has waited longest attempts next.
@@ -7036,6 +7040,9 @@ class LeaseManager:
                 # One attempt: the applier owns the wait, as a loop of bounded acquires (design D4).
                 result = run_idempotent()
             else:
+                # With the journal on, an eligible write never reaches this loop: `accept` answers it. It runs here
+                # for `off` and for ineligible writes (tranche 2 and open-world captures).
+                # seam: task 11.3 narrows this to ineligible writes once `on` is the default.
                 result = self._run_absorbing_capture_contention(
                     command,
                     run_idempotent,

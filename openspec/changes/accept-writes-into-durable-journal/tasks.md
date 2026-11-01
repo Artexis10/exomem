@@ -61,6 +61,7 @@
 ## 9. Cleanup
 
 - [ ] 9.1 Remove the request-side contention loop for eligible commands: the request role of `_absorb_contention`, and `_FairCaptureQueue` and the capture waiter counters once no ineligible write uses them. Proof: the write-path suites pass in `on` and `always` modes; report the weight change as product lines against proof lines.
+  - Status: nothing is deletable before 11.3. With the journal on, an eligible write already bypasses the loop (`accept` answers it before `_run_absorbing_capture_contention`). `off`, the collection-store writes and `/upload` (tranche 2, 11.2) still use the loop, the line queue and the waiter counters. Seam comments name 11.3 at the call site and the queue.
 
 ## 10. End-to-end proof (disposable vault copy, own state root)
 

@@ -61,6 +61,14 @@ def test_process_media_operation_precheck(vault: Path):
     assert excinfo.value.code == "INVALID_MEDIA_OPERATION"
 
 
+@pytest.fixture
+def journal_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These two cases pin the in-process wait of an eligible write; with the journal on it is accepted instead.
+    # seam: task 11.3 rewrites them onto an ineligible command once `on` is the default.
+    monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
+
+
+@pytest.mark.usefixtures("journal_off")
 def test_needs_schema_command_gets_schema_injected(vault: Path):
     result = product_invoke.invoke_product(
         "capture_source",
@@ -142,6 +150,7 @@ def _captured(vault: Path, title_slug: str) -> list[Path]:
     return [p for p in (vault / "Knowledge Base").rglob("*.md") if title_slug in p.name.lower()]
 
 
+@pytest.mark.usefixtures("journal_off")
 def test_an_unkeyed_cli_write_waits_out_a_held_boundary_and_leaves_no_replay_receipt(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ):
