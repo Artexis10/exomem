@@ -75,6 +75,51 @@ def indexed_relation(admitted, *, hinted=True):
     return admitted.table + " p" + (" INDEXED BY " + admitted.index if hinted else "")
 
 
+#: The closed predicate operators of the query IR that an index interval serves.
+# nosemgrep: ep-word-set -- The query grammar fixes these comparison operators.
+_SEEKING_OPS = frozenset({"eq", "gt", "gte", "lt", "lte", "between"})
+
+
+def _index_interval(query, projection, schema, as_of):
+    """The relation, predicate and parameters of the one index interval that bounds a copy's reads.
+
+    Only conjunct leaves on an index's leading field narrow its scan, so only they are counted;
+    the copy applies the request's whole predicate inside that interval.
+    """
+    leaves = typed_sql._leaves(query.where) or ()
+    best = None
+    for name, spec in zip(projection.index_names, projection.indexes, strict=True):
+        seeking = tuple(leaf for leaf in leaves if leaf.op in _SEEKING_OPS and leaf.field.path == spec.keys[0].field)
+        if seeking and (best is None or len(spec.keys) < best[0]):
+            best = (len(spec.keys), name, seeking)
+    if best is None:
+        return None
+    _, name, seeking = best
+    where = seeking[0] if len(seeking) == 1 else ir.Filter("all", children=seeking)
+    interval = typed_sql.compile_rows(replace(query, where=where), projection, as_of=as_of)
+    return projection.read_relation(schema, index=name) + " p", interval.where_sql, interval.params
+
+
+def _filter_fields(node) -> set[str]:
+    if node is None:
+        return set()
+    if node.children:
+        return set().union(*(_filter_fields(child) for child in node.children))
+    return {node.field.path}
+
+
+def _full_scan(query, projection, schema) -> str:
+    """The relation a whole-collection copy reads: no index narrows it, so scanning the narrowest
+    index that holds every order and filter operand lets SQLite read them instead of recomputing them."""
+    needed = (_filter_fields(query.where) | {key.field.path for key in query.order_by.keys}) - {"item_key"}
+    covering = sorted((len(spec.keys), name) for name, spec in zip(projection.index_names, projection.indexes,
+                                                                    strict=True)
+                      if needed <= {key.field for key in spec.keys})
+    if covering:
+        return projection.read_relation(schema, index=covering[0][1]) + " p"
+    return projection.read_relation(schema, not_indexed=True) + " p"
+
+
 def _populate_native(session, manifest, projection, private, table, scanned, where, params, layout, compiled, *,
                      operands=False):
     """Stream only admitted query dependencies into the request's scalar TEMP relation."""
@@ -91,9 +136,8 @@ def _populate_native(session, manifest, projection, private, table, scanned, whe
             if scalar.field in fields:
                 selected += [f"p.k{ordinal}_{part}" for part in ("rank", "tag", "band", "key")]
             else:
-                tag, band, key = native_operands.scalar_operand(MISSING, scalar.kind)
                 selected += ["?"] * 4
-                constants += [2 if tag == 0 else 1 if tag == 1 else 0, tag, band, key]
+                constants += native_operands.ranked_operand(MISSING, scalar.kind)
         session.connection.execute(f"INSERT INTO {table}({','.join(columns)}) SELECT {','.join(selected)} "
                                    f"FROM {scanned} WHERE {where}", (*constants, *params))
         return
@@ -211,18 +255,13 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
         ordinal = len(session._queries) + 1
         ids = f"query_ids_{ordinal}"
         materialize = not uniform or compiled.usable_index is None
-        interval = None
+        copy = bound = None
         if uniform and materialize and isinstance(projection, NativeProjectionPlan) and not compiled.residual:
-            # A uniform copy reads only the rows the request's own predicate admits; compiled against
-            # the READY relation, that predicate lets SQLite seek the projection's expression index.
-            # Scanning through an index that covers every dependency lets SQLite read the indexed
-            # operand expressions from the index instead of recomputing them for each row.
-            needed = {scalar.field for scalar in projection.scalars if scalar.field in compiled.dependency_paths}
-            covering = sorted((len(spec.keys), name) for name, spec in zip(projection.index_names, projection.indexes,
-                                                                            strict=True)
-                              if needed <= {key.field for key in spec.keys})
-            interval = (projection.read_relation(source.schema, index=covering[0][1] if covering else None) + " p",
-                        compiled.where_sql, compiled.params)
+            # SQL fills a uniform copy from the READY relation's operand columns. Only a predicate proven
+            # to seek an index interval narrows what the copy reads, and so what it is charged.
+            bound = _index_interval(query, projection, source.schema, as_of)
+            relation = bound[0] if bound else _full_scan(query, projection, source.schema)
+            copy = (relation, compiled.where_sql, compiled.params)
         count = None
         if not uniform:
             conn.execute(f"CREATE TEMP TABLE {ids}(row_id INTEGER PRIMARY KEY)")
@@ -235,8 +274,8 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                         raise QueryError("QUERY_COST_LIMIT")
                     conn.execute(f"INSERT INTO temp.{ids} VALUES(?)", (subject.row_id,))
                     session.check_temp()
-        elif interval is not None:
-            relation, where, params = interval
+        elif bound is not None:
+            relation, where, params = bound
             count = conn.execute(f"SELECT count(*) FROM (SELECT 1 FROM {relation} WHERE {where} LIMIT ?)",
                                  (*params, session.limits.max_row_visits + 1)).fetchone()[0]
         elif not compiled.page_bound:
@@ -246,8 +285,9 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             ).fetchone()[0]
         cost = query.page.limit + 1 if count is None else count * 2
         if materialize:
-            # Copy plus all B-tree insertion/search work is bounded before keys
-            # or predicates are evaluated; there is no external sort spill.
+            # Copy plus all B-tree insertion/search work is charged before the copy runs, on the
+            # rows it can read: the whole collection, or a proven index interval counted by its
+            # own seek. There is no external sort spill.
             cost += count * (2 + (len(projection.indexes) + 2) * max(1, count.bit_length()))
         if cost + session._estimated_visits > session.limits.max_row_visits:
             raise QueryError("QUERY_COST_LIMIT")
@@ -269,8 +309,8 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                 index = f"{private.table_name}_order"
                 order = compiled.order_sql.replace("p.", "")
                 conn.execute(f"CREATE INDEX temp.{index} ON {private.table_name}({order})")
-            if interval is not None:
-                scanned, where, params = interval
+            if copy is not None:
+                scanned, where, params = copy
             elif uniform:
                 scanned = f"{stored} p NOT INDEXED"
                 where, params = "1", ()
@@ -281,7 +321,7 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             if isinstance(projection, NativeProjectionPlan):
                 _populate_native(session, manifest, projection, private, table, scanned, where, params,
                                  source.layout or session.typed_layout(manifest.collection_id), compiled,
-                                 operands=interval is not None)
+                                 operands=copy is not None)
             else:
                 keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
                                 else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))

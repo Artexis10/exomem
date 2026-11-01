@@ -515,41 +515,49 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
 
 
-def test_a_descending_window_reads_only_its_rows_and_pages_in_source_order(derived, monkeypatch):
-    """Defect: no index runs in a descending order's direction, so the page's private copy read and
-    counted every row of the collection, however narrow the caller's window: a large collection was
-    refused or ran past its deadline. The lowered visit cap stands in for the collection's size: the
-    whole collection exceeds it and each window fits. The windows filter a date and a number, so the
-    copied operands must order and compare exactly as the stored values do."""
-    from exomem.query_engine import runtime as query_runtime
-
+def test_a_descending_window_is_charged_its_index_interval_and_pages_in_source_order(derived):
+    """Defect: no index runs in a descending order's direction, so the page's private copy read every row
+    of the collection and was charged for all of them, however narrow the caller's window: a large
+    collection was refused or ran past its deadline. A window on an index's leading field must be charged
+    only its interval; a predicate that cannot seek an index must still be charged the whole collection,
+    because the copy then reads every row. The windows filter a date and a number, so the copied operands
+    must order and compare exactly as the stored values do."""
     writer, job = derived("descending", {"samples/mixed.json": MIXED_DOCUMENT},
                           text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
     finish(writer, job)
     source = [{"day": day["day"], "position": position, **({"numeric": value} if type(value) is not str else {})}
               for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
-    monkeypatch.setitem(query_runtime.PROFILES["interactive"], "max_row_visits", 120)
+    order = [{"field": "day", "direction": "desc"}, {"field": "position", "direction": "desc"}]
+
+    def query(where, **extra):
+        request = {"version": 1, "select": ["day", "position", "numeric"], "order_by": order, **extra}
+        with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, writer.handle):
+            result = commands.op_record_memory(writer.root, action="query", collection=DERIVED,
+                                               query={**request, **({"where": where} if where else {})})
+        assert "error" not in result, result
+        return result
+
+    def charge(where):
+        return query(where, mode="preview")["visit_charge"]
 
     def pages(where):
-        query = {"version": 1, "select": ["day", "position", "numeric"], "where": where, "page": {"limit": 2},
-                 "order_by": [{"field": "day", "direction": "desc"}, {"field": "position", "direction": "desc"}]}
-        rows = []
-        with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, writer.handle):
-            while True:
-                result = commands.op_record_memory(writer.root, action="query", collection=DERIVED, query=query)
-                assert "error" not in result, result
-                rows += result["rows"]
-                if not result["has_more"]:
-                    return rows
-                query["page"]["after"] = result["next_cursor"]
+        rows, after = [], None
+        while True:
+            result = query(where, page={"limit": 2, **({"after": after} if after else {})})
+            rows += result["rows"]
+            if not result["has_more"]:
+                return rows
+            after = result["next_cursor"]
 
     def descending(rows):
         return sorted(rows, key=lambda row: (row["day"], row["position"]), reverse=True)
 
-    assert pages({"field": "day", "op": "eq", "value": "2026-11-02"}) == descending(
-        [row for row in source if row["day"] == "2026-11-02"])
-    assert pages({"field": "numeric", "op": "gte", "value": 3}) == descending(
-        [row for row in source if row.get("numeric", -1) >= 3])
+    day, numeric = {"field": "day", "op": "eq", "value": "2026-11-02"}, {"field": "numeric", "op": "gte", "value": 3}
+    whole = charge(None)
+    assert charge(day) < whole and charge(numeric) < whole
+    assert charge({"field": "numeric", "op": "ne", "value": 7}) == whole
+    assert pages(day) == descending([row for row in source if row["day"] == "2026-11-02"])
+    assert pages(numeric) == descending([row for row in source if row.get("numeric", -1) >= 3])
 
 
 def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_touching_its_rows(derived):

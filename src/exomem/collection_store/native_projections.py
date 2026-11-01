@@ -87,9 +87,9 @@ class NativeProjectionPlan(ProjectionPlan):
                 else:
                     value = MISSING
                     break
-            tag, band, key = native_operands.scalar_operand(value, scalar.kind)
-            result.update({f"k{ordinal}_rank": 2 if tag == 0 else 1 if tag == 1 else 0,
-                           f"k{ordinal}_tag": tag, f"k{ordinal}_band": band, f"k{ordinal}_key": key})
+            rank, tag, band, key = native_operands.ranked_operand(value, scalar.kind)
+            result.update({f"k{ordinal}_rank": rank, f"k{ordinal}_tag": tag, f"k{ordinal}_band": band,
+                           f"k{ordinal}_key": key})
         return result
 
 
@@ -137,7 +137,7 @@ def _operand_columns(plan, table):
     result = {}
     for ordinal, scalar in enumerate(plan.scalars):
         tag, band, key = _expressions(plan, table, scalar)
-        result.update({f"k{ordinal}_rank": case((tag == 0, 2), (tag == 1, 1), else_=0),
+        result.update({f"k{ordinal}_rank": case((tag == MISSING_TAG, 2), (tag == NULL_TAG, 1), else_=0),
                        f"k{ordinal}_tag": tag, f"k{ordinal}_band": band, f"k{ordinal}_key": key})
     return result
 
