@@ -4057,6 +4057,7 @@ def _with_source_pointers(
     empty_abstention = False
     if packet.get("abstained"):
         reason = (packet.get("abstention") or {}).get("reason")
+        # nosemgrep: ep-word-set -- The packet schema fixes these sections; they are field names, not vocabulary.
         listed = ("anchors", "ambiguity", "related", "units", "pointers", "current_state")
         if reason != activation_result.UNRESOLVED or any(packet.get(key) for key in listed):
             return packet
@@ -4081,6 +4082,7 @@ def _with_source_pointers(
         return packet
     compiled = [
         str(anchor["path"]) for anchor in packet.get("anchors") or ()
+        # nosemgrep: ep-word-set -- The packet specification fixes the two statuses that serve a compiled page.
         if anchor.get("path") and anchor.get("status") in ("resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS)
     ]
     cited = _compiled_citations(vault_root, compiled, [hit.path for hit in hits]) if compiled else {}

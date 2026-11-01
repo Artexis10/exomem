@@ -4017,6 +4017,7 @@ def guard_working_set(
     # goes with it, since a unit's only warrant was the anchor it hung from.
     # A packet that resolved no anchor but served material (a captured pointer) is emptied the same way:
     # nothing it served survived, so what is left is an abstention, not a served packet with nothing to say.
+    # nosemgrep: ep-word-set -- The packet schema fixes the sections that serve material.
     served_sections = ("units", "pointers", "current_state")
     emptied = (
         bool(packet.get("anchors"))

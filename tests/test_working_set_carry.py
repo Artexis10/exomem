@@ -3078,6 +3078,9 @@ def test_a_bound_of_zero_restores_the_packet_without_captured_pages(
 ) -> None:
     """The one switch: at 0 the turn that only a captured page answers gets today's empty abstention."""
     before = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_SOURCE_SLOTS", "0")
+    before_off = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+    monkeypatch.delenv("EXOMEM_ACTIVATION_SOURCE_SLOTS")
     _capture(
         carry_vault, "Sources/zerrin-bracken-invoice.md",
         "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.", title="Zerrin Bracken invoice",
@@ -3091,4 +3094,5 @@ def test_a_bound_of_zero_restores_the_packet_without_captured_pages(
         return {**packet, "generation": {k: v for k, v in packet["generation"].items() if k not in ("freshness_key", "index_generation")}}
 
     assert comparable(off) == comparable(before)
+    assert comparable(before_off) == comparable(before)  # a turn no captured page answers is the same at either bound
     assert len(on["pointers"]) == 1  # the control: the same vault does reach the page with the bound on

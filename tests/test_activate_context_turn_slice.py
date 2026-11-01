@@ -466,7 +466,9 @@ def test_a_carry_that_finds_the_budget_spent_skips_the_slice_and_names_the_stage
     # The control: the same call with time to spare names the carried page, under the same map.
     _cold()
     unhurried = _activate(vault, turn=CARRY_TURN)
-    assert [item["ref"] for item in unhurried["turn_slice"]["items"]] == [CARRY_PAGE]
+    leads = unhurried["turn_slice"]["items"]
+    assert leads[0]["ref"] == CARRY_PAGE  # the compiled page leads; the fixture's two raw pages follow as source leads
+    assert {item["kind"] for item in leads[1:]} == {"source"}
     assert packet["map"] == unhurried["map"]
 
 
