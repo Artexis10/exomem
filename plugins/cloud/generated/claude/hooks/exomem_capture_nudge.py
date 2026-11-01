@@ -912,13 +912,6 @@ def _write_episode_state(path: Path, state: dict) -> None:
 
 # --- episode door check: a revision recorded through any door still counts ---
 
-#: A key read from `service.env` is bound to loopback, mirroring the retrieve
-#: hook's own ladder: the hook must not become the primitive that posts a key
-#: it lifted off disk, plus a derived episode key, to a host named by
-#: `EXOMEM_HOST`. A key the user exported into the environment keeps today's
-#: behaviour — they placed both variables.
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
-
 #: One bounded call, only on a Stop where the ask is otherwise about to fire —
 #: this is the Stop hook's own time budget, spent alongside the transcript
 #: work above it.
@@ -954,15 +947,11 @@ def _rest_port() -> int | None:
     return port if 1 <= port <= 65535 else None
 
 
-def _service_env_path() -> Path | None:
-    return _state_core().local_credentials().service_env_path()
-
-
-def _resolve_rest_key() -> tuple[str, str]:
-    credentials = _state_core().local_credentials()
-    return credentials.rest_key(
-        lambda name: credentials.service_env_value(name, _service_env_path())
-    )
+def _rest_lane():
+    """The credentialed REST lane, or `None`: no credential, one the host binding
+    refuses, or no credential module deployed (the Cloud archive omits it)."""
+    credentials = _state_core().optional_sibling_module("exomem_local_credentials.py")
+    return credentials.rest_lane(_rest_host()) if credentials is not None else None
 
 
 def _bounded(call, budget: float):
@@ -1033,24 +1022,16 @@ def _episode_door(action: str, key: str) -> dict | None:
     timeout = _EPISODE_DOOR_TIMEOUT_SECONDS
 
     def _call() -> dict | None:
-        # Key resolution may read `service.env`, which can block (a FIFO, a
-        # stalled mount), so it runs inside the bound with the request.
-        api_key, source = _resolve_rest_key()
-        if not api_key or (source == "file" and _rest_host() not in _LOOPBACK_HOSTS):
+        # Credential resolution can block (a FIFO, a stalled mount), so it runs
+        # inside the bound with the request.
+        lane = _rest_lane()
+        if lane is None:
             return None
         port = _rest_port()
         if port is None:
             return None
         body = json.dumps({"action": action, "episode": key}).encode("utf-8")
-        req = urllib.request.Request(
-            f"http://{_rest_host()}:{port}/api/episode_memory",
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
+        req = lane.request(f"http://{_rest_host()}:{port}/api/episode_memory", body)
         try:
             with _open_no_redirect(req, timeout=timeout) as resp:
                 if resp.getcode() != 200:

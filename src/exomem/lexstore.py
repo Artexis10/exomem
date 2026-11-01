@@ -70,6 +70,7 @@ import sys
 import threading
 import time
 import uuid
+from array import array
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
@@ -3058,21 +3059,32 @@ class _AdmittedStatisticsEntry:
     postings: Any = None
 
 
-#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes each, so 32 MiB, which
-#: holds about 10,000 pages of 400 distinct words. A corpus past it keeps no base, and its next build counts
-#: every page.
+#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes for the term and 1 for its
+#: count (2 or 4 on a page where a word recurs over 255 or 65,535 times), so about 35 MiB, which holds about
+#: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
+#: no base, and its next build counts every page.
 _ADMITTED_BASE_TERMS_MAX = 4_000_000
+
+
+class _PageTerms(NamedTuple):
+    """One page's entry in a base: a function of its stemmed text alone."""
+
+    digest: bytes
+    length: int
+    #: Distinct terms in first-seen order, and how often each occurs, as `Counter(stemmed.split())` counts.
+    terms: tuple[str, ...]
+    counts: Sequence[int]
 
 
 @dataclass(frozen=True, slots=True)
 class _AdmittedBase:
     """What an admitted corpus's statistics were built from, so the next build re-reads only the pages that differ.
 
-    `pages` maps a page to `(digest of its stemmed text, token count, unique terms in first-seen order)`.
-    A page's entry is a function of its stemmed text alone, so the base serves any later corpus.
+    `pages` maps a page to its `_PageTerms`. An entry is a function of its stemmed text alone, so the base
+    serves any later corpus.
     """
 
-    pages: Mapping[str, tuple[bytes, int, tuple[str, ...]]]
+    pages: Mapping[str, _PageTerms]
     frequency: Mapping[str, int]
 
 
@@ -3080,10 +3092,27 @@ def _text_digest(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
-def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...]]:
-    """One page's token count and unique terms, interned so the pages of a base share each term."""
+def _page_identity(context: bytes, content_hash: str | None, text: str | None) -> bytes:
+    """What stands for a page's stemmed text, a fixed 17 bytes: change the text and the identity changes.
+
+    `_insert_page` writes `fts.stemmed` and `pages.content_hash` from one parse of one byte string. The text is
+    `tokenize(title + search_body)`, and the title, the body and the origin-carrier rule read only those bytes,
+    the page path and the KB folder name. So, with `context` keying it, the hash of the bytes names the text
+    without reading it. A page with no hash is an unparseable one, whose text is its identity.
+    """
+    if content_hash is None:
+        return b"t" + _text_digest(text or "")
+    return b"h" + hashlib.blake2b(content_hash.encode(), digest_size=16, key=context).digest()
+
+
+def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
+    """One page's token count, distinct terms and their counts; the terms are interned so the pages of a base share each."""
     words = stemmed.split()
-    return len(words), tuple(map(sys.intern, dict.fromkeys(words)))
+    counted = Counter(words)
+    most = max(counted.values(), default=0)
+    # The narrowest width that holds the page's largest count: most pages repeat no word 256 times.
+    width = "B" if most < 1 << 8 else "H" if most < 1 << 16 else "I"
+    return len(words), tuple(map(sys.intern, counted)), array(width, counted.values())
 
 
 def _admitted_corpus(
@@ -3092,43 +3121,47 @@ def _admitted_corpus(
     """The Okapi figures, postings and base of the corpus `rows` (page -> stemmed text), which `digests` fingerprints.
 
     A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
-    and the word counts move by exactly the terms that left or entered. The result equals
-    `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    and the word counts move by exactly the terms that left or entered. `rows` need hold only those pages.
+    The result equals `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
     """
     from . import bm25 as bm25_module
 
     held = base.pages if base is not None else {}
-    pages: dict[str, tuple[bytes, int, tuple[str, ...]]] = {}
-    for path, text in rows.items():
+    pages: dict[str, _PageTerms] = {}
+    for path, digest in digests.items():
         kept = held.get(path)
-        if kept is not None and kept[0] == digests[path]:
+        if kept is not None and kept.digest == digest:
             pages[path] = kept
         else:
-            length, terms = _page_terms(text)
-            pages[path] = (digests[path], length, terms)
+            length, terms, counts = _page_terms(rows[path])
+            pages[path] = _PageTerms(digest, length, terms, counts)
             call_spans.measure(call_spans.PAGES_TOKENIZED)
     # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
     ordered = sorted(pages)
     if base is None:
         # Counting in that order leaves the counts in the order `of` gives.
-        frequency = dict(Counter(itertools.chain.from_iterable(pages[path][2] for path in ordered)))
+        frequency = dict(Counter(itertools.chain.from_iterable(pages[path].terms for path in ordered)))
     else:
         counts = Counter(base.frequency)
         counts.subtract(itertools.chain.from_iterable(
-            kept[2] for path, kept in held.items() if pages.get(path) is not kept
+            kept.terms for path, kept in held.items() if pages.get(path) is not kept
         ))
         counts.update(itertools.chain.from_iterable(
-            page[2] for path, page in pages.items() if held.get(path) is not page
+            page.terms for path, page in pages.items() if held.get(path) is not page
         ))
         # The base's order is stale: an edit can bring a word forward, a delete can end one.
-        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path][2] for path in ordered))
+        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path].terms for path in ordered))
         frequency = {term: counts[term] for term in first_seen}
     statistics = bm25_module.CorpusStatistics.from_counts(
-        len(pages), sum(page[1] for page in pages.values()), frequency
+        len(pages), sum(page.length for page in pages.values()), frequency
     )
-    postings = bm25_module.CorpusPostings({path: page[1] for path, page in pages.items()})
-    kept_terms = sum(len(page[2]) for page in pages.values())
+    kept_terms = sum(len(page.terms) for page in pages.values())
     retained = _AdmittedBase(pages, statistics.document_frequency) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
+    # The postings count a new word from the pages' terms only where the base keeps them: the same bound.
+    postings = bm25_module.CorpusPostings(
+        {path: page.length for path, page in pages.items()},
+        {path: (page.terms, page.counts) for path, page in pages.items()} if retained is not None else None,
+    )
     return statistics, postings, retained
 
 
@@ -4815,8 +4848,10 @@ class LexicalStore:
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         self._filtered_term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         # (scope, catalogue generation, admitted-set digest) -> that admitted
-        # corpus's Okapi figures. A miss can reuse the math after a complete
-        # SQL input check. Each entry holds one vocabulary-sized mapping.
+        # corpus's Okapi figures. A miss can reuse the math when every admitted
+        # page's identity (content hash, path, KB folder, catalogue identity) is
+        # unchanged. Each entry holds one vocabulary-sized mapping and the page
+        # terms it was counted from.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
         # scope -> the pages the latest admitted corpus of that scope was built from;
         # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
@@ -4945,13 +4980,32 @@ class LexicalStore:
         # identity work; a catalogue read opens two of these.
         with call_spans.span("lexical.connect"):
             with reserved_paths._subsystem_authority_scope("lexstore"):
-                with call_spans.entered(
-                    "lexical.connect.guard",
-                    reserved_paths._identity_coordination_scope(
-                        self.vault_root,
-                        descriptor_ids=descriptor_ids,
-                    ),
-                ):
+                if descriptor_id == "lexical-store":
+                    # An open of the live store that is already there changes no identity, so
+                    # it skips the identity gate and the generation bump: a read must not
+                    # queue behind a writer. A missing store is created under the full guard.
+                    try:
+                        with call_spans.entered(
+                            "lexical.connect.guard",
+                            reserved_paths._identity_coordination_scope(
+                                self.vault_root,
+                                descriptor_ids=descriptor_ids,
+                                identity_may_change=False,
+                            ),
+                        ):
+                            return self._connect_owned(path, create=False)
+                    except FileNotFoundError:
+                        pass
+                # The guard span above already covered a missing live store's connect; only a
+                # connect that has not been spanned yet gets one here.
+                fallback = reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=descriptor_ids,
+                )
+                if descriptor_id == "lexical-store":
+                    with fallback:
+                        return self._connect_owned(path)
+                with call_spans.entered("lexical.connect.guard", fallback):
                     return self._connect_owned(path)
 
     def _connect_owned(
@@ -4959,6 +5013,7 @@ class LexicalStore:
         path: Path | None = None,
         *,
         publish: bool = True,
+        create: bool = True,
     ) -> sqlite3.Connection:
         target = path if path is not None else self.path
         descriptor_id = reserved_paths.state_target_descriptor_id(
@@ -4973,7 +5028,7 @@ class LexicalStore:
                 self.vault_root,
                 target,
                 descriptor_id,
-                create=True,
+                create=create,
             ) as retained_target:
                 return self._connect_retained(
                     retained_target,
@@ -9919,13 +9974,24 @@ class LexicalStore:
             if cached is not None:
                 return cached, generation
             col = "in_vault" if scope == "vault" else "in_kb"
-            rows = dict(conn.execute(
-                f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
+            stored = dict(conn.execute(
+                f"SELECT p.path, p.content_hash FROM {_FTS_PAGES} "
                 f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?)) "
                 "ORDER BY p.path",
                 (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
             ))
-            digests = {path: _text_digest(stemmed) for path, stemmed in rows.items()}
+            # A page without a content hash has no bytes to name, so its text stands for it: read it now.
+            rows = self._stemmed_texts(conn, col, [path for path, content_hash in stored.items() if content_hash is None])
+            # The catalogue identity and the KB folder name are the only inputs of a page's text beyond its
+            # bytes and path (see `_page_identity`); they key every identity, so a change of either reads as
+            # every page changed.
+            context = hashlib.blake2b(
+                f"{dict(generation[1:]).get('catalog_identity')}\0{kb_dirname()}".encode(), digest_size=16
+            ).digest()
+            digests = {
+                path: _page_identity(context, content_hash, rows.get(path))
+                for path, content_hash in stored.items()
+            }
             fingerprint = hashlib.sha256()
             for path, page_digest in digests.items():
                 encoded = path.encode("utf-8", "surrogatepass")
@@ -9953,6 +10019,12 @@ class LexicalStore:
                 call_spans.measure(call_spans.STATS_REBUILT)
                 with self._term_frequency_cache_lock:
                     base = self._admitted_bases.get(scope)
+                held = base.pages if base is not None else {}
+                # Only a page the base lacks, or holds under another identity, has its text read.
+                rows.update(self._stemmed_texts(conn, col, [
+                    path for path, page_digest in digests.items()
+                    if path not in rows and ((kept := held.get(path)) is None or kept.digest != page_digest)
+                ]))
                 statistics, postings, base = _admitted_corpus(rows, digests, base)
                 with self._term_frequency_cache_lock:
                     if base is None:
@@ -9974,6 +10046,19 @@ class LexicalStore:
         finally:
             if owns_snapshot:
                 conn.rollback()
+
+    @staticmethod
+    def _stemmed_texts(conn: sqlite3.Connection, col: str, paths: list[str]) -> dict[str, str]:
+        """The stemmed text of each of `paths` in the scope."""
+        if not paths:
+            return {}
+        # The pages lead the join: `_FTS_PAGES` leads with the full-text table, which a MATCH needs, but here it
+        # would read every full-text row to keep a few.
+        return dict(conn.execute(
+            f"SELECT p.path, fts.stemmed FROM pages p CROSS JOIN fts ON fts.rowid = p.rowid "
+            f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(paths), ensure_ascii=False),),
+        ))
 
     def _request_admitted_paths(
         self, conn: sqlite3.Connection, context: RequestQueryContext, scope: str = "kb"
@@ -10040,17 +10125,20 @@ class LexicalStore:
         held.update(postings.kept(words - held.keys()))
         missing = sorted(words - held.keys())
         if missing:
-            rows = conn.execute(
-                f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
-                "AND p.path IN (SELECT value FROM json_each(?))",
-                (
-                    " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
-                    json.dumps(sorted(admitted_paths), ensure_ascii=False),
-                ),
-            )
-            counted = postings.counted(
-                ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
-            )
+            if postings.keeps_page_terms:
+                counted = postings.counted_from_page_terms(missing, document_frequency)
+            else:
+                rows = conn.execute(
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
+                    "AND p.path IN (SELECT value FROM json_each(?))",
+                    (
+                        " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
+                        json.dumps(sorted(admitted_paths), ensure_ascii=False),
+                    ),
+                )
+                counted = postings.counted(
+                    ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
+                )
             if counted is None:
                 return None
             held.update(counted)

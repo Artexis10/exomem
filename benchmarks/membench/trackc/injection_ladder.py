@@ -9,7 +9,7 @@ that file) against an ISOLATED corpus vault:
   appends them under the ``KB routing stubs`` header (``_format_inject_block``;
   ``_STUB_HEADER``, whole-line bound ``_STUB_BLOCK_MAX_CHARS``).
 - Ladder order (``_gather_hits_with_lane``): REST is attempted ONLY when a key
-  resolves (``_resolve_rest_key``: the env, else the managed install's
+  resolves (``exomem_local_credentials.rest_lane``: the env, else the managed install's
   ``service.env``, loopback-only for a file-sourced key); otherwise, with
   ``EXOMEM_RETRIEVE_INJECT_CLI`` truthy, the CLI rung runs.
 - CLI rung resolution (``_fetch_via_cli``): the hook locates
@@ -209,7 +209,7 @@ def run_injection(
         **seeded.env,
     )
     # REST rung stays un-attempted: no key in the env, and the hook's
-    # service.env fallback (`_resolve_rest_key`) is pointed at an empty file.
+    # service.env fallback (`exomem_local_credentials.rest_key`) is pointed at an empty file.
     env.pop("EXOMEM_REST_API_KEY", None)
     env["EXOMEM_SERVICE_ENV"] = os.devnull
     ensure_isolated(env)
@@ -254,7 +254,7 @@ def run_injection(
 def rest_rung_stub() -> dict:
     """Documented stub for the REST rung (NOT run here: loopback availability
     in this sandbox is uncertain, and the hook only attempts REST when
-    a key resolves — ``_fetch_via_rest`` / ``_resolve_rest_key``).
+    a key resolves — ``_fetch_via_rest`` / ``exomem_local_credentials.rest_lane``).
 
     To exercise it manually on a workstation with the local REST facade
     running, execute the returned ``user_command`` (single line): it starts

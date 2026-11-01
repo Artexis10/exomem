@@ -806,20 +806,35 @@ class EmbeddingIndex:
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("embedding_index"):
+            # An open of the live store that is already there changes no identity, so it skips
+            # the identity gate and the generation bump: a read must not queue behind a writer.
+            # A missing store is created under the full guard.
+            if path is None or path == self.path:
+                try:
+                    with reserved_paths._identity_coordination_scope(
+                        self.vault_root,
+                        descriptor_ids=("embeddings-store",),
+                        identity_may_change=False,
+                    ):
+                        return self._connect_owned(path, create=False)
+                except FileNotFoundError:
+                    pass
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
                 descriptor_ids=("embeddings-store",),
             ):
                 return self._connect_owned(path)
 
-    def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
+    def _connect_owned(
+        self, path: Path | None = None, *, create: bool = True
+    ) -> sqlite3.Connection:
         target = path if path is not None else self.path
         if target == self.path:
             with reserved_paths._sqlite_owner_target_scope(
                 self.vault_root,
                 target,
                 "embeddings-store",
-                create=True,
+                create=create,
             ) as retained_target:
                 return self._connect_retained(retained_target)
         return self._connect_retained(target)

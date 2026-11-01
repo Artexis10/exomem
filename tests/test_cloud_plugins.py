@@ -148,11 +148,20 @@ def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_pat
     # native activation/capture behaviour when that local-only dependency is absent.
     cloud_plugins.build_packages(ROOT, tmp_path / "built")
     package = tmp_path / "unpacked"
+    # A closed set of our own credential identifiers, matched literally; it never judges meaning.
+    credential_identifiers = (
+        b"service.env",
+        b"EXOMEM_SERVICE_ENV",
+        b"EXOMEM_LOCAL_TOKEN_FILE",
+        b"EXOMEM_REST_API_KEY",
+        b"Authorization",
+    )
     with zipfile.ZipFile(tmp_path / "built/claude.zip") as archive:
         assert "hooks/exomem_local_credentials.py" not in archive.namelist()
         for name in archive.namelist():
             if name.startswith("hooks/") and name.endswith(".py"):
-                assert b"EXOMEM_REST_API_KEY" not in archive.read(name), name
+                for identifier in credential_identifiers:
+                    assert identifier not in archive.read(name), (name, identifier)
         archive.extractall(package)
     env = {
         name: value

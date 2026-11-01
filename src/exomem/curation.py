@@ -13,7 +13,7 @@ import json
 import os
 import re
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -1272,7 +1272,65 @@ def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
     return _guarded_text(Path(vault_root), path, stale=True)
 
 
-def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
+def _require_committable(
+    review: Mapping[str, Any], validation: Mapping[str, Any], *, relation_pending: bool
+) -> None:
+    """Refuse a create or supersede step the leaf would refuse at commit.
+
+    The review is held back from the leaf's validation, so the leaf cannot object
+    to it there; its validation still says whether the page needs one. Only a
+    fully governed page is reviewed at commit; the leaf ignores a review elsewhere.
+    """
+    if (
+        review
+        and validation.get("applicability") == "full"
+        and not validation.get("reviewed_none_required")
+    ):
+        raise _error(
+            "RELATION_REVIEW_NOT_APPLICABLE",
+            "the page needs no reviewed-none relation review; drop relation_disposition",
+        )
+    _refuse_blocked(
+        validation.get("contract_result"), relation_answered=bool(review) or relation_pending
+    )
+
+
+def _refuse_blocked(contract_result: Any, *, relation_answered: bool) -> None:
+    """Refuse at proposal a step whose leaf validation says its commit will block.
+
+    A relation-disposition finding is set aside when the step answers it with a
+    review the leaf could not see, and deferred to execution when the step links to
+    a page an earlier step creates, which the leaf can judge only once that page
+    exists. A truncated finding list cannot show that nothing else blocks.
+    """
+    from . import semantic_contract
+
+    result = dict(contract_result or {})
+    if not result.get("should_block"):
+        return
+    findings = list(result.get("blocking_findings") or [])
+    if relation_answered:
+        findings = [
+            finding
+            for finding in findings
+            if tuple(finding.get("resolved_rule") or ())
+            != semantic_contract.RELATION_DISPOSITION_RULE
+        ]
+        if not findings and not dict(result.get("omitted_counts") or {}).get("blocking_findings"):
+            return
+    detail = "; ".join(
+        f"{finding.get('code')} at {finding.get('path')}: {finding.get('detail')}"
+        for finding in findings
+    )
+    raise _error(
+        "SEMANTIC_CONTRACT_BLOCKED",
+        f"the step would block at commit: {detail or 'blocking findings were truncated'}",
+    )
+
+
+def _prepare_step(
+    vault_root: Path, step: Mapping[str, Any], ordinal: int, *, relation_pending: bool = False
+) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
     from . import (
         commands,
@@ -1321,6 +1379,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     canonical_json({"vocabulary_preparation": preflight.evidence}),
                 )
             validation = preflight.as_dict()
+            _require_committable(review, validation, relation_pending=relation_pending)
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"create destination {path!r} exists")
@@ -1357,6 +1416,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 vault_root, path=path, why=args["why"], operation=operation
             )
             semantic = dict(validation.get("semantic") or {})
+            _refuse_blocked(semantic.get("contract_result"), relation_answered=relation_pending)
             prepared = {
                 "transition_token": semantic.get("transition_token"),
                 "relation_review_hash": semantic.get("relation_review_hash"),
@@ -1411,6 +1471,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                     "CURATION_VOCABULARY_PREPARATION_REQUIRED",
                     canonical_json({"vocabulary_preparation": preparation}),
                 )
+            _require_committable(review, validation, relation_pending=relation_pending)
             prepared = {
                 "draft_id": validation["draft_id"],
                 "draft_hash": validation["draft_hash"],
@@ -1640,6 +1701,143 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
     }
 
 
+# The argument a creating step's leaf registers as its page's title (note.py, link.py `add_pending`).
+_CREATED_TITLE_ARGUMENT = {"create-note": "title", "supersede": "title", "create-entity": "name"}
+
+
+def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Prepare each step with links to the pages the plan's earlier steps create.
+
+    A later step may link to a page an earlier step creates, so its links are
+    rendered as they will be once that page exists. Only that rendering is
+    projected; the semantic checks still read the vault as it is. A plan that
+    projection cannot make run as sealed is refused here instead of stopping
+    part-way: a later step bound to a path an earlier step writes, a step that
+    links to a page an earlier step supersedes, and a step that gives a relation
+    disposition while it links to a page an earlier step creates (that link is
+    its relation once the page exists). A step whose leaf validation already blocks
+    is refused too (`_refuse_blocked`). Relocation steps, which remove pages, are
+    refused before any step runs (`_require_plan_relocation_history`).
+    """
+    from . import find as find_module
+
+    manifest: list[dict[str, Any]] = []
+    created: list[tuple[str, str | None]] = []
+    superseded: list[tuple[str, str | None]] = []
+    written: set[str] = set()
+    for ordinal, step in enumerate(steps):
+        args = step["args"]
+        retired = _planned_link_targets(vault_root, args, superseded)
+        if retired:
+            raise _error(
+                "CURATION_STEP_CONFLICT",
+                f"step {step['step_id']!r} links to {retired[0]!r}, which an earlier step "
+                "supersedes; link its successor",
+            )
+        operation = args.get("operation")
+        disposition = args.get("relation_disposition") or (
+            operation.get("relation_disposition") if isinstance(operation, Mapping) else None
+        )
+        related = _planned_link_targets(vault_root, args, created)
+        if related and disposition:
+            raise _error(
+                "CURATION_STEP_CONFLICT",
+                f"step {step['step_id']!r} links to {related[0]!r}, which an earlier step "
+                "creates; that link is its relation, so it takes no relation disposition",
+            )
+        with find_module.planned_pages(vault_root, created):
+            item = _prepare_step(vault_root, step, ordinal, relation_pending=bool(related))
+        conflicts = sorted(
+            {str(expected["path"]) for expected in _binding_expectations(item)} & written
+        )
+        if conflicts:
+            raise _error(
+                "CURATION_STEP_CONFLICT",
+                f"step {step['step_id']!r} is bound to {conflicts[0]!r}, "
+                "which an earlier step of the plan changes",
+            )
+        manifest.append(item)
+        after = {str(entry["path"]) for entry in item["effect_after"]}
+        written |= after
+        title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
+        title = args.get(title_argument) if title_argument else None
+        created.extend(
+            (str(entry["path"]), title if isinstance(title, str) else None)
+            for entry in item["effect_before"]
+            if entry.get("absent") is True and entry["path"] in after
+        )
+        if step["kind"] == "supersede":
+            from .vault import parse_frontmatter, resolve_display_title
+
+            # The resolver indexes a page by the title read surfaces show, not only `title:`.
+            fields, body, _raw = parse_frontmatter(str(item["preimage"] or ""))
+            superseded.append(
+                (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
+            )
+    return manifest
+
+
+# Fields of the closed step argument schema whose text never reaches the page, so a link
+# there is neither a relation nor a rendered link.
+_UNWRITTEN_ARGUMENTS = frozenset({"why", "reason", "relation_review_reason", "old_string"})
+
+
+def _written_arguments(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The step's arguments without the schema fields whose text never reaches the page.
+
+    Only the step schema's own levels are filtered: the step arguments, an edit's
+    operation and its `edits`. Deeper keys come from the user's data.
+    """
+
+    def written(fields: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in fields.items() if key not in _UNWRITTEN_ARGUMENTS}
+
+    result = written(args)
+    operation = result.get("operation")
+    if isinstance(operation, Mapping):
+        result["operation"] = operation = written(operation)
+        edits = operation.get("edits")
+        if isinstance(edits, list):
+            operation["edits"] = [
+                written(edit) if isinstance(edit, Mapping) else edit for edit in edits
+            ]
+    return result
+
+
+def _planned_link_targets(
+    vault_root: Path, args: Mapping[str, Any], pages: Sequence[tuple[str, str | None]]
+) -> list[str]:
+    """The `pages` that the wikilinks a step writes resolve to, by path or by title."""
+    from .vault import (
+        WikilinkError,
+        WikilinkResolver,
+        find_body_wikilinks,
+        normalize_wikilink,
+    )
+
+    if not pages:
+        return []
+    resolver = WikilinkResolver.from_entries(vault_root, pages)
+    found: set[str] = set()
+    texts: list[Any] = [_written_arguments(args)]
+    while texts:
+        value = texts.pop()
+        if isinstance(value, Mapping):
+            texts.extend(value.values())
+        elif isinstance(value, list):
+            texts.extend(value)
+        elif isinstance(value, str):
+            for match in find_body_wikilinks(value):
+                try:
+                    target, _warning = normalize_wikilink(
+                        match.group(0), vault_root, resolver=resolver, strict=True
+                    )
+                except WikilinkError:
+                    continue
+                found.add(target)
+    return sorted(found)
+
+
 def _validate_entity_candidate_plan(
     vault_root: Path, plan: Mapping[str, Any]
 ) -> None:
@@ -1785,9 +1983,7 @@ def prepare_proposal(
     # published.  A stale review must not leave an inert but misleading plan in
     # the governed run store.
     _validate_entity_candidate_plan(root, validated)
-    manifest = [
-        _prepare_step(root, step, ordinal) for ordinal, step in enumerate(validated["steps"])
-    ]
+    manifest = _prepare_manifest(root, validated["steps"])
     binding = validated.get("entity_candidate")
     if isinstance(binding, Mapping) and binding.get("candidate_state") == "hydration":
         allowed_paths = {
@@ -1842,53 +2038,44 @@ def _binding_blockers(
         if index in store_owned:
             # Its bound files are the store's generated views; the store blocker says why it cannot run.
             continue
-        manifest = item.get("effect_before")
-        if isinstance(manifest, list) and manifest:
-            for expected_item in manifest:
-                path = str(expected_item.get("path") or "")
-                if expected_item.get("absent") is True:
-                    if _guarded_absent(vault_root, path):
-                        continue
-                    blockers.append(
-                        {
-                            "code": "CURATION_BINDING_STALE",
-                            "path": path,
-                            "reason": "expected absence changed",
-                        }
-                    )
+        for expected_item in _binding_expectations(item):
+            path = str(expected_item.get("path") or "")
+            if expected_item.get("absent") is True:
+                if _guarded_absent(vault_root, path):
                     continue
-                expected = expected_item.get("content_hash")
-                actual = _bound_hash(vault_root, path, keep)
-                if actual != expected:
-                    blockers.append(
-                        {
-                            "code": "CURATION_BINDING_STALE",
-                            "path": path,
-                            "reason": "content hash changed",
-                        }
-                    )
-            continue
-        path = str(item["path"])
-        if item.get("expected_absent"):
-            destination = str(item.get("prepared", {}).get("destination") or path)
-            if not _guarded_absent(vault_root, destination):
                 blockers.append(
                     {
                         "code": "CURATION_BINDING_STALE",
-                        "path": destination,
+                        "path": path,
                         "reason": "expected absence changed",
                     }
                 )
-            continue
-        expected = item.get("before_hash")
-        if expected is None:
-            continue
-        actual = _bound_hash(vault_root, path, keep)
-        if actual != expected:
-            blockers.append(
-                {"code": "CURATION_BINDING_STALE", "path": path, "reason": "content hash changed"}
-            )
+                continue
+            expected = expected_item.get("content_hash")
+            actual = _bound_hash(vault_root, path, keep)
+            if actual != expected:
+                blockers.append(
+                    {
+                        "code": "CURATION_BINDING_STALE",
+                        "path": path,
+                        "reason": "content hash changed",
+                    }
+                )
     return blockers
+
+
+def _binding_expectations(item: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The paths a sealed step binds, each expected absent or at a content hash."""
+    manifest = item.get("effect_before")
+    if isinstance(manifest, list) and manifest:
+        return [dict(expected) for expected in manifest]
+    path = str(item["path"])
+    if item.get("expected_absent"):
+        destination = str(item.get("prepared", {}).get("destination") or path)
+        return [{"path": destination, "absent": True}]
+    if item.get("before_hash") is None:
+        return []
+    return [{"path": path, "content_hash": item["before_hash"]}]
 
 
 def _records_store_blockers(
@@ -2138,7 +2325,7 @@ def _finalize_witness_batch(
     from . import curation_witness
 
     root = Path(vault_root).absolute()
-    hashes: dict[str, str] = {}
+    contents: dict[str, str] = {}
     for write in writes:
         if not isinstance(getattr(write, "content", None), str):
             continue
@@ -2146,7 +2333,8 @@ def _finalize_witness_batch(
             relative = Path(write.path).absolute().relative_to(root).as_posix()
         except ValueError:
             continue
-        hashes[relative] = text_content_hash(write.content)
+        contents[relative] = write.content
+    hashes = {path: text_content_hash(content) for path, content in contents.items()}
     kind = str(step["kind"])
     source = str(binding["path"])
     destination = str(binding.get("postcondition", {}).get("path") or source)
@@ -2190,8 +2378,24 @@ def _finalize_witness_batch(
         exact_hash = hashes.get(destination)
         if exact_hash is None:
             return None
+        if kind == "edit":
+            _require_reviewed_edit(binding, contents[destination])
         after = [{"path": destination, "content_hash": exact_hash}]
     return curation_witness.render_with_after(content, after)
+
+
+def _require_reviewed_edit(binding: Mapping[str, Any], planned: str) -> None:
+    """Refuse, before any byte lands, an edit that differs from the approved one.
+
+    Only the `updated:` instant may differ: `_dispatch_step` mints the transition at execution.
+    """
+    from . import edit as edit_module
+    from . import semantic_writes
+
+    reviewed = semantic_writes.transition_token_stamp(binding["prepared"].get("transition_token"))
+    rendered = edit_module.reviewed_render(planned, reviewed) if reviewed is not None else planned
+    if text_content_hash(rendered) != binding["postcondition"]["content_hash"]:
+        raise _error("CURATION_BINDING_STALE", "the edit no longer writes the approved content")
 
 
 def _validate_witness(
@@ -2587,10 +2791,23 @@ def _dispatch_step(
     if kind == "accept-relation":
         return commands.op_connect_memory(vault_root, operation="accept-relation", **args)
     if kind == "edit":
-        operation = dict(args["operation"])
-        operation.pop("validate_only", None)
-        operation["transition_token"] = prepared["transition_token"]
-        operation["relation_review_hash"] = prepared["relation_review_hash"]
+        # The sealed transition pins the reviewed `updated:` instant, which the writer refuses once
+        # it is a day old, and approval often comes later. The transition is minted now, never from
+        # a token copied into the plan; `_require_reviewed_edit` proves the approved bytes land.
+        operation = {
+            key: value
+            for key, value in args["operation"].items()
+            if key not in {"validate_only", "transition_token", "relation_review_hash"}
+        }
+        validation = commands.op_edit_memory(
+            vault_root,
+            path=args["path"],
+            why=args["why"],
+            operation={**operation, "validate_only": True},
+        )
+        semantic = dict(validation.get("semantic") or {})
+        operation["transition_token"] = semantic.get("transition_token")
+        operation["relation_review_hash"] = semantic.get("relation_review_hash")
         return commands.op_edit_memory(
             vault_root, path=args["path"], why=args["why"], operation=operation
         )
@@ -4388,7 +4605,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "steps": steps,
         }
     )
-    manifest = [_prepare_step(root, step, ordinal) for ordinal, step in enumerate(plan["steps"])]
+    manifest = _prepare_manifest(root, plan["steps"])
     _require_plan_relocation_history(root, plan)
     registries = registry_identities(root)
     sealed = {
