@@ -13593,6 +13593,62 @@ _SPEC: tuple[tuple, ...] = (
 )
 
 
+# Journal eligibility of every write command, declared once beside the registry (design D8). Command
+# names are the registry's own closed set, not vocabulary. A mixed command is declared for its eligible
+# modes; the accept path narrows a call to those modes.
+_TRANCHE_1 = "tranche 1: a contended call is journaled and applied later"
+_TRANCHE_2 = "tranche 2: journaled only after the tranche 1 proof"
+_NEVER_BEARER = "its result carries a bearer credential, which the journal never stores or replays"
+_NEVER_NOT_A_CALLER_WRITE = "not a caller write the journal can order: it returns a job handle or holds the boundary itself"
+_NOT_NAMED = "not named by the journal design; keeps normal serialization"
+_INTENT_ELIGIBILITY: dict[str, tuple[bool, str]] = {
+    "remember": (True, _TRANCHE_1),
+    "replace_memory": (True, _TRANCHE_1),
+    "edit_memory": (True, f"{_TRANCHE_1}, every mode"),
+    "observe_memory": (True, _TRANCHE_1),
+    "episode_memory": (True, f"{_TRANCHE_1}, `record` mode only"),
+    "manage_memory_file": (True, f"{_TRANCHE_1}, create and append only"),
+    "capture_source": (True, f"{_TRANCHE_1}, run inline first and journaled with its staged files"),
+    "preserve_artifacts": (True, f"{_TRANCHE_1}, run inline first and journaled with its staged files"),
+    "note": (True, f"{_TRANCHE_1}: legacy spelling of remember"),
+    "edit": (True, f"{_TRANCHE_1}: legacy spelling of edit_memory"),
+    "replace": (True, f"{_TRANCHE_1}: legacy spelling of replace_memory"),
+    "create_file": (True, f"{_TRANCHE_1}: legacy spelling of manage_memory_file create"),
+    "append_to_file": (True, f"{_TRANCHE_1}: legacy spelling of manage_memory_file append"),
+    "preserve": (True, f"{_TRANCHE_1}: legacy spelling of preserve_artifacts"),
+    "move_file": (False, _TRANCHE_2),
+    "delete": (False, _TRANCHE_2),
+    "recover_from_trash": (False, _TRANCHE_2),
+    "link": (False, _TRANCHE_2),
+    "schema_memory": (False, f"{_TRANCHE_2}, save-relations only"),
+    "maintain_memory": (False, f"{_TRANCHE_2}, tag-variants and curation propose only"),
+    "record_memory": (False, f"{_TRANCHE_2}: collection-store write"),
+    "plan_memory": (False, f"{_TRANCHE_2}: collection-store write"),
+    "transfer_artifact": (False, _NEVER_BEARER),
+    "govern_memory": (False, f"session open and rotate: {_NEVER_BEARER}"),
+    "process_media": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "adopt": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "adopt_vault": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "adoption_studio": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "review_memory": (False, "a write-intent decision is never journaled itself"),
+    "triage_memory": (False, "a write-intent decision is never journaled itself"),
+    "configure_memory": (False, _NOT_NAMED),
+    "connect_memory": (False, _NOT_NAMED),
+    "preserve_evidence": (False, _NOT_NAMED),
+    "transfer_memory": (False, _NOT_NAMED),
+    "audit_fix": (False, _NOT_NAMED),
+    "reconcile": (False, _NOT_NAMED),
+    "add": (False, _NOT_NAMED),
+}
+
+
+def _intent_eligibility(name: str) -> dict[str, Any]:
+    declared = _INTENT_ELIGIBILITY.get(name)
+    if declared is None:
+        return {}
+    return {"intent_eligible": declared[0], "intent_reason": declared[1]}
+
+
 def _build_commands() -> tuple[Command, ...]:
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces in _SPEC:
@@ -13620,6 +13676,7 @@ def _build_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
+                **_intent_eligibility(name),
             )
         )
     return tuple(cmds)
@@ -14303,6 +14360,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
+                **_intent_eligibility(name),
             )
         )
     return tuple(cmds)
