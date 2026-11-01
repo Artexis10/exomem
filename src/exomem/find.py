@@ -870,15 +870,8 @@ class FreshnessSnapshot:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
-                paths: set[str] = set()
                 with call_spans.span("recall.projection.relativize"):
-                    for raw_path in entries:
-                        try:
-                            paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
-                        except (OSError, ValueError):
-                            # Registry identities outside the literal vault spelling are
-                            # never valid semantic-search parents; fail closed.
-                            continue
+                    paths = _relative_to_root(entries, root)
                 projected = frozenset(paths)
                 self._recall[scope] = checkpoint
                 self._recall_paths[scope] = projected
@@ -942,6 +935,33 @@ class _EmptyPendingCoverage:
 
 
 _EMPTY_PENDING_COVERAGE = _EmptyPendingCoverage()
+
+
+def _relative_to_root(raw_paths: Iterable[str], root: Path) -> set[str]:
+    """The vault-relative POSIX spelling of each path under `root`; any other path is dropped.
+
+    A path already spelled the way `Path` would write it, one that continues `root`'s own spelling with
+    plain components, is sliced as a string. Any other spelling goes through `Path`: that costs about
+    forty times more per path, and a catalogue holds one spelling for all of its paths.
+    """
+    prefix = str(root).rstrip("/")
+    relative: set[str] = set()
+    for raw in raw_paths:
+        body = raw[len(prefix):] if isinstance(raw, str) and raw.startswith(prefix) else ""
+        # `Path` would drop a repeated or trailing "/" and a "." component, and a platform separator
+        # other than "/" would change the POSIX spelling; those, and the path outside `root`, take its route.
+        if body[:1] == "/" and len(body) > 1 and not (
+            "//" in body or "/." in body or body.endswith("/") or "\\" in body
+        ):
+            relative.add(body[1:])
+            continue
+        try:
+            relative.add(Path(raw).absolute().relative_to(root).as_posix())
+        except (OSError, ValueError):
+            # Registry identities outside the literal vault spelling are
+            # never valid semantic-search parents; fail closed.
+            continue
+    return relative
 
 
 def _vault_rel(vault_root: Path, path: Path) -> str | None:

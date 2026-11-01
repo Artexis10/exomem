@@ -50,6 +50,7 @@ from membench.utility.switch_eval.state import (
 )
 from membench.utility.switch_eval.tap import process_start_ticks
 
+from . import ready_server
 from . import seed as seed_module
 from .runfile import read_jsonl, session_object
 from .scripted import DoorFault, ScriptedSession
@@ -188,16 +189,19 @@ def session_files(
 
     files_dir.mkdir(parents=True, exist_ok=True)
     paths = session_paths(files_dir, hooked=hooked)
+    tap_log = slot.runtime / "tap.jsonl"
     entry = mcp_server_entry(
         slot,
         spec,
-        log=slot.runtime / "tap.jsonl",
+        log=tap_log,
         server_stderr=slot.runtime / "server.stderr",
         # The tap's ready gate probes through the due-state carrier and would
-        # settle the prior agent's promotion; the settle session warmed the index.
+        # settle the prior agent's promotion. Every server process warms its own
+        # index, so the ready server holds discovery until that warm-up is over.
         skip_ready_gate=True,
         budget=CALL_GUARD,
     )
+    entry["args"] = ready_server.entry_args(entry["args"], tap_log)
     paths["mcp.json"].write_text(
         json.dumps({"mcpServers": {SERVER_NAME: entry}}, indent=2, sort_keys=True), encoding="utf-8"
     )
