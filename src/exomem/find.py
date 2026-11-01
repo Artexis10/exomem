@@ -6476,7 +6476,7 @@ def _find_semantic(
                             [] if retrieval_trace is not None else None
                         )
                         if prefer_compiled:
-                            factor = find_policy.type_multiplier(h.type, config, type_basis)
+                            factor = find_policy.page_type_factor(h.type, h.media_type, config, type_basis)
                             before = adjusted
                             adjusted *= factor
                             if chain is not None:
