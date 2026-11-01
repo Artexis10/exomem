@@ -589,8 +589,9 @@ def test_a_governed_key_is_recognized_through_label_normalization(
     # Re-emitted under its canonical spelling, and never duplicated as an
     # unowned row alongside the governed one.
     source = page.read_text(encoding="utf-8")
-    assert f"- {normalized}: {value}" in source
-    assert source.count(value) == 1
+    # Count unit rows, not the bare value: the page's `updated:` date can equal the fixture date.
+    rows = [line for line in source.splitlines() if line.startswith("- ") and value in line]
+    assert rows == [f"- {normalized}: {value}"]
     assert updated["unit"][normalized] == value
 
 
