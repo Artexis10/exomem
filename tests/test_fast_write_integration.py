@@ -805,10 +805,13 @@ def test_a_handoff_after_a_loan_prices_each_batch_it_re_proves_once(
 def _hand_off_three_batches_sharing_a_page(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[list[list[str]], list[str]]:
-    """Commit three batches in one session and hand off custody after each, as an import does
-    when it lends between chunks. Each batch creates its own page and rewrites one shared page,
-    as every Source an import files rewrites its index and log pages. Returns the batches each
-    handoff proved and the batch ids, oldest first.
+    """Commit three batches in one session under one hold, as an import does.
+
+    Each batch creates its own page and rewrites one shared page, as every Source an import
+    files rewrites its index and log pages. The import hands off custody after each of the
+    first two batches, as it does before it lends the boundary between chunks, and the end of
+    its hold hands off the last. Returns the batches each handoff proved and the batch ids,
+    oldest first.
     """
     # A governed write gives the vault the canonical generation every proof is bound to.
     _governed_write(
@@ -837,27 +840,32 @@ def _hand_off_three_batches_sharing_a_page(
 
     monkeypatch.setattr(derived_receipts, "prove_committed", recorded_proof)
     batch_ids = [f"handoff-{index}" for index in range(3)]
-    with writer_lease.active_manager().consistency_guard(vault, operation="test_import"):
-        for index, batch_id in enumerate(batch_ids):
-            own = f"Knowledge Base/Notes/Insights/handoff-{index}.md"
-            own_text = _compiled_page(f"Handoff {index}", f"handoffown{index}")
-            next_shared = _compiled_page("Handoff shared", f"handoffshared{index + 1}")
-            receipt = _prepare_store_batch(
-                vault,
-                batch_id=batch_id,
-                generation=generation,
-                changes=((own, None, own_text), (shared, shared_text, next_shared)),
-            )
-            _put(vault, own, own_text)
-            _put(vault, shared, next_shared)
-            shared_text = next_shared
-            session.batches.append(
-                writer_lease._FastAcknowledgementBatch(
-                    receipt=receipt, canonical_commit_monotonic=time.monotonic()
+    importing = writer_lease._ACTIVE_FAST_ACK_SESSION.set(session)
+    try:
+        with writer_lease.active_manager().consistency_guard(vault, operation="test_import"):
+            for index, batch_id in enumerate(batch_ids):
+                own = f"Knowledge Base/Notes/Insights/handoff-{index}.md"
+                own_text = _compiled_page(f"Handoff {index}", f"handoffown{index}")
+                next_shared = _compiled_page("Handoff shared", f"handoffshared{index + 1}")
+                receipt = _prepare_store_batch(
+                    vault,
+                    batch_id=batch_id,
+                    generation=generation,
+                    changes=((own, None, own_text), (shared, shared_text, next_shared)),
                 )
-            )
-            proofs.append([])
-            writer_lease._handoff_derived_batches(session)
+                _put(vault, own, own_text)
+                _put(vault, shared, next_shared)
+                shared_text = next_shared
+                session.batches.append(
+                    writer_lease._FastAcknowledgementBatch(
+                        receipt=receipt, canonical_commit_monotonic=time.monotonic()
+                    )
+                )
+                proofs.append([])
+                if index < len(batch_ids) - 1:
+                    writer_lease._handoff_derived_batches(session)
+    finally:
+        writer_lease._ACTIVE_FAST_ACK_SESSION.reset(importing)
     assert all(batch.handoff_outcome == "ready" for batch in session.batches)
     return proofs, batch_ids
 
@@ -897,6 +905,29 @@ def test_a_batch_the_last_handoff_did_not_re_prove_still_retires(
     assert derived_receipts._load_receipt(vault, first).state == "completed"
     assert pending_recall.overlay(vault).outcome == "ready"
     assert set(_pending_row_states(vault)) == {"retired"}, _pending_row_states(vault)
+
+
+def test_a_handoff_that_cannot_read_custody_re_proves_every_sharing_batch_and_still_commits(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A custody store gate held past its timeout fails the read of who holds a page.
+
+    The batches have committed by then, so each handoff falls back to re-proving every batch
+    that shares a page it moved. The last one runs as the import's hold ends, which must end
+    without an error: an error there reports committed batches as failed.
+    """
+    from exomem.cli_ops import OpError
+
+    def held_store_gate(*_args):
+        raise OpError("MUTATION_BUSY", "the custody store gate stayed held")
+
+    monkeypatch.setattr(derived_receipts, "_open_custody_batches", held_store_gate)
+
+    proofs, (first, second, third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch
+    )
+
+    assert proofs == [[first], [second, first], [third, second, first]]
 
 
 @pytest.mark.parametrize("flag", [None, "0"])

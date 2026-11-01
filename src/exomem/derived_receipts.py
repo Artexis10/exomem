@@ -2002,7 +2002,8 @@ def open_custody_batches(vault_root: Path, rel_paths: Collection[str]) -> frozen
 
     A batch whose row on a path is retired has handed that path on, or published it, so
     nothing a newer write did to the path is its to hand on. None when the store cannot
-    be read.
+    be read, for any reason: a handoff that cannot read custody re-proves every batch
+    that shares a path, so this read never fails a committed write.
     """
     try:
         deferred_index.store_path(vault_root).stat()
@@ -2016,7 +2017,7 @@ def open_custody_batches(vault_root: Path, rel_paths: Collection[str]) -> frozen
             return _open_custody_batches(connection, rel_paths)
         finally:
             connection.close()
-    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+    except Exception:  # noqa: BLE001 - a held store gate (MUTATION_BUSY) included: dearer, never less
         return None
 
 
