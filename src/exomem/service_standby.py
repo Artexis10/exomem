@@ -471,8 +471,9 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     2026-09-27 upgrade is why this exists: the standby's single proof declined
     50 s after the serving worker's last publication, and nothing ever ran it
     again, so the cutover waited out its whole budget on a proof that could not
-    change. It keeps running after a proof succeeds, so the proof promotion
-    relies on is the latest one the standby could make.
+    change. After a proof succeeds it re-proves only for a generation that
+    landed without a publication: a publication since the held proof is left
+    to promotion, which records it as `advanced`.
     """
     global _attempt_stat
     from . import freshness
@@ -495,6 +496,15 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         # next poll only opens the sidecar again if something moves again.
         _attempt_stat = stat
     if signal == last_signal:
+        return False
+    with _lock:
+        held = _proved_token
+    if held is not None and signal[1] != held:
+        # A snapshot published since the one the held proof names. Promotion
+        # records it as `advanced` and the promoted worker runs the handoff in
+        # full, so a re-proof here would only withdraw the held proof for its
+        # whole length. A generation that lands without a publication is the
+        # movement a re-proof is for.
         return False
     if not _invalidate_graph_proof():
         return False

@@ -631,11 +631,16 @@ def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
 
     The publication shows at promotion as `advanced`, so the promoted worker
     runs the handoff in full instead of the standby discarding a sound proof.
+    The re-proof loop's next due poll leaves the proof held, for the same reason.
     """
-    # Catches a standby that names S2 as proved, or declines a sound proof of S1.
+    # Catches a standby that names S2 as proved, declines a sound proof of S1, or
+    # withdraws S1 to re-prove after the publication and reports `graph_snapshot`
+    # waiting for the whole proof.
     root = handoff_vault
     _commit_unpublished_page(root)
     _enter_standby(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(service_standby, "_clock", clock, raising=True)
     real = EpistemicGraphIndex.adopt_published_snapshot
     read: list[str | None] = []
 
@@ -654,6 +659,10 @@ def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
     assert service_standby.prove_graph_snapshot(root) is True
     assert service_standby.proved_checkpoint() == read[0], "the standby must hold S1"
     assert service_standby.snapshot_token(root) != read[0], "S2 must have been published"
+
+    clock.now += service_standby.REPROVE_INTERVAL_SECONDS + 1.0
+    assert service_standby.reprove_graph_snapshot_if_due(root) is False
+    assert service_standby.proved_checkpoint() == read[0], "the poll must keep S1 held"
     assert service_standby.cutover_components()["graph_snapshot"] == "ready"
 
     record = service_standby.promote(root, migrated=False)
