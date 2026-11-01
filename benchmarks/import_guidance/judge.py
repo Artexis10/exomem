@@ -29,6 +29,31 @@ def render_transcript(prompt: str, stream_lines: Iterable[str]) -> str:
     return "\n\n".join(parts)
 
 
+def assistant_texts(stream_lines: Iterable[str]) -> list[str]:
+    """Every text message the agent wrote in the run, in order: all that the person could have read."""
+    texts: list[str] = []
+    for raw in stream_lines:
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            continue
+        content = (event.get("message") or {}).get("content")
+        texts.extend(
+            block["text"]
+            for block in (content if isinstance(content, list) else [])
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+        )
+    return texts
+
+
+def render_answer_view(prompt: str, reference: str, answer: str) -> str:
+    """What the judge reads when it scores the answer alone: the person's turn, the facts of the run,
+    and the agent's final message. The same view for every arm, so a tool reply cannot show it the arm."""
+    return f"PERSON: {prompt}\n\nREFERENCE (what actually happened):\n{reference}\n\nAGENT ANSWER TO THE PERSON:\n{answer}"
+
+
 def answer_schema(criteria: tuple[dict, ...]) -> dict:
     properties: dict = {}
     for criterion in criteria:
@@ -42,8 +67,15 @@ def answer_schema(criteria: tuple[dict, ...]) -> dict:
     }
 
 
-def judge_prompt(transcript: str, criteria: tuple[dict, ...]) -> str:
+def judge_prompt(transcript: str, criteria: tuple[dict, ...], *, answer_view: bool = False) -> str:
     listed = "\n".join(f"- {c['id']}: {c['text']}" for c in criteria)
+    if answer_view:
+        return (
+            "Read what a person asked, the facts of what happened, and the answer an AI agent gave the "
+            "person. For each criterion answer true if it holds for the agent's answer and false if it "
+            "does not. Give a one-line reason for each. The reference is true; judge only the answer's "
+            "words.\n\nCRITERIA\n" + listed + "\n\nCASE\n" + transcript
+        )
     return (
         "Read the transcript between a person and an AI agent. For each criterion answer true if it "
         "holds in the transcript and false if it does not. Give a one-line reason for each. Judge only "

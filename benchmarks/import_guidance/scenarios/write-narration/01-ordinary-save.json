@@ -1,0 +1,118 @@
+{
+  "id": "01-ordinary-save",
+  "title": "An ordinary note save succeeds",
+  "suite": "write-narration",
+  "prompt": "Please save a note in my memory called 'Standup decisions': we agreed to ship the CSV export first, the dashboard rewrite moves to next quarter, and the on-call rota stays as it is. Tell me once it's saved.",
+  "served_tools": [
+    "bootstrap",
+    "create_note"
+  ],
+  "builtin_tools": [],
+  "record": {
+    "steps": [
+      {
+        "settle_graph": true
+      },
+      {
+        "as": "bootstrap",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "compact"
+          }
+        }
+      },
+      {
+        "as": "validate",
+        "tool": "create_note",
+        "arguments": {
+          "title": "Standup decisions",
+          "slug": "standup-decisions",
+          "content": "## Observations\n\n- [finding] The team ships the CSV export first and moves the dashboard rewrite to next quarter. ^one\n\n## Connections\n\n- [[Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout]]\n",
+          "validate_only": true
+        },
+        "expect": {
+          "mutated": false,
+          "relation_review_hash": null
+        }
+      },
+      {
+        "as": "committed",
+        "tool": "create_note",
+        "arguments_from": "validate",
+        "arguments": {
+          "draft_id": {
+            "$ref": "validate.draft_id"
+          },
+          "draft_hash": {
+            "$ref": "validate.draft_hash"
+          },
+          "draft_token": {
+            "$ref": "validate.draft_token"
+          }
+        },
+        "expect": {
+          "status": "committed",
+          "graph_sync": "completed"
+        }
+      }
+    ]
+  },
+  "replies": {
+    "bootstrap": {
+      "$shape": "bootstrap"
+    },
+    "create_note": {
+      "$rules": [
+        {
+          "when": {
+            "validate_only": true
+          },
+          "reply": {
+            "$shape": "validate"
+          }
+        },
+        {
+          "reply": {
+            "$shape": "committed"
+          }
+        }
+      ]
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "judge_view": "answer",
+  "reference": "The agent saved the note 'Standup decisions' with one save call, and the save succeeded on the first try. The tool result also carried internal details: a request id (a UUID), a receipt field, a graph sync state and a vocabulary sync state.",
+  "checks": [
+    {
+      "type": "answer_lacks_scripted_strings",
+      "shapes": [
+        "validate",
+        "committed"
+      ],
+      "literals": [
+        "graph_sync",
+        "derived_sync",
+        "vocabulary_sync",
+        "relation_review_hash",
+        "request_id",
+        "receipt_id"
+      ]
+    }
+  ],
+  "criteria": [
+    {
+      "id": "R1",
+      "expect": true,
+      "text": "The answer tells the person that the note 'Standup decisions' was saved."
+    },
+    {
+      "id": "R2",
+      "expect": false,
+      "text": "The answer mentions an error code, a request id, a receipt id, a hash or draft identifier, that a save was refused or had to be retried, or the state of indexing or syncing (for example graph sync, derived sync or vocabulary sync)."
+    }
+  ]
+}

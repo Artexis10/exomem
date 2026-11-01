@@ -7,6 +7,7 @@ A check never reads the agent's words: those go to the judge. Each returns
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,13 +32,16 @@ class Evidence:
     calls: tuple[dict, ...]
     tool_names: tuple[str, ...]
     shell_events: dict[str, float]
+    # The agent's final message, and the replies recorded from the arm's own code (see `recording.py`).
+    answer: str = ""
+    shapes: Mapping[str, Any] | None = None
 
 
-def _matches(actual: Any, wanted: Any) -> bool:
+def matches(actual: Any, wanted: Any) -> bool:
     """`wanted` is a subset of `actual`; lists compare as sets (path order carries no meaning)."""
     if isinstance(wanted, dict):
         return isinstance(actual, dict) and all(
-            k in actual and _matches(actual[k], v) for k, v in wanted.items()
+            k in actual and matches(actual[k], v) for k, v in wanted.items()
         )
     if isinstance(wanted, list):
         return isinstance(actual, list) and sorted(map(repr, actual)) == sorted(map(repr, wanted))
@@ -72,7 +76,7 @@ def called_with(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
     hits = [
         c
         for c in _calls(evidence, spec["tool"], spec.get("kind"))
-        if _matches(c["arguments"], spec["where"])
+        if matches(c["arguments"], spec["where"])
     ]
     wrong = len(_calls(evidence, spec["tool"], spec.get("kind"))) - len(hits)
     if not hits:
@@ -115,9 +119,94 @@ def filed_before_shell_exit(spec: dict, evidence: Evidence, **_: Any) -> Outcome
     return Outcome("filed_before_shell_exit", FAIL, "first filing came after the command exited")
 
 
+#: Result fields that hold an id, a hash or a code; `references/mutation-results.md` documents them. A person
+#: never needs their values, so a check can look for the exact strings that a scripted reply carried.
+SCRIPTED_ID_KEYS = (
+    "request_id",
+    "receipt_id",
+    "operation_id",
+    "draft_id",
+    "draft_hash",
+    "relation_review_hash",
+    "idempotency_key",
+    "code",
+    "error_code",
+    "graph_sync_code",
+    "derived_sync_code",
+)
+#: Shorter values are words ("ok"), not identifiers; a longer one is also looked for by its first characters.
+MIN_ID_LENGTH = 8
+PREFIX_FROM_LENGTH = 24
+
+
+def values_under(node: Any, keys: tuple[str, ...]) -> Iterator[str]:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in keys and isinstance(value, str) and len(value) >= MIN_ID_LENGTH:
+                yield value
+            yield from values_under(value, keys)
+    elif isinstance(node, list):
+        for item in node:
+            yield from values_under(item, keys)
+
+
+def scripted_strings(shapes: Mapping[str, Any], spec: dict) -> list[str]:
+    """The id, hash and code strings the scripted replies carried, and the `literals` the spec adds (field
+    names that give away a sync state). `spec["shapes"]` limits the replies; without it every reply counts."""
+    names = spec.get("shapes") or list(shapes)
+    found: list[str] = []
+    for name in names:
+        for value in values_under(shapes[name], SCRIPTED_ID_KEYS):
+            found.append(value)
+            if len(value) >= PREFIX_FROM_LENGTH:
+                found.append(value[:MIN_ID_LENGTH])
+    found.extend(spec.get("literals", ()))
+    return sorted(set(found))
+
+
+def leaked_strings(text: str, shapes: Mapping[str, Any], spec: dict) -> list[str]:
+    """The scripted strings that appear in `text`, ignoring case."""
+    lowered = text.lower()
+    return [s for s in scripted_strings(shapes, spec) if s.lower() in lowered]
+
+
+def answer_lacks_scripted_strings(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
+    """The answer holds no id, hash, code or sync-state field name that a scripted reply carried."""
+    if evidence.shapes is None or not scripted_strings(evidence.shapes, spec):
+        return Outcome("answer_lacks_scripted_strings", UNKNOWN, "no scripted string to look for")
+    leaked = leaked_strings(evidence.answer, evidence.shapes, spec)
+    return Outcome(
+        "answer_lacks_scripted_strings",
+        FAIL if leaked else PASS,
+        f"in the answer: {leaked}" if leaked else "none",
+    )
+
+
+def answer_has_scripted_string(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
+    """The answer holds the value of one field of one scripted reply (the request id the person asked for)."""
+    reply = (evidence.shapes or {}).get(spec["shape"])
+    values = list(values_under(reply, (spec["key"],)))
+    if not values:
+        return Outcome(
+            "answer_has_scripted_string", UNKNOWN, f"{spec['shape']} has no {spec['key']}"
+        )
+    held = values[0] in evidence.answer
+    return Outcome(
+        "answer_has_scripted_string", PASS if held else FAIL, f"{spec['key']} in the answer: {held}"
+    )
+
+
 CHECKS = {
     f.__name__: f
-    for f in (never_called, max_calls, called_with, only_scripted_tools, filed_before_shell_exit)
+    for f in (
+        never_called,
+        max_calls,
+        called_with,
+        only_scripted_tools,
+        filed_before_shell_exit,
+        answer_lacks_scripted_strings,
+        answer_has_scripted_string,
+    )
 }
 
 
