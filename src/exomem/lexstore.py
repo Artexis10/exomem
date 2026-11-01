@@ -2462,6 +2462,14 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         return False
     try:
         if not catch_up():
+            # A round that writes outran still advanced the stored checkpoint,
+            # which is progress and not a decline: queue a lag-only catch-up for
+            # the events after it. Only a full pass closes a gap with no progress.
+            if getattr(store, "_last_catch_up_advanced", False):
+                _schedule_runtime_catalog_repair(
+                    vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
+                return True
             return False
         if _admit_if_current(vault_root):
             return True
@@ -4714,6 +4722,20 @@ class _CatchUpStep:
     paths: frozenset[str]
 
 
+@dataclass(frozen=True)
+class _CatchUpPlan:
+    """One scope's lag as a catch-up round planned it.
+
+    `stored` is the checkpoint the catalogue held, `target` the registry
+    checkpoint the delta bridged to, and `paths` every registry path of that
+    delta.
+    """
+
+    stored: object
+    target: object
+    paths: frozenset[str]
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -4759,6 +4781,7 @@ class LexicalStore:
         # Whether the last refused replay met a page that a write still held an
         # open publication intent for.
         self._last_replay_publishing = False
+        self._last_catch_up_advanced = False
         # Which bound ended the last pass that declined for a moving source.
         self._last_decline_cause: DeclineCause | None = None
         # Seconds the last rebuild waited at its yields for foreground work:
@@ -6875,7 +6898,9 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
-        lagging = self._lagging_catch_up_paths()
+        self._last_catch_up_advanced = False
+        plans: list[dict[str, _CatchUpPlan]] = [{}]
+        lagging = self._lagging_catch_up_paths(plans[0])
         if lagging is None:
             return False
         cap = CATALOG_FOREGROUND_DELTA_CAP
@@ -6889,6 +6914,17 @@ class LexicalStore:
             pending = pending or sorted(lagging)[:cap]
             while pending:
                 if taken >= budget:
+                    # Writes outran the round, but its steps may still have
+                    # applied everything up to a registry checkpoint.
+                    if self._stamp_outpaced_round(plans, steps):
+                        self._last_catch_up_advanced = True
+                        log.info(
+                            "lexical catch-up advanced (outpaced) paths=%d steps=%d;"
+                            " queueing a lag-only catch-up",
+                            len(lagging),
+                            taken,
+                        )
+                        return False
                     return _log_catch_up_decline("outpaced", paths=len(lagging), steps=taken)
                 taken += 1
                 chunk, pending = pending[:cap], pending[cap:]
@@ -6910,15 +6946,82 @@ class LexicalStore:
                 if not applied:
                     return _log_catch_up_decline("replay_failed", paths=len(chunk))
                 steps.append(_CatchUpStep(marks, frozenset(chunk)))
-            lagging = self._lagging_catch_up_paths()
+            plans.append({})
+            lagging = self._lagging_catch_up_paths(plans[-1])
             if lagging is None:
                 return False
         return True
 
-    def _lagging_catch_up_paths(self) -> set[str] | None:
+    def _stamp_outpaced_round(
+        self, plans: Sequence[Mapping[str, _CatchUpPlan]], steps: Sequence[_CatchUpStep]
+    ) -> bool:
+        """Record the newest registry checkpoint an outpaced round fully applied.
+
+        Keeps the invariant of a lagging catalogue: for its stored checkpoint,
+        every row equals the registry's state there, except pages the registry
+        names after it, whose rows hold that state or a newer one. A plan's
+        target qualifies per scope when every path of its delta was applied by
+        a committed step whose mark is at or after the target, so the step read
+        the page after the target. A path applied before the target is not
+        enough: an event between that read and the target would leave a stale
+        row under the stamp. Readers that need a current catalogue still
+        compare the stored checkpoint with the registry, so the rest of the lag
+        stays visible and the next catch-up replays it. Returns whether a scope
+        advanced.
+        """
+        from . import freshness as freshness_module
+        from .vault import VaultLockError, VaultLockTimeout
+
+        if not steps or not plans[0]:
+            return False
+        advanced = False
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
+                conn = self._connect()
+                try:
+                    identity = catalog_semantic_identity(self.vault_root)
+                    if not self._schema_is_current(conn):
+                        return False
+                    if self._meta_catalog_identity(conn) != identity:
+                        return False
+                    for scope in freshness_module.SCOPES:
+                        stored = self._meta_checkpoint(conn, scope)
+                        for plan in reversed(plans):
+                            scope_plan = plan.get(scope)
+                            if scope_plan is None or scope_plan.stored != stored:
+                                continue
+                            read_after_target = set().union(
+                                *(
+                                    step.paths
+                                    for step in steps
+                                    if getattr(step.marks.get(scope), "generation", -1)
+                                    >= scope_plan.target.generation
+                                )
+                            )
+                            if not scope_plan.paths <= read_after_target:
+                                continue
+                            with self._lock:
+                                self._bless(conn, scope, scope_plan.target, identity=identity)
+                            advanced = True
+                            break
+                finally:
+                    conn.close()
+        except VaultLockTimeout:
+            raise
+        except VaultLockError as error:
+            log.info("lexical catch-up stamp deferred (%s)", error)
+        except sqlite3.Error as error:
+            _log_catch_up_decline("store_error", error=type(error).__name__)
+        return advanced
+
+    def _lagging_catch_up_paths(
+        self, plan: dict[str, _CatchUpPlan] | None = None
+    ) -> set[str] | None:
         """The registry paths both scopes' stored checkpoints miss, or None.
 
         None means a refusal that keeps the full pass; this logs which one.
+        A caller that passes `plan` gets each scope's stored checkpoint, target
+        and delta paths recorded in it.
         """
         from . import freshness as freshness_module
 
@@ -6966,6 +7069,10 @@ class LexicalStore:
                         )
                         return None
                     lagging |= delta.changed | delta.deleted
+                    if plan is not None:
+                        plan[scope] = _CatchUpPlan(
+                            stored, delta.to, frozenset(delta.changed | delta.deleted)
+                        )
             finally:
                 conn.close()
         except sqlite3.Error as error:

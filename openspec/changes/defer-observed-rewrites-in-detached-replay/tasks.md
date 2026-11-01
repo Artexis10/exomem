@@ -6,7 +6,7 @@
 
 ## 2. Catch-up advances under sustained writes
 
-- [ ] 2.1 Record a catch-up round's starting checkpoint when every path of the delta from the stored checkpoint to it was applied after it, and queue a lag-only catch-up for newer events. Evidence: a test where events keep arriving through every step of a round.
+- [x] 2.1 Record a catch-up round's starting checkpoint when every path of the delta from the stored checkpoint to it was applied after it, and queue a lag-only catch-up for newer events. Evidence: a test where events keep arriving through every step of a round.
 
 ## 3. Proof under sustained writes
 
