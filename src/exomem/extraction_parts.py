@@ -20,7 +20,6 @@ leaves the field behind breaks nothing.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +45,6 @@ _PART_PREFIX = "part-"
 #: A closed set of the page schema's own field names. A reader seeks to any position from
 #: these alone, without opening a part.
 SOURCE_FIELDS = ("extraction_parts", "extraction_chars", "part_offsets", "next_part")
-_HEADER_BYTES = 4096
 
 
 def link_to(vault_root: Path, page: Path) -> str:

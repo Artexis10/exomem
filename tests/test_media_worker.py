@@ -175,7 +175,7 @@ def test_process_child_hands_extraction_to_parent_without_sidecar_write(
     assert pending.payload["text"] == "parent-only transcript"
 
 
-def test_process_handoff_projects_diarization_turns_and_caps_extraction_text(
+def test_process_handoff_projects_diarization_turns_and_carries_the_whole_extraction_text(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = _preserve_media_stub(vault, filename="long-diarized.mp3")
@@ -205,8 +205,34 @@ def test_process_handoff_projects_diarization_turns_and_caps_extraction_text(
     assert outcome.state == "handoff"
     [pending] = store.pending_results()
     assert pending.payload["speakers"] == [{"speaker": "S0"}, {"speaker": "S1"}]
-    assert "truncated:" in str(pending.payload["text"])
-    assert len(str(pending.payload["text"]).encode("utf-8")) < 768 * 1024
+    assert pending.payload["text"] == "x" * (600 * 1024)
+
+
+def test_an_extraction_over_the_job_store_limit_fails_visibly_and_keeps_the_original(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="too-long.mp3")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    monkeypatch.setattr(media_jobs, "MAX_EXTRACTED_TEXT_BYTES", 1000)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(text="y" * 2000, media_type="audio", engine="test"),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="process")._process(claimed)
+
+    [pending] = store.pending_results()
+    assert pending.kind == "failure"
+    assert "2000 bytes, over the 1000-byte limit" in str(pending.payload["error"])
+    assert (vault / result.path).exists()
 
 
 def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(

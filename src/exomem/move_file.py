@@ -240,7 +240,7 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
     return (page_rel, rel) if (vault_root / page_rel).is_file() else None
 
 
-def _repoint_artifact(old_binary: str, new_binary: str, new_page: str):
+def _repoint_artifact(old_binary: str, new_binary: str, new_page: str | None = None):
     """A content transform that repoints a moved page at its moved bytes.
 
     Only the pointer fields change, patched where the YAML parser places them,
@@ -266,7 +266,7 @@ def _repoint_artifact(old_binary: str, new_binary: str, new_page: str):
             changes["governance_companion"] = moved_descriptor
         if frontmatter.get("original_filename") == Path(old_binary).name:
             changes["original_filename"] = Path(new_binary).name
-        if "next_part" in frontmatter:
+        if new_page is not None and "next_part" in frontmatter:
             from . import extraction_parts
 
             # The folder of further parts is named for the page and moves with it.

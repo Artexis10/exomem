@@ -6,7 +6,6 @@ read_memory. Nothing is replaced: the original is plain UTF-8 text, which needs 
 
 import os
 import random
-from pathlib import Path
 
 import pytest
 
