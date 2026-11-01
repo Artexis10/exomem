@@ -231,6 +231,55 @@ def test_a_caller_that_holds_the_current_map_is_not_sent_it_again(
         assert served["map"]["items"] == first["map"]["items"], token
 
 
+def test_a_maps_packet_reports_what_became_of_its_token(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token that carries a map generation was compared with the served map's, so a vault write that moved the
+    map is `applied` with the whole map, not `stale`. A token that carries none was ignored."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=False)
+    _built(vault).close()
+    options = {"turn": "", "max_chars": 8000}
+    first = _activate(vault, **options)
+    assert first["generation"]["continuity"] == "absent"
+    assert _activate(vault, continuity=first["continuity"], **options)["map"]["unchanged"] is True  # the control: nothing moved yet
+
+    _page(vault, "dock-roster", "topics: [fleet]\nupdated: 2026-09-20\nsummary: Who works which dock.\n")
+    _built(vault).close()
+    moved = _activate(vault, continuity=first["continuity"], **options)
+    assert moved["generation"]["map_generation"] != first["generation"]["map_generation"]  # the control: the write moved the map
+    assert moved["generation"]["continuity"] == "applied"
+    assert "unchanged" not in moved["map"] and moved["map"]["items"]
+
+    anchors_token = working_set_runtime.encode_continuity(
+        identity="earlier", roles_hash="h", conventions_hash="c", generation=1, refs=[TIDE], roles=[], thread="earlier-thread",
+    )
+    for token in ("not a token", anchors_token):
+        assert _activate(vault, continuity=token, **options)["generation"]["continuity"] == "stale", token
+    assert _activate(vault, **options)["generation"]["continuity"] == "absent"
+
+
+def test_a_maps_packet_reports_the_conversation_its_slice_read(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`generation.conversation` is what the slice's compile computed: `absent` where no compile reads it."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=True)
+    _seed_structure(vault)
+    _built(vault).close()
+    turn = "What are the Cargo Sled constraints?"
+    earlier = {"recent": [{"role": "user", "text": "Earlier work on the sled"}]}
+    oversized = {"recent": [{"role": "user", "text": "Earlier work on the sled"}], "focus": "sled " * 100}
+
+    def reported(**options) -> str:
+        return _activate(vault, **options)["generation"]["conversation"]
+
+    assert reported(turn=turn, conversation=earlier) == "applied"
+    assert reported(turn=turn, conversation=oversized) == "truncated"
+    assert reported(turn=turn) == "absent"
+    assert reported(turn="", conversation=earlier) == "absent"  # an empty turn compiles no slice
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    off = _activate(vault, turn=turn, conversation=earlier)
+    assert off["generation"]["conversation"] == "absent" and "turn_slice" not in off
+    assert off == _activate(vault, turn=turn)  # the map alone: the conversation changes no byte
+
+
 @pytest.mark.parametrize("restricted", [False, True])
 def test_a_pathless_map_anchor_opens_its_profile(
     vault: Path, monkeypatch: pytest.MonkeyPatch, restricted: bool,
@@ -264,7 +313,8 @@ def test_conversation_does_not_change_the_map(vault: Path, monkeypatch: pytest.M
     second = _activate(vault, turn="A different question", conversation={"focus": "Something else", "refs": [TIDE], "recent": [{"role": "user", "text": "Earlier work"}]}, trigger="task_refresh")
     assert first["map"] == second["map"]
     assert first["continuity"] == second["continuity"]
-    assert first["generation"]["conversation"] == second["generation"]["conversation"] == "absent"
+    # The slice reads the conversation of the second request and the first has none; neither changes the map.
+    assert (first["generation"]["conversation"], second["generation"]["conversation"]) == ("absent", "applied")
 
 
 def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

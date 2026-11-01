@@ -784,6 +784,74 @@ def test_matching_replacement_requires_actual_file_flush_before_success(
     assert (_recover(root, writer) if pending else _publish(root, writer)).status == "published"
 
 
+def test_a_filesystem_whose_renames_do_not_flush_gets_each_rename_flushed_before_the_next_name_change(
+    store, monkeypatch
+):
+    """Defect: the swap skips a directory flush on a filesystem whose rename and directory unlink
+    do not flush their parents, as on Windows. A crash can then keep a later unlink of the
+    displaced replica but lose the rename that installed its successor: no copy survives."""
+    root, writer = store
+    assert _publish(root, writer).status == "published"
+    _commit(writer)  # the next publication displaces this replica, then installs its own
+    filesystem_type = _filesystem_type(root)
+    monkeypatch.setattr(filesystem_type, "name_changes_flush_parents", False)
+    replica_directory = replica.replica_path(root).parent
+    unflushed, probing, ordered = set(), [False], []
+
+    def which(directory):
+        for path in (replica_directory, *replica_directory.glob(".exomem-collection-replica-work-*")):
+            if os.stat(path).st_ino == directory.identity.inode:
+                return "replica" if path == replica_directory else "workspace"
+        return None
+
+    def changes(original, marks):
+        def changed(filesystem, *args, **kwargs):
+            if not probing[0]:  # a capability probe's own scratch names are not the publication's
+                ordered.append((original.__name__, set(unflushed)))
+            result = original(filesystem, *args, **kwargs)
+            if result.ok and not probing[0]:
+                marks()
+            return result
+        return changed
+
+    def renamed():
+        unflushed.update({"replica", "workspace"})
+
+    def removed():
+        unflushed.discard("workspace")
+        unflushed.add("replica")
+
+    flush, bookkeeping, probe = filesystem_type.flush_directory, replica._Publisher.bookkeeping, held_fs.probe
+
+    def flushed(filesystem, directory):
+        result = flush(filesystem, directory)
+        if result.ok:
+            unflushed.discard(which(directory))
+        return result
+
+    def recorded(publisher, values):
+        if schema.META_PUBLISHED_REPLICA_HEAD in values:
+            ordered.append(("promotion", set(unflushed)))
+        return bookkeeping(publisher, values)
+
+    def probed(path):
+        probing[0] = True
+        try:
+            return probe(path)
+        finally:
+            probing[0] = False
+
+    monkeypatch.setattr(filesystem_type, "rename", changes(filesystem_type.rename, renamed))
+    monkeypatch.setattr(filesystem_type, "unlink", changes(filesystem_type.unlink, lambda: None))
+    monkeypatch.setattr(filesystem_type, "unlink_directory", changes(filesystem_type.unlink_directory, removed))
+    monkeypatch.setattr(filesystem_type, "flush_directory", flushed)
+    monkeypatch.setattr(replica._Publisher, "bookkeeping", recorded)
+    monkeypatch.setattr(held_fs, "probe", probed)
+    assert _publish(root, writer).status == "published"
+    assert [name for name, _ in ordered].count("rename") == 2
+    assert [(name, waiting) for name, waiting in ordered if waiting] == []
+
+
 def _crash_staging(root, boundary):
     diagnostic_prefix = "staging-boundary "
     script = """

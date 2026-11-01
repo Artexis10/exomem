@@ -187,3 +187,35 @@ def test_no_replace_publication_preserves_a_destination_despite_stale_absence(
     assert (source_path / "payload" if kind == "directory" else source_path).read_bytes() == b"source"
     if kind != "directory":
         assert destination_path.read_bytes() == b"foreign"
+
+
+def test_name_changes_flush_every_parent_they_change_as_the_backend_declares(tmp_path, monkeypatch):
+    # Replica publication skips its own directory flush after a held rename or directory unlink
+    # when the backend declares `name_changes_flush_parents`. A rename or rmdir that stopped
+    # flushing would then lose crash ordering silently.
+    held_fs = _held_fs()
+    posix = importlib.import_module("exomem._held_fs_posix")
+    (tmp_path / "source" / "empty").mkdir(parents=True)
+    (tmp_path / "destination").mkdir()
+    (tmp_path / "source" / "file").write_text("payload")
+    flushed = []
+    fsync = posix._fsync
+
+    def recorded(descriptor):
+        flushed.append(os.fstat(descriptor).st_ino)
+        return fsync(descriptor)
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        assert filesystem.name_changes_flush_parents
+        monkeypatch.setattr(posix, "_fsync", recorded)
+        with (
+            filesystem.parent("source", access="mutate").require() as source,
+            filesystem.parent("destination", access="mutate").require() as destination,
+        ):
+            with filesystem.file(source, "file", access="mutate").require() as file:
+                filesystem.rename(file, destination, "file").require()
+            assert set(flushed) == {source.identity.inode, destination.identity.inode}
+            flushed.clear()
+            with filesystem.parent("source/empty", access="mutate").require() as empty:
+                filesystem.unlink_directory(empty).require()
+            assert flushed == [source.identity.inode]

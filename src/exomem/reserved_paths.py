@@ -1150,7 +1150,11 @@ def _source_leaf_spelling(value: object, *, physical: bool) -> tuple[str, str]:
     if classified.disposition is PathDisposition.INVALID:
         raise ReservedPathLeafError("UNSAFE_PATH")
     assert isinstance(value, (str, os.PathLike))
-    relative = os.fspath(value).replace("\\", "/")
+    relative = os.fspath(value)
+    if "\\" in relative:
+        # An observed name keeps a backslash as one of its characters, which the vault's separators
+        # and Windows cannot keep; reading it as a separator would look for a file that is not there.
+        raise ReservedPathLeafError("UNSAFE_PATH")
     parent, separator, leaf = relative.rpartition("/")
     return (parent, leaf) if separator else (".", relative)
 

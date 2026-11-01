@@ -4920,7 +4920,7 @@ def _refuse_blocked_creation(preflight: CreationPreflight) -> None:
     non_review_blockers = tuple(
         finding
         for finding in preflight.contract_result.blocking_findings
-        if finding.resolved_rule != ("relations", "*", "disposition")
+        if finding.resolved_rule != semantic_contract.RELATION_DISPOSITION_RULE
     )
     if non_review_blockers or (
         preflight.applicability != "full" and preflight.contract_result.should_block
