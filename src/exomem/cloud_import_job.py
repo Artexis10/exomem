@@ -34,7 +34,13 @@ from . import (
 )
 from .cell_init import _ensure_private_directory
 from .cloud_cell import CELL_ID_PATTERN
-from .cloud_import import DEFAULT_MAX_MEMBERS, RETRY_OWNER, ArchiveRefused, reserve_bytes_from_env, unpack_stream
+from .cloud_import import (
+    DEFAULT_MAX_MEMBERS,
+    RETRY_OWNER,
+    ArchiveRefused,
+    reserve_bytes_from_env,
+    unpack_stream,
+)
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 
 CHUNK_BYTES = 1024 * 1024
