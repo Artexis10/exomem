@@ -917,14 +917,14 @@ def test_a_session_commit_waiting_on_the_boundary_does_not_refuse_a_request_writ
         location, secret = _create(client, data)
         assert _patch(client, location, secret, 0, data).status_code == 204
         # Two refusals on one thread: the session commit holds its place in line.
-        _wait_for(lambda: any(count >= 2 for count in refusals.values()), "the commit waiting in line")
-        commit_thread = next(ident for ident, count in refusals.items() if count >= 2)
+        _wait_for(lambda: any(count >= 2 for count in list(refusals.values())), "the commit waiting in line")
+        commit_thread = next(ident for ident, count in list(refusals.items()) if count >= 2)
         writer = threading.Thread(target=keyed_write)
         writer.start()
         # Without a slot the writer is refused as full and ends at once; with one it waits in line.
         deadline = time.monotonic() + 10
         while writer.is_alive() and time.monotonic() < deadline:
-            if any(ident not in (commit_thread,) and count for ident, count in refusals.items()):
+            if any(ident not in (commit_thread,) and count for ident, count in list(refusals.items())):
                 break
             time.sleep(0.05)
         held.release.set()
