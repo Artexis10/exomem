@@ -1370,11 +1370,16 @@ def _media_mode(cluster_config: ClusterConfig, row: CellRow) -> str | None:
 
 def _media_store_record(cluster_config: ClusterConfig, row: CellRow, census: MediaCensus | None) -> dict | None:
     """D12: a turned-off store's record, with the newest report the cell captured since. A cell the
-    edge serves again forgets it, so a report from while it was served never counts for a later turn-off."""
+    edge serves again forgets it, so a report from while it was served never counts for a later turn-off.
+    A drained record stays on an unknown report and on a known one that is no later; a known count with a
+    later census time replaces it, which keys the cell again after a restore brings back an evicted original."""
     record = _media_store_of(row)
     if not isinstance(record, dict) or _media_mode(cluster_config, row) == MEDIA_SERVED:
         return None
     if census is None:
+        return record
+    if _media_store_drained(record) and (
+            census.evicted is None or census.captured_at <= datetime.fromisoformat(record["captured_at"])):
         return record
     known = {"evicted": census.evicted, "evicted_bytes": census.evicted_bytes}
     return {**record, **{key: "unknown" if value is None else value for key, value in known.items()},

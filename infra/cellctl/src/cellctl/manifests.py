@@ -13,14 +13,13 @@ import hashlib
 import ipaddress
 import json
 import re
-import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .backup_source import VAULT_CHECK_COMMAND
+from .backup_source import VAULT_CHECK_COMMAND, media_census_command
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
@@ -72,6 +71,7 @@ MEDIA_STORE_OWNED_KEYS = frozenset(
 )
 # D12: the hydration capacity the cell reads from the policy, a pair the store protocol fixes. The cell's
 # copy is `_HYDRATION_KEYS` in src/exomem/media_capacity.py; cellctl cannot import the cell, so change both.
+# tests/test_media_capacity.py fails when they differ.
 MEDIA_HYDRATION_KEYS = ("max_temporary_bytes", "max_hydrations")
 MEDIA_STORE_CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
 MEDIA_EDGE_URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
@@ -551,16 +551,21 @@ def check_media_store_policy(policy: dict[str, bool | int | float]) -> None:
                          "each a positive whole number, for its hydration capacity")
 
 
+def media_store_identity(cell_id: str) -> str:
+    """The store identity is per cell, so a reference restored into another cell counts as none."""
+    return f"media-edge:{cell_id}"
+
+
 def _media_store_config(spec: CellManifestSpec) -> str:
     """The file #2140's runtime reads: one store per vault, keyed by the vault's path.
     The store identity is per cell, so a reference restored into another cell counts as none."""
     if spec.media_store_retained:
         # Offload, eviction and hydration are off; the identity alone keeps evicted originals evicted.
-        store: dict[str, object] = {"store": f"media-edge:{spec.cell_id}", "enabled": False, "adapter": MEDIA_ADAPTER}
+        store: dict[str, object] = {"store": media_store_identity(spec.cell_id), "enabled": False, "adapter": MEDIA_ADAPTER}
         return json.dumps({"vaults": {CELL_VAULT_PATH: store}}, sort_keys=True, separators=(",", ":"))
     store = {
         **spec.media_store_policy,
-        "store": f"media-edge:{spec.cell_id}",
+        "store": media_store_identity(spec.cell_id),
         "enabled": spec.media_store_enabled,
         "adapter": MEDIA_ADAPTER,
         "key_version": str(spec.media_key_version),
@@ -1077,10 +1082,6 @@ FILESYSTEM_USE_COMMAND = (
     "print(\" %d %d\" % ((s.f_blocks - s.f_bfree) * s.f_frsize, s.f_blocks * s.f_frsize), end=\"\")'"
 )
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
-# add-cloud-media-store D12: the evicted count and bytes of the media report. The cell image has no
-# census of its sidecars yet (a seam in src/exomem), so every report says unknown. Unknown keeps a
-# turned-off cell's key and egress, the safe side of the drain rule.
-MEDIA_CENSUS_UNKNOWN = "unknown unknown"
 
 
 def hold_job_name(base: str, hold_started_at: str) -> str:
@@ -1298,10 +1299,9 @@ def render_backup_job(
         # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
         # the id alone and the Job successful: the backup itself succeeded.
         f"{{ {FILESYSTEM_USE_COMMAND} >> /dev/termination-log || true; }}",
-        # D12: "<evicted count> <evicted bytes> <capture time>" on a line of its own. The capture time
-        # is the hold start: the Job reads a clone, or the stopped cell's volume, taken after it.
-        f"{{ printf '\\n%s %s' {shlex.quote(MEDIA_CENSUS_UNKNOWN)} {shlex.quote(spec.hold_started_at)} "
-        ">> /dev/termination-log || true; }",
+        # D12: the cell's drain record, "<evicted count> <evicted bytes> <census time>", on a line of its own.
+        # The census time is the cell's. A record that the Job cannot read reports unknown at the hold start.
+        media_census_command(spec.hold_started_at),
     ]
     return {
         "apiVersion": "batch/v1",

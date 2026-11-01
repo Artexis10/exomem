@@ -2380,6 +2380,7 @@ class MediaWorker:
 
         queued = media_store.enqueue_offloads(self._vault_root) + self._scan_pending_ocr() + self._scan_unindexed_images()
         media_store.evict_to_target(self._vault_root)
+        _drain(self._vault_root)
         return queued
 
     def _scan_pending_ocr(self) -> int:
@@ -2583,6 +2584,30 @@ def _evict(vault_root: Path) -> None:
         media_store.evict_to_target(vault_root)
     except Exception:  # noqa: BLE001 - the next job or tick checks again
         log.warning("media worker: eviction deferred", exc_info=True)
+    _drain(vault_root)
+
+
+def _claimable_job(vault_root: Path) -> _Job | None:
+    """The job that the worker would claim now, or None: the oldest pending job, unless the GPU or the brakes hold it."""
+    store = MediaJobStore(vault_root)
+    job = store.next_pending(skip_media_types=media_engines.SPEECH_KINDS if store.gpu_waiting() else ())
+    if job is None or not media_brakes.enabled():
+        return job
+    cell = media_brakes.read_cell()
+    config = media_brakes.settings(cell=cell)
+    # The supervisor starts no child into pressure or without room for its job (`_room_for_next_job`).
+    held = media_brakes.pressure_exceeded(cell, config) or not media_brakes.admits(cell, _budget_for(job, config), config)
+    return None if held else job
+
+
+def _drain(vault_root: Path) -> None:
+    """Hydrate a turned-off store's evicted originals that fit and count the rest, on the same tick (D12)."""
+    from . import media_store
+
+    try:
+        media_store.drain_tick(vault_root, claimable=lambda: _claimable_job(vault_root))
+    except Exception:  # noqa: BLE001 - the next tick tries again
+        log.warning("media worker: drain deferred", exc_info=True)
 
 
 def run_child(

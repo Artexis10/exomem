@@ -7,6 +7,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -831,6 +832,9 @@ def test_disabled_store_retains_identity_and_hydration(vault: Path, selected_sto
     assert originals.original_state(vault, path).state == "evicted"
     with media_store.open_original(vault, path) as source:
         assert source.stream.read() == expected
+    # The identity alone, which a drained cell keeps, has no policy to evict by. A turned-off store whose policy
+    # asks for eviction evicts a hydrated copy again (D12, the retained store).
+    config.write_text(json.dumps({"vaults": {str(vault): {k: values[k] for k in ("store", "adapter")} | {"enabled": False}}}))
     assert not media_store.evict(vault, path)
 
 
@@ -2893,3 +2897,635 @@ def test_a_ledger_that_refuses_the_census_record_does_not_stop_the_batch(vault: 
     usage = media_store.OffloadBatch(vault).usage(RefusingLedger())
 
     assert usage.versions is not None
+
+
+def _retained(selected_store, vault: Path, **policy) -> None:
+    """The policy cellctl renders for a cell whose edge is turned off: offload off, the rest of the policy kept."""
+    _configure(selected_store, vault, **{"enabled": False, "growth_threshold": 0.8, **policy})
+
+
+def _evicted_pair(vault: Path) -> tuple[Path, Path, int]:
+    """Two stored originals, both evicted, and their bytes."""
+    from exomem import media_store
+
+    first, second = _stored(vault, "first", 300), _stored(vault, "second", 400)
+    evicted = first.stat().st_size + second.stat().st_size
+    assert media_store.evict(vault, first) and media_store.evict(vault, second)
+    return first, second, evicted
+
+
+def test_a_retained_store_that_cannot_hold_its_evicted_originals_evicts_a_hydrated_copy_again(vault: Path, selected_store, monkeypatch):
+    """Catches a turned-off cell that hydrates an owner read and never evicts the copy, so the volume fills."""
+    from exomem import commands, media_store
+
+    first, second, evicted = _evicted_pair(vault)
+    _retained(selected_store, vault)
+    newcomer = _preserved(vault, category="newcomer")
+    # 450 bytes in use; the growth threshold of 800 leaves room for 350 of the evicted bytes.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 450, first, second))
+
+    with media_store.open_original(vault, first, read=True):
+        pass
+    assert originals.original_state(vault, first).state == "cached"
+    assert media_store.evict_to_target(vault) == 1
+
+    assert originals.original_state(vault, first).state == "evicted"
+    assert originals.original_state(vault, second).state == "evicted"
+    with pytest.raises(media_store.MediaStoreError, match="offload is disabled"):
+        media_store.offload(vault, newcomer)
+    assert originals.original_state(vault, newcomer).state == "local"
+    status = commands.op_adoption_studio(vault, action="status")
+    assert status["retained_store"]["shortfall"] == {"bytes": evicted - 350}
+
+
+def test_a_retained_store_whose_evicted_originals_fit_keeps_a_hydrated_copy(vault: Path, selected_store, monkeypatch):
+    """Catches eviction that undoes the drain: a hydrated copy leaves again although everything evicted fits."""
+    from exomem import commands, media_store
+
+    first, second, _evicted = _evicted_pair(vault)
+    _retained(selected_store, vault, growth_threshold=0.99, eviction_target=0.5)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 250, first, second))
+
+    with media_store.open_original(vault, first, read=True):
+        pass
+    # The copy puts the volume above its eviction target, which evicts it while the policy was served.
+    assert shutil.disk_usage(vault).used > 500
+
+    assert media_store.evict_to_target(vault) == 0
+    assert originals.original_state(vault, first).state == "cached"
+    assert commands.op_adoption_studio(vault, action="status")["retained_store"]["shortfall"] == {"bytes": 0}
+
+
+def test_a_retained_store_with_an_unreadable_ledger_reports_its_shortfall_as_unknown(vault: Path, selected_store, monkeypatch):
+    """Catches a shortfall of 0 for a ledger that the cell could not read."""
+    from exomem import commands, media_jobs
+
+    first, second, _evicted = _evicted_pair(vault)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 450, first, second))
+    media_jobs.MediaJobStore(vault).path.write_bytes(b"not a database" * 100)
+
+    shortfall = commands.op_adoption_studio(vault, action="status")["retained_store"]["shortfall"]
+
+    assert set(shortfall) == {"unknown"}
+
+
+def _census(vault: Path, capsys) -> tuple[int, str, str]:
+    """Run `exomem cell-media-census` as the backup Job does: it reads the drain record and nothing else."""
+    from exomem import cell_media_census
+
+    code = cell_media_census.main(["--vault", str(vault)])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _ledger_rows(vault: Path) -> dict[str, tuple[int, int | None]]:
+    """Each cache row of the ledger as `(evicted, size)`, by the original's path."""
+    from exomem import media_jobs
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        return {relative: (evicted, size) for relative, evicted, size in
+                connection.execute("SELECT binary_rel, evicted, size FROM media_cache")}
+
+
+def test_the_census_counts_three_evicted_originals_and_their_bytes(vault: Path, selected_store, capsys):
+    """Catches a census that counts a hydrated copy as evicted, or reports a size other than the original's."""
+    from exomem import media_drain_record, media_store
+
+    paths = [_stored(vault, f"original-{size}", size) for size in (200, 300, 450)]
+    cached = _stored(vault, "still-on-the-volume", 100)
+    sizes = [path.stat().st_size for path in paths]
+    for path in paths:
+        assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+
+    assert media_store.drain_census(vault) == (3, sum(sizes))
+
+    code, out, _err = _census(vault, capsys)
+    assert code == 0 and out == media_drain_record.read(vault) + "\n"
+    assert out.startswith(f"3 {sum(sizes)} ")
+    rows = _ledger_rows(vault)
+    assert {rows[path.relative_to(vault).as_posix()] for path in paths} == {(1, size) for size in sizes}
+    assert rows[cached.relative_to(vault).as_posix()][0] == 0
+    assert not media_store.drain_record(vault).latched
+
+
+def test_the_census_counts_an_original_whose_eviction_stopped_before_its_ledger_commit(vault: Path, selected_store):
+    """Catches a census read from the ledger, which says 0 for an original whose bytes left before its row was marked."""
+    from exomem import media_store
+
+    path = _stored(vault, "interrupted", 300)
+    size = path.stat().st_size
+    path.unlink()  # Eviction unlinks the bytes, then marks the row; a stop in between leaves evicted = 0.
+    _retained(selected_store, vault)
+    assert _ledger_rows(vault)[path.relative_to(vault).as_posix()] == (0, size)
+
+    assert media_store.drain_census(vault) == (1, size)
+
+    assert _ledger_rows(vault)[path.relative_to(vault).as_posix()] == (1, size)
+
+
+def test_a_drained_retained_store_never_evicts_again(vault: Path, selected_store, monkeypatch):
+    """Catches an eviction after the zero that cellctl acts on, which would put an original out of the cell's reach."""
+    from exomem import media_jobs, media_store
+
+    cached, other = _stored(vault, "cached", 300), _stored(vault, "other", 200)
+    _retained(selected_store, vault)
+    assert media_store.drain_census(vault) == (0, 0)
+    assert media_store.drain_record(vault).latched
+    # A row evicted with no size leaves the shortfall unknown, which evicts as a served cell does.
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_cache SET evicted = 1, size = NULL WHERE binary_rel = ?",
+                           (other.relative_to(vault).as_posix(),))
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 600, cached, other))
+    assert shutil.disk_usage(vault).used > 700  # Above the eviction target.
+
+    assert media_store.evict_to_target(vault) == 0
+
+    assert originals.original_state(vault, cached).state == "cached"
+
+
+def test_a_census_above_zero_clears_the_latch(vault: Path, selected_store):
+    """Catches a latch that outlives a restore: originals evicted again, and eviction off for good."""
+    from exomem import media_store
+
+    path = _stored(vault, "restored", 300)
+    size = path.stat().st_size
+    _retained(selected_store, vault)
+    assert media_store.drain_census(vault) == (0, 0)
+    assert media_store.drain_record(vault).latched
+    path.unlink()  # A restore brings back the companion without its bytes.
+
+    assert media_store.drain_census(vault) == (1, size)
+
+    assert not media_store.drain_record(vault).latched
+
+
+def test_an_unknown_census_leaves_the_latch_and_the_record_as_they_were(vault: Path, selected_store):
+    """Catches a census that skips the row it cannot read, or rewrites the record, so a cell that holds media drains."""
+    from exomem import media_drain_record, media_store
+
+    path = _stored(vault, "cached", 300)
+    _retained(selected_store, vault)
+    assert media_store.drain_census(vault) == (0, 0)
+    line = media_drain_record.read(vault)
+    # A companion cut off inside its front matter: the walk cannot say what it binds.
+    path.with_name(path.name + ".md").write_bytes(b"---\nkind: companion\n")
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+
+    assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN" and str(vault) not in str(unknown.value)
+    assert media_store.drain_record(vault).latched
+    assert media_drain_record.read(vault) == line
+
+
+def _companion(path: Path) -> Path:
+    return path.with_name(path.name + ".md")
+
+
+@pytest.mark.parametrize("damage", ["garbage", "empty", "another"])
+def test_a_census_is_unknown_when_the_companion_of_an_evicted_original_is_damaged(vault: Path, selected_store, damage):
+    """Catches a census that reads a damaged companion as no original, so a cell that holds media records zero."""
+    from exomem import media_drain_record, media_store
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    damaged = {"garbage": b"\xff\xfe\x00garbage", "empty": b"", "another": b"---\nevidence_file: Elsewhere/other.bin\n---\n"}[damage]
+    _companion(path).write_bytes(damaged)
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+
+    assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN" and str(vault) not in str(unknown.value)
+    assert _ledger_rows(vault)[path.relative_to(vault).as_posix()][0] == 1
+    assert not media_store.drain_record(vault).latched
+    assert not media_drain_record.record_path(vault).exists()
+
+
+@pytest.mark.parametrize("released", ["deleted", "forgotten"])
+def test_a_census_clears_the_row_of_an_original_that_its_companion_no_longer_references(vault: Path, selected_store, released):
+    """Catches a census that stays unknown for an original that is gone for good, so its cell never drains."""
+    from exomem import media_store
+
+    path = _stored(vault, "gone", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    if released == "deleted":
+        _companion(path).unlink()
+    else:
+        media_store.forget_original(vault, path)
+
+    assert media_store.drain_census(vault) == (0, 0)
+
+    assert _ledger_rows(vault)[path.relative_to(vault).as_posix()][0] == 0
+    assert media_store.drain_record(vault).latched
+
+
+def test_a_census_is_unknown_when_the_companion_of_a_cached_row_that_lost_its_bytes_is_damaged(vault: Path, selected_store):
+    """Catches a census that checks only the rows marked evicted, so a stopped eviction with a damaged companion reads as zero."""
+    from exomem import media_drain_record, media_store
+
+    path = _stored(vault, "stopped", 300)
+    path.unlink()  # An eviction that stopped after it removed the bytes and before it marked the row.
+    _companion(path).write_bytes(b"")
+    _retained(selected_store, vault)
+    assert _ledger_rows(vault)[path.relative_to(vault).as_posix()][0] == 0
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+
+    assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN"
+    assert not media_store.drain_record(vault).latched
+    assert not media_drain_record.record_path(vault).exists()
+
+
+def test_a_census_stays_complete_for_a_cached_row_whose_original_was_deleted(vault: Path, selected_store):
+    """Catches a census that stays unknown for every stale cache row of a deleted original, so its cell never drains."""
+    from exomem import media_store
+
+    path = _stored(vault, "deleted", 300)
+    path.unlink()
+    _companion(path).unlink()
+    _retained(selected_store, vault)
+
+    assert media_store.drain_census(vault) == (0, 0)
+
+    assert media_store.drain_record(vault).latched
+
+
+def test_a_prune_pass_keeps_the_row_of_a_stopped_eviction_whose_companion_is_damaged(vault: Path, selected_store):
+    """Catches a prune that drops the row of an original whose companion is damaged, so the census reads zero for bytes that live only in the store."""
+    from exomem import media_store
+
+    path = _stored(vault, "stopped", 300)
+    path.unlink()  # An eviction that stopped after it removed the bytes and before it marked the row.
+    _companion(path).write_bytes(b"")
+    relative = path.relative_to(vault).as_posix()
+    assert _ledger_rows(vault)[relative][0] == 0
+
+    assert not media_store.evict(vault, path)  # The pass reads the row first and prunes it when its original is gone.
+    _retained(selected_store, vault)
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+    assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN"
+    assert media_store.drain_record(vault).blocked_by == (relative,)
+    assert _ledger_rows(vault)[relative][0] == 1  # Kept as evicted, so no budget counts its absent bytes as room.
+
+
+def test_a_prune_pass_still_drops_the_row_of_an_original_whose_companion_was_deleted(vault: Path, selected_store):
+    """Catches a prune that keeps every row without bytes, so rows of deleted originals pile up and keep a cell from draining."""
+    from exomem import media_store
+
+    path = _stored(vault, "deleted", 300)
+    path.unlink()
+    _companion(path).unlink()
+    relative = path.relative_to(vault).as_posix()
+    assert relative in _ledger_rows(vault)
+
+    assert not media_store.evict(vault, path)
+
+    assert relative not in _ledger_rows(vault)
+
+
+def test_the_retained_status_names_the_original_whose_companion_blocks_the_census(vault: Path, selected_store):
+    """Catches an unknown census that gives the operator no original to look at, or that puts its path in the error."""
+    from exomem import commands, media_store
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    _companion(path).write_bytes(b"")  # A plain note where the companion stood.
+    relative = path.relative_to(vault).as_posix()
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+
+    census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
+    assert census["blocked_by"] == [relative]
+    assert relative not in str(unknown.value) and relative not in str(unknown.value.__cause__)  # The worker logs both.
+
+
+def test_the_status_names_no_more_than_the_first_blocking_originals(vault: Path, selected_store, monkeypatch):
+    """Catches a status and a ledger that grow with every damaged companion of a large vault."""
+    from exomem import commands, media_store
+
+    paths = [_stored(vault, f"evicted-{number}", 100) for number in range(3)]
+    for path in paths:
+        assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    for path in paths:
+        _companion(path).write_bytes(b"")
+    monkeypatch.setattr(media_store, "CENSUS_BLOCKERS_SHOWN", 2)
+
+    with pytest.raises(media_store.MediaStoreError):
+        media_store.drain_census(vault)
+
+    census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
+    assert census["blocked_by"] == sorted(path.relative_to(vault).as_posix() for path in paths)[:2]
+
+
+def test_an_eviction_that_read_a_served_policy_still_honours_a_latch_set_before_its_guard(vault: Path, selected_store, monkeypatch):
+    """Catches an eviction that decided on a policy read from before the guard, after the store was turned off and counted."""
+    from exomem import media_store
+
+    path = _stored(vault, "cached", 300)
+    real = media_store._confirmed
+
+    def turn_off_and_count(*arguments):
+        _retained(selected_store, vault)  # The owner turns the store off while the eviction waits on the store.
+        assert media_store.drain_census(vault) == (0, 0)
+        return real(*arguments)
+
+    monkeypatch.setattr(media_store, "_confirmed", turn_off_and_count)
+
+    assert media_store._evict_one(vault, path) == media_store.KEPT
+
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_a_media_worker_start_clears_the_record_of_a_served_store(vault: Path, selected_store, monkeypatch):
+    """Catches a start that leaves the earlier zero, so the next turn-off is read as already drained."""
+    from exomem import media_drain_record, media_store, server_runtime
+
+    _stored(vault, "cached", 300)
+    _retained(selected_store, vault)
+    assert media_store.drain_census(vault) == (0, 0)
+    _configure(selected_store, vault)
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: None)
+    monkeypatch.setattr("exomem.media_processing.reconcile_all_media", lambda *_args, **_kwargs: None)
+
+    server_runtime._start_media_worker(vault)
+
+    assert not media_drain_record.record_path(vault).exists()
+    assert media_store.drain_record(vault) is None
+
+
+def test_a_media_worker_start_keeps_the_record_of_a_retained_store(vault: Path, selected_store, monkeypatch):
+    """Catches a start that drops a drained cell's zero and latch, so the cell evicts again after a restart."""
+    from exomem import media_drain_record, media_store, server_runtime
+
+    _stored(vault, "cached", 300)
+    _retained(selected_store, vault)
+    assert media_store.drain_census(vault) == (0, 0)
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: None)
+    monkeypatch.setattr("exomem.media_processing.reconcile_all_media", lambda *_args, **_kwargs: None)
+
+    server_runtime._start_media_worker(vault)
+
+    assert media_drain_record.read(vault).startswith("0 0 ")
+    assert media_store.drain_record(vault).latched
+
+
+def test_a_served_policy_clears_the_record_and_the_latch(vault: Path, selected_store):
+    """Catches a record that survives the store being turned on, which a later turn-off would read as drained."""
+    from exomem import media_drain_record, media_store
+
+    _stored(vault, "cached", 300)
+    _retained(selected_store, vault)
+    assert media_store.drain_census(vault) == (0, 0)
+    _configure(selected_store, vault)
+
+    media_store.drain_tick(vault)
+
+    assert media_store.drain_record(vault) is None
+    assert not media_drain_record.record_path(vault).exists()
+
+
+def _evicted_that_fits(vault: Path, selected_store, monkeypatch) -> Path:
+    """A retained store with one evicted original that fits on the volume, and a census row that records its wait."""
+    from exomem import media_store
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 1_000, path))
+    media_store.drain_census(vault)
+    return path
+
+
+def _pending(vault: Path, name: str, media_type: str):
+    from exomem import media_jobs
+
+    binary = vault / "pending" / name
+    binary.parent.mkdir(exist_ok=True)
+    binary.write_bytes(b"x")
+    media_jobs.MediaJobStore(vault).enqueue(media_jobs.MediaJob(binary, binary.with_name(name + ".md"), media_type, do_ocr=True))
+
+
+def test_a_pending_job_that_the_memory_brakes_hold_back_does_not_stall_the_drain(vault: Path, selected_store, monkeypatch):
+    """Catches a drain that waits for a job the worker will not claim, so a cell under memory pressure never drains."""
+    from exomem import media_brakes, media_worker
+
+    path = _evicted_that_fits(vault, selected_store, monkeypatch)
+    _pending(vault, "held.bin", "binary")
+    monkeypatch.setattr(media_brakes, "enabled", lambda *_args, **_kwargs: True)
+    unreadable = media_brakes.CellMemory(anon=None, max=None, high=None, pressure_avg10=None, problem="cgroup unreadable")
+    monkeypatch.setattr(media_brakes, "read_cell", lambda *_args, **_kwargs: unreadable)
+
+    media_worker._drain(vault)
+
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_a_speech_job_that_waits_for_the_gpu_does_not_stall_the_drain(vault: Path, selected_store, monkeypatch):
+    """Catches a drain that waits for a job that the worker skips while the GPU is busy."""
+    from exomem import media_jobs, media_worker
+
+    path = _evicted_that_fits(vault, selected_store, monkeypatch)
+    _pending(vault, "talk.mp3", "audio")
+    media_jobs.MediaJobStore(vault).note_gpu_wait("the GPU is busy")
+
+    media_worker._drain(vault)
+
+    assert originals.original_state(vault, path).state == "cached"
+
+
+@pytest.mark.parametrize("cause", ["a pending job", "an owner read"])
+def test_the_drain_yields_to_the_owner_and_the_status_says_why(vault: Path, selected_store, monkeypatch, cause):
+    """Catches a drain that stands still with nothing in the status to say what it waits for."""
+    from exomem import commands, media_jobs, media_worker
+
+    path = _evicted_that_fits(vault, selected_store, monkeypatch)
+    if cause == "a pending job":
+        _pending(vault, "claimable.bin", "binary")
+    else:
+        _retained(selected_store, vault, minimum_idle_seconds=3600)
+        with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+            connection.execute("UPDATE media_cache SET owner_read = ?", (time.time(),))
+
+    media_worker._drain(vault)
+
+    assert originals.original_state(vault, path).state == "evicted"
+    waiting = commands.op_adoption_studio(vault, action="status")["retained_store"]["drain_waiting"]
+    assert waiting == ("PENDING_JOB" if cause == "a pending job" else "OWNER_READ_RECENT")
+
+
+def test_a_drain_step_that_raises_still_lets_the_census_run(vault: Path, selected_store, monkeypatch):
+    """Catches a failure in the hydration step that also stops the census, so the cell never records its count."""
+    from exomem import media_store
+
+    _stored(vault, "cached", 300)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(media_store, "drain_step", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("volume gone")))
+
+    media_store.drain_tick(vault)
+
+    assert media_store.drain_record(vault).latched
+
+
+def test_the_retained_status_shows_a_census_attempt_that_failed_after_the_last_complete_one(vault: Path, selected_store):
+    """Catches a status that keeps showing an old count after the cell lost the ability to count."""
+    from exomem import commands, media_store
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    media_store.drain_census(vault)
+    _companion(path).write_bytes(b"---\nkind: companion\n")  # Cut off inside its front matter.
+    with pytest.raises(media_store.MediaStoreError):
+        media_store.drain_census(vault)
+
+    census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
+
+    assert set(census) == {"unknown", "attempted_at", "last_complete"}
+    assert census["last_complete"]["evicted"] == 1
+
+
+def test_a_retained_store_whose_originals_fit_hydrates_them_back_and_records_zero(vault: Path, selected_store, monkeypatch, capsys):
+    """Catches a turned-off store that keeps its key and its evicted originals although they fit on the volume."""
+    from exomem import media_store
+
+    paths = [_stored(vault, f"original-{size}", size) for size in (200, 300, 450)]
+    for path in paths:
+        assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 1_000, *paths))
+
+    media_store.drain_tick(vault)
+
+    assert [originals.original_state(vault, path).state for path in paths] == ["cached"] * 3
+    code, out, _err = _census(vault, capsys)
+    assert code == 0 and out.startswith("0 0 ")
+    assert media_store.drain_record(vault).latched
+
+
+def test_the_media_workers_eviction_tick_drains_a_retained_store(vault: Path, selected_store, monkeypatch):
+    """Catches a drain that nothing schedules: the cell keeps its evicted originals and its key."""
+    from exomem import media_store, media_worker
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 1_000, path))
+
+    media_worker._evict(vault)
+
+    assert originals.original_state(vault, path).state == "cached"
+    assert media_store.drain_record(vault).latched
+
+
+def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
+    """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room."""
+    from exomem import media_store
+
+    first, second, kept = _stored(vault, "first", 250), _stored(vault, "second", 300), _stored(vault, "kept", 200)
+    assert media_store.evict(vault, first) and media_store.evict(vault, second)
+    _retained(selected_store, vault, eviction_target=0.15)
+    # 200 in use leaves room for 600 below the growth threshold; the 550 evicted do not leave the margin of 100.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 0, first, second, kept))
+    assert shutil.disk_usage(vault).used > 150  # Above the eviction target, so eviction would act on a shortfall.
+
+    assert media_store.drain_step(vault) == 0
+    assert media_store.evict_to_target(vault) == 0
+
+    assert [originals.original_state(vault, path).state for path in (first, second, kept)] == ["evicted", "evicted", "cached"]
+
+
+def test_the_drain_stops_when_an_owners_write_takes_the_room_below_the_growth_threshold(vault: Path, selected_store, monkeypatch):
+    """Catches a drain that hydrates past the growth threshold when the volume fills while it runs."""
+    from types import SimpleNamespace
+
+    from exomem import media_store
+
+    first, second = _stored(vault, "first", 300), _stored(vault, "second", 400)
+    assert media_store.evict(vault, first) and media_store.evict(vault, second)
+    _retained(selected_store, vault)
+
+    def usage(_path):
+        # The owner writes 400 bytes as the first original returns.
+        used = sum(path.stat().st_size for path in (first, second) if path.exists()) + (400 if first.exists() else 0)
+        return SimpleNamespace(total=1_000, used=used, free=1_000 - used)
+
+    monkeypatch.setattr(shutil, "disk_usage", usage)
+
+    assert media_store.drain_step(vault) == 1
+
+    assert originals.original_state(vault, first).state == "cached"
+    assert originals.original_state(vault, second).state == "evicted"
+
+
+def test_the_drain_leaves_a_busy_hydration_slot_to_the_owner(vault: Path, selected_store, monkeypatch):
+    """Catches a drain that waits on, steals or fails over the hydration slot that an owner's read holds."""
+    import os
+
+    from exomem import media_jobs, media_store
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault, max_hydrations=1)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 1_000, path))
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('owner', 'elsewhere', ?, 1024, 1)", (os.getpid(),))
+
+    assert media_store.drain_step(vault) == 0
+
+    assert originals.original_state(vault, path).state == "evicted"
+    with sqlite3.connect(ledger.path) as connection:
+        assert [token for (token,) in connection.execute("SELECT token FROM media_access")] == ["owner"]
+        connection.execute("DELETE FROM media_access WHERE token = 'owner'")
+    assert media_store.drain_step(vault) == 1
+
+
+def test_a_census_that_just_counted_waits_out_the_hour(vault: Path, selected_store, monkeypatch):
+    """Catches a walk of the whole Knowledge Base on every tick of the media worker."""
+    from exomem import media_jobs, media_store
+
+    path = _stored(vault, "interrupted", 300)
+    path.unlink()
+    _retained(selected_store, vault, eviction_enabled=False)
+    calls: list[Path] = []
+    real = media_store.drain_census
+    monkeypatch.setattr(media_store, "drain_census", lambda root: calls.append(root) or real(root))
+
+    media_store.drain_tick(vault)
+    media_store.drain_tick(vault)
+    assert len(calls) == 1
+
+    long_ago = (datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_drain SET attempted_at = ?", (long_ago,))
+    media_store.drain_tick(vault)
+    assert len(calls) == 2
+
+
+def test_the_retained_status_reports_the_census_the_latch_and_the_originals_too_large_to_hydrate(vault: Path, selected_store, monkeypatch):
+    """Catches a status that hides the originals that keep the key, or shows a drain that no census has confirmed."""
+    from exomem import commands, media_store
+
+    first, second, _evicted = _evicted_pair(vault)
+    _retained(selected_store, vault, max_temporary_bytes=350)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 100, first, second))
+    before = commands.op_adoption_studio(vault, action="status")["retained_store"]
+
+    media_store.drain_census(vault)
+    after = commands.op_adoption_studio(vault, action="status")["retained_store"]
+
+    assert set(before["census"]) == {"unknown"} and before["drained"] is False
+    assert (after["census"]["evicted"], after["census"]["bytes"]) == (2, 700)
+    assert after["drained"] is False
+    assert after["above_hydration_capacity"] == {"count": 1}

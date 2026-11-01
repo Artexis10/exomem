@@ -22,6 +22,8 @@ Subcommands:
   migration, no custody environment
 - `cell-export` — Exomem Cloud owner export Job: the canonical ZIP of a held
   cell, uploaded to controller-presigned parts; reports sizes and digests only
+- `cell-media-census` — Exomem Cloud backup Job: the cell's last census of its
+  evicted originals from its drain record, or `unknown unknown` when it cannot say
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -141,11 +143,17 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["cell-media-census"]:
+        # The backup Job bounds this command in seconds on one CPU, and it reads one file, so it loads no CLI,
+        # server framework or native runtime.
+        from .cell_media_census import main as census_main
+
+        return census_main(raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
     preload_local_dotenv_policy()
     bootstrap()
-    raw = list(sys.argv[1:] if argv is None else argv)
     # Named commands and identification/help keep their completion wait. A
     # serving route skips it only when its managed lifecycle already joined.
     serving = (not raw or raw[0].startswith("-")) and not any(

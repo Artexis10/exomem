@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -212,17 +213,16 @@ def evicted(vault: Path, path: str | Path) -> bool:
     return not is_note_path(Path(path).as_posix()) and original_state(vault, path).state == "evicted"
 
 
-def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object], bytes] | None:
-    """Return the first companion candidate whose pointer fields all name this original.
+def companion_candidates(vault: Path, relative: str) -> Iterator[tuple[str, bytes]]:
+    """Each companion candidate of this original that exists, as its path and bytes.
 
-    preserve owns the candidate layout, legacy Source forms included. A malformed
-    candidate raises UnicodeError or FrontmatterError; each caller decides what it means.
+    preserve owns the candidate layout, legacy Source forms included. A missing candidate is skipped; any
+    other failed read raises.
     """
     from . import reserved_paths
     from .governance.raw_protection import marked
     from .kbdir import kb_dirname
     from .preserve import _sidecar_paths
-    from .vault import parse_frontmatter
 
     target = Path(relative)
     for candidate in _sidecar_paths(
@@ -235,6 +235,17 @@ def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object],
             if error.code != "MISSING":
                 raise
             continue
+        yield companion, data
+
+
+def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object], bytes] | None:
+    """Return the first companion candidate whose pointer fields all name this original.
+
+    A malformed candidate raises UnicodeError or FrontmatterError; each caller decides what it means.
+    """
+    from .vault import parse_frontmatter
+
+    for companion, data in companion_candidates(vault, relative):
         fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
         if marker is not None and bound_path(fields) == relative:
             return companion, fields, data

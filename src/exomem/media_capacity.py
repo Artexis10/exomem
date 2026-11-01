@@ -114,6 +114,14 @@ def hydration_limits(config: dict[str, object]) -> HydrationLimits | None:
     return HydrationLimits(int(config["max_temporary_bytes"]), int(config["max_hydrations"]))
 
 
+def growth_threshold(config: dict[str, object]) -> float | None:
+    """The fraction of the volume that the cell grows at, or None when the policy sets none or an invalid one (D12)."""
+    value = config.get("growth_threshold")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+        return None
+    return float(value)
+
+
 @functools.cache
 def _warn_once(problem: str) -> None:
     # Every claim reads the policy, so the cache keeps one warning per problem in each process.

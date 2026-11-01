@@ -1346,12 +1346,12 @@ def test_a_vault_check_that_cannot_run_is_reported_apart_from_a_volume_with_no_v
     assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
 
 
-def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
-    # The Job and cellctl must agree on the termination message, or no cell
-    # ever grows. This runs the rendered command under sh, with restic stubbed
-    # and the Job's paths moved under tmp_path, and reads the message back as
-    # ClusterClient.observe() does. The cell image's exomem.vault is stubbed
-    # to find the vault.
+def _run_backup_job(tmp_path, exomem: str):
+    """Run the rendered backup command under sh and read its termination message back as ClusterClient.observe() does.
+
+    restic and the cell image's `exomem` are stubs on PATH, and the Job's paths move under tmp_path.
+    `exomem` is the body of the stub's shell script. Returns what cellctl observed, and the data directory.
+    """
     import os
     import subprocess
 
@@ -1373,6 +1373,8 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
         encoding="utf-8",
     )
     restic.chmod(0o755)
+    (bin_dir / "exomem").write_text(f"#!/bin/sh\n{exomem}\n", encoding="utf-8")
+    (bin_dir / "exomem").chmod(0o755)
     spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
                             hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
     shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
@@ -1388,12 +1390,48 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     message = (tmp_path / "termination-log").read_text(encoding="utf-8")
     observed = _client(hold_started_at=CURRENT_HOLD, jobs={backup: _job(succeeded=True)},
                        pods=[_job_pod(backup, snapshot_id=message)]).observe(CELL_ID, NAMESPACE)
+    return observed, data
+
+
+def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
+    # The Job and cellctl must agree on the termination message, or no cell
+    # ever grows. The cell image's exomem is stubbed: it finds the vault and
+    # prints the record that the cell wrote, three evicted originals.
+    import os
+
+    from .test_k8s_client import CURRENT_HOLD
+
+    census_time = datetime.fromisoformat(CURRENT_HOLD) + timedelta(minutes=30)
+    arguments = f"cell-media-census --vault {tmp_path}/data/vault"
+    census = f'[ "$*" = "{arguments}" ] && echo "3 4096 {census_time.isoformat()}"'
+
+    observed, data = _run_backup_job(tmp_path, census)
+
     filesystem = os.statvfs(data)
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert observed.backup_job_total_bytes == filesystem.f_blocks * filesystem.f_frsize
     assert 0 < observed.backup_job_used_bytes <= observed.backup_job_total_bytes
-    # D12: the media report says unknown, never 0, until the cell can count its evicted originals,
-    # and its capture time is the hold start, which the volume it read cannot predate.
+    # D12: the media report is the record the cell image printed, with the cell's own census time.
+    assert observed.backup_job_media_census == MediaCensus(evicted=3, evicted_bytes=4096, captured_at=census_time)
+
+
+@pytest.mark.parametrize("exomem", [
+    pytest.param("echo '3 4096 2026-10-31T01:30:00+00:00'; exit 1", id="the census fails after it printed"),
+    pytest.param("echo 'usage: exomem'; exit 2", id="an older image has no such command"),
+    pytest.param("exec sleep 600", id="the census does not finish"),
+])
+def test_a_backup_job_whose_census_does_not_complete_reports_the_media_census_as_unknown(
+        tmp_path, monkeypatch, exomem) -> None:
+    # The backup itself succeeded, so its snapshot still counts. A record that cannot be read, or a read that
+    # hangs, says unknown at the hold start, never a count and never 0, which would drain a cell that holds media.
+    from cellctl import backup_source
+
+    from .test_k8s_client import CURRENT_HOLD
+
+    monkeypatch.setattr(backup_source, "MEDIA_CENSUS_SECONDS", 1)
+    observed, _data = _run_backup_job(tmp_path, exomem)
+
+    assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert observed.backup_job_media_census == MediaCensus(
         evicted=None, evicted_bytes=None, captured_at=datetime.fromisoformat(CURRENT_HOLD))
 
