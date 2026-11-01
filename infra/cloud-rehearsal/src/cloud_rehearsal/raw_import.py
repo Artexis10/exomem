@@ -13,35 +13,55 @@ collection, so the run can show that nothing already there changed or was copied
 from __future__ import annotations
 
 import asyncio
-import base64
 import collections
 import hashlib
-import io
+import importlib
 import json
 import shutil
+import subprocess
 import sys
 import tarfile
 import time
 import unicodedata
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from cellctl.manifests import namespace_name
+
 from . import images
 from . import substrate as substrate_mod
-from .large_import import TRANSIENT_ATTEMPTS, exec_json, import_summary
+from .large_import import TRANSIENT_ATTEMPTS, import_summary
 from .mcp_client import TenantClient
 from .native_import import retain_cli_diagnostics, run_cli_import
 from .report import StepFailure, StepRecord, innermost
 from .shell import CommandFailed, run
 
 BENCH = images.REPO_ROOT / "benchmarks" / "collection_ingest"
-# The benchmark's own modules, imported from their folder so that changes there need no change here.
-sys.path.insert(0, str(BENCH))
-import drive  # noqa: E402
-import score  # noqa: E402
-from mcp_session import LedgerSession, classify  # noqa: E402
+
+
+def _import_bench() -> tuple[Any, Any, Any]:
+    """The benchmark's own modules, imported from their folder so that changes there need no change here.
+
+    The folder is on `sys.path` only while they load, and their top-level names (`score`, `drive`, `control`,
+    `generate`) are dropped from `sys.modules` after, so no other rehearsal mode can import one by mistake.
+    """
+    saved_path, known = list(sys.path), set(sys.modules)
+    sys.path.insert(0, str(BENCH))
+    try:
+        loaded = tuple(importlib.import_module(name) for name in ("drive", "score", "mcp_session"))
+    finally:
+        sys.path[:] = saved_path
+        for name in set(sys.modules) - known:
+            origin = getattr(sys.modules[name], "__file__", None)
+            if origin and Path(origin).parent == BENCH:
+                del sys.modules[name]
+    return loaded
+
+
+drive, score, _session_module = _import_bench()
+LedgerSession, classify = _session_module.LedgerSession, _session_module.classify
 
 if TYPE_CHECKING:
     from .scenarios import Context, Tenant
@@ -58,14 +78,12 @@ SCORE_TIMEOUT_S = 3600
 PASS, INCOMPLETE, FAIL = "pass", "incomplete", "fail"
 _SEVERITY = (PASS, INCOMPLETE, FAIL)
 
-VAULT_SCRIPT = """import base64, io, json, os, tarfile
+VAULT_SCRIPT = """import os, sys, tarfile
 root = '/data/vault'
-buffer = io.BytesIO()
-with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+with tarfile.open(fileobj=sys.stdout.buffer, mode='w|gz') as archive:
     for name in sorted(os.listdir(root)):
         if name != '_Imports':
             archive.add(os.path.join(root, name), arcname=name)
-print(json.dumps({'tar': base64.b64encode(buffer.getvalue()).decode()}))
 """
 
 
@@ -76,10 +94,20 @@ def nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
+def edge_ends(key: Mapping[str, Any]) -> dict[str, dict[str, tuple[str, str]]]:
+    """Each distinct link and embed edge of the key, named 'source -> target', with its two key paths."""
+    notes = [i for i in key["items"] if i["kind"] == "note"]
+    links = {f"{n['path']} -> {lk['target']}": (n["path"], lk["target"])
+             for n in notes for lk in n["links"] if lk["resolution"] == "resolvable"}
+    embeds = {f"{n['path']} -> {e['attachment']}": (n["path"], e["attachment"]) for n in notes for e in n["embeds"]}
+    return {"links": links, "embeds": embeds}
+
+
 def item_states(key: Mapping[str, Any], per_item: Mapping[str, Any] | None) -> dict[str, dict[str, bool | None]]:
     """Per group, per key item: did this arm keep it? `None` is unknown: the arm did not measure it.
 
     `per_item` is the `per_item` block of `score.py`'s metrics, or `None` when the arm was not scored.
+    For junk, "kept" means kept out: no page came of it.
     """
     notes = [i for i in key["items"] if i["kind"] == "note"]
     atts = [i for i in key["items"] if i["kind"] == "attachment"]
@@ -95,8 +123,7 @@ def item_states(key: Mapping[str, Any], per_item: Mapping[str, Any] | None) -> d
     def filed_at_most_once(item: Mapping[str, Any]) -> bool | None:
         return pages[item["path"]] <= 1 if item["path"] in pages else None
 
-    link_edges = sorted({f"{n['path']} -> {lk['target']}" for n in notes for lk in n["links"] if lk["resolution"] == "resolvable"})
-    embed_edges = sorted({f"{n['path']} -> {e['attachment']}" for n in notes for e in n["embeds"]})
+    ends = edge_ends(key)
     return {
         "notes": {i["path"]: landed(i) for i in notes},
         "attachments": {i["path"]: landed(i) for i in atts},
@@ -104,14 +131,27 @@ def item_states(key: Mapping[str, Any], per_item: Mapping[str, Any] | None) -> d
         "nfd_names": {i["path"]: landed(i) for i in notes + atts if i["nfd_filename"]},
         # A duplicate is an item that came out as more than one page; an item that did not land is not one.
         "no_duplicate_pages": {i["path"]: filed_at_most_once(i) for i in notes + atts},
-        "junk_landed": {i["path"]: (junk_pages[i["path"]] >= 1 if i["path"] in junk_pages else None) for i in junk},
-        "links": {edge: links.get(edge) for edge in link_edges},
-        "embeds": {edge: embeds.get(edge) for edge in embed_edges},
+        "junk_kept_out": {i["path"]: (junk_pages[i["path"]] == 0 if i["path"] in junk_pages else None) for i in junk},
+        "links": {edge: links.get(edge) for edge in sorted(ends["links"])},
+        "embeds": {edge: embeds.get(edge) for edge in sorted(ends["embeds"])},
     }
 
 
-def compare_group(cloud: Mapping[str, bool | None], local: Mapping[str, bool | None]) -> dict[str, Any]:
-    """Item by item. A loss is an item that local kept and Cloud did not; a Cloud-only extra is the reverse."""
+def path_cause(path: str) -> str:
+    """Why an item may be left behind, read from the key path's shape: a hidden part, or its extension."""
+    parts = path.split("/")
+    if any(part.startswith(".") for part in parts):
+        return "hidden path"
+    suffix = Path(parts[-1]).suffix.lower()
+    return f"extension {suffix}" if suffix else "no extension"
+
+
+def compare_group(cloud: Mapping[str, bool | None], local: Mapping[str, bool | None],
+                  cause: Callable[[str], str] = path_cause) -> dict[str, Any]:
+    """Item by item. A loss is an item that local kept and Cloud did not; a Cloud-only extra is the reverse.
+
+    `loss_causes` groups the losses by `cause(item)`; a loss counts once, in `loss` and in its cause.
+    """
     states: dict[str, list[str]] = {"loss": [], "cloud_extra": [], "unknown": []}
     kept_by_both = missed_by_both = 0
     for item in sorted(cloud.keys() | local.keys()):
@@ -126,39 +166,85 @@ def compare_group(cloud: Mapping[str, bool | None], local: Mapping[str, bool | N
             kept_by_both += 1
         else:
             missed_by_both += 1
+    by_cause: dict[str, list[str]] = {}
+    for item in states["loss"]:
+        by_cause.setdefault(cause(item), []).append(item)
     return {
         "items": len(cloud.keys() | local.keys()), "kept_by_both": kept_by_both, "missed_by_both": missed_by_both,
         **{state: {"count": len(names), "listed": names[:LISTED_ITEMS]} for state, names in states.items()},
+        "loss_causes": {name: {"count": len(items), "listed": items[:LISTED_ITEMS]} for name, items in sorted(by_cause.items())},
     }
 
 
 def compare_arms(key: Mapping[str, Any], cloud: Mapping[str, Any] | None,
                  local: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
     cloud_states, local_states = item_states(key, cloud), item_states(key, local)
-    return {group: compare_group(cloud_states[group], local_states[group]) for group in cloud_states}
+    ends = edge_ends(key)
+    cloud_landed = {path for group in ("notes", "attachments") for path, kept in cloud_states[group].items() if kept}
+
+    def edge_cause(group: str) -> Callable[[str], str]:
+        # A lost endpoint explains its edges; only an edge between two landed items is a dropped edge.
+        return lambda edge: "endpoint missing" if not set(ends[group][edge]) <= cloud_landed else "edge dropped, both landed"
+
+    return {group: compare_group(cloud_states[group], local_states[group], edge_cause(group) if group in ends else path_cause)
+            for group in cloud_states}
 
 
-def check_existing_pages(before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
-    """Every page the vault held before the import: unchanged, still there and not copied.
+def arm_gaps(label: str, metrics: Mapping[str, Any] | None, key: Mapping[str, Any], *, stopped_at: str | None,
+             converged: bool | None) -> list[str]:
+    """Why this arm's reads cannot carry a pass: each reason is a measurement that is partial or absent."""
+    if metrics is None:
+        return [f"{label}: not scored"]
+    gaps = [f"{label}: {tool} read failed {count} times" for tool, count in sorted((metrics.get("measurement_gaps") or {}).items())]
+    if stopped_at:
+        gaps.append(f"{label}: the journey stopped at {stopped_at}")
+    if converged is not True:
+        gaps.append(f"{label}: the media queue had {'not converged' if converged is False else 'no convergence reading'}")
+    pages = (metrics.get("per_item") or {}).get("pages_per_item", {})
+    if not any(pages.get(i["path"], 0) >= 1 for i in key["items"] if i["kind"] == "note"):
+        gaps.append(f"{label}: no key note landed, so there is nothing to compare")
+    return gaps
 
-    Both maps are Knowledge Base page path -> SHA-256. A new page with a pre-existing page's bytes is a copy.
+
+@dataclass(frozen=True)
+class Snapshot:
+    """What a vault's Knowledge Base held at one moment, for the pre-existing page check."""
+
+    files: frozenset[str] = frozenset()  # every file under Knowledge Base, Markdown or not
+    sourced: Mapping[str, str] = field(default_factory=dict)  # page path -> SHA-256, for pages with `imported_from`
+    identities: Mapping[str, tuple[str, str, str]] = field(default_factory=dict)  # page path -> its source identity
+
+
+def check_existing_pages(before: Snapshot, after: Snapshot) -> list[str]:
+    """What the import did to the pages the vault held before it.
+
+    Pages that came from a source are immutable after capture: each must be unchanged. Every other file only
+    has to exist, because adoption rewrites the managed pages (the indexes and the log) on every run. No source
+    identity of a pre-existing page may appear on more than one page.
     """
-    problems = [f"changed: {path}" for path, digest in sorted(before.items()) if path in after and after[path] != digest]
-    problems += [f"missing: {path}" for path in sorted(before) if path not in after]
-    first_path = {}
-    for path, digest in sorted(before.items()):
-        first_path.setdefault(digest, path)
-    problems += [f"duplicated: {path} repeats {first_path[digest]}" for path, digest in sorted(after.items())
-                 if path not in before and digest in first_path]
+    problems = []
+    for path, digest in sorted(before.sourced.items()):
+        if path not in after.files:
+            problems.append(f"missing: {path}")
+        elif after.sourced.get(path) != digest:
+            problems.append(f"changed: {path}")
+    problems += [f"missing: {path}" for path in sorted(before.files - after.files) if path not in before.sourced]
+    pages_by_identity: dict[tuple[str, str, str], list[str]] = {}
+    for path, identity in sorted(after.identities.items()):
+        pages_by_identity.setdefault(identity, []).append(path)
+    for identity in sorted(set(before.identities.values())):
+        if len(pages_by_identity.get(identity, [])) > 1:
+            problems.append(f"duplicated: {pages_by_identity[identity]}")
     return problems
 
 
-def target_verdict(groups: Mapping[str, Mapping[str, Any]], page_problems: Sequence[str] | None = ()) -> str:
-    """`fail` on any loss or any damaged pre-existing page; `incomplete` on any unknown, or when a required
-    page check did not run (`page_problems` is `None`); otherwise `pass`."""
+def target_verdict(groups: Mapping[str, Mapping[str, Any]], page_problems: Sequence[str] | None = (),
+                   gaps: Sequence[str] = ()) -> str:
+    """`fail` on any loss or any damaged pre-existing page; `incomplete` on any unknown, any gap, or when a
+    required page check did not run (`page_problems` is `None`); otherwise `pass`: no loss on the first pass."""
     if any(group["loss"]["count"] for group in groups.values()) or page_problems:
         return FAIL
-    if page_problems is None or any(group["unknown"]["count"] for group in groups.values()):
+    if page_problems is None or gaps or any(group["unknown"]["count"] for group in groups.values()):
         return INCOMPLETE
     return PASS
 
@@ -168,11 +254,8 @@ def worst(verdicts: Sequence[str | None]) -> str:
     return max((INCOMPLETE if verdict is None else verdict for verdict in verdicts), key=_SEVERITY.index, default=INCOMPLETE)
 
 
-def imported_from_prefix(values: Sequence[str], key_paths: Sequence[str]) -> str | None:
-    """The folder the product wrote in front of each original path in `imported_from`; `None` if none match.
-
-    A Cloud cell names the staged folder, not the label, so the scorer is told what the data shows.
-    """
+def imported_from_matches(values: Sequence[str], key_paths: Sequence[str]) -> collections.Counter[str]:
+    """For each folder the product wrote in front of an original path in `imported_from`, how many values match."""
     seen: collections.Counter[str] = collections.Counter()
     suffixes = [nfc("/" + path) for path in key_paths]
     for value in values:
@@ -181,6 +264,15 @@ def imported_from_prefix(values: Sequence[str], key_paths: Sequence[str]) -> str
             if text.endswith(suffix):
                 seen[text[: -len(suffix)]] += 1
                 break
+    return seen
+
+
+def imported_from_prefix(values: Sequence[str], key_paths: Sequence[str]) -> str | None:
+    """The folder the product wrote in front of each original path in `imported_from`; `None` if none match.
+
+    A Cloud cell names the staged folder, not the label, so the scorer is told what the data shows.
+    """
+    seen = imported_from_matches(values, key_paths)
     return seen.most_common(1)[0][0] if seen else None
 
 
@@ -205,6 +297,10 @@ class CloudSession(LedgerSession):
                 last = f"{type(innermost(error)).__name__}: {str(innermost(error))[:200]}"
                 await asyncio.sleep(min(30, 2**attempt))
                 continue
+            # A structured refusal (MUTATION_WARMING asks for a retry) goes to `LedgerSession.call`, which waits
+            # `retry_after_ms` and calls again; only an error with no structured body is a tool error.
+            if isinstance(result.structured, dict) and isinstance(result.structured.get("error"), dict):
+                return classify(result.structured)
             if result.is_error:
                 return "tool_error", None, result.error_code, result.text()[:800]
             return classify(result.structured or None)
@@ -219,7 +315,7 @@ class RawImportPlan:
     run_id: str
     workdir: Path
     cli_image: str
-    python: Path  # an interpreter with the server and its extractors installed: the local arm and the scorer run on it
+    python: Path  # an interpreter with fastmcp, the server and its extractors: the local arm, the driver and the scorer run on it
 
     @property
     def root(self) -> Path:
@@ -235,19 +331,37 @@ def generate_collection(plan: RawImportPlan, name: str, spec: Mapping[str, Any])
 
 
 def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def kb_page_hashes(vault: Path) -> dict[str, str]:
+def vault_snapshot(vault: Path) -> Snapshot:
     kb = vault / "Knowledge Base"
-    return {path.relative_to(vault).as_posix(): sha256_file(path) for path in sorted(kb.rglob("*.md"))} if kb.is_dir() else {}
+    files = frozenset(path.relative_to(vault).as_posix() for path in kb.rglob("*") if path.is_file()) if kb.is_dir() else frozenset()
+    sourced: dict[str, str] = {}
+    identities: dict[str, tuple[str, str, str]] = {}
+    for rel, page in score.scan_vault(vault)["pages"].items():
+        front = page["front"]
+        if isinstance(front.get("imported_from"), str):
+            sourced[rel] = sha256_file(vault / rel)
+        identity = tuple(front.get(name) for name in ("import_collection", "collection_path", "original_sha256"))
+        if all(isinstance(part, str) and part for part in identity):
+            identities[rel] = identity  # type: ignore[assignment]
+    return Snapshot(files, sourced, identities)
+
+
+def run_scorer(plan: RawImportPlan, script: str, *arguments: str) -> None:
+    """A benchmark script on `plan.python`: the drivers import fastmcp, which the harness's own interpreter lacks."""
+    run([str(plan.python), str(BENCH / script), *arguments], timeout=SCORE_TIMEOUT_S)
 
 
 def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path) -> dict[str, Any] | None:
     """Run `score.py` on a finished vault. `None` when it did not finish: the arm is then unknown, not zero."""
     try:
-        run([sys.executable, str(BENCH / "score.py"), "--key", str(key), "--drive-log", str(log), "--out", str(out),
-             "--python", str(plan.python)], timeout=SCORE_TIMEOUT_S)
+        run_scorer(plan, "score.py", "--key", str(key), "--drive-log", str(log), "--out", str(out), "--python", str(plan.python))
     except CommandFailed as error:
         out.with_suffix(".failure.txt").write_text(f"{error}\n{error.stdout[-2000:]}\n{error.stderr[-2000:]}")
         return None
@@ -255,51 +369,70 @@ def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path) -> dict[st
 
 
 def local_arm(plan: RawImportPlan, collection: Path, key: Path) -> dict[str, Any]:
-    """The same journey on a personal server: `drive.py --profile personal`, then `score.py`."""
+    """The same journey on a personal server: `drive.py --profile personal`, then `score.py`.
+
+    `drive.py` exits 0 when a journey stops, so the log says whether it stopped and whether the media queue converged.
+    """
     work = plan.root / "local"
     log, metrics_path = plan.root / "local.drive.json", plan.root / "local.metrics.json"
     started = time.monotonic()
     out: dict[str, Any] = {"profile": "personal", "metrics": None}  # `metrics` is for the caller; the report keeps the headline
     try:
-        run([sys.executable, str(BENCH / "drive.py"), "--collection", str(collection), "--workdir", str(work),
-             "--profile", "personal", "--python", str(plan.python), "--server-root", str(images.REPO_ROOT),
-             "--log", str(log), "--label", "raw-import local arm"], timeout=SCORE_TIMEOUT_S)
+        run_scorer(plan, "drive.py", "--collection", str(collection), "--workdir", str(work), "--profile", "personal",
+                   "--python", str(plan.python), "--server-root", str(images.REPO_ROOT), "--log", str(log),
+                   "--label", "raw-import local arm")
+        drive_log = json.loads(log.read_text(encoding="utf-8"))
+        stopped = [journey["stopped_at"] for journey in drive_log["journeys"] if journey.get("stopped_at")]
+        out["stopped_at"] = ", ".join(stopped) or None
+        out["converged"] = all(drive_log["media"][phase].get("converged") is True for phase in ("after_first_run", "after_rerun"))
         out["metrics"] = score_vault(plan, key, log, metrics_path)
-    except CommandFailed as error:
-        out["failure"] = str(error)[:1500]
+    except (CommandFailed, OSError, KeyError, ValueError) as error:
+        out["failure"] = f"{type(error).__name__}: {error}"[:1500]
     out["seconds"] = round(time.monotonic() - started, 1)
     return out
 
 
 async def provision_paid_tenant(ctx: Context, tenant: Tenant) -> None:
-    """A second paid tenant the way step 2 admits the first: invite, redemption, checkout, `subscription.activated`."""
-    token = await substrate_mod.seed_invite(ctx.substrate, tenant.email, paid=True)
-    tenant.session = await ctx.browser.redeem_invite(token)
-    await ctx.identify(tenant)
-    if not (tenant.cell_id and tenant.tenant_id and tenant.user_id):
-        raise StepFailure(f"tenant {tenant.label}: redemption left no cell")
-    tenant.transaction_id = await substrate_mod.bind_checkout(ctx.substrate, tenant.tenant_id)
-    tenant.subscription_id = substrate_mod.paddle_id("sub")
-    await ctx.paddle(substrate_mod.paddle_event(
-        event_type="subscription.activated", status="active", user_id=tenant.user_id, tenant_id=tenant.tenant_id,
-        subscription_id=tenant.subscription_id, transaction_id=tenant.transaction_id))
+    """A second paid tenant the way step 2 admits the first."""
+    from .scenarios import activate_subscription, redeem_invite
+
+    await redeem_invite(ctx, tenant, await substrate_mod.seed_invite(ctx.substrate, tenant.email, paid=True))
+    await activate_subscription(ctx, tenant)
     await ctx.wait_cell(tenant.cell_id, lambda cell: bool(cell.get("ready")) and cell.get("observed_state") == "running"
                         and cell.get("hold_kind") is None, timeout=600, description=f"tenant {tenant.label}'s cell to be running and ready")
 
 
 async def copy_vault(ctx: Context, tenant: Tenant, destination: Path) -> dict[str, Any]:
-    """Copy the cell's vault out, read-only, into a new folder: one tar of the volume, minus the staged imports.
+    """Copy the cell's vault out, read-only, into a new folder: one streamed tar of the volume, minus the staged imports.
 
-    This costs one pod exec. The owner export would add the export flag, an export Job, a versioned download and
-    the archive verifier, to read the same files.
+    This costs one pod exec, and the archive goes to a file as it arrives, so a huge file never sits in memory.
+    The owner export would add the export flag, an export Job, a versioned download and the archive verifier,
+    to read the same files.
     """
-    found = await asyncio.to_thread(exec_json, ctx, VAULT_SCRIPT, cell_id=tenant.cell_id)
-    archive = base64.b64decode(found["tar"])
-    destination.mkdir(parents=True)
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+    archive = destination.with_suffix(".tar.gz")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(3):  # the pod may be replaced between attempts, so each one looks it up again
+        pod = ctx.runtime_pod(tenant.cell_id)
+        if pod is None:
+            code = -1
+            await asyncio.sleep(5 * (attempt + 1))
+            continue
+        command = ["docker", "exec", ctx.stack.k3s.container, "kubectl", "exec", "--namespace", namespace_name(tenant.cell_id),
+                   pod["metadata"]["name"], "--container", "exomem", "--", "python3", "-c", VAULT_SCRIPT]
+        with archive.open("wb") as sink:
+            code = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False, timeout=SCORE_TIMEOUT_S).returncode
+        if code == 0:
+            break
+        await asyncio.sleep(5 * (attempt + 1))
+    else:
+        raise StepFailure(f"the vault copy of tenant {tenant.label} kept failing (last exit code {code})")
+    destination.mkdir()
+    with tarfile.open(archive, mode="r:gz") as tar:
         tar.extractall(destination, filter="data")
-    return {"tar_bytes": len(archive), "tar_sha256": hashlib.sha256(archive).hexdigest(),
-            "files": sum(1 for path in destination.rglob("*") if path.is_file())}
+    result = {"tar_bytes": archive.stat().st_size, "tar_sha256": sha256_file(archive),
+              "files": sum(1 for path in destination.rglob("*") if path.is_file())}
+    archive.unlink()
+    return result
 
 
 async def import_collection(ctx: Context, plan: RawImportPlan, tenant: Tenant, collection: Path, name: str) -> tuple[str, dict]:
@@ -316,19 +449,31 @@ async def import_collection(ctx: Context, plan: RawImportPlan, tenant: Tenant, c
     return f"_Imports/{cli.import_id}", row or {}
 
 
+def cli_coverage(collection: Path, row: Mapping[str, Any]) -> dict[str, Any]:
+    """The files the CLI declared against the files in the collection, so a file it left behind shows as a number."""
+    on_disk = sum(1 for path in collection.rglob("*") if path.is_file())
+    declared = row.get("declared_files")
+    return {"collection_files": on_disk, "declared_files": declared,
+            "left_behind_by_the_cli": None if declared is None else on_disk - declared}
+
+
 async def adopt(ctx: Context, plan: RawImportPlan, tenant: Tenant, session: Any, collection: Path, name: str,
                 label: str, *, initialize_kb: bool) -> dict[str, Any]:
     """Send `collection` to the tenant's cell and file it with the journey `drive.py` runs locally."""
     stage_path, row = await import_collection(ctx, plan, tenant, collection, name)
     started = time.perf_counter()
-    # The scorer reads the refusals of the journey named "first".
-    journey = drive.Journey(session, "first", label, collection, [], path=stage_path, request=drive.hosted_request,
+    # The scorer reads the refusals of the journey named "first". The CLI stages the collection in one folder
+    # inside the stage, so the folder-kind rule probes name that folder, as the local arm's do.
+    journey = drive.Journey(session, "first", label, collection, [], path=stage_path,
+                            collection_root=f"{stage_path}/{collection.name}", request=drive.hosted_request,
                             initialize_kb=initialize_kb)
     rules_state: dict[str, Any] = {"folder_kind_rules": "not-probed", "collection_label": "not-tried"}
     summary = await journey.run(collection_label="try", rules_state=rules_state, probe_rules=True, include_rules=[])
     media = await drive.wait_for_media(session, "first", MEDIA_DEADLINE_S, drive.hosted_media_status)
-    return {"stage_path": stage_path, "import": import_summary(row), "journey": summary, "rules_state": rules_state,
-            "media": media, "seconds": round(time.perf_counter() - started, 1)}
+    return {"stage_path": stage_path, "import": import_summary(row), "cli": cli_coverage(collection, row),
+            "journey": summary, "rules_state": rules_state, "media": media,
+            "stopped_at": summary.get("stopped_at"), "converged": media.get("converged"),
+            "seconds": round(time.perf_counter() - started, 1)}
 
 
 def write_drive_log(plan: RawImportPlan, name: str, session: Any, adopted: Mapping[str, Any], vault: Path,
@@ -377,16 +522,26 @@ def arm_report(metrics: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return score.headline(metrics)
 
 
+def target_report(adopted: Mapping[str, Any], scored: Mapping[str, Any], groups: Mapping[str, Any], verdict: str,
+                  gaps: Sequence[str]) -> dict[str, Any]:
+    return {"verdict": verdict, "gaps": list(gaps), "journey": adopted["stopped_at"] or "finished",
+            "media_converged": adopted["converged"], "import": adopted["import"], "cli": adopted["cli"],
+            "vault_copy": scored["vault_copy"], "imported_from_prefix": scored["imported_from_prefix"],
+            "cloud": arm_report(scored["metrics"]), "groups": groups}
+
+
 async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
     """The stage body: write into `report.stages["raw_import"]` as it goes, so partial results survive."""
     out = ctx.report.stages["raw_import"]
     out.update({"collection": MAIN_COLLECTION, "earlier_collection": EARLIER_COLLECTION, "findings": [], "targets": {},
                 "local": None, "verdict": None,
+                "verdict_meaning": "pass means no loss on the first pass: one import of each folder; a second `exomem cloud import` of the same folder is not run",
                 "rerun_duplicates": "unknown: the first pass consumes the staged copy, so the Cloud arm has no second pass"})
     plan.root.mkdir(parents=True, exist_ok=True)
     collection, key_path = generate_collection(plan, "main", MAIN_COLLECTION)
-    earlier, _ = generate_collection(plan, "earlier", EARLIER_COLLECTION)
+    earlier, earlier_key_path = generate_collection(plan, "earlier", EARLIER_COLLECTION)
     key = json.loads(key_path.read_text(encoding="utf-8"))
+    earlier_key = json.loads(earlier_key_path.read_text(encoding="utf-8"))
     out["key"] = {"profile": key["profile"], "seed": key["seed"], "fixture_tree_sha256": key["fixture_tree_sha256"],
                   "summary": key["summary"]}
     record = StepRecord(0, "raw_import")
@@ -394,7 +549,8 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
 
     local = await asyncio.to_thread(local_arm, plan, collection, key_path)
     local_metrics = local.pop("metrics")
-    out["local"] = {**local, "scored": local_metrics is not None, "headline": arm_report(local_metrics)}
+    local_gaps = arm_gaps("local", local_metrics, key, stopped_at=local.get("stopped_at"), converged=local.get("converged"))
+    out["local"] = {**local, "scored": local_metrics is not None, "headline": arm_report(local_metrics), "gaps": local_gaps}
 
     async def connect(tenant: Tenant) -> CloudSession:
         client = tenant.client = TenantClient(ctx.resolver, ctx.browser, tenant.session, ctx.substrate.redirect_uri)
@@ -407,32 +563,43 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         session = await connect(ctx.a)
         adopted = await adopt(ctx, plan, ctx.a, session, collection, "new", MAIN_LABEL, initialize_kb=True)
         scored = await score_cloud_vault(ctx, plan, ctx.a, session, adopted, key_path, "new", plan.root / "cloud-new-vault")
-        groups = compare_arms(key, (scored["metrics"] or {}).get("per_item"), (local_metrics or {}).get("per_item"))
-        verdicts["new"] = target_verdict(groups)
-        out["targets"]["new"] = {"verdict": verdicts["new"], "journey": adopted["journey"].get("stopped_at") or "finished",
-                                 "import": adopted["import"], "vault_copy": scored["vault_copy"],
-                                 "imported_from_prefix": scored["imported_from_prefix"],
-                                 "cloud": arm_report(scored["metrics"]), "groups": groups}
+        cloud_metrics = scored["metrics"] or {}
+        groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
+        gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], converged=adopted["converged"]), *local_gaps]
+        verdicts["new"] = target_verdict(groups, (), gaps)
+        out["targets"]["new"] = target_report(adopted, scored, groups, verdicts["new"], gaps)
         # Target 2: tenant B's vault, which holds a different collection first.
         await provision_paid_tenant(ctx, ctx.b)
         session = await connect(ctx.b)
         earlier_adopted = await adopt(ctx, plan, ctx.b, session, earlier, "earlier", EARLIER_LABEL, initialize_kb=True)
         before_vault = plan.root / "cloud-earlier-vault"
         await copy_vault(ctx, ctx.b, before_vault)
-        before = kb_page_hashes(before_vault)
+        before = vault_snapshot(before_vault)
+        earlier_values = [score.scan_vault(before_vault)["pages"][page]["front"]["imported_from"] for page in before.sourced]
+        earlier_notes = [item["path"] for item in earlier_key["items"] if item["kind"] == "note"]
+        earlier_landed = sum(imported_from_matches(earlier_values, earlier_notes).values())
+        baseline_gaps = []
+        if earlier_adopted["stopped_at"]:
+            baseline_gaps.append(f"earlier collection: the journey stopped at {earlier_adopted['stopped_at']}")
+        if earlier_adopted["converged"] is not True:
+            baseline_gaps.append("earlier collection: the media queue had not converged before the snapshot")
+        if not earlier_landed:
+            baseline_gaps.append("earlier collection: none of its key notes landed, so no page is protected")
         session.calls.clear()
         adopted = await adopt(ctx, plan, ctx.b, session, collection, "existing", MAIN_LABEL, initialize_kb=False)
         scored = await score_cloud_vault(ctx, plan, ctx.b, session, adopted, key_path, "existing", plan.root / "cloud-existing-vault")
-        after = kb_page_hashes(plan.root / "cloud-existing-vault")
-        page_problems = check_existing_pages(before, after) if before else None
-        groups = compare_arms(key, (scored["metrics"] or {}).get("per_item"), (local_metrics or {}).get("per_item"))
-        verdicts["existing"] = target_verdict(groups, page_problems)
+        after = vault_snapshot(plan.root / "cloud-existing-vault")
+        page_problems = check_existing_pages(before, after) if before.sourced else None
+        cloud_metrics = scored["metrics"] or {}
+        groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
+        gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], converged=adopted["converged"]),
+                *local_gaps, *baseline_gaps]
+        verdicts["existing"] = target_verdict(groups, page_problems, gaps)
         out["targets"]["existing"] = {
-            "verdict": verdicts["existing"], "journey": adopted["journey"].get("stopped_at") or "finished",
-            "import": adopted["import"], "vault_copy": scored["vault_copy"],
-            "imported_from_prefix": scored["imported_from_prefix"], "cloud": arm_report(scored["metrics"]), "groups": groups,
-            "earlier_journey": earlier_adopted["journey"].get("stopped_at") or "finished",
-            "existing_pages": {"before": len(before) if before else None, "after": len(after),
+            **target_report(adopted, scored, groups, verdicts["existing"], gaps),
+            "earlier_journey": earlier_adopted["stopped_at"] or "finished",
+            "existing_pages": {"sourced_before": len(before.sourced), "files_before": len(before.files),
+                               "files_after": len(after.files), "earlier_key_notes_landed": f"{earlier_landed}/{len(earlier_notes)}",
                                "problems": page_problems if page_problems is None else page_problems[:LISTED_ITEMS],
                                "problem_count": None if page_problems is None else len(page_problems)},
         }

@@ -149,9 +149,9 @@ To run it from a workstation with Docker, sudo and enough free disk, use the `--
 `--raw-import` proves that messy input survives a Cloud import as well as a local one, and runs only on demand as the `raw-import` mode of the `Cloud rehearsal` workflow.
 The run generates a collection and its answer key with `benchmarks/collection_ingest/generate.py` (`--profile standard --seed 7`), so new raw-data cases in the generator need no change here.
 It sends the collection through `exomem cloud import` and the cell's MCP tools to a new vault, and to a second vault that first adopted another collection (`--profile small --seed 8`).
-It copies each vault out with one read-only `tar` of the pod's volume, which costs less than the owner export, and scores the copy with `score.py`.
+It copies each vault out with one streamed read-only `tar` of the pod's volume, which costs less than the owner export, and scores the copy with `score.py`.
 It runs the same journey locally with `drive.py --profile personal`, then compares each key item between the two arms: a loss is an item that local kept and Cloud did not.
-The exit code is 0 only when there is no loss, no unknown read and no changed, missing or copied pre-existing page; run it with `--raw-import-python <interpreter with the server installed>`.
+The exit code is 0 only on a pass, which means no loss on the first pass, no unknown read or measurement gap, and no changed, missing or copied pre-existing source page; run it with `--raw-import-python <interpreter with fastmcp and the server installed>`.
 
 ## Owner export
 

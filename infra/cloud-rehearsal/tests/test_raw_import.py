@@ -1,4 +1,5 @@
-"""The raw-data import rehearsal's own decisions: per-item parity with local, and the pre-existing page check.
+"""The raw-data import rehearsal's own decisions: per-item parity with local, the gaps that stop a pass, and the
+pre-existing page check.
 
 Pure logic over small invented keys. The run itself needs a K3s cell and is exercised by the `raw-import` workflow.
 """
@@ -6,17 +7,20 @@ Pure logic over small invented keys. The run itself needs a K3s cell and is exer
 from __future__ import annotations
 
 from cloud_rehearsal import raw_import
-from cloud_rehearsal.raw_import import FAIL, INCOMPLETE, PASS
+from cloud_rehearsal.raw_import import FAIL, INCOMPLETE, PASS, Snapshot
 
 
-def _key(*note_paths):
-    return {"items": [{"kind": "note", "path": path, "lang": "en", "nfd_filename": False, "links": [], "embeds": []}
-                      for path in note_paths]}
+def _key(*note_paths, junk=(), links=()):
+    """Notes `note_paths`, each linking to the targets that `links` names as (source, target)."""
+    notes = [{"kind": "note", "path": path, "lang": "en", "nfd_filename": False, "embeds": [],
+              "links": [{"resolution": "resolvable", "target": target} for source, target in links if source == path]}
+             for path in note_paths]
+    return {"items": [*notes, *({"kind": "junk", "path": path} for path in junk)]}
 
 
-def _arm(**pages):
+def _arm(links=None, junk=None, **pages):
     """A scored arm's `per_item` block: key path -> number of pages it came out as."""
-    return {"pages_per_item": pages, "junk_pages": {}, "links_kept": {}, "embeds_kept": {}}
+    return {"pages_per_item": pages, "junk_pages": junk or {}, "links_kept": links or {}, "embeds_kept": {}}
 
 
 def _verdict(cloud, local):
@@ -61,23 +65,119 @@ def test_a_target_that_was_never_judged_keeps_the_run_from_passing():
     assert raw_import.worst([PASS, INCOMPLETE, FAIL]) == FAIL
 
 
+def test_losses_are_grouped_by_what_the_key_path_shows():
+    key = {"items": [{"kind": "note", "path": path, "lang": "en", "nfd_filename": False, "links": [], "embeds": []}
+                     for path in ("a.md", "docs/.hidden.md", "docs/b.txt")]}
+    groups = raw_import.compare_arms(key, _arm(**{"a.md": 1, "docs/.hidden.md": 0, "docs/b.txt": 0}),
+                                     _arm(**{"a.md": 1, "docs/.hidden.md": 1, "docs/b.txt": 1}))
+    assert {cause: row["count"] for cause, row in groups["notes"]["loss_causes"].items()} == {"hidden path": 1, "extension .txt": 1}
+
+
+# --- junk: kept means kept out ---------------------------------------------------------------
+
+
+def test_junk_that_cloud_let_in_and_local_refused_is_a_loss():
+    groups = raw_import.compare_arms(_key(junk=[".obsidian/app.json"]), _arm(junk={".obsidian/app.json": 1}),
+                                     _arm(junk={".obsidian/app.json": 0}))
+    assert groups["junk_kept_out"]["loss"]["listed"] == [".obsidian/app.json"]
+    assert raw_import.target_verdict(groups) == FAIL
+
+
+def test_junk_that_cloud_refused_and_local_let_in_is_a_cloud_extra_and_passes():
+    groups = raw_import.compare_arms(_key(junk=[".obsidian/app.json"]), _arm(junk={".obsidian/app.json": 0}),
+                                     _arm(junk={".obsidian/app.json": 1}))
+    assert groups["junk_kept_out"]["cloud_extra"]["count"] == 1
+    assert raw_import.target_verdict(groups) == PASS
+
+
+# --- links: one lost note is not many lost edges ---------------------------------------------
+
+
+def test_a_link_is_dropped_only_when_both_notes_landed_and_is_endpoint_missing_otherwise():
+    key = _key("a.md", "b.md", "c.md", links=[("a.md", "b.md"), ("a.md", "c.md")])
+    both = {"a.md -> b.md": True, "a.md -> c.md": True}
+    cloud = _arm(links={"a.md -> b.md": False, "a.md -> c.md": False}, **{"a.md": 1, "b.md": 1, "c.md": 0})
+    groups = raw_import.compare_arms(key, cloud, _arm(links=both, **{"a.md": 1, "b.md": 1, "c.md": 1}))
+    assert {cause: row["listed"] for cause, row in groups["links"]["loss_causes"].items()} == {
+        "edge dropped, both landed": ["a.md -> b.md"], "endpoint missing": ["a.md -> c.md"]}
+
+
+# --- gaps: a partial read never passes -------------------------------------------------------
+
+
+def _scored(**extra):
+    return {"measurement_gaps": {}, "per_item": _arm(**{"a.md": 1}), **extra}
+
+
+def _gaps(metrics, stopped_at=None, converged=True):
+    return raw_import.arm_gaps("local", metrics, _key("a.md"), stopped_at=stopped_at, converged=converged)
+
+
+def test_a_complete_arm_has_no_gaps():
+    assert _gaps(_scored()) == []
+
+
+def test_a_failed_scorer_read_is_a_gap():
+    assert _gaps(_scored(measurement_gaps={"read_memory": 3})) == ["local: read_memory read failed 3 times"]
+
+
+def test_a_stopped_journey_is_a_gap():
+    assert _gaps(_scored(), stopped_at="apply") == ["local: the journey stopped at apply"]
+
+
+def test_a_media_queue_that_had_not_converged_is_a_gap_and_so_is_no_reading():
+    assert _gaps(_scored(), converged=False) == ["local: the media queue had not converged"]
+    assert _gaps(_scored(), converged=None) == ["local: the media queue had no convergence reading"]
+
+
+def test_an_arm_that_landed_no_note_is_a_gap_so_two_empty_arms_do_not_pass():
+    empty = {"measurement_gaps": {}, "per_item": _arm(**{"a.md": 0})}
+    assert _gaps(empty) == ["local: no key note landed, so there is nothing to compare"]
+    groups = raw_import.compare_arms(_key("a.md"), empty["per_item"], empty["per_item"])
+    assert raw_import.target_verdict(groups, (), _gaps(empty)) == INCOMPLETE
+
+
+def test_a_gap_keeps_a_target_from_passing_but_a_loss_still_fails_it():
+    groups = raw_import.compare_arms(_key("a.md"), _arm(**{"a.md": 1}), _arm(**{"a.md": 1}))
+    assert raw_import.target_verdict(groups, (), ["local: the journey stopped at apply"]) == INCOMPLETE
+    lost = raw_import.compare_arms(_key("a.md"), _arm(**{"a.md": 0}), _arm(**{"a.md": 1}))
+    assert raw_import.target_verdict(lost, (), ["cloud: the journey stopped at apply"]) == FAIL
+
+
 # --- the vault that already held pages -------------------------------------------------------
 
-
-def test_untouched_pre_existing_pages_pass_even_with_new_pages_beside_them():
-    before = {"Knowledge Base/old.md": "h1"}
-    after = {**before, "Knowledge Base/Sources/new.md": "h2"}
-    assert raw_import.check_existing_pages(before, after) == []
+IDENTITY = ("earlier", "notes/a.md", "sha-a")
 
 
-def test_a_changed_missing_or_copied_pre_existing_page_each_gets_its_own_problem():
-    before = {"Knowledge Base/a.md": "h1", "Knowledge Base/b.md": "h2", "Knowledge Base/c.md": "h3"}
-    after = {"Knowledge Base/a.md": "changed", "Knowledge Base/c.md": "h3", "Knowledge Base/Sources/c copy.md": "h3"}
-    assert raw_import.check_existing_pages(before, after) == [
-        "changed: Knowledge Base/a.md",
-        "missing: Knowledge Base/b.md",
-        "duplicated: Knowledge Base/Sources/c copy.md repeats Knowledge Base/c.md",
-    ]
+def _before():
+    return Snapshot(files=frozenset({"Knowledge Base/index.md", "Knowledge Base/Sources/a.md", "Knowledge Base/Sources/a.pdf"}),
+                    sourced={"Knowledge Base/Sources/a.md": "h1"}, identities={"Knowledge Base/Sources/a.md": IDENTITY})
+
+
+def test_managed_pages_may_change_and_new_pages_may_appear_beside_untouched_sources():
+    after = Snapshot(files=_before().files | {"Knowledge Base/Sources/new.md"},
+                     sourced={"Knowledge Base/Sources/a.md": "h1", "Knowledge Base/Sources/new.md": "h2"},
+                     identities={"Knowledge Base/Sources/a.md": IDENTITY, "Knowledge Base/Sources/new.md": ("main", "x.md", "sha-x")})
+    assert raw_import.check_existing_pages(_before(), after) == []
+
+
+def test_a_changed_or_missing_source_page_is_a_problem():
+    changed = Snapshot(files=_before().files, sourced={"Knowledge Base/Sources/a.md": "other"}, identities=_before().identities)
+    assert raw_import.check_existing_pages(_before(), changed) == ["changed: Knowledge Base/Sources/a.md"]
+    gone = Snapshot(files=frozenset({"Knowledge Base/index.md", "Knowledge Base/Sources/a.pdf"}))
+    assert raw_import.check_existing_pages(_before(), gone) == ["missing: Knowledge Base/Sources/a.md"]
+
+
+def test_a_missing_non_markdown_file_is_a_problem():
+    after = Snapshot(files=_before().files - {"Knowledge Base/Sources/a.pdf"}, sourced=_before().sourced, identities=_before().identities)
+    assert raw_import.check_existing_pages(_before(), after) == ["missing: Knowledge Base/Sources/a.pdf"]
+
+
+def test_a_second_page_with_a_pre_existing_source_identity_is_a_duplicate():
+    after = Snapshot(files=_before().files | {"Knowledge Base/Sources/a copy.md"}, sourced=_before().sourced,
+                     identities={**_before().identities, "Knowledge Base/Sources/a copy.md": IDENTITY})
+    assert raw_import.check_existing_pages(_before(), after) == [
+        "duplicated: ['Knowledge Base/Sources/a copy.md', 'Knowledge Base/Sources/a.md']"]
 
 
 def test_a_failed_page_check_fails_and_an_unrun_one_is_incomplete():
@@ -90,7 +190,7 @@ def test_a_failed_page_check_fails_and_an_unrun_one_is_incomplete():
 
 
 def test_the_staged_folder_in_front_of_each_original_is_read_from_the_pages_even_for_decomposed_names():
-    nfd_name = "résumé.md"
+    nfd_name = "résumé.md"
     values = [f"_Imports/abc/notes/{nfd_name}", "_Imports/abc/ideas/x.md", "unrelated/other.md"]
     assert raw_import.imported_from_prefix(values, ["notes/résumé.md", "ideas/x.md"]) == "_Imports/abc"
     assert raw_import.imported_from_prefix(["other.md"], ["ideas/x.md"]) is None
