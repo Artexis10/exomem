@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import extraction_parts, find_results, preserve
+from . import extraction_parts, find_results, preserve, provenance
 from .embeddings import MAX_WORDS_PER_CHUNK
 from .vault import parse_frontmatter, read_guarded_text
 
@@ -81,17 +81,19 @@ def matched_passage(
     vault_root: Path,
     matched: str,
     *,
+    source: str,
     number: int,
     base: int,
     chunk: str | None,
     query_norm: str,
 ) -> dict[str, object] | None:
-    """`{"matched_part", "passage"}` for a hit on the page `matched`, part `number` of its Source.
+    """`{"matched_part", "passage"}` for a hit on the page `matched`, part `number` of `source`.
 
     `matched` is a part page, or the Source page for part 1; `base` is where its text starts in
     the whole text. `chunk` is the stored chunk that matched when the hit is semantic. Without
     one, the passage is `MAX_WORDS_PER_CHUNK` words around the first match of the query.
-    Returns None when the page cannot be read or holds no text.
+    The passage text withholds origin carriers as the hit excerpt does; its `offset` and
+    `length` count the stored text. Returns None when the page cannot be read or holds no text.
     """
     path = vault_root / matched
     try:
@@ -116,7 +118,8 @@ def matched_passage(
         first = max(0, anchor - MAX_WORDS_PER_CHUNK // 2)
         end_word = min(len(spans), first + MAX_WORDS_PER_CHUNK)
     start, end = _grow(text, spans[first][0], spans[end_word - 1][1])
+    shown = extraction_parts.without_spans(text, start, end, provenance.withheld_spans(text, owner_path=source))
     return {
         "matched_part": number,
-        "passage": {"text": text[start:end], "part": number, "offset": base + start, "length": end - start},
+        "passage": {"text": shown, "part": number, "offset": base + start, "length": end - start},
     }

@@ -7762,26 +7762,43 @@ def _source_of_part(vault_root: Path, path: str) -> str:
 def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -> dict:
     """Return one window of a long Source's extracted text instead of its whole body.
 
-    Only a page released in full is windowed: below that level the caller holds a projection
-    of the body, and the parts beyond it are not the caller's to read.
+    Only a page released in full is windowed, and only when the released body is the stored
+    one or that body without its origin carriers: positions count the stored text, and a
+    window never shows what the release withheld. The window is part of the page, not the
+    page, so it carries no `content_hash` and cannot guard a write of the whole body.
     """
     from . import extraction_parts
+    from .vault import content_hash, parse_frontmatter, read_guarded_text
 
-    frontmatter = result.get("frontmatter")
+    if offset is not None and type(offset) is not int:  # a bool is an int to Python, never an offset
+        raise ValueError("INVALID_OFFSET: offset must be a whole number of characters")
     body = result.get("body")
-    if not (
-        isinstance(frontmatter, dict)
-        and isinstance(body, str)
-        and "content_hash" in result
-        and frontmatter.get("type") == "source"
-    ):
+    if not (isinstance(body, str) and "content_hash" in result):
         return _refuse_unused_offset(result, offset)
-    first = _preserve_module().extracted_text(body)
+    path = str(result["path"])
+    page = Path(vault_root) / path
+    try:
+        raw, _guard = read_guarded_text(vault_root, page)
+    except (OSError, UnicodeError):
+        return _refuse_unused_offset(result, offset)
+    if content_hash(raw) != result["content_hash"]:
+        raise ValueError("SOURCE_CHANGED: the page changed during the read; read it again")
+    frontmatter, stored, _ = parse_frontmatter(raw)
+    first = _preserve_module().extracted_text(stored)
     if extraction_parts.count_of(frontmatter) == 1 and len(first) <= extraction_parts.WINDOW_CHARS:
         return _refuse_unused_offset(result, offset)
+    if body != stored and body != provenance_module.withheld_prose(stored, owner_path=path):
+        if offset:
+            raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
+        return result
     try:
         window = extraction_parts.read_window(
-            vault_root, Path(vault_root) / result["path"], frontmatter, first, offset or 0
+            vault_root,
+            page,
+            frontmatter,
+            first,
+            offset or 0,
+            withhold=lambda text: egress_module.carrier_spans_for_caller(vault_root, text, owner_path=path),
         )
     except ValueError as error:
         raise ValueError(f"INVALID_OFFSET: {error}") from error
@@ -7789,9 +7806,11 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
         raise ValueError(
             "PART_MISSING: part of the extracted text is missing; reconcile the vault to rebuild it"
         ) from error
+    whole_page_only = ("content_hash", "evidence_version")
     return {
-        **result,
+        **{key: value for key, value in result.items() if key not in whole_page_only},
         "body": window.text,
+        "body_truncated": True,
         "window": {
             "offset": window.offset,
             "next_offset": window.next_offset,

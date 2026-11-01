@@ -208,7 +208,7 @@ def test_process_handoff_projects_diarization_turns_and_carries_the_whole_extrac
     assert pending.payload["text"] == "x" * (600 * 1024)
 
 
-def test_an_extraction_over_the_job_store_limit_fails_visibly_and_keeps_the_original(
+def test_an_extraction_over_the_job_store_limit_keeps_its_start_with_a_visible_cut(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = _preserve_media_stub(vault, filename="too-long.mp3")
@@ -230,9 +230,10 @@ def test_an_extraction_over_the_job_store_limit_fails_visibly_and_keeps_the_orig
     media_worker.MediaWorker(vault, execution_mode="process")._process(claimed)
 
     [pending] = store.pending_results()
-    assert pending.kind == "failure"
-    assert "2000 bytes, over the 1000-byte limit" in str(pending.payload["error"])
-    assert (vault / result.path).exists()
+    text = str(pending.payload["text"])
+    assert pending.kind == "extraction"
+    assert text.startswith("y" * 500) and "truncated: kept the first 1,000 of 2,000 bytes" in text
+    assert len(text.encode("utf-8")) <= 1000
 
 
 def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(

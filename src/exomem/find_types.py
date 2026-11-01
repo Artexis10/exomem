@@ -153,8 +153,7 @@ class ParsedPage:
 
     @property
     def emitted_parent(self) -> str | None:
-        """The page a hit on this one is emitted as: a scene frame's video, or a part's Source."""
-        return self.parent_media + ".md" if self.parent_media else self.part_of
+        return emitted_parent(self.parent_media, self.part_of)
 
     @property
     def frame_ts(self) -> float | None:
@@ -241,6 +240,11 @@ class ParsedPage:
         return find_policy.dominant_script(self.title + " " + self.search_body)
 
 
+def emitted_parent(parent_media: str | None, part_of: str | None) -> str | None:
+    """The page a hit on a page is emitted as: a scene frame's video, or a part's Source."""
+    return parent_media + ".md" if parent_media else part_of
+
+
 @dataclass(frozen=True)
 class RankingPage:
     """Selection-free ranking inputs from one admitted page generation."""
@@ -263,7 +267,7 @@ class RankingPage:
 
     @property
     def emitted_parent(self) -> str | None:
-        return self.parent_media + ".md" if self.parent_media else self.part_of
+        return emitted_parent(self.parent_media, self.part_of)
 
     @classmethod
     def from_page(cls, page: ParsedPage) -> RankingPage:

@@ -378,6 +378,26 @@ def _result_binary_identity(
     return {"stat": list(identity[0]), "sha256": identity[1]}
 
 
+def _within_result_limit(text: str, name: str) -> str:
+    """`text`, or as much of its start as one result carries, then a line that says the rest is cut.
+
+    The original keeps the whole content; the cut is visible on the page and in the log.
+    """
+    limit = media_jobs.MAX_EXTRACTED_TEXT_BYTES
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    marker = (
+        f"\n\n[... truncated: kept the first {limit:,} of {len(raw):,} bytes of extracted text; "
+        "the whole content is in the original ...]"
+    )
+    kept = raw[: limit - len(marker.encode("utf-8"))].decode("utf-8", errors="ignore").rstrip()
+    log.warning(
+        "extracted text of %s is %d bytes, over the %d-byte limit of one result; kept its start", name, len(raw), limit
+    )
+    return kept + marker
+
+
 class MediaWorker:
     """Media supervisor with process-default and inline execution modes."""
 
@@ -824,24 +844,7 @@ class MediaWorker:
                 next_action=_FAILED_ACTION,
             )
             return self._publication_outcome(committed, FAILED, error)
-        text = result.text.strip() or "(no text detected)"
-        text_bytes = len(text.encode("utf-8"))
-        if text_bytes > media_jobs.MAX_EXTRACTED_TEXT_BYTES:
-            error = (
-                f"extracted text is {text_bytes} bytes, over the {media_jobs.MAX_EXTRACTED_TEXT_BYTES}-byte "
-                "limit for one extraction; the original is kept"
-            )
-            committed = self._commit_processing_failure(
-                job,
-                expected_sidecar=expected_sidecar,
-                expected_evidence_version=expected_evidence_version,
-                expected_binary=expected_binary,
-                state=FAILED,
-                error=error,
-                next_action=_FAILED_ACTION,
-                retryable=False,
-            )
-            return self._publication_outcome(committed, FAILED, error)
+        text = _within_result_limit(result.text.strip() or "(no text detected)", job.sidecar_path.name)
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
                 BLOCKED,
@@ -1320,7 +1323,7 @@ class MediaWorker:
         )
         date_iso = temporal.stamp(temporal.now())
         old_pieces = extraction_parts.split(
-            extraction_parts.whole_text(self._vault_root, job.sidecar_path, before)
+            extraction_parts.text_with_gaps(self._vault_root, job.sidecar_path, before)
         )
         old_plan = extraction_parts.plan(
             self._vault_root, page, old_pieces,
@@ -1329,7 +1332,7 @@ class MediaWorker:
         prior_page = prior_extraction.render(
             before,
             artifact_name=job.sidecar_path.name.removesuffix(".md"),
-            sidecar_link=extraction_parts.link_to(self._vault_root, job.sidecar_path),
+            sidecar_link=prior_extraction.link_to(self._vault_root, job.sidecar_path),
             ordinal=ordinal,
             date_iso=date_iso,
             text=old_pieces[0],
@@ -1339,7 +1342,7 @@ class MediaWorker:
             self._vault_root, job.sidecar_path, before, guard, text=text,
             prior_extractions=(
                 *prior_extraction.links_of(before),
-                extraction_parts.link_to(self._vault_root, page),
+                prior_extraction.link_to(self._vault_root, page),
             ),
             reset_speakers=True,
             **fields,

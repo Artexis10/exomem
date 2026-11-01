@@ -25,6 +25,11 @@ def extraction_digest(content: str) -> str:
     return hashlib.sha256(f"{engine}\n{preserve.extracted_text(content)}".encode()).hexdigest()
 
 
+def link_to(vault_root: Path, page: Path) -> str:
+    """The wikilink target of a page: its vault-relative path without the extension."""
+    return page.relative_to(vault_root).as_posix().removesuffix(".md")
+
+
 def links_of(sidecar_content: str) -> tuple[str, ...]:
     listed = parse_frontmatter(sidecar_content)[0].get("prior_extractions")
     if not isinstance(listed, list):

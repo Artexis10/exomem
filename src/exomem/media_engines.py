@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from . import cloud_cell, media_types
 
@@ -28,6 +30,11 @@ DOCUMENTS = "documents"
 OCR = "ocr"
 SPEECH = "speech"
 ENGINES = (DOCUMENTS, OCR, SPEECH)
+#: The engines that run a model. Their text takes minutes to produce again, so a repair
+#: never reruns them (`extraction_parts.sweep`).
+MODEL_ENGINES = frozenset({OCR, SPEECH})
+#: The engines one block of code may run (`only`); None runs every enabled engine.
+_ONLY: ContextVar[frozenset[str] | None] = ContextVar("media_engines_only", default=None)
 
 _DOCUMENT_KINDS = frozenset({"pdf", *media_types.DOC_EXTS.values()})
 SPEECH_KINDS = frozenset({"audio", "video"})
@@ -48,7 +55,23 @@ def engine_for(media_type: str | None) -> str | None:
     return None
 
 
+@contextmanager
+def only(engines: Iterable[str]) -> Iterator[None]:
+    """Run the block with no engine outside `engines`, whatever this deployment enables."""
+    token = _ONLY.set(frozenset(engines))
+    try:
+        yield
+    finally:
+        _ONLY.reset(token)
+
+
 def enabled_engines(env: Mapping[str, str] | None = None) -> frozenset[str]:
+    narrowed = _ONLY.get()
+    enabled = _deployed_engines(env)
+    return enabled if narrowed is None else enabled & narrowed
+
+
+def _deployed_engines(env: Mapping[str, str] | None) -> frozenset[str]:
     values = os.environ if env is None else env
     raw = values.get(ENGINES_ENV)
     if raw is None:

@@ -5507,6 +5507,12 @@ def _find_managed_browse(
     return hits
 
 
+def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
+    from . import extraction_parts
+
+    return extraction_parts.listed(vault_root / page.rel_path)
+
+
 def _part_match(
     vault_root: Path, page: ParsedPage, matched: ParsedPage, query_norm: str, *, chunk: str | None = None
 ) -> dict[str, object] | None:
@@ -5514,14 +5520,20 @@ def _part_match(
 
     `matched` is the page whose text matched: a part page, or `page` itself for part 1.
     """
-    from . import extraction_parts, find_parts
+    from . import extraction_parts, find_parts, preserve
 
-    offsets = extraction_parts.offsets_of(page.frontmatter)
-    number = matched.frontmatter.get("part") if matched.part_of else 1
-    if offsets is None or not isinstance(number, int) or not 1 <= number <= len(offsets):
+    number = extraction_parts.part_number(Path(matched.rel_path)) if matched.part_of else 1
+    if number is None or not 1 <= number <= extraction_parts.count_of(page.frontmatter):
+        return None
+    try:
+        base = extraction_parts.part_start(
+            vault_root, vault_root / page.rel_path, preserve.extracted_text(page.body), number
+        )
+    except (OSError, UnicodeError):
         return None
     return find_parts.matched_passage(
-        vault_root, matched.rel_path, number=number, base=offsets[number - 1], chunk=chunk, query_norm=query_norm
+        vault_root, matched.rel_path, source=page.rel_path, number=number, base=base, chunk=chunk,
+        query_norm=query_norm,
     )
 
 
@@ -5618,7 +5630,7 @@ def _find_managed_keyword(
         if page is None:
             continue
         source = resolve(group.source_path, group.hashes[group.source_path])
-        if source is None:
+        if source is None or (source.part_of and not _listed_part(vault_root, source)):
             continue
         excerpt = _make_excerpt(source, query_norm)
         if excerpt is None or not _passes_filters(
@@ -5794,8 +5806,8 @@ def _find_keyword(
             parent_page = _resolve_page(vault_root, page.emitted_parent, pending)
             if page_memo is not None:
                 page_memo[page.emitted_parent] = parent_page
-            if parent_page is None and page.part_of:
-                # A part is its Source's text, never a memory of its own.
+            if page.part_of and (parent_page is None or not _listed_part(vault_root, page)):
+                # A part is its Source's text, never a memory of its own; a leftover is no text of it.
                 continue
             if parent_page is not None:
                 existing = by_path.get(parent_page.rel_path)

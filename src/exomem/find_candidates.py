@@ -234,7 +234,7 @@ def collapse_frame_children(
         return ranking
     out: list[str] = []
     seen: set[str] = set()
-    from . import recall_policy
+    from . import extraction_parts, recall_policy
 
     def admitted(rel: str) -> bool:
         return (
@@ -254,6 +254,8 @@ def collapse_frame_children(
             else page_of(rel)
         )
         parent_sidecar = page.emitted_parent if page is not None else None
+        if page is not None and page.part_of is not None and not extraction_parts.listed(vault_root / rel):
+            continue  # a part left over from a longer extraction is no text of its Source
         if parent_sidecar:
             if (
                 admitted(parent_sidecar)

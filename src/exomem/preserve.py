@@ -1670,12 +1670,7 @@ def _part_fields(parts: Layout | None) -> tuple[tuple[str, str], ...]:
     """The Source page's front matter for the part pages that hold the rest of its extraction."""
     if parts is None:
         return ()
-    return (
-        ("extraction_parts", str(len(parts.offsets))),
-        ("extraction_chars", str(parts.chars)),
-        ("part_offsets", "[" + ", ".join(str(offset) for offset in parts.offsets) + "]"),
-        ("next_part", yaml_scalar(parts.next_part)),
-    )
+    return (("extraction_parts", str(parts.count)), ("next_part", yaml_scalar(parts.next_part)))
 
 
 def _part_field_lines(parts: Layout | None) -> list[str]:
