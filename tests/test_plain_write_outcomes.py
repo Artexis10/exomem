@@ -266,3 +266,17 @@ def test_a_replayed_write_says_it_was_already_saved() -> None:
     assert next(iter(projected)) == "user_summary"
     assert projected["user_summary"] == "Already saved -> Knowledge Base/Records/log.md"
     assert mutation_terminal.project_terminal(terminal) == projected
+
+
+def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> None:
+    """The skill and the bootstrap cannot import the rule, so both copies are compared here."""
+    rule = mutation_terminal.NARRATION_RULE
+    loop = commands.op_bootstrap(vault, profile="compact")["write"]["canonical_loop"]
+    skill_text = (
+        Path(__file__).parents[1] / "src/exomem/_scaffold/_Schema/SKILL.md"
+    ).read_text(encoding="utf-8")
+    skill = " ".join(skill_text.split())
+
+    assert rule in loop
+    assert rule in skill
+    assert "Working on Exomem does not make an unrelated conversation diagnostic." in skill

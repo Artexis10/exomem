@@ -23,7 +23,7 @@ Committed and replayed product mutations SHALL return a compact default projecti
 
 ### Requirement: One Narration Rule Reaches The Agent Through Two Carriers
 
-The system SHALL define the rule for narrating a write to the user once, as `mutation_terminal.NARRATION_RULE`: tell the user `user_summary`; mention codes, ids, hashes, retries and sync state only when the user asks or when debugging this write; state a blocker plainly. The compact bootstrap `write.canonical_loop` SHALL carry that sentence as its final step, and the shipped skill scaffold SHALL carry the same sentence, because a client with the skill installed receives the session profile, which omits the `write` block. The scaffold SHALL also say that working on Exomem does not make an unrelated conversation diagnostic.
+The system SHALL define the rule for narrating a write to the user once, as `mutation_terminal.NARRATION_RULE`: tell the user `user_summary`; mention codes, ids, hashes, retries and sync state only if asked; state a blocker plainly. The compact bootstrap `write.canonical_loop` SHALL carry that sentence as its final step, and the shipped skill scaffold SHALL carry the same sentence, because a client with the skill installed receives the session profile, which omits the `write` block. The scaffold SHALL also say that working on Exomem does not make an unrelated conversation diagnostic, and every standalone workflow skill SHALL embed the same operating rules.
 
 #### Scenario: Both carriers hold the rule
 - **WHEN** the compact bootstrap and the shipped skill scaffold are read

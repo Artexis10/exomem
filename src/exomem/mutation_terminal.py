@@ -142,6 +142,14 @@ _ADVISORY_FAILURE = (
 #: multi-batch mutation shares this budget rather than multiplying it.
 _MAX_DERIVED_DIAGNOSTICS = 9
 
+#: How an agent tells the user about a write. One sentence, carried by the bootstrap
+#: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
+#: keeps both copies equal to this one.
+NARRATION_RULE = (
+    "Tell the user the user_summary. Give codes, ids, hashes, retries and sync state "
+    "only if asked. State a blocker plainly."
+)
+
 #: Keys a client may branch on. Everything else in a response is advisory.
 _ENVELOPE_KEYS = (
     "ok",

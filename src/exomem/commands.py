@@ -107,6 +107,7 @@ from . import memory_refs as memory_refs_module
 from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
+from . import mutation_terminal as mutation_terminal_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
@@ -1815,13 +1816,13 @@ def op_bootstrap(
                     "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
-                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')} as appropriate",
+                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')}",
                 (
                     "inspect write warnings; response_detail='full' reveals write_feedback; "
                     "create_note(suggestions=true) also reveals suggestions"
                 ),
                 "apply any accepted links through edit_note",
-                "report the written path",
+                mutation_terminal_module.NARRATION_RULE,
             ],
             "route_by_intent": {
                 "raw_material": "capture_source",
