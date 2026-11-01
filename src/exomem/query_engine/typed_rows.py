@@ -80,24 +80,32 @@ def indexed_relation(admitted, *, hinted=True):
 _SEEKING_OPS = frozenset({"eq", "gt", "gte", "lt", "lte", "between"})
 
 
-def _index_interval(query, projection, schema, as_of):
-    """The relation, predicate and parameters of the one index interval that bounds a copy's reads.
+def _index_interval(query, projection, schema, as_of, types):
+    """The relation and the B-tree seeks of the one index interval that bounds a copy's reads, or None.
 
-    Only conjunct leaves on an index's leading field narrow its scan, so only they are counted;
-    the copy applies the request's whole predicate inside that interval.
+    Only conjunct leaves on an index's leading field narrow its scan. Compiled in that index's own
+    order, they become the scalar-prefix seeks that page reads already use, so counting the seeks
+    counts exactly the index entries the copy reads; the copy applies the whole predicate inside them.
     """
     leaves = typed_sql._leaves(query.where) or ()
     best = None
     for name, spec in zip(projection.index_names, projection.indexes, strict=True):
         seeking = tuple(leaf for leaf in leaves if leaf.op in _SEEKING_OPS and leaf.field.path == spec.keys[0].field)
         if seeking and (best is None or len(spec.keys) < best[0]):
-            best = (len(spec.keys), name, seeking)
+            best = (len(spec.keys), name, spec, seeking)
     if best is None:
         return None
-    _, name, seeking = best
+    _, name, spec, seeking = best
+    if any(key.field not in types for key in spec.keys):
+        return None
+    keys = tuple(ir.SortKey(ir.Field(query.source, key.field, types[key.field]), key.direction) for key in spec.keys)
+    keys += (ir.SortKey(ir.Field(query.source, "item_key", "string")),)
     where = seeking[0] if len(seeking) == 1 else ir.Filter("all", children=seeking)
-    interval = typed_sql.compile_rows(replace(query, where=where), projection, as_of=as_of)
-    return projection.read_relation(schema, index=name) + " p", interval.where_sql, interval.params
+    interval = typed_sql.compile_rows(replace(query, where=where, order_by=replace(query.order_by, keys=keys)),
+                                      projection, as_of=as_of)
+    if interval.seeks is None:
+        return None
+    return projection.read_relation(schema, index=name) + " p", interval.seeks
 
 
 def _filter_fields(node) -> set[str]:
@@ -120,9 +128,13 @@ def _full_scan(query, projection, schema) -> str:
     return projection.read_relation(schema, not_indexed=True) + " p"
 
 
-def _populate_native(session, manifest, projection, private, table, scanned, where, params, layout, compiled, *,
+def _populate_native(session, manifest, projection, private, table, scanned, intervals, layout, compiled, *,
                      operands=False):
-    """Stream only admitted query dependencies into the request's scalar TEMP relation."""
+    """Stream only admitted query dependencies into the request's scalar TEMP relation.
+
+    ``intervals`` are disjoint ``(predicate, parameters)`` pairs over ``scanned``; together they read
+    every row the copy holds.
+    """
     fields = {scalar.field for scalar in projection.scalars
               if scalar.field in manifest.schema.fields and scalar.field in compiled.dependency_paths}
     columns = ("row_id", "item_key", "row_version", *(f"k{ordinal}_{part}" for ordinal in range(len(private.scalars))
@@ -138,8 +150,9 @@ def _populate_native(session, manifest, projection, private, table, scanned, whe
             else:
                 selected += ["?"] * 4
                 constants += native_operands.ranked_operand(MISSING, scalar.kind)
-        session.connection.execute(f"INSERT INTO {table}({','.join(columns)}) SELECT {','.join(selected)} "
-                                   f"FROM {scanned} WHERE {where}", (*constants, *params))
+        for where, params in intervals:
+            session.connection.execute(f"INSERT INTO {table}({','.join(columns)}) SELECT {','.join(selected)} "
+                                       f"FROM {scanned} WHERE {where}", (*constants, *params))
         return
     sql = f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})"
 
@@ -151,8 +164,10 @@ def _populate_native(session, manifest, projection, private, table, scanned, whe
             encoded = private.admitted_parameters(row_id, logical, version, values)
             yield tuple(encoded[name] for name in columns)
 
-    with closing(session.connection.execute(f"SELECT p.row_id,p.item_key,p.row_version FROM {scanned} WHERE {where}", params)) as rows:
-        session.connection.executemany(sql, parameters(rows))
+    for where, params in intervals:
+        with closing(session.connection.execute(f"SELECT p.row_id,p.item_key,p.row_version FROM {scanned} "
+                                                f"WHERE {where}", params)) as rows:
+            session.connection.executemany(sql, parameters(rows))
 
 
 def declaration(manifest, basis, *, projected=frozenset(), item_key_withheld=False) -> dict:
@@ -259,9 +274,13 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
         if uniform and materialize and isinstance(projection, NativeProjectionPlan) and not compiled.residual:
             # SQL fills a uniform copy from the READY relation's operand columns. Only a predicate proven
             # to seek an index interval narrows what the copy reads, and so what it is charged.
-            bound = _index_interval(query, projection, source.schema, as_of)
-            relation = bound[0] if bound else _full_scan(query, projection, source.schema)
-            copy = (relation, compiled.where_sql, compiled.params)
+            types = {name: spec.type for name, spec in manifest.schema.fields.items()}
+            bound = _index_interval(query, projection, source.schema, as_of, types)
+            if bound is None:
+                copy = (_full_scan(query, projection, source.schema), ((compiled.where_sql, compiled.params),))
+            else:
+                copy = (bound[0], tuple((f"({seek.where_sql}) AND {compiled.where_sql}",
+                                         (*seek.params, *compiled.params)) for seek in bound[1]))
         count = None
         if not uniform:
             conn.execute(f"CREATE TEMP TABLE {ids}(row_id INTEGER PRIMARY KEY)")
@@ -275,9 +294,13 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                     conn.execute(f"INSERT INTO temp.{ids} VALUES(?)", (subject.row_id,))
                     session.check_temp()
         elif bound is not None:
-            relation, where, params = bound
-            count = conn.execute(f"SELECT count(*) FROM (SELECT 1 FROM {relation} WHERE {where} LIMIT ?)",
-                                 (*params, session.limits.max_row_visits + 1)).fetchone()[0]
+            relation, seeks = bound
+            count = 0
+            for seek in seeks:
+                count += conn.execute(f"SELECT count(*) FROM (SELECT 1 FROM {relation} WHERE {seek.where_sql} LIMIT ?)",
+                                      (*seek.params, session.limits.max_row_visits + 1 - count)).fetchone()[0]
+                if count > session.limits.max_row_visits:
+                    break
         elif not compiled.page_bound:
             count = conn.execute(
                 f"SELECT count(*) FROM (SELECT 1 FROM {source.items} WHERE collection_id=? LIMIT ?)",
@@ -310,19 +333,18 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                 order = compiled.order_sql.replace("p.", "")
                 conn.execute(f"CREATE INDEX temp.{index} ON {private.table_name}({order})")
             if copy is not None:
-                scanned, where, params = copy
+                scanned, intervals = copy
             elif uniform:
-                scanned = f"{stored} p NOT INDEXED"
-                where, params = "1", ()
+                scanned, intervals = f"{stored} p NOT INDEXED", (("1", ()),)
             else:
-                scanned = f"temp.{ids} a CROSS JOIN {stored} p NOT INDEXED"
-                where, params = "p.row_id=a.row_id", ()
+                scanned, intervals = f"temp.{ids} a CROSS JOIN {stored} p NOT INDEXED", (("p.row_id=a.row_id", ()),)
             # Projection ordinals are fixed by the validated internal layout; withheld keys never enter TEMP.
             if isinstance(projection, NativeProjectionPlan):
-                _populate_native(session, manifest, projection, private, table, scanned, where, params,
+                _populate_native(session, manifest, projection, private, table, scanned, intervals,
                                  source.layout or session.typed_layout(manifest.collection_id), compiled,
                                  operands=copy is not None)
             else:
+                ((where, params),) = intervals
                 keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
                                 else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
                 conn.execute(f"INSERT INTO {table}(row_id,item_key,row_version,keys_json) "
