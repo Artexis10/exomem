@@ -1,0 +1,159 @@
+## ADDED Requirements
+
+### Requirement: A cell accepts a request only with a valid gateway proof
+
+A Cloud cell SHALL accept a request on its service port only when the request carries a valid gateway proof for that request's purpose and for the cell's own cell ID. The cell SHALL verify the proof against the pinned gateway verifying key.
+
+No component SHALL hold a key that derives a static credential that a cell accepts for a request. The cell's health-only port SHALL stay unauthenticated, and it SHALL serve only the readiness answer.
+
+#### Scenario: A request with a bearer and no proof
+
+- **WHEN** a request reaches a cell with a valid legacy bearer but no gateway proof
+- **THEN** the cell refuses it
+
+#### Scenario: A proof for another cell
+
+- **WHEN** a request carries a proof that the gateway signed for a different cell ID
+- **THEN** the cell refuses it
+
+#### Scenario: The controller's keys are searched for a request credential
+
+- **WHEN** every key that the controller holds is listed
+- **THEN** none of them signs a proof or derives a credential that any cell accepts
+
+### Requirement: The admission policy pins every trust anchor that a cell reads
+
+The platform SHALL render each trust anchor into the admission policy as a literal value. The trust anchors are:
+- the gateway verifying key;
+- the grant verifying key;
+- the object-store endpoint and bucket;
+- the escrow recipient.
+
+The admission policy SHALL accept a cell StatefulSet or Job only when each anchor that the workload reads equals the pinned current or next value. It SHALL also require that the cell ID a workload reads equals the cell ID in its namespace name. The controller SHALL NOT be able to change the pinned values.
+
+The platform SHALL pin a minimum cell release, and admission SHALL refuse a cell image below it.
+
+#### Scenario: The controller swaps a verifying key
+
+- **WHEN** the controller's identity writes a cell StatefulSet whose gateway verifying key differs from the pinned value
+- **THEN** admission refuses the write
+
+#### Scenario: A key rotates
+
+- **WHEN** a chart release pins a next verifying key beside the current one
+- **THEN** admission accepts workloads with either key, and a later release that drops the old key refuses it
+
+### Requirement: Cell workloads run a closed pod template
+
+The admission policy SHALL accept a cell StatefulSet or Job only when its whole pod template has an allowlisted shape. Every container and init container SHALL meet all of these:
+- it runs the fixed process preamble, followed by `exomem` and one subcommand from the closed set;
+- it has no lifecycle hooks;
+- its probes are `httpGet` on the cell's own fixed ports and paths;
+- its volume mounts are exactly the known pairs for its subcommand, with no `subPath`;
+- `workingDir` is unset;
+- it has no `envFrom`;
+- every environment name is on the allowlist for its subcommand.
+
+The pod SHALL have no ephemeral containers, no `dnsConfig` and no `hostAliases`, and its `dnsPolicy` SHALL be `ClusterFirst`. The `cell-credentials` Secret SHALL hold only allowlisted data keys.
+
+No cell workload SHALL run a shell command string that the controller assembles.
+
+#### Scenario: The controller runs a shell in a cell Job
+
+- **WHEN** the controller's identity writes a Job in a cell namespace whose command is `sh -c` with its own string
+- **THEN** admission refuses the write
+
+#### Scenario: The controller adds an environment variable
+
+- **WHEN** the controller's identity writes a cell Job that sets an environment name outside the closed set, such as one that changes the interpreter's module path
+- **THEN** admission refuses the write
+
+#### Scenario: The controller adds a lifecycle hook or an exec probe
+
+- **WHEN** the controller's identity writes a cell StatefulSet whose container has a `postStart` hook or an exec probe
+- **THEN** admission refuses the write
+
+#### Scenario: The controller plants a certificate authority
+
+- **WHEN** the controller's identity writes a cell Job that sets a CA bundle variable, mounts a CA file, or sets `dnsConfig`
+- **THEN** admission refuses the write
+
+#### Scenario: A backup runs
+
+- **WHEN** a cell's scheduled backup runs
+- **THEN** its Job runs `exomem cell-backup` with no destination argument, and admission accepts it
+
+### Requirement: Data moves only to destinations that a signed grant names
+
+A cell SHALL run an export, import or restore only when it holds a grant that Substrate signed for that cell, that operation and that operation ID, and that has not expired. The cell SHALL verify the grant against the pinned grant verifying key.
+
+Before the cell moves data, it SHALL parse each URL that it uses and check three things:
+- the host equals the pinned object-store endpoint;
+- the path is the pinned bucket, then the grant's object key;
+- the object key sits under the cell's own prefix.
+
+A backup SHALL go only to the repository that the cell derives from its own cell ID and the pinned endpoint and bucket.
+
+A refused operation SHALL log a cataloged, content-free event that names the cell, the operation and the reason.
+
+#### Scenario: An export with no grant
+
+- **WHEN** the controller starts an export Job for a cell with no grant, or with a grant for another export
+- **THEN** the cell refuses the export and uploads nothing
+
+#### Scenario: An export to a foreign host
+
+- **WHEN** an export Job carries a valid grant and a presigned URL whose host is not the pinned endpoint
+- **THEN** the cell refuses the export and uploads nothing
+
+#### Scenario: A restore with no grant
+
+- **WHEN** the controller starts a restore Job without a restore grant for that snapshot
+- **THEN** the cell refuses the restore and leaves its volume unchanged
+
+### Requirement: Exports and imports are encrypted to recipients the controller cannot replace
+
+A cell SHALL encrypt an owner export, before upload, to the recipient that the signed export grant names. The tenant's client SHALL generate that recipient.
+
+A cell SHALL decrypt an import only when the signed import grant names the cell's own import recipient. Substrate SHALL obtain that recipient from the cell through the gateway, on a path that the controller cannot reach.
+
+#### Scenario: The controller reads a completed export
+
+- **WHEN** an identity holding everything the controller holds downloads a completed owner export
+- **THEN** it cannot decrypt the archive
+
+#### Scenario: The controller substitutes an import recipient
+
+- **WHEN** the controller writes its own recipient into an import request row
+- **THEN** the signed grant still names the cell's recipient, and the cell refuses an upload that was encrypted to any other recipient
+
+### Requirement: The controller cannot decrypt a cell's backups
+
+Each cell SHALL generate its own backup repository password and keep it on its encrypted volume, outside every backup and export root. It SHALL write an escrow copy, encrypted to the pinned escrow recipient, under its own object-store prefix.
+
+No platform service SHALL hold the password or a key that decrypts it. A restore after the loss of the cell's volume SHALL need the operator's presence-gated escrow identity.
+
+#### Scenario: The controller reads a backup
+
+- **WHEN** an identity holding everything the controller holds downloads a cell's backup repository
+- **THEN** it cannot decrypt any snapshot
+
+#### Scenario: A volume is lost
+
+- **WHEN** a cell's volume is lost and the operator restores the cell from backup
+- **THEN** the restore succeeds only after the operator opens the escrow copy with their presence-gated identity
+
+### Requirement: Attack signals alert through a path that excludes the controller
+
+The platform SHALL raise an alert through the platform alert receiver for each of these signals:
+- an admission denial for the controller's identity;
+- a grant or destination refusal that a cell logged;
+- a Secret read by an identity outside the expected set;
+- a denied write of an unknown workload kind.
+
+The alert path SHALL NOT pass through the controller. Each alert SHALL carry only an identity, a cell ID and a reason token. The evaluator SHALL coalesce signals by cell ID and reason, so that a flood of one class cannot bury another class.
+
+#### Scenario: The controller is denied
+
+- **WHEN** admission denies a write by the controller's identity
+- **THEN** the operator receives an alert even though the controller sends nothing
