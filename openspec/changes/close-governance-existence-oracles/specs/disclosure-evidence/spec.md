@@ -24,7 +24,7 @@ If append reports an error, the boundary SHALL fail closed with a content-free
 retryable service error and SHALL NOT return the unreceipted payload. Read-path
 events need not fsync and SHALL make no whole-system power-loss durability claim.
 
-A governed boundary that collects no outcome SHALL still emit one receipt with an empty outcome list when the caller is restricted or the compiled policy is non-empty, so that a receipt-store failure refuses it exactly as it refuses a boundary that touched an item. The owner on a vault with an empty policy SHALL keep the receipt-free fast path.
+A governed boundary that collects no outcome SHALL still emit one receipt with an empty outcome list when the caller is restricted, so that a receipt-store failure refuses it exactly as it refuses a boundary that touched an item. A caller that is not restricted SHALL keep the receipt-free path for a boundary that collects no outcome, and that decision SHALL NOT add a policy load to the boundary.
 
 #### Scenario: MCP's second filter pass does not duplicate evidence
 
@@ -72,10 +72,11 @@ A governed boundary that collects no outcome SHALL still emit one receipt with a
 - **THEN** the boundary emits one disclosure receipt with an empty outcome list
 - **AND** when the receipt store is unavailable, the call refuses with the same retryable error as a call that touched an item
 
-#### Scenario: The ungoverned owner fast path stays receipt-free
+#### Scenario: An unrestricted owner read that touches nothing stays receipt-free
 
-- **WHEN** the owner reads a missing path on a vault with an empty policy
+- **WHEN** the owner, with no connector ceiling, reads a missing path or asks `coordination_status`, on a governed or an ungoverned vault
 - **THEN** no receipt is appended
+- **AND** a receipt-store failure does not refuse the call
 
 ### Requirement: Chain verification via audit
 
