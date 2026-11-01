@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import stat
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import httpx2
 from fastmcp import Client
 
 from . import adoption_run, import_selection, import_stage, media_capacity
@@ -22,13 +24,16 @@ from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
 from .cloud_import_client import (
+    _STOP_ON_CLOUD,
     PREFLIGHT,
+    REGISTER,
     CloudImportClientConfig,
     CloudImportError,
     Window,
     _coded,
     _Where,
     import_source,
+    safe_code,
 )
 from .cloud_import_job import _private_json
 
@@ -115,13 +120,24 @@ class Reading:
     keep_source: dict | None
     windows: list[dict] = field(default_factory=list)
     next_after: str | None = None
+    # Why the cell cannot list its window records, or None. An unknown listing is not an empty one.
+    windows_unknown: str | None = None
+    # The classification the cell reports; None when it reports none, and the sender's own copy of the rule serves.
+    largest_offloadable: int | None = None
+    inline_text_limit: int | None = None
 
     @classmethod
     def of(cls, reply: dict) -> Reading:
         section = reply.get("window_budget")
-        windows = reply.get("import_windows") if isinstance(reply.get("import_windows"), dict) else {}
+        # `report()` leaves `import_windows` out when the cell holds no window record: that is an empty listing.
+        # Only a listing that says it is unknown, or that has no `windows` list, proves nothing.
+        listing = reply.get("import_windows", {"windows": []})
+        windows = listing if isinstance(listing, dict) else {}
+        listing_why = None
+        if "windows" not in windows:
+            listing_why = windows.get("unknown") or "the cell did not list its window records"
         common = {"keep_source": windows.get("keep_source"), "windows": windows.get("windows") or [],
-                  "next_after": windows.get("next_after")}
+                  "next_after": windows.get("next_after"), "windows_unknown": str(listing_why) if listing_why else None}
         unknown = Figure(None, "the cell reports no window budget")
         if not isinstance(section, dict):
             return cls(True, unknown, unknown, unknown, unknown, None, unknown.why, unknown, unknown, **common)
@@ -139,9 +155,12 @@ class Reading:
         used = (section.get("volume") or {}).get("used_bytes")
         allowance = section.get("media_allowance") or {}
         remaining = {"bytes": allowance["remaining_bytes"]} if "remaining_bytes" in allowance else allowance
+        reported = {name: classification.get(key) for name, key in
+                    (("largest_offloadable", "largest_offloadable_file"), ("inline_text_limit", "inline_text_limit"))}
+        reported = {name: value for name, value in reported.items() if type(value) is int}
         return cls(False, Figure.of(section["window_budget"]), Figure.of(section.get("reachable_budget")),
                    Figure.of(section.get("job_pinned")), Figure.of(section.get("effective_file_limit")),
-                   bounds, bounds_why, Figure.of(remaining), Figure.of({"bytes": used}), **common)
+                   bounds, bounds_why, Figure.of(remaining), Figure.of({"bytes": used}), **common, **reported)
 
     def unknown_reasons(self) -> list[str]:
         figures = (self.budget, self.reachable, self.pinned)
@@ -162,6 +181,22 @@ class Member:
         return 2 * self.size if self.klass == TEXT else self.size
 
 
+# A window's import identity. Cloud's create replays a known import ID whatever the row's state, refuses a known ID with
+# another declaration (IMPORT_CONFLICT), and refuses a new row while another import holds the cell (IMPORT_CONFLICT,
+# from the unique index of open imports in Substrate migration 0061). So:
+# (a) A window keeps its import ID while Cloud has no row for it, while its row is open or done, after the client gives
+#     up its checkpoint, after any failure that Cloud did not end, and after a member change: the create decides, as
+#     Cloud inserts the new declaration under an ID that it never saw.
+# (b) A window gets a new import ID only when Cloud reports that the window's own row ended (rule c): in the wait, or
+#     by a read of the row after IMPORT_CONFLICT at register. The old ID moves to `attempts`, and a receipt for any of
+#     the IDs lands the window. After a renewal at register, the send is retried once, never more.
+# (c) An attempt is over when its row is `failed`, `expired` or `discarded` and no longer holds the cell. `done` has
+#     landed. A row whose upload never completed (`requested`) still holds the cell until Cloud ends it.
+# (d) IMPORT_CONFLICT at register while Cloud has no row for the window's ID means that another import holds the cell:
+#     the run stops, and resumes under the same ID once that import ends. IMPORT_CONFLICT with the window's own row
+#     open or done means its earlier attempt with another member set holds the cell: the run stops, and resumes.
+
+
 @dataclass
 class SentWindow:
     paths: list[str]
@@ -169,6 +204,17 @@ class SentWindow:
     state: str = "open"  # open: created or being sent; landed: the cell finished it; settled: the resend cleared its old records
     import_id: str | None = None
     cost: int = 0
+    # The import IDs of earlier attempts that ended terminally or declared another member set. A receipt for one lands the window.
+    attempts: list[str] = field(default_factory=list)
+
+    def ids(self) -> list[str]:
+        return [*self.attempts, *([self.import_id] if self.import_id else [])]
+
+    def renew(self) -> None:
+        """Give the window a new import ID: Cloud replays a known ID whatever its state, and refuses a changed declaration."""
+        if self.import_id:
+            self.attempts.append(self.import_id)
+        self.import_id = str(uuid.uuid4())
 
 
 @dataclass
@@ -182,6 +228,13 @@ class Series:
     options: dict = field(default_factory=dict)
     # Resend only: each member's path -> the import ID of the old window whose residual record lists it.
     clears: dict[str, str] = field(default_factory=dict)
+    # Members that changed or vanished at the source before their window was sent: never sent, so never planned again.
+    skipped: list[str] = field(default_factory=list)
+
+    def not_landed(self) -> list[Member]:
+        """The members that the cell has not received: unplanned or skipped ones and those of a window still open."""
+        landed = {path for window in self.windows if window.state != "open" for path in window.paths}
+        return [member for member in self.members if member.path not in landed]
 
     @classmethod
     def read(cls, path: Path) -> Series | None:
@@ -191,7 +244,7 @@ class Series:
             return None
         return cls(raw["source"], raw["api_base_url"], raw["series_id"], raw["series_file"],
                    [Member(**item) for item in raw["members"]], [SentWindow(**item) for item in raw["windows"]],
-                   raw["options"], raw.get("clears", {}))
+                   raw["options"], raw.get("clears", {}), raw.get("skipped", []))
 
     def write(self, path: Path) -> None:
         _private_json(path, asdict(self))
@@ -202,6 +255,14 @@ def not_sent_notice(members: list[Member]) -> str:
     count, size = len(members), sum(member.size for member in members)
     return (f"The members not yet sent ({count:,} files, {human_bytes(size)}) are not in Exomem. "
             "You must keep them: do not delete or move your source folder")
+
+
+class Stopped(CloudImportError):
+    """A stop that already says the members not yet sent are not in Exomem."""
+
+
+def stopped(series: Series, code: str, message: str) -> Stopped:
+    return Stopped(WINDOWS, code, f"{message}. {not_sent_notice(series.not_landed())}", resume=True)
 
 
 def _listed(items: list[str]) -> str:
@@ -227,17 +288,12 @@ class _Run:
 
     def unplanned(self) -> list[Member]:
         """The members that no window holds yet."""
-        planned = {path for window in self.series.windows for path in window.paths}
+        planned = {path for window in self.series.windows for path in window.paths} | set(self.series.skipped)
         return [member for member in self.series.members if member.path not in planned]
 
-    def not_landed(self) -> list[Member]:
-        """The members that the cell has not received: unplanned ones and those of a window still open."""
-        landed = {path for window in self.series.windows if window.state != "open" for path in window.paths}
-        return [member for member in self.series.members if member.path not in landed]
-
-    def stop(self, code: str, message: str) -> CloudImportError:
+    def stop(self, code: str, message: str) -> Stopped:
         """Every stop says that the members not yet sent are not in Exomem."""
-        return CloudImportError(WINDOWS, code, f"{message}. {not_sent_notice(self.not_landed())}", resume=True)
+        return stopped(self.series, code, message)
 
     def say_once(self, line: str) -> None:
         if line != self.shown:
@@ -263,9 +319,19 @@ class _Run:
         Admission applies only where the cell publishes its limits: used + `space_factor` x bytes + `reserve_bytes`
         within the cell's current size (D12).
         """
-        limits = self.limits or {}
-        if type(limits.get("space_factor")) is not int or type(limits.get("reserve_bytes")) is not int:
+        limits = self.limits
+        if limits is None:
             return None, None
+        # A published limit that cannot be read is unknown, never "no limit". Both limits are whole numbers.
+        if not isinstance(limits, dict):
+            return None, "the cell's published admission limits cannot be read"
+        values = limits.get("space_factor"), limits.get("reserve_bytes")
+        if any(value is not None and (type(value) is not int or value < 0) for value in values):
+            return None, "the cell's published admission limits cannot be read"
+        if any(value is None for value in values):
+            return None, None
+        if limits["space_factor"] < 1:
+            return None, "the cell's published admission limits cannot be read"
         if reading.volume_used.bytes is None or reading.bounds is None:
             return None, "the cell does not report the volume's use or size, which admission needs"
         room = reading.bounds.volume_bytes - reading.volume_used.bytes - limits["reserve_bytes"]
@@ -304,41 +370,101 @@ class _Run:
         return [], 0, "admission would grow the cell for the next member"
 
     async def create(self, taken: list[Member], cost: int) -> None:
-        window = SentWindow([member.path for member in taken], f"window-{uuid.uuid4().hex[:8]}", cost=cost)
+        window = SentWindow([member.path for member in taken], f"window-{uuid.uuid4().hex[:8]}", import_id=str(uuid.uuid4()), cost=cost)
         self.series.windows.append(window)
         self.series.write(self.record)
         await self.send(window)
 
     async def send(self, window: SentWindow) -> None:
         """Send one window; a window that the Job refuses for space is dropped, so the loop plans it again smaller."""
-        kept = []
+        kept, gone = [], []
         for path in window.paths:
             member = next(m for m in self.series.members if m.path == path)
             fresh = _kept_now(self.source, member)
             if fresh is None or (fresh.size, fresh.mtime_ns) != (member.size, member.mtime_ns):
-                raise self.stop("SOURCE_CHANGED", "a member of the series changed or vanished at the source since the series began")
-            kept.append(fresh)
+                gone.append(path)
+            else:
+                kept.append(fresh)
         checkpoint = self.record.parent / window.dir
-        self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
-        try:
-            result = await import_source(
-                self.source, self.config, checkpoint, api=self.api, uploads=self.uploads, poll_seconds=self.poll,
-                progress=self.progress, window=Window(import_selection.Selection(kept=kept), self.series.series_file.encode()),
-                include_hidden=self.series.options["include_hidden"], use_gitignore=self.series.options["use_gitignore"])
-        except CloudImportError as error:
-            # The Job refuses a window for lack of space with this code: the import ends `failed` with it.
-            if error.code == STORAGE_ALLOWANCE_EXCEEDED:
+        if gone:  # The window keeps its import ID (rule a); the create decides.
+            # The record is the partition: a member that changed is not sent and not planned again, and the person keeps it.
+            window.paths = [item.rel for item in kept]
+            self.series.skipped.extend(gone)
+            self.progress.say(f"Not sent, because the source file changed or vanished since the series began ({len(gone):,}); "
+                              "keep the source: " + _listed(gone))
+            if not kept:
                 self.series.windows.remove(window)
                 self.series.write(self.record)
-                self.refused = window.cost
-                self.progress.say("The Job refused the window for space; planning it again from the current budget.")
                 return
-            raise CloudImportError(error.phase, error.code, f"{error.message}. {not_sent_notice(self.not_landed())}",
-                                   error.import_id, resume=error.resume) from None
-        window.import_id, window.state = result["import_id"], "landed"
+            self.series.write(self.record)
+        self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
+        renewed = False
+        while True:
+            try:
+                result = await import_source(
+                    self.source, self.config, checkpoint, api=self.api, uploads=self.uploads, poll_seconds=self.poll,
+                    progress=self.progress, window=Window(import_selection.Selection(kept=kept), self.series.series_file.encode(), window.import_id),
+                    include_hidden=self.series.options["include_hidden"], use_gitignore=self.series.options["use_gitignore"])
+                break
+            except CloudImportError as error:
+                # The Job refuses a window for lack of space with this code: the import ends `failed` with it.
+                if error.code == STORAGE_ALLOWANCE_EXCEEDED:
+                    self.series.windows.remove(window)
+                    self.series.write(self.record)
+                    self.refused = window.cost
+                    self.progress.say("The Job refused the window for space; planning it again from the current budget.")
+                    return
+                message, resume = error.message, error.resume
+                if error.phase == REGISTER and error.code == "IMPORT_CONFLICT":
+                    refused = error.import_id or window.import_id  # The ID that the create declared.
+                    row = await self._own_row(refused)
+                    # Rule (b): one renewal and one retry. A renewed ID has no row, so its conflict reads as rule (d); the flag bounds the loop all the same.
+                    if row is not None and _ended(row) and not renewed:
+                        window.renew()
+                        shutil.rmtree(checkpoint, ignore_errors=True)  # Its checkpoint holds the dead ID, and a checkpoint's ID wins over the window's.
+                        self.series.write(self.record)
+                        renewed = True
+                        continue
+                    if row is None:  # Rule (d).
+                        message = "another import is open; cancel it in Home or wait for it to end"
+                    else:
+                        message = (f"Cloud import {refused} is an earlier attempt of this window with another member set, "
+                                   f"and its state is {safe_code(row['observed_state']) or 'unknown'}. The run continues once the cell "
+                                   "receives it or Cloud ends it")
+                        if row["observed_state"] != "done":
+                            message += f". To end it now, {_STOP_ON_CLOUD}"
+                    resume = True
+                elif error.ended:
+                    # Rule (b): Cloud reported that this import ended and replays its ID; the rerun uses a new one.
+                    window.renew()
+                    self.series.write(self.record)
+                    resume = True
+                elif error.why:
+                    # The client gave up its checkpoint, but Cloud's import may be open: the rerun replays the same ID, and Cloud's state decides.
+                    message = (f"{error.why}. The checkpoint is removed. Cloud import {error.import_id} stays as it is, and the next run "
+                               f"replays it. To stop it, {_STOP_ON_CLOUD}")
+                    resume = True
+                raise Stopped(error.phase, error.code, f"{message}. {not_sent_notice(self.series.not_landed())}",
+                              error.import_id, resume=resume) from None
+        if window.import_id != result["import_id"]:  # The import resumed from a checkpoint that holds its own ID.
+            window.attempts = [import_id for import_id in window.ids() if import_id != result["import_id"]]
+            window.import_id = result["import_id"]
+        window.state = "landed"
         self.series.write(self.record)
         self.refused = None
         await self.settle(window)
+
+    async def _own_row(self, import_id: str) -> dict | None:
+        """Cloud's row for one of the window's import IDs, or None when Cloud has none."""
+        url = self.config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports/" + import_id
+        try:
+            response = await self.api.request("GET", url)
+            response.raise_for_status()
+        except httpx2.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return None
+            raise
+        return response.json()["import"]
 
     async def settle(self, window: SentWindow) -> None:
         """A landed window of a resend clears its members from the old residual records, once."""
@@ -399,11 +525,23 @@ class _Run:
 
     async def reconcile(self, reading: Reading) -> None:
         """Resume from the record: a landed window without a receipt is sent again; an open window resumes."""
-        receipts = {window["import_id"] for window in reading.windows}
+        if not self.series.windows:
+            return
+        since = self.clock()
+        while reading.windows_unknown:  # An unknown listing proves nothing: waiting, never sending a landed window again.
+            await self.wait(since, f"the cell cannot list its window records: {reading.windows_unknown}")
+            reading = await self.read()
+        receipts = {window.get("import_id") for window in reading.windows}
         for window in list(self.series.windows):
-            if window.state != "open" and window.import_id not in receipts:
+            received = next((import_id for import_id in window.ids() if import_id in receipts), None)
+            if window.state != "open" and received is None:
                 self.progress.say(f"The cell has no receipt for window {self.series.windows.index(window) + 1}; sending it again.")
                 self.series.windows.remove(window)
+            elif received is not None:
+                window.attempts = [import_id for import_id in window.ids() if import_id != received]
+                window.import_id = received
+                if window.state == "open":
+                    window.state = "landed"  # The import finished, and the stop came before the record said so.
         self.series.write(self.record)
         for window in list(self.series.windows):
             if window.state == "open":
@@ -414,13 +552,29 @@ class _Run:
     async def finish(self) -> dict:
         final = await self.cell.status()
         keep = Reading.of(final).keep_source
+        if self.series.skipped:
+            cell_says = keep["message"] if keep and keep.get("keep") and keep.get("message") else "Keep the source folder."
+            keep = {"keep": True, "message": f"{cell_says} {len(self.series.skipped):,} files were not sent."}
         if keep is None or keep.get("keep"):
             self.progress.say("The upload is done and filing continues. " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
         else:
             self.progress.say("Every member is filed and discarded, so you no longer need to keep the source folder.")
-        landed = [window for window in self.series.windows if window.import_id]
+        landed = [window for window in self.series.windows if window.state != "open"]
         return {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
-                "import_ids": [window.import_id for window in landed], "keep_source": keep}
+                "import_ids": [window.import_id for window in landed], "keep_source": keep,
+                "not_sent": list(self.series.skipped)}
+
+
+def _holds_cell(row: dict) -> bool:
+    """True while the row counts in Substrate's one-open-import-per-cell index; a pending discard keeps a row open."""
+    # nosemgrep: ep-word-membership -- The Cloud import protocol fixes the closed states that the index (migration 0061) excludes.
+    closed = row["observed_state"] in ("done", "failed", "expired", "discarded")
+    return not closed or (row["requested_state"] == "discard_requested" and row["observed_state"] != "discarded")
+
+
+def _ended(row: dict) -> bool:
+    """Rule (c): the attempt is over, so a new import ID cannot land the window twice or meet this row in the index."""
+    return row["observed_state"] != "done" and not _holds_cell(row)
 
 
 def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:
@@ -452,16 +606,24 @@ async def _preflight(run: _Run, members: list[Member], reading: Reading) -> None
     if need > reading.reachable.bytes:
         raise run.stop("RESIDENT_BYTES_TOO_LARGE", f"2 x the text bytes plus the resident bytes need {need} bytes and the reachable budget "
                        f"is {reading.reachable.bytes} bytes; resident files: " + _listed([f"{m.path} ({m.size} bytes)" for m in resident]))
-    run.check_allowance(reading, sum(m.size for m in offloadable))
+
 
 
 def _sorted(members: list[Member]) -> list[Member]:
     return sorted(members, key=lambda member: (_CLASS_ORDER[member.klass], member.path))
 
 
-def _classify(kept: import_selection.Kept, bounds: media_capacity.Bounds) -> Member:
-    return Member(kept.rel, kept.size, kept.mtime_ns,
-                  bounds.classify(kept.size, text=adoption_run.reads_as_text(kept.rel, kept.size)))
+def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
+    """Classify by the cell's reported rule; the sender's own copy serves only where the cell reports none."""
+    inline = reading.inline_text_limit
+    if inline is None:
+        text = adoption_run.reads_as_text(kept.rel, kept.size)
+    else:  # The suffix rule alone; the cell's inline limit replaces the local size limit.
+        text = adoption_run.has_text_suffix(kept.rel) and kept.size <= inline
+    if reading.largest_offloadable is None:
+        return Member(kept.rel, kept.size, kept.mtime_ns, reading.bounds.classify(kept.size, text=text))
+    klass = TEXT if text else OFFLOADABLE if kept.size <= reading.largest_offloadable else RESIDENT
+    return Member(kept.rel, kept.size, kept.mtime_ns, klass)
 
 
 async def import_folder(source: Path, config: CloudImportClientConfig, checkpoint: Path, *, cell: Cell, api, uploads=None,
@@ -470,25 +632,38 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
                         resend_residual: bool = False) -> dict:
     """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring."""
     progress, source, checkpoint = progress or Progress(), source.resolve(), checkpoint.resolve()
-    where = _Where(WINDOWS)
+    where, held = _Where(WINDOWS), []
     try:
         return await _import_folder(source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=include_hidden,
                                     use_gitignore=use_gitignore, progress=progress, poll_seconds=poll_seconds, sleep=sleep,
-                                    clock=clock, resend=resend_residual)
-    except CloudImportError:
+                                    clock=clock, resend=resend_residual, held=held)
+    except Stopped:
         raise
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
-        raise _coded(where, error) from None
+        failure = error if isinstance(error, CloudImportError) else _coded(where, error)
+        if not held:  # No series exists yet, so nothing was sent.
+            raise failure from (None if failure is not error else error.__cause__)
+        # Once a series exists, every stop says that the members not yet sent are not in Exomem.
+        raise Stopped(failure.phase, failure.code, f"{failure.message}. {not_sent_notice(held[0].not_landed())}",
+                      failure.import_id, resume=failure.resume) from None
 
 
 async def _import_folder(source, config, checkpoint, *, cell, api, uploads, include_hidden, use_gitignore, progress,
-                         poll_seconds, sleep, clock, resend) -> dict:
+                         poll_seconds, sleep, clock, resend, held) -> dict:
     # nosemgrep: ep-word-membership -- the series file's own reserved name, fixed by D12.
     if os.path.lexists(source / import_stage.SERIES_FILE):
         raise CloudImportError(PREFLIGHT, "SERIES_FILE_IN_SOURCE", f"the source folder holds a file named {import_stage.SERIES_FILE} "
                                "at its top level, a name that Exomem reserves for a series; rename it and run the command again", resume=False)
     if checkpoint.is_relative_to(source):
         raise CloudImportError(PREFLIGHT, "CHECKPOINT_INSIDE_SOURCE", "the checkpoint folder must be outside the source folder")
+    # The record is read before any network call, so a failure on the first call still says what is not in Exomem.
+    _ensure_private_directory(checkpoint)
+    record = checkpoint / (RESEND_RECORD if resend else SERIES_RECORD)
+    series = Series.read(record)
+    if series is not None and (series.source, series.api_base_url) != (str(source), config.api_base_url):
+        raise CloudImportError(PREFLIGHT, "CHECKPOINT_MISMATCH", "the checkpoint belongs to another source or Cloud endpoint")
+    if series is not None:
+        held.append(series)
     base = config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports"
     response = await api.request("GET", base)
     response.raise_for_status()
@@ -497,17 +672,17 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
     options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
     settings = {"cell": cell, "api": api, "uploads": uploads, "limits": limits, "progress": progress,
                 "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock}
-    _ensure_private_directory(checkpoint)
-    record = checkpoint / (RESEND_RECORD if resend else SERIES_RECORD)
-    series = Series.read(record)
-    if series is not None and (series.source, series.api_base_url) != (str(source), config.api_base_url):
-        raise CloudImportError(PREFLIGHT, "CHECKPOINT_MISMATCH", "the checkpoint belongs to another source or Cloud endpoint")
     if resend:
-        return await _resend(source, config, checkpoint, record, series, first, options, settings)
+        return await _resend(source, config, checkpoint, record, series, first, options, settings, held)
     if first.older_cell:
+        if series is not None:  # A series exists: sending the folder as one import would send every landed member again.
+            raise stopped(series, "NO_WINDOW_BUDGET", "the cell reports no window budget now (its media store may be off or rolled back), "
+                                                       "so the series cannot go on")
         return await _older_cell(source, config, checkpoint, limits, options, **{k: settings[k] for k in ("api", "uploads", "progress", "poll_seconds")})
     if series is None:
         series = await _begin(source, config, record, first, options, settings)
+    if series not in held:
+        held.append(series)
     run = _Run(series, record, source, config, **settings)
     return await run.drive()
 
@@ -528,10 +703,15 @@ async def _begin(source, config, record, first, options, settings) -> Series:
     while reading.bounds is None or reading.reachable.bytes is None or reading.effective.bytes is None:
         await run.wait(since, "the cell reports an unknown figure: " + "; ".join(reading.unknown_reasons() or ["its limits"]))
         reading = Reading.of(await settings["cell"].status())
-    members = _sorted([_classify(kept, reading.bounds) for kept in selection.kept])
+    members = _sorted([_classify(kept, reading) for kept in selection.kept])
     series.members, series.series_file = members, _series_file(source.name, members)
-    census = await run.read(members[0].cost)  # The demand also makes the cell count the media usage when none is recorded.
-    await _preflight(run, members, census if census.bounds else reading)
+    await _preflight(run, members, reading)
+    offloadable = sum(m.size for m in members if m.klass == OFFLOADABLE)
+    if offloadable:
+        if reading.allowance.bytes is None:
+            # The demand makes the cell count the media usage when none is recorded; it follows the refusals above.
+            reading = await run.read(members[0].cost)
+        run.check_allowance(reading, offloadable)
     series.write(record)
     return series
 
@@ -554,8 +734,11 @@ async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:
     after = None
     while True:
         reading = Reading.of(await cell.status(after=after))
+        if reading.windows_unknown:
+            raise CloudImportError(WINDOWS, "RECEIPTS_UNKNOWN", f"the cell cannot list its window records ({reading.windows_unknown}), so "
+                                   "nothing was resent. Keep your source folder, and run the command again later", resume=False)
         for window in reading.windows:
-            if window.get("state") == "discarded":
+            if window.get("state") == import_stage.WINDOW_DISCARDED:
                 for member in window.get("members", []):
                     found[member["path"]] = (window["import_id"], member["bytes"])
         after = reading.next_after
@@ -563,7 +746,7 @@ async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:
             return found
 
 
-async def _resend(source, config, checkpoint, record, series, first, options, settings) -> dict:
+async def _resend(source, config, checkpoint, record, series, first, options, settings, held) -> dict:
     """Send the residual of a finished series as a new series that carries the first series' file unchanged."""
     progress = settings["progress"]
     original = Series.read(checkpoint / SERIES_RECORD)
@@ -585,7 +768,7 @@ async def _resend(source, config, checkpoint, record, series, first, options, se
             if fresh is None or (fresh.size, fresh.mtime_ns) != (old.size, old.mtime_ns):
                 skipped.append(path)
             else:
-                members.append(_classify(fresh, first.bounds))
+                members.append(_classify(fresh, first))
         if skipped:
             progress.say(f"Not resent, because the source file changed since the series began ({len(skipped):,}): " + _listed(skipped))
         if not members:
@@ -602,6 +785,8 @@ async def _resend(source, config, checkpoint, record, series, first, options, se
         for import_id, paths in by_record.items():
             await cell.acknowledge(import_id, paths)
 
+    if series not in held:
+        held.append(series)
     run = _Run(series, record, source, config, on_landed=clear, **settings)
     result = await run.drive()
     record.unlink(missing_ok=True)

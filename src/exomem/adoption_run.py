@@ -525,12 +525,17 @@ def _stands_for_manifest(stage: import_stage.Stage | None, rel: str, info: os.st
     return vouched is not None and vouched[0] == import_stage.Identity.of(info)
 
 
+def has_text_suffix(path: str) -> bool:
+    """Whether the importer treats this path's suffix as text-like, whatever its size."""
+    return PurePosixPath(path).suffix.lower() in _TEXT_IMPORT_SUFFIXES
+
+
 def reads_as_text(path: str, size: int) -> bool:
     """Whether the importer files this member as text: a text-like suffix within the inline text limit.
 
     The importer also needs the bytes to decode as UTF-8, which a status call does not read.
     """
-    return PurePosixPath(path).suffix.lower() in _TEXT_IMPORT_SUFFIXES and size <= adoption_plan.INLINE_TEXT_MAX_BYTES
+    return has_text_suffix(path) and size <= adoption_plan.INLINE_TEXT_MAX_BYTES
 
 
 def _row(

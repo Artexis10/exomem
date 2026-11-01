@@ -14,13 +14,13 @@ Use this when the person wants existing files in the Knowledge Base: a folder, a
 4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.
 5. While a `start` or later reply carries `next_after`, call `start` again with only `after` set to it, then repeat step 4. Pages file in order and share one collection.
 6. Review the residual with the person. The last page's `finish` reports `residual`: the files still staged, by reason, with counts and bytes.
-7. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. Tell the person to keep the source folder while `keep_source.keep` is true.
+7. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
 8. Discard the stage only after the person agrees. For a series of windows, ask once for the series.
    - Cloud: `transfer_memory(action="import_discard", import_id=<id>, confirm=true)` deletes the staged folder for good.
    - Local: no Exomem command discards a stage. The person deletes `_Imports/<id>` by hand.
    - A discard keeps a residual record of each member that adoption did not file. Status lists those members as "discarded, not filed".
    - If a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `read_import` status for that window. `renames_pending` lists Knowledge Base paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
-   - A window in state `unreadable` has a record that cannot be read. No tool you hold discards it. Keep the source, tell the person, and leave the stage. The operator of the cell discards it with `--walk-stage`.
+   - A window in state `unreadable` has a record that cannot be read. No tool you hold discards it, and the person cannot either. Keep the source, tell the person, and leave the stage. Only the operator of Exomem Cloud can discard it, with `--walk-stage`.
 9. Acknowledge residual paths only when the person confirms they no longer need to keep them: `import_memory(operation={"kind": "acknowledge", "import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
 
 ## Stops
