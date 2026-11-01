@@ -397,19 +397,32 @@ class Arm:
         A copy meets a coordinator that never enrolled its store, so the worker refuses every
         collection read until the owner's offline `collections adopt-local` previews and applies.
         """
-        if not any(self.state.glob("*/collections.sqlite")):
+        from exomem.collection_store.connection import STORE_FILENAME
+
+        if not any(self.state.glob(f"*/{STORE_FILENAME}")):
+            progress(f"arm-store-adoption arm={self.name} skipped=no-collection-store")
             return
-        await self._start_coordinator()
+
+        def adopt(*mode: str) -> dict:
+            done = subprocess.run(
+                [self.python, "-I", "-m", "exomem", "collections", "adopt-local", "--vault", str(self.vault),
+                 "--why", "private latency sandbox copy", *mode],
+                env=self.env, cwd=self.root, capture_output=True, text=True, timeout=1800)
+            if done.returncode != 0:
+                # The product's refusal goes to the log only; the summary keeps the runner's closed code.
+                print(f"{self.name} arm: collections adopt-local failed: {done.stderr.strip()[-500:]}", file=sys.stderr)
+                raise MeasurementRefused("arm-store-adoption-failed", phase="arm-preparation")
+            return json.loads(done.stdout)
+
         try:
-            def adopt(*mode: str) -> dict:
-                done = subprocess.run(
-                    [self.python, "-I", "-m", "exomem", "collections", "adopt-local", "--vault", str(self.vault),
-                     "--why", "private latency sandbox copy", *mode],
-                    env=self.env, cwd=self.root, capture_output=True, text=True, timeout=1800)
-                if done.returncode != 0:
-                    raise MeasurementRefused("arm-store-adoption-failed", phase="arm-preparation")
-                return json.loads(done.stdout)
-            adopt("--preview-id", adopt("--dry-run")["preview_id"])
+            await self._start_coordinator()
+            applied = adopt("--preview-id", adopt("--dry-run")["preview_id"])
+            # The command exits 0 for a pending publication or an unresolved store too; its route reports
+            # in_sync only once the store is admitted.
+            if applied.get("status") not in ("adopted", "in_sync"):
+                print(f"{self.name} arm: collections adopt-local left status={applied.get('status')}", file=sys.stderr)
+                raise MeasurementRefused("arm-store-adoption-failed", phase="arm-preparation")
+            progress(f"arm-store-adoption arm={self.name} status={applied['status']}")
         finally:
             await self.stop()
 
@@ -880,7 +893,9 @@ def place_arm_state(golden_state: Path, root: Path) -> None:
     key = vault_state_key(root / "vault")
     leaf = root / "state" / key
     shutil.copytree(leaves[0], leaf, symlinks=True)
-    manifest = leaf / ".state-migration.json"
+    from exomem.state_migration import MANIFEST_NAME
+
+    manifest = leaf / MANIFEST_NAME
     if manifest.is_file():
         record = json.loads(manifest.read_text())
         record["vault_identity"] = key
@@ -920,8 +935,7 @@ def run_private(args: argparse.Namespace) -> dict:
                                           passthrough=json.loads((RECALL_BENCHMARK / "profile.json").read_text())
                                           ["worker_environment"]))
         if args.prepare:
-            for arm in arms.values():
-                asyncio.run(arm.adopt_store())
+            asyncio.run(adopt_stores(arms))
             asyncio.run(warm(arms))
             for root in roots.values():
                 (root / "prepared.json").write_text(json.dumps({"prepared": True}))
@@ -931,6 +945,15 @@ def run_private(args: argparse.Namespace) -> dict:
     return fragment_of(result, cases=cases, total=len(cases), shard=0, shards=1, header={
         "profile_sha256": None, "cases_sha256": hashlib.sha256(raw).hexdigest(), "tag": tag,
         "base_commit": base_commit, "reduced": False})
+
+
+async def adopt_stores(arms: dict[str, Arm]) -> None:
+    """Enroll each arm's copied store in turn; stop every arm however one of them ends."""
+    try:
+        for arm in arms.values():
+            await arm.adopt_store()
+    finally:
+        await stop_arms(arms)
 
 
 async def warm(arms: dict[str, Arm]) -> None:
