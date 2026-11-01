@@ -2601,22 +2601,23 @@ def _revalidate_existing_preflight(
     # `revalidate.preflight.*`, so the stages of `commit.revalidate` show.
     nested = MutationTimings() if timings is not None else None
     with _write_phase("revalidate"):
-        refreshed = preflight_existing(
-            vault_root,
-            path=preflight.path,
-            after_source=preflight.after_source,
-            operation=preflight.operation,
-            expected_before_hash=preflight.before.source_hash,
-            transition_token=preflight.transition_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            status_basis=status_basis,
-            timings=nested,
-        )
-        if timings is not None and nested is not None:
-            for name, entry in nested.stages.items():
-                timings.stages[f"revalidate.{name}"] = entry
+        try:
+            refreshed = preflight_existing(
+                vault_root,
+                path=preflight.path,
+                after_source=preflight.after_source,
+                operation=preflight.operation,
+                expected_before_hash=preflight.before.source_hash,
+                transition_token=preflight.transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+                status_basis=status_basis,
+                timings=nested,
+            )
+        finally:
+            if timings is not None and nested is not None:
+                timings.absorb("revalidate", nested)
         return replace(
             refreshed, read_dependency_guards=preflight.read_dependency_guards,
             provenance_server_at=preflight.provenance_server_at,

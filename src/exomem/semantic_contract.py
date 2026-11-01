@@ -1240,10 +1240,19 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
-        if _stable_topology_replacement(self, state):
-            return _context_with_stable_topology_candidate(self, state)
         pages = dict(self.pages)
         pages[state.path] = state
+        if _stable_topology_replacement(self, state):
+            patched = _context_with_page_delta(
+                self,
+                pages,
+                (state.path,),
+                registry=self.registry,
+                identity_census=self.identity_census,
+                writer_visibility=self.writer_visibility,
+            )
+            if patched is not None:
+                return patched
         return _context_from_state_map(
             self.vault_root,
             pages,
@@ -4018,63 +4027,6 @@ def _stable_topology_replacement(
     )
 
 
-def _context_with_stable_topology_candidate(
-    context: SemanticCorpusContext,
-    state: SemanticPageState,
-) -> SemanticCorpusContext:
-    """Replace one page and refresh facts that bind its current units."""
-    pages = dict(context.pages)
-    pages[state.path] = state
-    resolver = _WikilinkResolverView(
-        full_paths=context.resolver_full_paths,
-        kb_stripped=context.resolver_kb_stripped,
-        stems=context.resolver_stems,
-        titles=context.resolver_titles,
-        candidates_by_key=context.resolver_candidates_by_key,
-    )
-    # Incoming exact endpoints depend on the target's anchors and fingerprints.
-    affected = {state.path} | {
-        fact.authored_path for fact in context.relation_facts
-        if fact.resolved_target_path is not None
-        and fact.resolved_target_path.split("#", 1)[0] == state.path
-    }
-    # Sorted, as in a full build: fact identities count occurrences per authored
-    # identity, so pages that share an id must be derived in the same order.
-    candidate_facts = _derive_relation_facts(
-        context.vault_root,
-        {path: pages[path] for path in sorted(affected)},
-        resolver,  # type: ignore[arg-type]
-        context.registry,
-        target_states=pages,
-    )
-    retained_facts = (fact for fact in context.relation_facts if fact.authored_path not in affected)
-    facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
-    current = context.pages[state.path]
-    census = None
-    if current.structurally_compiled and state.structurally_compiled:
-        census = context.activation_census._with_replaced_candidate(
-            activation_manifest.ActivationCandidate(
-                state.path,
-                state.source_hash,
-                state.identity if state.identity_kind == "exomem_id" else None,
-                activation_manifest.recorded_status(state.frontmatter.get("status")),
-            )
-        )
-    elif not current.structurally_compiled and not state.structurally_compiled:
-        census = context.activation_census
-    return _context_from_resolved_state(
-        context.vault_root,
-        pages,
-        context.registry,
-        context.identity_census,
-        entries=context.resolver_entries,
-        resolver=resolver,  # type: ignore[arg-type]
-        facts=facts,
-        writer_visibility=context.writer_visibility,
-        validated_census=census,
-    )
-
-
 # Past this many changed pages a patch gains little over a full derivation:
 # each page widens the set of authors to re-derive. A performance limit only.
 _PAGE_DELTA_LIMIT = 64
@@ -4130,26 +4082,11 @@ def _context_with_page_delta(
         base.registry.core_version, base.registry.extension_hash,
     ):
         return None
-    ids: set[str] = set()
     for path in delta:
         before, after = old.get(path), pages.get(path)
         if before is not None and after is not None and (
             before.relation_registry_hash != after.relation_registry_hash
             or before.language_registry_hash != after.language_registry_hash
-        ):
-            return None
-        for page in (before, after):
-            if page is not None and page.identity_kind == "exomem_id":
-                ids.add(page.identity)
-    if ids:
-        # Fact identities count occurrences per authored identity across the
-        # corpus, so a page that shares an id is never re-derived alone: the
-        # other holders must all be delta pages, re-derived in sorted order.
-        delta_set = set(delta)
-        if any(
-            page.identity_kind == "exomem_id" and page.identity in ids
-            and page.path not in delta_set
-            for page in old.values()
         ):
             return None
 
@@ -4199,13 +4136,43 @@ def _context_with_page_delta(
         for key in keys
         for identity in base.raw_target_dependencies.get(key, ())
     }
+    delta_set = set(delta)
     affected = {path for path in delta if path in pages}
-    removed = set(delta) - affected
+    removed = delta_set - affected
     stale_authors = removed | affected
     for fact in base.relation_facts:
-        if fact.identity in dependent:
+        if fact.identity in dependent or (
+            fact.resolved_target_path is not None
+            and fact.resolved_target_path.split("#", 1)[0] in delta_set
+        ):
             stale_authors.add(fact.authored_path)
     affected |= {path for path in stale_authors if path in pages}
+    # Fact identities count occurrences per authored id across the corpus, so
+    # every holder of an id that one re-derived page carries is re-derived with
+    # it, in sorted order, as a full build would.
+    holders: dict[str, list[str]] = {}
+    for page in pages.values():
+        if page.identity_kind == "exomem_id":
+            holders.setdefault(page.identity, []).append(page.path)
+    seen_ids: set[str] = set()
+    pending = [
+        page.identity
+        for path in (*delta, *affected)
+        for page in (old.get(path), pages.get(path))
+        if page is not None and page.identity_kind == "exomem_id"
+    ]
+    while pending:
+        identity = pending.pop()
+        if identity in seen_ids:
+            continue
+        seen_ids.add(identity)
+        for path in holders.get(identity, ()):
+            if path not in affected:
+                affected.add(path)
+                stale_authors.add(path)
+            state = pages[path]
+            if state.identity_kind == "exomem_id":
+                pending.append(state.identity)
     if len(affected) > max(_PAGE_DELTA_LIMIT, len(pages) // 2):
         return None
     candidate_facts = _derive_relation_facts(
@@ -4270,12 +4237,7 @@ def _context_from_resolved_state(
     census = validated_census
     if census is None:
         census = activation_manifest.ActivationCensus.from_candidates(
-            activation_manifest.ActivationCandidate(
-                state.path,
-                state.source_hash,
-                state.identity if state.identity_kind == "exomem_id" else None,
-                activation_manifest.recorded_status(state.frontmatter.get("status")),
-            )
+            _activation_candidate(state)
             for state in ordered_pages.values()
             if state.structurally_compiled
         )
@@ -4657,7 +4619,7 @@ def _derive_relation_facts(
 
 def _dependency_key(raw_target: str) -> str:
     path, _, _ = _target_parts(raw_target)
-    return path.removesuffix(".md").strip("/").casefold()
+    return vault.wikilink_page_key(path).casefold()
 
 
 def require_page_status(page: SemanticPageState | None) -> None:

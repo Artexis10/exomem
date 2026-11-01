@@ -501,44 +501,75 @@ def test_a_page_delta_yields_the_corpus_a_full_build_would(
     assert enriched.as_dict() == semantic_contract.build_corpus_context_with_census(tmp_path)[0].as_dict()
 
 
-def test_a_delta_page_sharing_an_id_falls_back_to_a_full_derivation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _shared_id_vault(root: Path) -> None:
+    """Two pages share an id and a common relation; only the second links to Target."""
+    _linked_vault(root)
+    _write(root, "common.md", title="Common")
+    for name, extra in (("copy-a", ""), ("copy-b", "- supports [[Target]]\n")):
+        (root / _INSIGHTS / f"{name}.md").write_text(
+            f"---\ntitle: {name}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {_SHARED_ID}\n---\n\n"
+            f"## Relations\n- supports [[Common]]\n{extra}",
+            encoding="utf-8",
+        )
+
+
+_SHARED_ID_DELTAS = {
+    "edited target anchor": _DELTAS["edited target anchor"],
+    "deleted target": _DELTAS["deleted target"],
+    "page created with the target's title": _DELTAS["new page makes a title ambiguous"],
+    "retitled target": _DELTAS["retitled target"],
+}
+
+
+@pytest.mark.parametrize("delta", sorted(_SHARED_ID_DELTAS))
+def test_pages_sharing_an_id_keep_the_fact_identities_a_full_build_gives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delta: str
 ) -> None:
-    # Failure caught: fact identities count occurrences per authored id, so a
-    # delta that adds a second holder renumbers a page the delta never touched.
-    _linked_vault(tmp_path)
-    holder = tmp_path / _INSIGHTS / "by-path.md"
-    holder.write_text(
-        holder.read_text(encoding="utf-8").replace(
-            "status: active", f"status: active\n{memory_refs.ID_FIELD}: {_SHARED_ID}", 1
-        ),
-        encoding="utf-8",
-    )
+    # Failure caught: fact identities count occurrences per authored id across the
+    # corpus, so re-deriving one holder alone numbers its facts differently.
+    _shared_id_vault(tmp_path)
     _shared_context(tmp_path)
     semantic_contract.build_corpus_context_with_census(tmp_path)
-    twin = tmp_path / _INSIGHTS / "twin.md"
-    twin.write_text(
-        f"---\ntitle: twin\ntype: insight\nstatus: active\nproject: atlas\n"
-        f"{memory_refs.ID_FIELD}: {_SHARED_ID}\n---\n\n## Relations\n- supports [[Target]]\n",
-        encoding="utf-8",
-    )
-    derived: list[int] = []
-    real_derive = semantic_contract._derive_relation_facts
-
-    def record(root, states, *args, **kwargs):
-        derived.append(len(states))
-        return real_derive(root, states, *args, **kwargs)
-
-    monkeypatch.setattr(semantic_contract, "_derive_relation_facts", record)
+    _SHARED_ID_DELTAS[delta](tmp_path)
     structural = _shared_context(tmp_path)
     enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
-    monkeypatch.setattr(semantic_contract, "_derive_relation_facts", real_derive)
-    assert len(structural.pages) in derived
 
     semantic_contract.reset_corpus_context_cache()
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
-    assert structural.as_dict() == _shared_context(tmp_path).as_dict()
-    assert enriched.as_dict() == semantic_contract.build_corpus_context_with_census(tmp_path)[0].as_dict()
+    full_structural = _shared_context(tmp_path)
+    full_enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
+    assert structural.relation_facts == full_structural.relation_facts
+    assert enriched.relation_facts == full_enriched.relation_facts
+    assert structural.as_dict() == full_structural.as_dict()
+    assert enriched.as_dict() == full_enriched.as_dict()
+
+
+@pytest.mark.parametrize("direction", ["delete", "create"])
+def test_a_link_with_a_blank_before_md_follows_its_page_like_a_full_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction: str
+) -> None:
+    # Failure caught: the dependency key and link resolution normalise `.md` and
+    # blanks in different orders, so a link keeps a stale resolution.
+    _linked_vault(tmp_path)
+    _write(tmp_path, "blank-linker.md", title="blank-linker",
+           body="## Relations\n- supports [[alpha .md]]\n- supports [[Notes/Insights/alpha .md]]\n")
+    alpha = tmp_path / _INSIGHTS / "alpha.md"
+    if direction == "delete":
+        _write(tmp_path, "alpha.md", title="Alpha")
+    _shared_context(tmp_path)
+    semantic_contract.build_corpus_context_with_census(tmp_path)
+    if direction == "delete":
+        alpha.unlink()
+    else:
+        _write(tmp_path, "alpha.md", title="Alpha")
+    structural = _shared_context(tmp_path)
+    enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    assert structural.relation_facts == _shared_context(tmp_path).relation_facts
+    assert enriched.relation_facts == semantic_contract.build_corpus_context_with_census(tmp_path)[0].relation_facts
 
 
 def test_live_event_patch_makes_hot_reads_census_free(
