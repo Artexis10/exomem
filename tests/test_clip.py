@@ -456,7 +456,50 @@ def test_the_clip_trace_reports_the_band_and_what_it_withheld(
     )
 
     lane = explained["retrieval_profile"]["lanes"]["clip"]
-    assert (lane["status"], lane["band"], lane["withheld"]) == ("available_nonmatching", "applied", 6)
+    assert (lane["status"], lane["band"], lane["withheld_pages"]) == ("available_nonmatching", "applied", 6)
+
+
+def test_an_alpha_that_has_no_chance_level_switches_the_band_off_instead_of_failing_the_lane(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
+    rng = np.random.default_rng(11)
+    _photo_library(vault, _unit_rows(rng, 60))
+    query = _unit_rows(rng, 1)[0]
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts",
+        lambda texts, **kw: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda q: query)
+    monkeypatch.setattr(find_module, "_active_ranking", lambda: find_module.RankingConfig(clip_semantic_alpha=1.0))
+
+    explained = commands.op_ask_memory(
+        vault, query="kill switch for risky releases", mode="hybrid", graph=False,
+        rerank=False, scope="kb-only", detail="compact", explain=True,
+    )
+
+    lane = explained["retrieval_profile"]["lanes"]["clip"]
+    assert (lane["status"], lane["band"]) == ("participated", "off")
+
+
+def test_the_band_counts_the_pages_it_withholds_and_says_when_it_had_nothing_to_score(vault) -> None:
+    rng = np.random.default_rng(11)
+    vectors = _unit_rows(rng, 63)
+    index = embeddings.ClipIndex(vault)
+    for number in range(60):
+        index.upsert(f"Knowledge Base/Evidence/photo-{number}.jpg", vectors[number], 1.0)
+    index.upsert_frames(  # three keyframes of one video are one page
+        "Knowledge Base/Evidence/clip.mp4", [(0.0, vectors[60]), (5.0, vectors[61]), (9.0, vectors[62])], 1.0
+    )
+    query = _unit_rows(rng, 1)[0]
+
+    banded = index.search_above_chance(query, 100, allowed_paths=None, alpha=0.01, min_population=50)
+    nothing = index.search_above_chance(query, 100, allowed_paths=set(), alpha=0.01, min_population=50)
+
+    assert (banded.hits, banded.withheld_pages, banded.band) == ([], 61, "applied")
+    assert (nothing.hits, nothing.withheld_pages, nothing.band) == ([], 0, "not_attempted")
 
 
 def test_a_photo_with_no_legible_text_is_found_by_its_image_and_shows_no_ocr_noise(

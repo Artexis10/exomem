@@ -625,8 +625,8 @@ def collect_candidates(
                         "status": "participated" if clip_ranking else "available_nonmatching",
                         "backend": type(clip_idx).__name__,
                         "model": embeddings.CLIP_MODEL_NAME,
-                        "band": "applied" if clip_search.banded else "uncalibrated",
-                        "withheld": clip_search.withheld,
+                        "band": clip_search.band,
+                        "withheld_pages": clip_search.withheld_pages,
                         "metric": {
                             "name": "cosine_similarity",
                             "direction": "higher",

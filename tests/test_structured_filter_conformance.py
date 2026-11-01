@@ -460,7 +460,7 @@ def test_optional_clip_backend_receives_and_cannot_escape_exact_eligibility(
                     ("Knowledge Base/Evidence/eligible.jpg", None, 0.9),
                 ],
                 0,
-                False,
+                "off",
             )
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)

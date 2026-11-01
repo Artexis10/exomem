@@ -993,7 +993,7 @@ def test_available_clip_lane_is_metric_labelled_without_optional_artifacts(
             return True
 
         def search_above_chance(self, _query_vector, *, k: int, allowed_paths=None, alpha, min_population):
-            return clip_index.ClipSearch([(rel.removesuffix(".md"), None, 0.654321987)], 0, False)
+            return clip_index.ClipSearch([(rel.removesuffix(".md"), None, 0.654321987)], 0, "off")
 
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)

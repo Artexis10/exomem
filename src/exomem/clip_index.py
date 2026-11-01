@@ -68,10 +68,13 @@ class ClipSearch(NamedTuple):
     """The hits of a CLIP search and what the chance band did to them."""
 
     hits: list[tuple[str, float | None, float]]
-    #: Hits the unbanded search would have returned that the band removed.
-    withheld: int
-    #: False when no band was asked for, or the population was too small or uniform to calibrate one.
-    banded: bool
+    #: Distinct pages (a video's frames count once) among the unbanded top-k hits that the
+    #: band removed entirely.
+    withheld_pages: int
+    #: "applied" the band ran; "uncalibrated" the population was too small or uniform to
+    #: calibrate one; "off" no band was asked for (alpha outside (0, 1)); "not_attempted"
+    #: there was no image to score.
+    band: str
 
 
 class ClipIndex:
@@ -706,9 +709,12 @@ class ClipIndex:
         The chance level is measured from every indexed image, not from `allowed_paths`: a
         filter chooses which images may be returned, and does not change what an unrelated
         match scores. The in-memory scan alone sees that whole population. The KNN backend
-        returns k rows, so it is never used here and the band is never bypassed.
+        returns k rows, so it is never used here and the band is never bypassed. An alpha
+        outside (0, 1) has no chance level, so it switches the band off instead of failing
+        the lane.
         """
-        return self._brute_force(query_vec, k, allowed_paths, (alpha, min_population))
+        band = (alpha, min_population) if 0.0 < alpha < 1.0 else None
+        return self._brute_force(query_vec, k, allowed_paths, band)
 
     def _brute_force(
         self,
@@ -719,26 +725,22 @@ class ClipIndex:
     ) -> ClipSearch:
         paths, frame_ts, matrix = self.all_vectors()
         if not paths:
-            return ClipSearch([], 0, False)
+            return ClipSearch([], 0, "not_attempted")
         scores = matrix @ query_vec.astype(np.float32, copy=False)
         rows = np.arange(len(paths))
         if allowed_paths is not None:
             rows = np.array([i for i, path in enumerate(paths) if path in allowed_paths], dtype=np.intp)
         wanted = min(k, len(rows))
         if wanted <= 0:
-            return ClipSearch([], 0, False)
+            return ClipSearch([], 0, "not_attempted")
+        in_rows = scores[rows]
+        top = np.argpartition(-in_rows, wanted - 1)[:wanted]
+        window = [int(i) for i in rows[top[np.argsort(-in_rows[top])]]]
+        state = "off"
         cleared = None
         if band is not None:
             cleared = chance_band.semantic_band(scores, alpha=band[0], min_population=band[1])
-        if cleared is not None:
-            clears = np.zeros(len(paths), dtype=bool)
-            clears[list(cleared)] = True
-            rows = rows[clears[rows]]
-        k_eff = min(wanted, len(rows))
-        banded = cleared is not None
-        if k_eff <= 0:
-            return ClipSearch([], wanted, banded)
-        in_rows = scores[rows]
-        top = np.argpartition(-in_rows, k_eff - 1)[:k_eff]
-        top = rows[top[np.argsort(-in_rows[top])]]
-        return ClipSearch([(paths[i], frame_ts[i], float(scores[i])) for i in top], wanted - k_eff, banded)
+            state = "uncalibrated" if cleared is None else "applied"
+        kept = window if cleared is None else [i for i in window if i in cleared]
+        withheld = {paths[i] for i in window} - {paths[i] for i in kept}
+        return ClipSearch([(paths[i], frame_ts[i], float(scores[i])) for i in kept], len(withheld), state)
