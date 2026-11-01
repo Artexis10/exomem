@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
@@ -642,8 +643,61 @@ def _receipt_from_connection(
     )
 
 
-def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
-    """Report whether this store already carries the whole extended schema."""
+#: Stores whose extended schema a read already proved current, keyed by
+#: (st_dev, st_ino, PRAGMA schema_version). A replaced store has a new inode and
+#: every CREATE, ALTER or DROP bumps the schema cookie, so a stale store never
+#: matches an entry. Only the schema facts are kept: the data probes run on
+#: every open. Bounded like the drain's per-cell maps.
+_CURRENT_SCHEMA_LIMIT: Final = 64
+_CURRENT_SCHEMA_LOCK = threading.Lock()
+_CURRENT_SCHEMAS: dict[tuple[int, int, int], None] = {}
+
+
+def _store_identity(vault_root: Path) -> tuple[int, int] | None:
+    try:
+        info = deferred_index.store_path(vault_root).stat()
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _schema_version(connection: sqlite3.Connection) -> int:
+    return int(connection.execute("PRAGMA schema_version").fetchone()[0])
+
+
+def _receipt_schema_is_current(
+    connection: sqlite3.Connection, store: tuple[int, int] | None = None
+) -> bool:
+    """Report whether this store already carries the whole extended schema.
+
+    ``store`` is the (st_dev, st_ino) the caller proved this connection opened;
+    with it, schema facts already proved for the same cookie are reused.
+    """
+    key = None if store is None else (*store, _schema_version(connection))
+    with _CURRENT_SCHEMA_LOCK:
+        known = key is not None and key in _CURRENT_SCHEMAS
+    if not known:
+        if not _receipt_schema_facts_current(connection):
+            return False
+        # The cookie only grows, so an unchanged value proves the facts above
+        # describe exactly the schema the key names.
+        if key is not None and _schema_version(connection) == key[2]:
+            with _CURRENT_SCHEMA_LOCK:
+                if len(_CURRENT_SCHEMAS) >= _CURRENT_SCHEMA_LIMIT:
+                    _CURRENT_SCHEMAS.pop(next(iter(_CURRENT_SCHEMAS)))
+                _CURRENT_SCHEMAS[key] = None
+    return (
+        connection.execute(
+            "SELECT 1 FROM derived_batch_paths "
+            "INDEXED BY derived_paths_missing_sequence "
+            "WHERE batch_seq IS NULL LIMIT 1"
+        ).fetchone() is None
+        and deferred_index.derived_component_check_current(connection)
+    )
+
+
+def _receipt_schema_facts_current(connection: sqlite3.Connection) -> bool:
+    """Whether every column, index and trigger of the extended schema exists."""
     components = {
         str(row[1])
         for row in connection.execute("PRAGMA table_info(derived_batch_components)")
@@ -678,12 +732,6 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
         and "batch_seq" in paths
         and "proven_at" in batches
         and len(present) == 10
-        and connection.execute(
-            "SELECT 1 FROM derived_batch_paths "
-            "INDEXED BY derived_paths_missing_sequence "
-            "WHERE batch_seq IS NULL LIMIT 1"
-        ).fetchone() is None
-        and deferred_index.derived_component_check_current(connection)
     )
 
 
@@ -695,9 +743,12 @@ def _connect_receipt_read(vault_root: Path) -> sqlite3.Connection:
     work an already-migrated store does not need, so probe first and migrate
     only when the store is genuinely stale.
     """
+    opened = _store_identity(vault_root)
     connection = deferred_index._connect(vault_root, create=False)
     try:
-        current = _receipt_schema_is_current(connection)
+        # The same inode before and after the open is the store this connection holds.
+        store = opened if opened is not None and opened == _store_identity(vault_root) else None
+        current = _receipt_schema_is_current(connection, store)
     except Exception:
         connection.close()
         raise
@@ -1620,6 +1671,9 @@ def prove_committed(
         vault_root,
         operation="derived_receipt_proof",
         holder_kind="derived-worker",
+        # One batch's proof is brief and writes only derived rows, so it may run
+        # between two units of a long mutation.
+        may_borrow=True,
     ):
         return _prove_committed_guarded(
             vault_root,
@@ -1826,15 +1880,7 @@ def snapshot_pending_visibility(
         generation = _pending_visibility_generation(connection)
         selected = None if batch_ids is None else set(batch_ids)
         if rel_paths is not None:
-            selected = {
-                str(row[0])
-                for rel in set(rel_paths)
-                for row in connection.execute(
-                    "SELECT batch_id FROM pending_recall_rows "
-                    "WHERE state != 'retired' AND rel_path = ?",
-                    (rel,),
-                )
-            }
+            selected = set(_open_custody_batches(connection, rel_paths))
         # LEFT JOIN preserves orphan custody as an explicit invalid row. Both
         # lineage lookups use their primary keys, including above the body cap.
         query = (
@@ -1937,6 +1983,44 @@ def snapshot_pending_visibility(
             connection.close()
 
 
+def _open_custody_batches(
+    connection: sqlite3.Connection, rel_paths: Collection[str]
+) -> frozenset[str]:
+    # A seek on (path, batch) per path: only the batches with open custody on it.
+    return frozenset(
+        str(row[0])
+        for rel in set(rel_paths)
+        for row in connection.execute(
+            "SELECT batch_id FROM pending_recall_rows WHERE state != 'retired' AND rel_path = ?",
+            (rel,),
+        )
+    )
+
+
+def open_custody_batches(vault_root: Path, rel_paths: Collection[str]) -> frozenset[str] | None:
+    """The batches that still hold unretired pending-visibility custody on any of these paths.
+
+    A batch whose row on a path is retired has handed that path on, or published it, so
+    nothing a newer write did to the path is its to hand on. None when the store cannot
+    be read, for any reason: a handoff that cannot read custody re-proves every batch
+    that shares a path, so this read never fails a committed write.
+    """
+    try:
+        deferred_index.store_path(vault_root).stat()
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return None
+    try:
+        connection = _connect_receipt_read(vault_root)
+        try:
+            return _open_custody_batches(connection, rel_paths)
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 - a held store gate (MUTATION_BUSY) included: dearer, never less
+        return None
+
+
 def pending_visibility_snapshot_is_current(
     vault_root: Path,
     snapshot_generation: int,
@@ -1970,33 +2054,35 @@ def retire_imported_visibility(
     """
     if limit <= 0 or not deferred_index.store_path(vault_root).exists():
         return ("", ""), 0
+    from .cli_ops import OpError
     from .collection_store import legacy_originals, ownership
     from .collection_store.connection import CollectionStoreError
-    from .cli_ops import OpError
     from .writer_lease import active_manager
 
     retired_at = _timestamp(now)
-    with active_manager().consistency_guard(
-        vault_root, operation="derived_imported_custody", holder_kind="derived-worker",
-    ):
-        reader = _connect_receipt_read(vault_root)
-        try:
-            rows = reader.execute(
-                "SELECT p.rel_path,p.batch_id,p.component_revision,p.canonical_generation,p.state,"
-                "d.after_hash,b.state FROM pending_recall_rows p INDEXED BY pending_recall_active "
-                "JOIN derived_batch_paths d ON d.batch_id=p.batch_id AND d.rel_path=p.rel_path "
-                "JOIN derived_batches b ON b.batch_id=p.batch_id "
-                "WHERE p.state!='retired' AND (p.rel_path,p.batch_id)>(?,?) "
-                "ORDER BY p.rel_path,p.batch_id LIMIT ?", (*after, int(limit)),
-            ).fetchall()
-        finally:
-            reader.close()
-        cursor = (str(rows[-1][0]), str(rows[-1][1])) if len(rows) == limit else ("", "")
-        candidates = [row for row in rows if ownership.relevant(row[0])
-                      and row[6] not in {"aborted", "superseded"}]
-        if not candidates:
-            return cursor, 0
-        try:
+    cursor = after
+    try:
+        # A held boundary is one more reason to retain custody for another pass.
+        with active_manager().consistency_guard(
+            vault_root, operation="derived_imported_custody", holder_kind="derived-worker",
+        ):
+            reader = _connect_receipt_read(vault_root)
+            try:
+                rows = reader.execute(
+                    "SELECT p.rel_path,p.batch_id,p.component_revision,p.canonical_generation,p.state,"
+                    "d.after_hash,b.state FROM pending_recall_rows p INDEXED BY pending_recall_active "
+                    "JOIN derived_batch_paths d ON d.batch_id=p.batch_id AND d.rel_path=p.rel_path "
+                    "JOIN derived_batches b ON b.batch_id=p.batch_id "
+                    "WHERE p.state!='retired' AND (p.rel_path,p.batch_id)>(?,?) "
+                    "ORDER BY p.rel_path,p.batch_id LIMIT ?", (*after, int(limit)),
+                ).fetchall()
+            finally:
+                reader.close()
+            cursor = (str(rows[-1][0]), str(rows[-1][1])) if len(rows) == limit else ("", "")
+            candidates = [row for row in rows if ownership.relevant(row[0])
+                          and row[6] not in {"aborted", "superseded"}]
+            if not candidates:
+                return cursor, 0
             # Lock order is manager, canonical SQL snapshot, then deferred CAS.
             # Keep ownership fenced through commit, including during export.
             with ownership.read_snapshot(vault_root) as (canonical, proof):
@@ -2021,9 +2107,9 @@ def retire_imported_visibility(
                     return cursor, retired
                 finally:
                     connection.close()
-        except (CollectionStoreError, OpError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
-            # File-only cells and incomplete ownership retain custody for another pass.
-            return cursor, 0
+    except (CollectionStoreError, OpError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        # File-only cells and incomplete ownership retain custody for another pass.
+        return cursor, 0
 
 
 def retire_pending_visibility(
@@ -2531,26 +2617,19 @@ def _record_batch_recovery_failure(
         connection.close()
 
 
-def recover_prepared_batches(
-    vault_root: Path,
-    *,
-    observe_current_generation: Callable[[Path], str | None] | None,
-    visibility_publisher: Callable[[Path, DerivedBatchReceipt], bool] | None,
-    limit: int,
-    now: float | None = None,
-    converge_current: Callable[[Path, Sequence[str], Sequence[str]], bool] | None = None,
-) -> int:
-    """Boundedly prove crash-cut custody from an independent live observation."""
-    if (
-        limit <= 0
-        or observe_current_generation is None
-        or not deferred_index.store_path(vault_root).exists()
-    ):
-        return 0
-    observed_at = _timestamp(now)
+#: What one guarded recovery proof leaves for after its boundary turn: a
+#: proven batch, a stranded batch owed a current-byte repair or a failure
+#: record, or a batch whose proof settled it (aborted or superseded).
+RecoveryOutcome = Literal["recovered", "repair", "stranded", "settled"]
+
+
+def recovery_candidates(vault_root: Path, *, limit: int, now: float) -> tuple[str, ...]:
+    """Crash-cut batches with due component work, in recovery's rotation order."""
+    if limit <= 0 or not deferred_index.store_path(vault_root).exists():
+        return ()
     connection = deferred_index._connect(vault_root, create=False)
     try:
-        batch_ids = tuple(
+        return tuple(
             str(row[0])
             for row in connection.execute(
                 "SELECT b.batch_id FROM derived_batches AS b WHERE "
@@ -2563,131 +2642,147 @@ def recover_prepared_batches(
                 "('prepared', 'ready', 'retryable', 'reconcile_required') "
                 "AND c.next_attempt_at <= ?) "
                 "ORDER BY b.updated_at, b.created_at, b.batch_id LIMIT ?",
-                (observed_at, int(limit)),
+                (_timestamp(now), int(limit)),
             ).fetchall()
         )
     finally:
         connection.close()
 
-    recovered = 0
-    from .writer_lease import active_manager
 
-    for batch_id in batch_ids:
+def rotate_if_healthy(vault_root: Path, batch_id: str, *, now: float) -> bool:
+    """Rotate a ready batch with live custody and every path in after-state.
+
+    Healthy live custody needs component work, not another activation that
+    would reset its dependency eligibility. This changes only the batch's place
+    in the rotation, never custody, so it needs no mutation boundary: a path
+    that moves meanwhile fails the next proof instead.
+    """
+    current = _load_receipt(vault_root, batch_id)
+    if current.state != "ready":
+        return False
+    connection = _connect_receipt_read(vault_root)
+    try:
+        visibility_complete = _pending_visibility_complete(connection, batch_id)
+    finally:
+        connection.close()
+    if not visibility_complete or any(
+        _canonical_path_state(vault_root, path) != "after" for path in current.paths
+    ):
+        return False
+    connection = deferred_index._connect(vault_root, create=True)
+    try:
+        connection.execute(
+            "UPDATE derived_batches SET updated_at = ? WHERE batch_id = ?",
+            (_timestamp(now), batch_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return True
+
+
+def prove_recovery_batch(
+    vault_root: Path,
+    batch_id: str,
+    *,
+    observe_current_generation: Callable[[Path], str | None],
+    visibility_publisher: Callable[[Path, DerivedBatchReceipt], bool] | None,
+    converge_current: Callable[[Path, Sequence[str], Sequence[str]], bool] | None,
+    now: float,
+) -> RecoveryOutcome:
+    """Prove one crash-cut batch and publish it if proven; the caller holds the boundary."""
+    observed_at = _timestamp(now)
+    observed = observe_current_generation(vault_root)
+    # An unreadable checkpoint is not evidence about this batch's bytes (ruling
+    # R1), so recovery falls back to the receipt's own recorded generation
+    # rather than abandoning exact custody. The proof itself is by content hash
+    # under the observation guards.
+    current_generation = _bounded(
+        _load_receipt(vault_root, batch_id).canonical_generation if observed is None else observed,
+        label="current_generation",
+        maximum=_MAX_IDENTITY,
+    )
+    proof = _prove_committed_guarded(
+        vault_root,
+        batch_id,
+        current_generation=current_generation,
+        known_uncommitted=False,
+        observed_at=observed_at,
+    )
+    if proof.outcome == "reconcile_required":
+        connection = _connect_receipt_read(vault_root)
         try:
-            repair_eligible = False
-            with active_manager().consistency_guard(
-                vault_root,
-                operation="derived_receipt_restart_proof",
-                holder_kind="derived-worker",
-            ):
-                observed = observe_current_generation(vault_root)
-                # An unreadable checkpoint is not evidence about this batch's
-                # bytes (ruling R1), so recovery falls back to the receipt's own
-                # recorded generation rather than abandoning exact custody. The
-                # proof itself is by content hash under the observation guards.
-                current_generation = (
-                    _load_receipt(vault_root, batch_id).canonical_generation
-                    if observed is None
-                    else observed
-                )
-                current_generation = _bounded(
-                    current_generation,
-                    label="current_generation",
-                    maximum=_MAX_IDENTITY,
-                )
-                current = _load_receipt(vault_root, batch_id)
-                connection = _connect_receipt_read(vault_root)
-                try:
-                    visibility_complete = _pending_visibility_complete(connection, batch_id)
-                finally:
-                    connection.close()
-                if current.state == "ready" and visibility_complete:
-                    states, _guards = _observe_canonical_paths(vault_root, current.paths)
-                    if all(state == "after" for state in states):
-                        # Healthy live custody needs component work, not another
-                        # activation that would reset its dependency eligibility.
-                        connection = deferred_index._connect(vault_root, create=True)
-                        try:
-                            connection.execute(
-                                "UPDATE derived_batches SET updated_at = ? WHERE batch_id = ?",
-                                (observed_at, batch_id),
-                            )
-                            connection.commit()
-                        finally:
-                            connection.close()
-                        continue
-                proof = _prove_committed_guarded(
-                    vault_root,
-                    batch_id,
-                    current_generation=current_generation,
-                    known_uncommitted=False,
-                    observed_at=observed_at,
-                )
-                if proof.outcome == "reconcile_required":
-                    connection = _connect_receipt_read(vault_root)
-                    try:
-                        repair_eligible = bool(connection.execute(
-                            "SELECT proven_at IS NOT NULL FROM derived_batches WHERE batch_id = ?",
-                            (batch_id,),
-                        ).fetchone()[0]) and converge_current is not None
-                    finally:
-                        connection.close()
-                elif proof.outcome == "ready":
-                    current = _load_receipt(vault_root, batch_id)
-                    visibility_connection = deferred_index._connect(
-                        vault_root,
-                        create=False,
-                    )
-                    try:
-                        visibility_complete = _pending_visibility_complete(
-                            visibility_connection,
-                            batch_id,
-                        )
-                    finally:
-                        visibility_connection.close()
-                    if not visibility_complete:
-                        publish_pending_visibility(
-                            vault_root,
-                            current,
-                            publisher=visibility_publisher,
-                            now=observed_at,
-                        )
-                    recovered += 1
-            if proof.outcome == "reconcile_required":
-                if repair_eligible:
-                    # Index fan-out must not hold the canonical mutation boundary.
-                    # Reconciliation rechecks current bytes under its final guard.
-                    repair = reconcile_stranded_batches(
-                        vault_root, converge=converge_current,
-                        batch_ids=(batch_id,), limit=1, now=observed_at,
-                    )
-                    if repair["retired"]:
-                        recovered += 1
-                        continue
-                # Failed proof rotates behind later batches with bounded backoff.
-                _record_recovery_failure(
-                    vault_root, batch_id, failure_code="generation_changed",
-                    failed_at=observed_at,
-                )
-        except Exception as error:  # noqa: BLE001 - callback failure stays durable and bounded
-            log.warning(
-                "derived batch recovery failed (%s: %s)",
-                type(error).__name__,
-                error,
-            )
-            try:
-                _record_batch_recovery_failure(
-                    vault_root,
-                    batch_id,
-                    failure_code="handler_unavailable",
-                    failed_at=observed_at,
-                )
-            except (OSError, RuntimeError, ValueError, sqlite3.Error):
-                # The original exact custody remains authoritative even when
-                # failure telemetry itself cannot be advanced.
-                pass
-            continue
-    return recovered
+            proven = bool(connection.execute(
+                "SELECT proven_at IS NOT NULL FROM derived_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()[0])
+        finally:
+            connection.close()
+        return "repair" if proven and converge_current is not None else "stranded"
+    if proof.outcome != "ready":
+        return "settled"
+    current = _load_receipt(vault_root, batch_id)
+    connection = deferred_index._connect(vault_root, create=False)
+    try:
+        visibility_complete = _pending_visibility_complete(connection, batch_id)
+    finally:
+        connection.close()
+    if not visibility_complete:
+        publish_pending_visibility(
+            vault_root, current, publisher=visibility_publisher, now=observed_at,
+        )
+    return "recovered"
+
+
+def finish_recovery(
+    vault_root: Path,
+    batch_id: str,
+    outcome: RecoveryOutcome,
+    *,
+    converge_current: Callable[[Path, Sequence[str], Sequence[str]], bool] | None,
+    now: float,
+) -> bool:
+    """Repair or rotate one proof's outcome outside the boundary; return whether it recovered."""
+    observed_at = _timestamp(now)
+    if outcome == "repair" and converge_current is not None:
+        # Index fan-out must not hold the canonical mutation boundary.
+        # Reconciliation rechecks current bytes under its final guard.
+        repair = reconcile_stranded_batches(
+            vault_root, converge=converge_current,
+            batch_ids=(batch_id,), limit=1, now=observed_at,
+        )
+        if repair["retired"]:
+            return True
+    if outcome in ("repair", "stranded"):
+        # Failed proof rotates behind later batches with bounded backoff.
+        _record_recovery_failure(
+            vault_root, batch_id, failure_code="generation_changed",
+            failed_at=observed_at,
+        )
+    return outcome == "recovered"
+
+
+def record_recovery_error(
+    vault_root: Path, batch_id: str, error: Exception, *, now: float
+) -> None:
+    """Rotate a batch whose recovery raised, leaving its components untouched."""
+    log.warning(
+        "derived batch recovery failed (%s: %s)",
+        type(error).__name__,
+        error,
+    )
+    try:
+        _record_batch_recovery_failure(
+            vault_root,
+            batch_id,
+            failure_code="handler_unavailable",
+            failed_at=_timestamp(now),
+        )
+    except Exception:  # noqa: BLE001 - a held store gate (MUTATION_BUSY) included
+        # The original exact custody remains authoritative even when
+        # failure telemetry itself cannot be advanced. A drain records this in
+        # its pass's `finally`, where an error would replace the pass's own.
+        pass
 
 
 _RECOVERING_BATCHES_SQL: Final = (
@@ -3148,50 +3243,58 @@ def settle_component_not_required(
     return "batch_completed" if batch_completed else "settled"
 
 
-def defer_component(
+def defer_components(
     vault_root: Path,
-    status: DerivedComponentStatus,
+    statuses: Sequence[DerivedComponentStatus],
     *,
     now: float | None = None,
-) -> DerivedComponentStatus:
-    """Release an exact claim awaiting execution, without spending a failure.
+) -> int:
+    """Release several exact claims in one transaction; return how many were current.
 
-    Reuse the existing due state and lease CAS. No new queue or schema is
-    needed; a short eligibility delay prevents re-claiming in the same pass.
-    The execution owner signals the drain after publication.
+    Release without spending a failure, reusing the due state and lease CAS; a
+    short eligibility delay keeps a pass from claiming them again. A claim that
+    is no longer current is skipped, since its newer owner or its expired lease
+    already decides it.
     """
+    if not statuses:
+        return 0
     deferred_at = _timestamp(now)
     connection = deferred_index._connect(vault_root, create=True)
     try:
         connection.execute("BEGIN IMMEDIATE")
         try:
-            changed = connection.execute(
-                "UPDATE derived_batch_components SET state = 'retryable', "
-                "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
-                "next_attempt_at = ?, updated_at = ? "
-                "WHERE batch_id = ? AND component = ? AND revision = ? "
-                "AND lease_revision = ? AND state = 'claimed' AND claim_owner = ?",
-                (
-                    deferred_at + 0.1,
-                    deferred_at,
-                    status.batch_id,
-                    status.component.value,
-                    status.revision,
-                    status.lease_revision,
-                    status.claim_owner,
-                ),
-            ).rowcount
-            if not changed:
-                raise RuntimeError("component claim is no longer current")
+            released = sum(_defer_claim(connection, status, deferred_at) for status in statuses)
         except Exception:
             connection.rollback()
             raise
         connection.commit()
-        return _component_status_from_connection(
-            connection, status.batch_id, status.component
-        )
+        return released
     finally:
         connection.close()
+
+
+def _defer_claim(
+    connection: sqlite3.Connection, status: DerivedComponentStatus, deferred_at: float
+) -> bool:
+    """CAS one exact claim back to due; a short delay keeps it out of this pass."""
+    return bool(
+        connection.execute(
+            "UPDATE derived_batch_components SET state = 'retryable', "
+            "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
+            "next_attempt_at = ?, updated_at = ? "
+            "WHERE batch_id = ? AND component = ? AND revision = ? "
+            "AND lease_revision = ? AND state = 'claimed' AND claim_owner = ?",
+            (
+                deferred_at + 0.1,
+                deferred_at,
+                status.batch_id,
+                status.component.value,
+                status.revision,
+                status.lease_revision,
+                status.claim_owner,
+            ),
+        ).rowcount
+    )
 
 
 def complete_component(
@@ -3210,6 +3313,8 @@ def complete_component(
         vault_root,
         operation="derived_component_completion",
         holder_kind="derived-worker",
+        # One component's completion is brief and writes only derived rows, as a proof is.
+        may_borrow=True,
     ):
         if observe_current_generation is not None:
             current_generation = observe_current_generation(vault_root)

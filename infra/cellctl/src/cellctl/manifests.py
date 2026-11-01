@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -20,23 +21,30 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .backup_source import VAULT_CHECK_COMMAND
+from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .storage.topolvm import FamilyRequest
-from .storage_config import LEGACY_CLASS
+from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
 # already converged.
-RENDER_VERSION = 2
+RENDER_VERSION = 3
 
 NAMESPACE_PREFIX = "exo-cell-"
 GATEWAY_NAMESPACE = "exomem-cloud"
 GATEWAY_POD_LABEL = "app.kubernetes.io/name"
 GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
 CELL_PORT = 8765
+# cellctl runs in GATEWAY_NAMESPACE; the chart schema pins that namespace.
+CELLCTL_POD_LABEL_VALUE = "cellctl"
 ARTIFACT_BROKER_PORT = 8767
 ARTIFACT_BROKER_POD_LABEL_VALUE = "exomem-artifact-broker"
 MEDIA_EDGE_PORT = 8769
 MEDIA_EDGE_POD_LABEL_VALUE = "exomem-media-edge"
+# D12, decided by the operator on 2026-10-31: the namespace label that opens the network to the edge while a
+# cell's store is served or draining. The chart's edge ingress and cellctl admission select on it, and
+# test_media_edge_chart imports it to keep them in step.
+MEDIA_EDGE_ACCESS_LABEL = "exomem.io/media-edge-access"
 MEDIA_SLOT_PORT = 8768
 MEDIA_SLOT_POD_LABEL_VALUE = "exomem-media-slot-lease"
 STORAGE_CLASS = LEGACY_CLASS
@@ -60,8 +68,11 @@ MEDIA_ADAPTER = "media-edge"
 # The store settings cellctl renders itself. The chart's policy may add to them and never replace one.
 MEDIA_STORE_OWNED_KEYS = frozenset(
     {"store", "enabled", "adapter", "key_version", "name_key_path", "identity_path", "recipient",
-     "max_object_bytes", "root"}
+     "max_object_bytes", "root", "growth_threshold"}
 )
+# D12: the hydration capacity the cell reads from the policy, a pair the store protocol fixes. The cell's
+# copy is `_HYDRATION_KEYS` in src/exomem/media_capacity.py; cellctl cannot import the cell, so change both.
+MEDIA_HYDRATION_KEYS = ("max_temporary_bytes", "max_hydrations")
 MEDIA_STORE_CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
 MEDIA_EDGE_URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 MEDIA_EDGE_CREDENTIAL_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
@@ -266,6 +277,9 @@ class CellManifestSpec:
     media_max_object_bytes: int = 0
     # Operator-set eviction and hydration settings the runtime reads from the same file.
     media_store_policy: dict[str, bool | int | float] = field(default_factory=dict)
+    # D12: False for a turned-off cell that keeps its key, credential and egress until it drains.
+    # Its runtime offloads nothing new and still hydrates its evicted originals.
+    media_store_enabled: bool = True
     # A cell that holds a media key bundle but that the edge does not serve. It keeps its store
     # identity, disabled, so its evicted originals still read as evicted, never as deleted. It
     # gets no credential, no key and no egress to the edge.
@@ -283,6 +297,8 @@ class CellManifestSpec:
             raise ValueError("a media edge cell needs its credential, key bundle, key version and object bound")
         if self.media_edge_url and self.media_store_retained:
             raise ValueError("a cell the media edge serves does not also retain a disabled store")
+        if self.media_edge_url:
+            check_media_store_policy(self.media_store_policy)
 
     @property
     def media_store(self) -> bool:
@@ -307,10 +323,14 @@ class CellManifestSpec:
 
 
 def _labels(spec: CellManifestSpec) -> dict[str, str]:
+    return _cell_labels(spec.cell_id)
+
+
+def _cell_labels(cell_id: str) -> dict[str, str]:
     return {
         "app.kubernetes.io/name": "exomem-cell",
         "app.kubernetes.io/part-of": "exomem-cloud",
-        "exomem.io/cell": spec.cell_id,
+        "exomem.io/cell": cell_id,
     }
 
 
@@ -322,20 +342,29 @@ def _selector_labels(spec: CellManifestSpec) -> dict[str, str]:
 
 
 def render_namespace(spec: CellManifestSpec) -> dict:
+    return render_cell_namespace(spec.cell_id, media_edge_access=bool(spec.media_edge_url))
+
+
+def render_cell_namespace(cell_id: str, *, media_edge_access: bool) -> dict:
+    """A cell's namespace with every label cellctl owns on it, so an apply of it alone drops none."""
     return {
         "apiVersion": "v1",
         "kind": "Namespace",
         "metadata": {
-            "name": spec.namespace,
+            "name": namespace_name(cell_id),
             "labels": {
-                **_labels(spec),
-                "exomem.io/cloud-cell": spec.cell_id,
+                **_cell_labels(cell_id),
+                "exomem.io/cloud-cell": cell_id,
                 "pod-security.kubernetes.io/enforce": "restricted",
                 "pod-security.kubernetes.io/enforce-version": POD_SECURITY_VERSION,
                 "pod-security.kubernetes.io/audit": "restricted",
                 "pod-security.kubernetes.io/audit-version": POD_SECURITY_VERSION,
                 "pod-security.kubernetes.io/warn": "restricted",
                 "pod-security.kubernetes.io/warn-version": POD_SECURITY_VERSION,
+                # D12: the label follows the credential. In the render that drops the credential the namespace
+                # applies before the Secret, so the label leaves first and the credential next; the active-set
+                # entry leaves at the next pass's start.
+                **({MEDIA_EDGE_ACCESS_LABEL: "true"} if media_edge_access else {}),
             },
         },
     }
@@ -391,8 +420,9 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
 
 
 def render_network_policies(spec: CellManifestSpec) -> list[dict]:
-    """Default deny, gateway-only runtime ingress, optional broker and media edge
-    egress, and backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
+    """Default deny, runtime ingress from the gateway to the cell port and from
+    cellctl to the health-only port, optional broker and media edge egress, and
+    backup/restore Jobs limited to TCP 443 plus DNS (D5, D11)."""
 
     default_deny = {
         "apiVersion": "networking.k8s.io/v1",
@@ -430,7 +460,22 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
                         }
                     ],
                     "ports": [{"protocol": "TCP", "port": CELL_PORT}],
-                }
+                },
+                {
+                    "from": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "kubernetes.io/metadata.name": GATEWAY_NAMESPACE
+                                }
+                            },
+                            "podSelector": {
+                                "matchLabels": {GATEWAY_POD_LABEL: CELLCTL_POD_LABEL_VALUE}
+                            },
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": CELL_HEALTH_PORT}],
+                },
             ],
             "egress": [],
         },
@@ -494,6 +539,18 @@ def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
+def check_media_store_policy(policy: dict[str, bool | int | float]) -> None:
+    """D12: the hydration capacity is both keys or neither, each a positive whole number.
+
+    The cell reads any other shape as no capacity and refuses every hydration, so a render
+    refuses it here (decided 2026-10-31). `type(...) is int` refuses booleans, fractions and infinity."""
+    present = [key for key in MEDIA_HYDRATION_KEYS if key in policy]
+    if present and (len(present) != len(MEDIA_HYDRATION_KEYS)
+                    or not all(type(policy[key]) is int and policy[key] > 0 for key in present)):
+        raise ValueError("the media store policy needs max_temporary_bytes and max_hydrations together, "
+                         "each a positive whole number, for its hydration capacity")
+
+
 def _media_store_config(spec: CellManifestSpec) -> str:
     """The file #2140's runtime reads: one store per vault, keyed by the vault's path.
     The store identity is per cell, so a reference restored into another cell counts as none."""
@@ -504,13 +561,15 @@ def _media_store_config(spec: CellManifestSpec) -> str:
     store = {
         **spec.media_store_policy,
         "store": f"media-edge:{spec.cell_id}",
-        "enabled": True,
+        "enabled": spec.media_store_enabled,
         "adapter": MEDIA_ADAPTER,
         "key_version": str(spec.media_key_version),
         "name_key_path": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_NAME_KEY_KEY]}",
         "identity_path": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_IDENTITY_KEY]}",
         "recipient": spec.media_recipient,
         "max_object_bytes": spec.media_max_object_bytes,
+        # D12: the one threshold cellctl grows the volume at; the cell sizes import windows below it.
+        "growth_threshold": GROWTH_THRESHOLD_PERCENT / 100,
     }
     return json.dumps({"vaults": {CELL_VAULT_PATH: store}}, sort_keys=True, separators=(",", ":"))
 
@@ -710,6 +769,7 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
             "name": "EXOMEM_CLOUD_CELL_TOKEN",
             "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "cell-token"}},
         },
+        {"name": CELL_HEALTH_PORT_ENV, "value": str(CELL_HEALTH_PORT)},
     ]
     if spec.bearer_previous:
         # Optional: inside a hold the StatefulSet is applied even when this
@@ -915,7 +975,8 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                                 str(CELL_PORT),
                             ]),
                             "ports": [
-                                {"name": "http", "containerPort": CELL_PORT, "protocol": "TCP"}
+                                {"name": "http", "containerPort": CELL_PORT, "protocol": "TCP"},
+                                {"name": "health", "containerPort": CELL_HEALTH_PORT, "protocol": "TCP"},
                             ],
                             "env": _runtime_env(spec),
                             "resources": {
@@ -935,7 +996,7 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
                                 **_container_security_context(),
                             },
                             "readinessProbe": {
-                                "httpGet": {"path": "/health/ready", "port": "http"},
+                                "httpGet": {"path": CELL_READINESS_PATH, "port": "http"},
                                 "periodSeconds": 5,
                                 "timeoutSeconds": 2,
                                 "failureThreshold": 2,
@@ -1016,6 +1077,10 @@ FILESYSTEM_USE_COMMAND = (
     "print(\" %d %d\" % ((s.f_blocks - s.f_bfree) * s.f_frsize, s.f_blocks * s.f_frsize), end=\"\")'"
 )
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
+# add-cloud-media-store D12: the evicted count and bytes of the media report. The cell image has no
+# census of its sidecars yet (a seam in src/exomem), so every report says unknown. Unknown keeps a
+# turned-off cell's key and egress, the safe side of the drain rule.
+MEDIA_CENSUS_UNKNOWN = "unknown unknown"
 
 
 def hold_job_name(base: str, hold_started_at: str) -> str:
@@ -1233,6 +1298,10 @@ def render_backup_job(
         # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
         # the id alone and the Job successful: the backup itself succeeded.
         f"{{ {FILESYSTEM_USE_COMMAND} >> /dev/termination-log || true; }}",
+        # D12: "<evicted count> <evicted bytes> <capture time>" on a line of its own. The capture time
+        # is the hold start: the Job reads a clone, or the stopped cell's volume, taken after it.
+        f"{{ printf '\\n%s %s' {shlex.quote(MEDIA_CENSUS_UNKNOWN)} {shlex.quote(spec.hold_started_at)} "
+        ">> /dev/termination-log || true; }",
     ]
     return {
         "apiVersion": "batch/v1",

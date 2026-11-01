@@ -30,7 +30,7 @@ directory independently.
 | `queries.jsonl`          | One record per `find()`/`search_memory` call.                      |
 | `writes.jsonl`           | One record per note/add/replace write.                          |
 | `reads.jsonl`            | One record per `get()` read.                                     |
-| `mutations.jsonl`        | One record per mutation attempt (the mutation journal).          |
+| `mutations.jsonl`        | One record per mutation attempt or refusal a caller saw (the mutation journal). |
 | `ledger.jsonl`           | One record per **MCP tool call** — the call ledger (below).       |
 | `ledger-archive/`        | The call ledger's rotated segments, content-addressed.           |
 | `ledger.gap`             | Empty; its mtime marks the latest call whose row failed to append. |
@@ -255,7 +255,9 @@ it with `exomem logs verify`.
 - **`client_name` / `client_version` / `transport` / `session_id`** come from
   the MCP initialize handshake and are recorded **in the clear**: they identify
   software, the same class of value as a `User-Agent`. This is what makes one
-  client's calls separable when several are connected to one vault at once. It
+  client's calls separable when several are connected to one vault at once. On
+  stdio, `session_id` is one value for the life of the server process, so every
+  call of one connection shares it and two connections never do. It
   is client-declared, so treat it as a diagnostic hint, not an authorization
   input. `caller_principal_hash` is the separate, hashed, authenticated
   identity. A stateless request carries no handshake; there the name comes
@@ -310,7 +312,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `advisory.overlap_groups` | Grouping and emitting that sweep's candidates — a ref batch and a review-state read per candidate. |
 | `preflight.contract_eval`, `preflight.corpus_context`, `preflight.page_states`, `preflight.read_guarded`, `preflight.registries`, `preflight.relation_review`, `preflight.validity_token` | The write's preflight stages, from the per-stage collector (`MutationTimings`). |
 | `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
-| `writer.resolver_snapshot` | The wikilink resolver a writer prepares its draft with. One field names the route: `forked` from the warm resolver cache, `corpus_entries` from the current corpus context, or `disk`, a full read of the vault's titles. When the corpus route declines, one `declined_<reason>` field says why: `external_pending`, `events_not_live`, `checkpoint_absent`, `freshness_differs`, `corpus_absent`, `checkpoint_differs`, `proof_failed`, `identity_changed`, `changed_during_proof` or `unkeyable`. |
+| `writer.resolver_snapshot` | The wikilink resolver a writer prepares its draft with. One field names the route: `forked` from the warm resolver cache, `corpus_entries` from the current corpus context, or `disk`, a full read of the vault's titles. A caller that must not walk the vault, such as the due-state write delta, gets no resolver when both cheap routes decline and records `disk_declined` instead. When the corpus route declines, one `declined_<reason>` field says why: `external_pending`, `events_not_live`, `checkpoint_absent`, `freshness_differs`, `corpus_absent`, `checkpoint_differs`, `proof_failed`, `identity_changed`, `changed_during_proof` or `unkeyable`. |
 | `preflight.creation` | A page creation's preflight, before the commit. `structural_ms` is its structural evaluation and `relation_review_ms` its relation review when the page needs one, both in whole milliseconds; the commit reuses that relation review while its validity stamp stays current. |
 | `commit.source_closure`, `commit.relation_review_prepare`, `commit.catalog_prepare`, `commit.relation_review`, `commit.relation_review_attempt` | A page creation's commit stages, recorded directly. Before the guard: the source closure, the relation-review preparation and the model warm-up (`commit.embedding_prewarm`). Inside it: the catalog preparation and the relation-review commit. `commit.relation_review_attempt` is the commit's in-lock revalidation, with one field for its outcome: `reused`, `revalidated` or `unavailable`. `commit.relation_review_prepare` carries the same field for the preliminary attempt before the guard, which is offered the preflight's relation review: `reused` means the commit did not repeat it. |
 | `post_commit.structure_suggestion`, `post_commit.records_routing`, `post_commit.observation_delta`, `post_commit.records_delivery`, `post_commit.due_state`, `post_commit.capture_sweep`, `post_commit.entity_candidate` | The advisory blocks a write attaches after its commit, one span each, for a page creation and an existing-page commit alike. |
@@ -562,7 +564,15 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
 - `exomem_mutation_busy_total{code}`, `exomem_boundary_wait_ms`,
   `exomem_boundary_hold_ms`, `exomem_boundary_overdue_total` — mutation
   contention: busy refusals by code, acquire-wait and hold histograms, and
-  holds that exceeded the long-holder threshold.
+  holds that exceeded the long-holder threshold. `exomem_mutation_busy_total`
+  counts a busy refusal once, when it reaches a caller. A background holder
+  (a graph or derived drain) that is refused and retries does not count.
+- `exomem_boundary_borrowed_total`, `exomem_boundary_borrowed_hold_ms` — holds
+  that ran on a loan: a long mutation, such as an import, lends its boundary
+  between two committed units to a waiting derived proof. A lender's
+  `exomem_boundary_hold_ms` includes the time on loan; its
+  `mutation_lock_released` and `mutation_lock_long_hold` events give that part
+  as `lent_ms`.
 - `exomem_lease_ops_total{op,outcome}`, `exomem_coordinator_errors_total{code}` —
   writer-lease coordination. An `acquire` with outcome `reused` is a collection-store
   write nested in an operation that kept the operation's grant instead of

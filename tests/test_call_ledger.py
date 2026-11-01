@@ -265,6 +265,7 @@ def _fake_mcp_client(monkeypatch, *, name: str, version: str) -> None:
             )
         ),
         session_id="sess-1234",
+        transport="stdio",
     )
     monkeypatch.setattr(dependencies, "get_context", lambda: context)
     monkeypatch.setattr(dependencies, "get_http_headers", lambda **_kw: {})
@@ -282,9 +283,17 @@ def test_caller_identity_comes_from_the_handshake(monkeypatch) -> None:
     identity = command_surface.mcp_caller_identity()
     assert identity["client_name"] == "claude-ai"
     assert identity["client_version"] == "1.2.3"
-    assert identity["session_id"] == "sess-1234"
+    # stdio: the connection's own session, not the id the framework minted for this call.
+    assert identity["session_id"] == command_surface.mcp_session_id() != "sess-1234"
     assert identity["transport"] == "stdio"
     assert identity["app_id"] is None
+
+    import fastmcp.server.dependencies as dependencies
+
+    monkeypatch.setattr(dependencies, "get_http_headers", lambda **_kw: {"user-agent": "client/1"})
+    over_http = command_surface.mcp_caller_identity()
+    assert over_http["transport"] == "http"
+    assert over_http["session_id"] == "sess-1234"
 
 
 def test_the_row_carries_the_calling_client(ledger_dir: Path, monkeypatch) -> None:
@@ -295,7 +304,7 @@ def test_the_row_carries_the_calling_client(ledger_dir: Path, monkeypatch) -> No
     row = _rows(ledger_dir)[0]
     assert row["client_name"] == "chatgpt"
     assert row["client_version"] == "9.9"
-    assert row["session_id"] == "sess-1234"
+    assert row["session_id"] == command_surface.mcp_session_id()
 
 
 def test_identity_is_absent_rather_than_fatal_outside_a_call(ledger_dir: Path) -> None:
@@ -1429,11 +1438,11 @@ def test_a_gateway_actor_is_independent_of_the_handshake_and_absent_without_head
     assert command_surface.mcp_caller_identity()["app_id"] is None
 
     monkeypatch.setattr(
-        dependencies, "get_http_headers", lambda: {cloud_cell.GATEWAY_APP_ID_HEADER: actor}
+        dependencies, "get_http_headers", lambda **_kw: {cloud_cell.GATEWAY_APP_ID_HEADER: actor}
     )
     assert command_surface.mcp_caller_identity()["app_id"] == actor
 
-    def unavailable():
+    def unavailable(**_kw):
         raise LookupError("no HTTP request")
 
     monkeypatch.setattr(dependencies, "get_http_headers", unavailable)

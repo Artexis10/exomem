@@ -8937,7 +8937,10 @@ def test_legacy_navigation_capture_refuses_postprepare_file_drift(tmp_path, monk
     )
     draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
     monkeypatch.setattr(catalog_publication, "prepare_planned_markdown_batch", change_after_prepare)
-    with pytest.raises(create_file_module.CreateFileError):
+    # Only a server-planned auxiliary moved, so the refusal is a retryable busy that re-plans it.
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError) as refused:
         create_file_module.create_file(
             vault,
             draft_id=draft.draft_id,
@@ -8945,6 +8948,8 @@ def test_legacy_navigation_capture_refuses_postprepare_file_drift(tmp_path, monk
             draft_token=draft.draft_token,
             **kwargs,
         )
+    assert (refused.value.code, refused.value.details["cause"]) == ("MUTATION_BUSY", "auxiliary_changed")
+    assert refused.value.details["committed"] is False
     assert "Knowledge Base/index.md" in prepared_paths
     assert target.read_text(encoding="utf-8") == "concurrent navigation change\n"
     assert not (vault / "Knowledge Base/Notes/Insights/new.md").exists()

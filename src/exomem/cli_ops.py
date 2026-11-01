@@ -37,8 +37,8 @@ INVALID_OPERATION_ARGUMENTS = "INVALID_OPERATION_ARGUMENTS"
 
 RELATION_REVIEW_STABLE_ID_REMEDIATION = (
     'For reviewed-none, preview maintain_memory(mode="backfill-ids"). '
-    "Resolve reported identity issues before confirmation for CLI backfill of "
-    "missing IDs, then re-read and validate."
+    "Resolve reported identity issues before confirmation, then backfill with its "
+    "plan_id and a why; re-read and validate."
 )
 
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a
@@ -79,7 +79,10 @@ _REMEDIATION: dict[str, str] = {
         "Point the writer-lease URL at a service that implements /v1/vaults/<id>/lease, "
         "or disable coordination; retrying cannot change this answer."
     ),
-    "WRITER_FENCED": "Retry the mutation on the current writer.",
+    "WRITER_FENCED": (
+        "Retry the mutation; the retry runs under whichever lease is current now, "
+        "which may be this process's own renewed lease."
+    ),
     "INGRESS_BYPASSED": (
         "Public traffic must enter via the HA edge hostname; check DNS, tunnel ingress, "
         "and worker route coverage, or set EXOMEM_EDGE_STAMP_ENFORCE=0 to break glass."
@@ -206,6 +209,9 @@ _CONFLICT_CODES = frozenset(
         "MUTATION_ACKNOWLEDGEMENT_PENDING",
         "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
         "MUTATION_OUTCOME_UNKNOWN",
+        # A maintenance job holds the one slot, or its plan changed since the preview.
+        "MAINTENANCE_JOB_ACTIVE",
+        "STALE_MAINTENANCE_PLAN",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
         # proposal whose bound content changed since review is a conflict, not a
         # plain bad-request — the client's honest recourse is to re-scan/re-read,

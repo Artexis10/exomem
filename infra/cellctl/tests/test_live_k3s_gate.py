@@ -137,13 +137,13 @@ def _git(repo: Path, *args: str) -> str:
                           text=True, env=env).stdout.strip()
 
 
-def _run_scope(repo: Path, event: str, base: str, head: str, tmp_path: Path, *, full: bool = False) -> str:
+def _run_scope(repo: Path, event: str, base: str, head: str, tmp_path: Path) -> str:
     """Run the step exactly as GitHub's `shell: bash` does (-eo pipefail)."""
     step = _scope_step()
     output = tmp_path / "github_output"
     output.write_text("")
     env = {**os.environ, **{k: str(v) for k, v in step["env"].items()},
-           "EVENT": event, "BASE": base, "HEAD": head, "GITHUB_OUTPUT": str(output), "FULL_CI": str(full).lower()}
+           "EVENT": event, "BASE": base, "HEAD": head, "GITHUB_OUTPUT": str(output)}
     subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
                    cwd=repo, env=env, check=True, capture_output=True, text=True)
     (line,) = [line for line in output.read_text().splitlines() if line.startswith("run=")]
@@ -221,11 +221,18 @@ def test_every_live_path_matches_the_pattern(path: str) -> None:
     assert re.search(_scope_step()["env"]["LIVE_K3S_PATTERN"], path), path
 
 
-def test_full_caller_runs_live_suites_even_when_pr_paths_are_unrelated(repo, tmp_path):
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_scheduled_and_dispatched_runs_run_the_live_suite_whatever_the_paths(repo, tmp_path, event):
+    # ci.yml calls this workflow only from schedule and dispatch; the called workflow keeps that event.
     root, base = repo
-    assert _run_scope(root, "pull_request", base, base, tmp_path, full=True) == "true"
+    assert _run_scope(root, event, base, base, tmp_path) == "true"
+
+
+def test_pull_request_jobs_do_not_depend_on_the_draft_state():
     workflow = _workflow()
     triggers = workflow.get("on", workflow.get(True))
-    assert triggers["workflow_call"]["inputs"]["full"]["type"] == "boolean"
+    # ci.yml calls this workflow; its concurrency group must carry the caller's workflow name.
+    assert "workflow_call" in triggers
     assert "github.workflow" in workflow["concurrency"]["group"]
-    assert "inputs.full" in workflow["jobs"]["live-k3s-scope"]["if"]
+    for job in ("checks", "live-k3s-scope"):
+        assert "draft" not in workflow["jobs"][job]["if"]

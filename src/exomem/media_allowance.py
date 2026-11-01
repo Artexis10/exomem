@@ -28,6 +28,16 @@ class ReferenceUsage:
             return None
         return sum(binary.size for binary, _reference in self.versions.values())
 
+    def charged(
+        self, binary: originals.BinaryBinding, reference: originals.StoredObject,
+    ) -> ReferenceUsage:
+        """This census plus a version that a writer is about to bind; an unknown census stays unknown."""
+        key = _key(reference)
+        if self.versions is None or key in self.versions:
+            return self
+        return ReferenceUsage({**self.versions, key: (binary, reference)}, self.observed_at,
+                              {**self.live_paths, key: binary.path})
+
 
 def _key(reference: originals.StoredObject) -> tuple[str, str, str]:
     return reference.store, reference.object, reference.version

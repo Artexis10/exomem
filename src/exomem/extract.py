@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import accel, asr_runtime, runtime_resources
+from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
 from .asr_facts import (
     DECODING_BATCHED,
     DECODING_SEQUENTIAL,
@@ -360,15 +360,30 @@ def _get_whisper():
                 selection.device,
                 selection.compute_type,
             )
-            try:
-                _WHISPER = WhisperModel(
+
+            def load(chosen: asr_runtime.ASRSelection):
+                return WhisperModel(
                     WHISPER_MODEL,
-                    device=selection.device,
-                    compute_type=selection.compute_type,
+                    device=chosen.device,
+                    compute_type=chosen.compute_type,
                     cpu_threads=runtime_resources.resolve_policy().cpu_threads,
                     num_workers=1,
                 )
+
+            try:
+                try:
+                    _WHISPER = load(selection)
+                except Exception as exc:
+                    cpu = asr_runtime.cpu_selection_after_cuda_oom(selection, exc)
+                    if cpu is None:
+                        raise
+                    log.warning("the GPU ran out of memory while loading ASR; this media process runs ASR on the CPU: %s", exc)
+                    _WHISPER = load(cpu)
             except Exception as exc:
+                # Out of memory first: cuBLAS reports it as a CUDA runtime failure, which would block the job.
+                busy = asr_runtime.as_gpu_busy(exc)
+                if busy is not None:
+                    raise busy from exc
                 typed = asr_runtime.as_compute_runtime_error(exc)
                 if typed is not None:
                     raise typed from exc
@@ -410,6 +425,8 @@ def prewarm() -> asr_runtime.ASRComputeRuntimeError | None:
     except asr_runtime.ASRComputeRuntimeError as e:
         log.warning("ASR prewarm hit a compute runtime failure; worker will circuit-break: %s", e)
         return e
+    except asr_runtime.ASRGpuBusy as e:
+        log.info("ASR prewarm skipped (GPU busy); model will load on the first media job: %s", e)
     except ExtractionUnavailable as e:
         log.info("ASR prewarm skipped (engine unavailable): %s", e)
     except Exception:  # noqa: BLE001 — prewarm must never crash startup
@@ -909,7 +926,7 @@ def _is_timed_text(text: str) -> bool:
 
 # ---------------- optional: ASR speaker diarization (EXOMEM_DIARIZE, default OFF) ----
 #
-# pyannote's who-spoke-when pipeline runs in an ISOLATED CPU-torch sidecar venv (sidecar/diarizer/)
+# pyannote's who-spoke-when pipeline runs in an ISOLATED sidecar venv (`diarizer_sidecar`)
 # as a subprocess, NOT in this process: the main service runs a custom torch-2.12+cu132 (Blackwell)
 # build for whisper/CLIP/bge, which is fundamentally incompatible with the pyannote/torchaudio
 # ecosystem (torchcodec native-lib load failure, torchaudio AudioMetaData / list_audio_backends
@@ -939,24 +956,12 @@ def _diarize_enabled() -> bool:
 
 
 def _diarizer_sidecar_python() -> Path | None:
-    """Locate the isolated diarization sidecar's interpreter, or None if unprovisioned.
-
-    `EXOMEM_DIARIZE_SIDECAR_PYTHON` overrides; else the conventional
-    `sidecar/diarizer/.venv/{Scripts/python.exe|bin/python}` under the repo root. Returns None
-    (→ plain transcript) when the venv isn't built — never auto-builds at runtime.
-    """
-    override = os.environ.get("EXOMEM_DIARIZE_SIDECAR_PYTHON")
-    if override:
-        p = Path(override)
-        return p if p.is_file() else None
-    root = Path(__file__).resolve().parents[2]  # src/exomem/extract.py → repo root
-    rel = "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    py = root / "sidecar" / "diarizer" / ".venv" / rel
-    return py if py.is_file() else None
+    """The diarization sidecar's interpreter, or None when unprovisioned (→ plain transcript)."""
+    return diarizer_sidecar.python()
 
 
 def _diarizer_worker_script() -> Path:
-    return Path(__file__).resolve().parents[2] / "sidecar" / "diarizer" / "worker.py"
+    return diarizer_sidecar.worker_script()
 
 
 def _diarizer_timeout(path: Path) -> float:

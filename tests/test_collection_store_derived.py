@@ -235,7 +235,7 @@ def _restart_into_a_slow_rebuild(running, monkeypatch):
     """Import one member of six batches, drop its rows file and restart the service, which rebuilds them.
 
     Each replayed batch takes 0.3 s, as a batch does beside CPU-bound requests, and the service's mutation
-    timeout is one second: longer than one batch, shorter than the member's six. Returns the restarted
+    timeout is one second: longer than one batch, shorter than the member's batches together. Returns the restarted
     service, the rows the import left and the start of each replayed batch.
     """
     root = running.root
@@ -710,6 +710,54 @@ def test_a_rebuild_leaves_the_vault_commit_generation_where_it_was(derived):
             outcomes = [derived_rows.step(root, restarted) for _ in range(8)]
         assert "done" in outcomes
         assert writer_lease.read_commit_generation(root) == generation
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["import", "rebuild"])
+def test_slow_rows_keep_each_derived_boundary_hold_near_the_step_budget(derived, monkeypatch, replay):
+    """Defect: a derived batch held the vault mutation boundary for as many rows as it took, whatever each
+    cost. Beside a large derived file a row costs milliseconds, so an import or a rebuild held every
+    foreground write and read for seconds per batch."""
+    day = "2026-11-01"
+    writer, job = derived("slow", {f"samples/{day}.json": samples((day, at(day, *(
+        (f"{minute // 60:02d}:{minute % 60:02d}", minute) for minute in range(240)))))})
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 500)
+    apply, transaction, holds = derived_rows.apply, derived_rows.Store.transaction, []
+
+    def slow(conn, goal, items, **kwargs):
+        time.sleep(0.006 * len(items))
+        return apply(conn, goal, items, **kwargs)
+
+    @contextlib.contextmanager
+    def timed(self):
+        started = time.monotonic()
+        with transaction(self) as conn:
+            yield conn
+        holds.append(time.monotonic() - started)
+
+    def slowed():
+        monkeypatch.setattr(derived_rows, "apply", slow)
+        monkeypatch.setattr(derived_rows.Store, "transaction", timed)
+
+    path = writer.handle.path
+    if not replay:
+        slowed()
+        assert finish(writer, job)["state"] == "complete"
+        assert len(_rows_file(derived_rows.path(path))) == 240
+    else:
+        assert finish(writer, job)["state"] == "complete"
+        before = _rows_file(derived_rows.path(path))
+        writer.handle.close()
+        for suffix in ("", "-wal", "-shm"):
+            derived_rows.path(path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+        slowed()
+        with connection.open_writer(path, lease_check=lambda: True) as handle:
+            restarted = CollectionWriter(writer.root, handle)
+            with preview_store(writer.root, handle):
+                outcomes = [derived_rows.step(writer.root, restarted) for _ in range(64)]
+            assert "done" in outcomes
+        assert _rows_file(derived_rows.path(path)) == before
+    assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
+    assert max(holds) < 0.75  # a 240-row batch at this pace held the boundary for about 1.5 s
 
 
 def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(derived):

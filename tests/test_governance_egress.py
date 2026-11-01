@@ -3015,6 +3015,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "work-item": True,
             "propose": False,
             "apply-proposal": False,
+            "acknowledge": False,
         },
         ("process_media", "operation"): {
             "process": False,
@@ -3033,6 +3034,9 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "fix": True,
             "reconcile": False,
             "backfill-ids": True,
+            # A job read is a structure read; its cancel flags a job and is a write.
+            "maintenance-job": True,
+            "maintenance-job-cancel": False,
             "structured-files": True,
             # `curation` is registered "mutation": a bare `mode="curation"`
             # carries no curation_action, and an unstated action stays on the

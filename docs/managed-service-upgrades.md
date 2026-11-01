@@ -180,6 +180,213 @@ clients to authorize again. If startup fails, leave the unit stopped and
 inspect the journal and retained state before another change; do not silently
 start an older release over migrated state.
 
+## Rehearse a release on a copy
+
+Rehearse each release on a copy of the live vault and state before you install
+it. The rehearsal runs the same handoff on a throwaway managed service, so it
+shows what the live switch will do. The checks judge what callers see, not
+whether a repair runs. Install the release only when all four pass:
+
+- `handoff.ready_after_ms` is under 120000 (two minutes).
+- `/health/ready` stays ready for 45 minutes after the switch.
+- Every full lexical repair in that window publishes.
+- During each repair in that window, one MCP read and one MCP write succeed,
+  and neither returns `MUTATION_BUSY` or `VAULT_LOCK_TIMEOUT`.
+
+A failed check holds the install. A repair that holds `/health/ready` at
+`not_ready` fails, and so does a write refused to its caller. Run the same read
+and write in the live install window; there, use a write that is safe to repeat,
+such as a scratch note.
+`ready_after_ms` counts from the old worker's stop, so it includes the state
+migrator when `handoff.migration.state` is `ran`.
+
+The copy needs disk for the vault and the state directory, plus one release
+environment. The throwaway service needs memory for two workers during the
+standby warm. Set its `MemoryMax` from the serving worker's resident size.
+
+The first start on a copy always repairs the catalog once. The freshness
+checkpoint covers each page's absolute path and change time, and a copy keeps
+neither. Let the current release settle on the copy first. Only the switch that
+follows tells you about the candidate.
+
+The supervisor verifies its systemd identity, so the throwaway service runs as
+a transient user unit. Keep its paths short: the control sockets under the
+runtime directory have a 104-byte limit.
+
+1. Create the scratch root: `install -d -m 700 /tmp/xr /tmp/xr/{managed,home,logs,lease,cwd,state}`.
+2. Create the launcher with `uv venv /tmp/xr/launcher` and the serving version's package and profile extras.
+3. When no import or bulk apply is running, copy the vault to `/tmp/xr/vault`.
+4. Compute the copy's state key with the key command below.
+5. Create the state leaf: `install -d -m 700 /tmp/xr/state/KEY`.
+6. Copy the live vault state directory into the state leaf with the state copy command below.
+7. Set `vault_identity` in `/tmp/xr/state/KEY/.state-migration.json` to `KEY` with a JSON editor.
+8. Write `/tmp/xr/rehearsal.env` with mode 600 from the template below.
+9. Pick two free loopback ports as `PORT` and `LOCAL_PORT`.
+10. Unless `/tmp/xr/home/local-token` exists from this `rehearsal.env`, issue a local session with the issue command below.
+11. Start the transient unit with the `systemd-run` command below.
+12. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
+13. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
+14. In a second terminal, start the probe loop below.
+15. Note the time, then switch with the `service_upgrade` command below.
+16. Read `last_transition.handoff` in the printed result.
+17. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
+18. Count failed calls with the check command below; expect 0.
+19. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
+20. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
+
+Expect all four checks to pass in the 45 minutes after the noted time.
+
+```sh
+/tmp/xr/launcher/bin/python -c 'from pathlib import Path; from exomem.state_paths import vault_state_key; print(vault_state_key(Path("/tmp/xr/vault")))'
+```
+
+The service writes its state while you copy it. The state copy command copies
+each SQLite database through SQLite's backup API, so each copy is consistent. It
+tells a database by its file header, skips SQLite's side files and rebuild
+temporaries (both `*.rebuild-*` and `.graph-rebuild-*`), and skips files that
+disappear during the copy. A rebuild temporary left by a crash can hold a hot
+journal, and a read-only open of it fails:
+
+```sh
+/tmp/xr/launcher/bin/python -I - LIVE_STATE_DIR /tmp/xr/state/KEY <<'PY'
+import contextlib, shutil, sqlite3, sys
+from pathlib import Path
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+for path in sorted(src.rglob("*")):
+    target = dst / path.relative_to(src)
+    try:
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            continue
+        if path.name.endswith(("-wal", "-shm", "-journal")) or "rebuild-" in path.name:
+            continue
+        with path.open("rb") as handle:
+            database = handle.read(16) == b"SQLite format 3\0"
+        if database:
+            live = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=120)
+            copy = sqlite3.connect(target)
+            with contextlib.closing(live), contextlib.closing(copy):
+                live.backup(copy)
+            continue
+        shutil.copy2(path, target)
+    except (FileNotFoundError, sqlite3.OperationalError):
+        if path.exists():
+            raise  # a locked or unreadable database must stop the copy, not shorten it
+        target.unlink(missing_ok=True)
+PY
+```
+
+Write the environment file from this template, not from a copy of the live
+file. It gives the copy its own paths and leaves out every variable that reaches
+a live or external system. Replace only the marked live values, so the timings
+match, and leave out a marked line that the live file does not set. Use the live
+model cache path for `HF_HOME`, or for `HF_HUB_CACHE` when the live file sets
+that; the hub stays offline:
+
+```sh
+EXOMEM_VAULT_PATH=/tmp/xr/vault
+EXOMEM_STATE_ROOT=/tmp/xr/state
+EXOMEM_LOG_DIR=/tmp/xr/logs
+EXOMEM_WRITER_LEASE_STATE_DIR=/tmp/xr/lease
+HOME=/tmp/xr/home
+XDG_STATE_HOME=/tmp/xr/home/.local/state
+XDG_CONFIG_HOME=/tmp/xr/home/.config
+XDG_DATA_HOME=/tmp/xr/home/.local/share
+EXOMEM_REST_API_KEY=NEW_RANDOM_VALUE
+EXOMEM_DISABLE_MEDIA_EXTRACTION=1
+EXOMEM_ASR_PREWARM=0
+EXOMEM_DISABLE_CLIP=1
+HF_HUB_OFFLINE=1
+HF_HOME=LIVE_VALUE
+EXOMEM_PRELOAD_MODELS=LIVE_VALUE
+EXOMEM_STANDBY_WARM_SECONDS=LIVE_VALUE
+EXOMEM_COLD_START_SECONDS=LIVE_VALUE
+EXOMEM_LOCAL_PORT=LOCAL_PORT
+EXOMEM_GITHUB_USER_ID=LIVE_VALUE
+EXOMEM_GITHUB_USERNAME=LIVE_VALUE
+EXOMEM_JWT_SIGNING_KEY=NEW_RANDOM_VALUE
+```
+
+Generate each `NEW_RANDOM_VALUE` separately, for example with `openssl rand -hex 32`.
+Keep `rehearsal.env` with a kept copy. A new signing key invalidates
+`/tmp/xr/home/local-token`, so delete that file when you change the key.
+When the live file sets no owner identity, use any numeric id and any login.
+
+The last four lines let the copy's own local session call MCP tools on
+`LOCAL_PORT`, so the read and write checks run as the owner. The signing key is
+new, so no live token is valid on the copy.
+
+The issue command runs in a subshell from the empty working directory, so a
+`.env` file elsewhere cannot override the copy's signing key or storage:
+
+```sh
+( cd /tmp/xr/cwd && set -a && . /tmp/xr/rehearsal.env && /tmp/xr/launcher/bin/exomem auth issue-local --client rehearsal --output /tmp/xr/home/local-token )
+```
+
+The probe loop sends one MCP read and one MCP write every 30 seconds for 50
+minutes, which covers the 45 minutes after a switch made within 5 minutes of
+its start. It writes one line per call, `TIME read|write RESPONSE`, and each
+write creates a disposable note in the copy:
+
+```sh
+TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
+while [ "$(date +%s)" -lt "$END" ]; do
+  NOW=$(date -u +%H:%M:%S)
+  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"create_note\",\"arguments\":{\"title\":\"Rehearsal probe $NOW\",\"content\":\"Disposable rehearsal write.\",\"note_type\":\"insight\"}}"; do
+    BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
+      -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":${CALL#* }}" | tr -d '\n')
+    printf '%s\n' "$NOW ${CALL%% *} ${BODY:-no-response}" >> /tmp/xr/calls.log
+  done
+  sleep 30
+done
+```
+
+A call fails when its line holds `"isError":true`, `MUTATION_BUSY`,
+`VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. The check command
+prints two counts; expect both to be 0:
+
+```sh
+grep -cE '"isError":true|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
+```
+
+The worker also inherits the user manager's environment. Run `systemctl --user
+show-environment` first, and add `-p UnsetEnvironment=NAME` to the unit for each
+variable there that reaches a live or external system.
+
+```sh
+systemd-run --user --collect --unit=exomem-rehearsal.service -p Type=simple -p MemoryMax=MEMORY_LIMIT -p KillMode=control-group -p SendSIGKILL=yes -p TimeoutStopSec=30 -p EnvironmentFile=/tmp/xr/rehearsal.env -p WorkingDirectory=/tmp/xr/cwd /tmp/xr/launcher/bin/python -m exomem.service_manager serve --runtime-dir /tmp/xr/managed --worker-python /tmp/xr/launcher/bin/python --host 127.0.0.1 --port PORT --unit-name exomem-rehearsal.service
+```
+
+```sh
+HOME=/tmp/xr/home UV_CACHE_DIR=LIVE_UV_CACHE EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH=1 /tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --package-version VERSION --profile standard
+```
+
+`UV_CACHE_DIR` keeps staging on the existing package cache instead of the empty
+home. For a candidate that is not published, pass `--wheel` and
+`--source-revision` in place of `--package-version`, as for a live upgrade. The
+candidate stages under `/tmp/xr/releases`, never under the live service root.
+
+The log is JSON lines. Read these events and messages after the noted time:
+
+- A `lexical_repair_started` event with `fields.kind` `full` starts a full
+  repair. Its `lexical_repair_finished` event must report `result` `published`.
+  `targeted` and `catch_up` are the usual delta repairs.
+- `standby built a detached lexical catalogue` and `adopted retrieval catalog
+  healed=` show that promotion adopted the standby's catalog.
+- `managed retrieval catalog delegated to background repair` or `maintained
+  retrieval catalog warm-up failed` explain a slow or failed adoption.
+
+The rehearsal runs without other writers. During a live full repair, a bulk
+writer outside the service makes every publication of that repair abort. Pause
+bulk writers for the live install window.
+
+The rehearsal does not cover a collection store schema change or the move of
+file collections into the store. Both need the writer lease coordinator, and
+the copy runs without one so that it cannot reach the live coordinator.
+
 ## Release retention
 
 After the target is confirmed active, the operator removes the release
@@ -657,6 +864,59 @@ backoff inside the reattachment budget while the standby is being promoted,
 instead of being closed on the first non-success. A replacement that refuses the
 original credential (401 or 403) is a definitive answer and still closes the
 stream.
+
+## When the service starts
+
+The supervisor opens the public listener, the local listener and the control
+socket before it starts the first worker. Until that worker reports ready, the
+phase is `starting`, and every call gets an immediate HTTP 503 with the body
+`Request not dispatched`. No call executes and none waits in the queue, because
+a cold warm, such as a full catalogue rebuild, can outlast any queue budget.
+When the first worker reports ready, ingress serves calls and the phase becomes
+`ready`. A first worker that fails to start still stops the supervisor with a
+failed exit status.
+
+## When the worker crashes
+
+A worker that exits outside a transition no longer stops the supervisor. The
+public listener, the local listener and the control socket stay open, and the
+supervisor replaces the worker in place:
+
+1. The supervisor sets the phase to `restarting` and pauses ingress. New calls
+   queue under the admission budgets below.
+2. The supervisor proves that the exited worker and every descendant it left
+   have exited. A child that called `setsid()` is included.
+3. The supervisor starts the active release under the cold-start window.
+4. When the replacement reports ready, ingress resumes and the phase returns to
+   `ready`.
+
+A call that the dead worker was answering gets the retryable error described
+in the managed-service spec. A call that arrives during the restart is held for
+up to the 45-second queue budget. If the replacement reports ready inside that
+budget, the replacement serves the call. Otherwise the call is answered as not
+dispatched and can be retried. A production worker takes about 40 to 80 seconds
+to warm, so a call that arrives early in the restart usually gets the
+not-dispatched answer.
+
+The supervisor makes one attempt for each exit, and restarts a serving worker
+in place at most 3 times in any 10 minutes. The supervisor stops with a failed
+exit status in these cases:
+
+- A fourth exit falls inside the window.
+- A descendant of the exited worker is still alive after 10 seconds.
+- The replacement exits before it reports ready, or does not report ready
+  inside the cold-start window.
+- The restart fails with an unexpected error.
+
+systemd then cleans the unit's cgroup and applies `Restart=`, as it did for
+every crash before in-place restarts. `--status` reports the restarts inside
+the window, the limit, the window and the last exit status under
+`worker_restarts`. The journal records each restart with the worker's exit
+status. A negative status is the signal that killed the worker.
+
+The supervisor runs from the launcher venv, so a worker handoff does not
+change this behaviour. It takes effect after the offline maintenance that
+changes the stable supervisor, described above, which restarts the unit once.
 
 ## Admission budgets
 

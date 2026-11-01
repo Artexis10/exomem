@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 import pytest
@@ -135,11 +136,26 @@ def test_remote_http_runs_stateless(
         "host": "127.0.0.1",
         "port": 9876,
         "stateless_http": True,
+        "uvicorn_config": {"reset_contextvars": True},
     }
     assert len(middleware) == 3
     assert middleware[0].cls is server.EdgeIngressMiddleware
     assert middleware[1].cls is server.AccessLogMiddleware
     assert middleware[2].cls is server.PrimeMcpSSEMiddleware
+
+
+def test_a_foreground_serve_hides_the_gpu_from_its_own_process_and_keeps_the_list_for_the_media_child(
+    fake_mcp: _FakeMcp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import cuda_containment
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.delenv(cuda_containment.CHILD_DEVICES_ENV, raising=False)
+
+    server.run(transport="stdio")
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+    assert cuda_containment.give_devices_to_child(os.environ)["CUDA_VISIBLE_DEVICES"] == "0"
 
 
 def test_stdio_does_not_apply_http_stateless_configuration(fake_mcp: _FakeMcp) -> None:

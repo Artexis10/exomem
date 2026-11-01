@@ -11,9 +11,12 @@ silently closed at the egress boundary) — and structured `OpError` failures.
 from __future__ import annotations
 
 import concurrent.futures
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
+from held_boundary import held_boundary
 
 from exomem import cli_ops, product_invoke, writer_lease
 
@@ -133,3 +136,27 @@ def test_tier2_opt_out_hides_commands(vault: Path, monkeypatch: pytest.MonkeyPat
     with pytest.raises(cli_ops.OpError) as excinfo:
         product_invoke.invoke_product("govern_memory", {"operation": "status"})
     assert excinfo.value.code == "UNKNOWN_OP"
+
+
+def _captured(vault: Path, title_slug: str) -> list[Path]:
+    return [p for p in (vault / "Knowledge Base").rglob("*.md") if title_slug in p.name.lower()]
+
+
+def test_an_unkeyed_cli_write_waits_out_a_held_boundary_and_leaves_no_replay_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+):
+    request = {
+        "content": "a note taken while another writer holds the boundary",
+        "title": "Held Boundary Capture",
+        "source_kind": "personal-note",
+    }
+    with held_boundary(vault, monkeypatch):
+        product_invoke.invoke_product("capture_source", request)
+
+    assert len(_captured(vault, "held-boundary-capture")) == 1
+    with closing(sqlite3.connect(writer_lease.get_manager().idempotency.path)) as store:
+        assert store.execute("SELECT COUNT(*) FROM mutations").fetchone() == (0,)
+
+    # No replay identity: the same invocation again is a new write, not the first one's result.
+    product_invoke.invoke_product("capture_source", request)
+    assert len(_captured(vault, "held-boundary-capture")) == 2

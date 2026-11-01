@@ -645,6 +645,22 @@ _DECLARED_UNBOUNDED_JOINS = {
         "self._q.join",
     ): "explicit test/operator queue drain when timeout=None; request paths do not call it",
     (
+        "mutation_lock.py",
+        "VaultMutationCoordinator.lend",
+        "state.turn.wait",
+    ): "waits for a borrower that already took the boundary; only prove_committed and "
+    "complete_component borrow, each for one batch, and lend makes no offer after its room",
+    (
+        "media_store.py",
+        "_decrypt_into",
+        "process.wait",
+    ): "age exits once its output reaches EOF or after kill; its input ends with the feed",
+    (
+        "media_store.py",
+        "_decrypt_into",
+        "feeder.join",
+    ): "the feed ends at the object's end, a broken pipe, or the edge store's per-read timeout",
+    (
         "governance/receipts.py",
         "_prepare_receipt_connections_for_fork",
         "_RECEIPT_CONNECTIONS_CONDITION.wait",

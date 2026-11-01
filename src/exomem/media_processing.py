@@ -29,6 +29,7 @@ from . import (
     memory_refs,
     originals,
     recall_policy,
+    rename_journal,
     reserved_paths,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
@@ -209,7 +210,9 @@ def _runtime_unavailable(vault_root: Path) -> tuple[str, str] | None:
 
 
 def _is_automatic_media_candidate(vault: Path, binary: Path) -> bool:
-    """Reject raw Records media before automatic discovery reads its inputs."""
+    """Reject raw Records media and a renamed import file that no Source page binds yet."""
+    if rename_journal.is_held(vault, binary):
+        return False
     sidecar = originals.sidecar_path(binary)
     if not recall_policy.is_structured_only_path(vault, sidecar):
         return True

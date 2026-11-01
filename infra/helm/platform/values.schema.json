@@ -303,7 +303,15 @@
         "maxObjectBytes": {"type": "integer", "minimum": 1},
         "storePolicy": {
           "type": "object",
-          "properties": {"allowance_bytes": {"type": "integer", "minimum": 0}},
+          "properties": {
+            "allowance_bytes": {"type": "integer", "minimum": 0},
+            "max_temporary_bytes": {"type": "integer", "minimum": 1},
+            "max_hydrations": {"type": "integer", "minimum": 1}
+          },
+          "allOf": [
+            {"if": {"required": ["max_temporary_bytes"]}, "then": {"required": ["max_hydrations"]}},
+            {"if": {"required": ["max_hydrations"]}, "then": {"required": ["max_temporary_bytes"]}}
+          ],
           "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
           "additionalProperties": {"type": ["boolean", "number"]}
         },

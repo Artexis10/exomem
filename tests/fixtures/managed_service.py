@@ -152,6 +152,9 @@ else:
 
     @app.custom_route("/health/ready", methods=["GET"])
     async def ready(request):
+        if (root / "hold-ready").exists():
+            # A cold warm that has not finished, such as a catalogue rebuild.
+            return JSONResponse({"status": "warming"}, status_code=503)
         return JSONResponse(
             {"status": "ready", "cutover": service_standby.readiness_payload()}
         )

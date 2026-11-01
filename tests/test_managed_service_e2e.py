@@ -107,7 +107,7 @@ async def eventually(predicate, timeout=10):
 
 
 @asynccontextmanager
-async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
+async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30", hold_ready=False):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -128,6 +128,8 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
             "EXOMEM_STANDBY_WARM_SECONDS": warm_seconds,
         }
     )
+    if hold_ready:
+        (tmp_path / "hold-ready").touch()
     log = (tmp_path / "service.log").open("w")
     command = [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)]
     if env_file is not None:
@@ -147,7 +149,8 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
                         pytest.fail((tmp_path / "service.log").read_text()[-5000:])
                     try:
                         response = await client.get(f"http://127.0.0.1:{port}/health", timeout=0.2)
-                        if response.status_code == 200:
+                        # A held worker never turns ready; an open listener is the signal.
+                        if response.status_code == 200 or hold_ready:
                             break
                     except httpx.HTTPError:
                         pass
@@ -281,6 +284,78 @@ def test_standalone_authenticated_stream_survives_and_disconnect_releases_it(tmp
                 async with asyncio.timeout(3):
                     while (await control(tmp_path, "status"))["ingress"]["streams"]:
                         await asyncio.sleep(0.05)
+
+    asyncio.run(scenario())
+
+
+def test_a_crashed_worker_is_replaced_while_the_listener_stays_up(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        async with live_fixture(tmp_path) as (url, token, supervisor):
+            async with Client(url, auth=token, timeout=30) as client:
+                before = await client.call_tool("counted", {"marker": "before"})
+                escaped = await client.call_tool("escaped_child")
+                # Only the worker dies, as in a native crash; the child it
+                # started in its own session outlives it.
+                os.kill(before.data["pid"], signal.SIGKILL)
+                async with asyncio.timeout(10):
+                    while (await control(tmp_path, "status"))["phase"] != "restarting":
+                        await asyncio.sleep(0.01)
+                during = await client.call_tool("counted", {"marker": "during"})
+                assert supervisor.poll() is None
+                status = await control(tmp_path, "status")
+                assert status["phase"] == "ready"
+                assert during.data["pid"] not in {before.data["pid"], 0}
+                assert status["worker_pid"] == during.data["pid"]
+                assert status["worker_restarts"]["in_window"] == 1
+                assert status["worker_restarts"]["last_exit_code"] == -signal.SIGKILL
+                # The replacement could only spawn once no descendant was left.
+                with pytest.raises(ProcessLookupError):
+                    os.kill(escaped.data["pid"], 0)
+
+    asyncio.run(scenario())
+
+
+def test_a_worker_that_cannot_restart_stops_the_supervisor(tmp_path):
+    async def scenario():
+        async with live_fixture(tmp_path) as (_, _, supervisor):
+            worker = (await control(tmp_path, "status"))["worker_pid"]
+            (tmp_path / "fail-start").touch()
+            os.kill(worker, signal.SIGKILL)
+            async with asyncio.timeout(60):
+                while supervisor.poll() is None:
+                    await asyncio.sleep(0.05)
+            # A failed status, so systemd's Restart= and cgroup cleanup take over.
+            assert supervisor.returncode != 0
+
+    asyncio.run(scenario())
+
+
+def test_the_listener_answers_while_the_first_worker_warms(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        async with live_fixture(tmp_path, hold_ready=True) as (url, token, supervisor):
+            assert (await control(tmp_path, "status"))["phase"] == "starting"
+            async with httpx.AsyncClient() as raw:
+                refused = await raw.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+                    timeout=5,
+                )
+            # Answered at once with the unavailable refusal, not held for the queue budget.
+            assert refused.status_code == 503
+            assert refused.text == "Request not dispatched"
+            (tmp_path / "hold-ready").unlink()
+            async with asyncio.timeout(30):
+                while (await control(tmp_path, "status"))["phase"] != "ready":
+                    await asyncio.sleep(0.05)
+            async with Client(url, auth=token, timeout=20) as client:
+                served = await client.call_tool("counted", {"marker": "after-warm"})
+            assert served.data["marker"] == "after-warm"
+            assert supervisor.poll() is None
 
     asyncio.run(scenario())
 

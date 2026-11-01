@@ -541,12 +541,12 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Leaf-only pacing must not spend the time needed to publish committed custody."""
-    from exomem import adoption_run, commands, request_budget
+    from exomem import adopt, adoption_run, commands, request_budget
 
     monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
     folder = vault / "Collection"
     folder.mkdir()
-    for index in range(6):
+    for index in range(9):
         (folder / f"note-{index}.md").write_text(f"# Note {index}\n\nRetain observation {index}.\n")
     run_id = commands.op_adoption_studio(vault, action="start", path="Collection")["run_id"]
     commands.op_adoption_studio(vault, action="select", run_id=run_id, include=[
@@ -557,12 +557,15 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     fake_time = SimpleNamespace(monotonic=lambda: clock["now"])
     monkeypatch.setattr(adoption_run, "time", fake_time)
     monkeypatch.setattr(request_budget, "time", fake_time)
-    create_note = adoption_run._create_note
+    create_notes = adopt.create_draft_notes
+    # The pacer sizes its custody reserve from the handoff time the writer measures on this clock.
+    monkeypatch.setattr(vault_module, "_fast_ack_monotonic", fake_time.monotonic)
+    monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", fake_time.monotonic)
     handoff = writer_lease._handoff_derived_batches
 
-    def costly_note(*args, **kwargs):
-        result = create_note(*args, **kwargs)
-        clock["now"] += 8
+    def costly_notes(root, notes, **kwargs):
+        result = create_notes(root, notes, **kwargs)
+        clock["now"] += 8 * len(notes)
         return result
 
     def costly_custody(session):
@@ -572,7 +575,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
             clock["now"] += 20
         return result
 
-    monkeypatch.setattr(adoption_run, "_create_note", costly_note)
+    monkeypatch.setattr(adopt, "create_draft_notes", costly_notes)
     monkeypatch.setattr(writer_lease, "_handoff_derived_batches", costly_custody)
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "adoption_studio")
     leaf = command.leaf
@@ -599,7 +602,332 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     else:
         pytest.fail("the bounded continuations did not complete the import")
     outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
-    assert len(outcomes) == 6 and all(row["status"] == "applied" for row in outcomes.values())
+    assert len(outcomes) == 9 and all(row["status"] == "applied" for row in outcomes.values())
+
+
+def _import_three_sources_while(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hold,
+    *,
+    proof_seconds: float = 0.0,
+) -> dict:
+    """Import three Sources, one chunk each, while `hold(receipt)` waits on the boundary.
+
+    `hold` starts in its own thread as the second chunk starts, on a drain manager that gives
+    up after 1 s, with the receipt of the import's first batch. The first chunk takes 1.5 s,
+    so the import prices each next chunk at 1.5 s, and the third chunk starts once `hold` has
+    returned. Each proof the importing thread makes adds `proof_seconds` to the writer's
+    handoff clock. A governed write first measures one handoff, as the import lends only
+    after one. Returns what `hold` returned, the chunks committed then, the chunks committed
+    at each custody handoff, and the import's applied items.
+    """
+    from exomem import adoption_run, commands, mutation_lock
+
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)
+    folder = vault / "Collection"
+    folder.mkdir()
+    for index in range(3):
+        (folder / f"scan-{index}.dat").write_bytes(bytes([index]) * 1024)
+    run_id = commands.op_adoption_studio(vault, action="start", path="Collection")["run_id"]
+    commands.op_adoption_studio(
+        vault, action="select", run_id=run_id, include=[{"path": "Collection", "adopt_as": "source"}]
+    )
+    plan_id = commands.op_adoption_studio(vault, action="plan", run_id=run_id)["plan"]["plan_id"]
+    manager = _manager(tmp_path)
+    # A drain holds outside any invocation, on the configured manager; this one gives up after 1 s.
+    drain = writer_lease.LeaseManager(manager.config, mutation_timeout_seconds=1.0)
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: drain)
+    boundary = mutation_lock.VaultMutationCoordinator(manager.config.state_dir, vault)
+    importer, clock = threading.get_ident(), {"offset": 0.0}
+    prove = derived_receipts.prove_committed
+
+    def timed_proof(*args, **kwargs):
+        if threading.get_ident() == importer:
+            clock["offset"] += proof_seconds
+        return prove(*args, **kwargs)
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", timed_proof)
+    monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", lambda: time.monotonic() + clock["offset"])
+    _governed_write(
+        manager, vault, rel_path="Knowledge Base/Notes/warm.md", source=_compiled_page("Warm", "warmprobe")
+    )
+    earlier = set(_batch_ids(vault))
+    committed: list[int] = []
+    handoffs: list[int] = []
+    held: dict = {}
+    handoff = writer_lease._timed_handoff
+
+    def counted_handoff(session):
+        handoffs.append(len(committed))
+        return handoff(session)
+
+    def holder() -> None:
+        first = next(batch for batch in _batch_ids(vault) if batch not in earlier)
+        try:
+            held["outcome"] = hold(derived_receipts._load_receipt(vault, first))
+        except Exception as error:  # noqa: BLE001 - a refused hold is an outcome the tests name
+            held["outcome"] = getattr(error, "code", repr(error))
+        held["chunks_committed"] = len(committed)
+
+    waiting = threading.Thread(target=holder, daemon=True)
+    apply_chunk = adoption_run._apply_chunk
+
+    def chunk(*args, **kwargs):
+        if len(committed) == 1:
+            waiting.start()
+            waited = time.monotonic() + 10
+            while not boundary.waiter_count():  # the second chunk starts once the holder waits
+                assert time.monotonic() < waited, "the holder never waited on the boundary"
+                time.sleep(0.005)
+        if len(committed) == 2:
+            waiting.join(timeout=10)
+        extractions = apply_chunk(*args, **kwargs)
+        if not committed:
+            time.sleep(1.5)
+        committed.append(1)
+        return extractions
+
+    monkeypatch.setattr(writer_lease, "_timed_handoff", counted_handoff)
+    monkeypatch.setattr(adoption_run, "_apply_chunk", chunk)
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "adoption_studio")
+    manager.invoke(
+        command, (vault,), {"action": "apply", "run_id": run_id, "plan_id": plan_id},
+        idempotency_key="lent-boundary",
+    )
+    waiting.join(timeout=10)
+    outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
+    return {
+        **held,
+        "handoffs": handoffs,
+        "applied": sum(row["status"] == "applied" for row in outcomes.values()),
+    }
+
+
+def _prove_in_place(vault: Path):
+    def prove(receipt) -> str:
+        return derived_receipts.prove_committed(
+            vault, receipt, current_generation=receipt.canonical_generation
+        ).outcome
+
+    return prove
+
+
+def test_a_derived_proof_that_would_time_out_during_an_import_proves_between_two_of_its_chunks(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain's proof waiting on the boundary of a long import holds it before the import ends.
+
+    The import hands off the custody of its batches before it lends the boundary, so the proof of
+    its first batch, whose index and log pages the second batch moved, is ready, not reconcile_required.
+    """
+    held = _import_three_sources_while(vault, tmp_path, monkeypatch, _prove_in_place(vault))
+
+    assert (held["outcome"], held["chunks_committed"]) == ("ready", 2)
+    assert held["applied"] == 3
+
+
+def test_a_background_holder_cannot_borrow_the_boundary_of_an_import(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a hold that opts in, a brief derived proof, runs between two chunks of an import.
+
+    A background scan holds for as long as its work takes, and the import waits for a loan's
+    return, so a loan to one could spend the import's room. It waits for the import to end.
+    """
+
+    def scan(_receipt) -> str:
+        with writer_lease.get_manager().consistency_guard(
+            vault, operation="media_offload_scan", holder_kind="background"
+        ):
+            return "held"
+
+    held = _import_three_sources_while(vault, tmp_path, monkeypatch, scan)
+
+    assert held["outcome"] == "MUTATION_BUSY"
+    assert held["applied"] == 3
+
+
+@pytest.mark.parametrize(
+    ("proof_seconds", "room_seconds"),
+    [(1.5, None), (0.05, 0.05)],
+    ids=["handoff-outlasts-the-proof-deadline", "handoff-outlasts-the-room"],
+)
+def test_an_import_does_not_lend_when_the_custody_handoff_before_a_loan_cannot_fit(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proof_seconds: float,
+    room_seconds: float | None,
+) -> None:
+    """A loan first hands off the custody of every batch so far, at its measured price.
+
+    When that handoff would end after the waiting proof gives up, or take longer than the time
+    left for the import's next chunk, the import spends nothing on it and the proof retries.
+    """
+    from exomem import adoption_run
+
+    if room_seconds is not None:
+        next_unit = adoption_run._ApplyPacer.next_unit
+
+        def short_room(pacer, pending):
+            seconds, batches, _room = next_unit(pacer, pending)
+            return seconds, batches, room_seconds
+
+        monkeypatch.setattr(adoption_run._ApplyPacer, "next_unit", short_room)
+    held = _import_three_sources_while(
+        vault, tmp_path, monkeypatch, _prove_in_place(vault), proof_seconds=proof_seconds
+    )
+
+    assert held["outcome"] == "MUTATION_BUSY"
+    assert 2 not in held["handoffs"], "the import handed off custody for a loan it could not make"
+    assert held["applied"] == 3
+
+
+def test_a_handoff_after_a_loan_prices_each_batch_it_re_proves_once(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The custody price is the measured time of one proof, however many batches a handoff proves.
+
+    The handoff at the import's end proves its last batch and re-proves the one that holds the
+    index pages the last one moved. Dividing its time by its one new batch would price each
+    proof twice over and shrink every later chunk and loan.
+    """
+    held = _import_three_sources_while(
+        vault, tmp_path, monkeypatch, _prove_in_place(vault), proof_seconds=0.2
+    )
+
+    assert held["outcome"] == "ready" and 2 in held["handoffs"], "the import made no loan"
+    assert 0.2 <= writer_lease.owed_custody_handoff_seconds(vault, more_batches=1) < 0.4
+
+
+def _hand_off_three_batches_sharing_a_page(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[list[str]], list[str]]:
+    """Commit three batches in one session under one hold, as an import does.
+
+    Each batch creates its own page and rewrites one shared page, as every Source an import
+    files rewrites its index and log pages. The import hands off custody after each of the
+    first two batches, as it does before it lends the boundary between chunks, and the end of
+    its hold hands off the last. Returns the batches each handoff proved and the batch ids,
+    oldest first.
+    """
+    # A governed write gives the vault the canonical generation every proof is bound to.
+    _governed_write(
+        _manager(tmp_path),
+        vault,
+        rel_path="Knowledge Base/Notes/warm.md",
+        source=_compiled_page("Warm", "warmprobe"),
+    )
+    generation = writer_lease.current_canonical_generation(vault)
+    shared = "Knowledge Base/Notes/Insights/handoff-shared.md"
+    shared_text = _compiled_page("Handoff shared", "handoffshared0")
+    _put(vault, shared, shared_text)
+    session = writer_lease._FastAcknowledgementSession(
+        vault_root=vault,
+        request_id="handoff-import",
+        mutation_attempt_digest="0" * 64,
+        terminal_replay_until=0.0,
+        advisory_required=False,
+    )
+    proofs: list[list[str]] = []
+    prove = derived_receipts.prove_committed
+
+    def recorded_proof(root, receipt, **kwargs):
+        proofs[-1].append(receipt.batch_id)
+        return prove(root, receipt, **kwargs)
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", recorded_proof)
+    batch_ids = [f"handoff-{index}" for index in range(3)]
+    importing = writer_lease._ACTIVE_FAST_ACK_SESSION.set(session)
+    try:
+        with writer_lease.active_manager().consistency_guard(vault, operation="test_import"):
+            for index, batch_id in enumerate(batch_ids):
+                own = f"Knowledge Base/Notes/Insights/handoff-{index}.md"
+                own_text = _compiled_page(f"Handoff {index}", f"handoffown{index}")
+                next_shared = _compiled_page("Handoff shared", f"handoffshared{index + 1}")
+                receipt = _prepare_store_batch(
+                    vault,
+                    batch_id=batch_id,
+                    generation=generation,
+                    changes=((own, None, own_text), (shared, shared_text, next_shared)),
+                )
+                _put(vault, own, own_text)
+                _put(vault, shared, next_shared)
+                shared_text = next_shared
+                session.batches.append(
+                    writer_lease._FastAcknowledgementBatch(
+                        receipt=receipt, canonical_commit_monotonic=time.monotonic()
+                    )
+                )
+                proofs.append([])
+                if index < len(batch_ids) - 1:
+                    writer_lease._handoff_derived_batches(session)
+    finally:
+        writer_lease._ACTIVE_FAST_ACK_SESSION.reset(importing)
+    assert all(batch.handoff_outcome == "ready" for batch in session.batches)
+    return proofs, batch_ids
+
+
+def test_a_handoff_re_proves_only_the_earlier_batch_that_holds_the_page_it_moved(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second handoff hands the first batch's copy of the shared page on to the second.
+
+    The third batch moves the page again, so its handoff re-proves the second, which holds it,
+    but not the first, which holds nothing the third moved. Re-proving every batch that shares
+    a page costs an import the square of its batches.
+    """
+    proofs, (first, second, third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch
+    )
+
+    assert proofs == [[first], [second, first], [third, second]]
+
+
+def test_a_batch_the_last_handoff_did_not_re_prove_still_retires(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skipping a re-proof leaves no custody behind: the skipped batch completes and retires."""
+    proofs, (first, _second, _third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch
+    )
+    assert first not in proofs[-1]
+
+    _drain(vault)
+    # Retirement waits for the catalogue to hold the pages, which a running server's repair
+    # worker publishes; it is driven here the way a running server drives it.
+    lexstore.ensure_fresh(vault)
+    _drain(vault)
+    pending_recall.reset(vault)
+
+    assert derived_receipts._load_receipt(vault, first).state == "completed"
+    assert pending_recall.overlay(vault).outcome == "ready"
+    assert set(_pending_row_states(vault)) == {"retired"}, _pending_row_states(vault)
+
+
+def test_a_handoff_that_cannot_read_custody_re_proves_every_sharing_batch_and_still_commits(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A custody store gate held past its timeout fails the read of who holds a page.
+
+    The batches have committed by then, so each handoff falls back to re-proving every batch
+    that shares a page it moved. The last one runs as the import's hold ends, which must end
+    without an error: an error there reports committed batches as failed.
+    """
+    from exomem.cli_ops import OpError
+
+    def held_store_gate(*_args):
+        raise OpError("MUTATION_BUSY", "the custody store gate stayed held")
+
+    monkeypatch.setattr(derived_receipts, "_open_custody_batches", held_store_gate)
+
+    proofs, (first, second, third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch
+    )
+
+    assert proofs == [[first], [second, first], [third, second, first]]
 
 
 @pytest.mark.parametrize("flag", [None, "0"])
@@ -1285,13 +1613,14 @@ def test_crash_cut_committed_before_terminal_converges_without_replay(
     )
     _put(vault, rel, after)  # canonical commit landed; the process then died
 
-    recovered = derived_receipts.recover_prepared_batches(
+    derived_drain.drain_once(
         vault,
+        dispatch=None,
         observe_current_generation=lambda _root: "generation-1",
         visibility_publisher=pending_recall.publish,
         limit=8,
     )
-    assert recovered == 1
+    assert derived_receipts._load_receipt(vault, "cut-committed").state == "ready"
     assert (vault / rel).read_text(encoding="utf-8") == after
     snapshot = derived_receipts.snapshot_pending_visibility(vault, limit=64)
     live = {
