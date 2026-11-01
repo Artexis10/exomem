@@ -1165,17 +1165,13 @@ def test_rule_e_a_checkpoint_whose_import_cloud_has_no_row_for_is_dropped_and_th
     assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
-@pytest.mark.parametrize("hostile", ["network error", "unknown listing"])
-def test_rule_e_a_network_error_or_an_unknown_listing_never_drops_a_checkpoint(rig, hostile):
-    """Rule (e): catches a failed read or an unknown listing taken as "Cloud has no row", which drops a live checkpoint."""
+def test_rule_e_a_network_error_never_drops_a_checkpoint(rig):
+    """Rule (e): catches a failed read taken as "Cloud cannot show a row", which drops a live checkpoint."""
     old = _stop_after_complete_while_cloud_imports(rig)
     del rig.cloud.rows[old]
     rig.cloud.held.clear()
     creates = rig.cloud.creates
-    if hostile == "network error":
-        rig.cloud.on_read = _network_error
-    else:
-        rig.cell.windows_unknown = "the window records cannot be listed"
+    rig.cloud.on_read = _network_error
 
     with pytest.raises(CloudImportError) as stop:
         rig.run()
@@ -1201,9 +1197,26 @@ def test_verify_a_member_change_after_a_stopped_attempt_lands_once_with_the_new_
     assert old not in result["import_ids"] and "a02.bin" in rig.said()
 
 
-@pytest.mark.parametrize("hostile", ["network error", "unknown listing"])
-def test_rule_f_a_network_error_or_an_unknown_listing_never_cancels_an_attempt(rig, hostile):
-    """Rule (f): catches a cancel that a failed row read or an unknown listing reaches, which ends an attempt on no evidence."""
+def test_rule_f_a_member_change_that_empties_a_stopped_window_cancels_its_attempt_and_lands_the_rest_once(rig):
+    """Rule (f): catches an emptied window that leaves the record while its never-uploaded attempt holds the cell."""
+    rig.files(a01__bin=800, a02__bin=800, a03__bin=800)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 2000  # Window 1 is a01.bin and a02.bin.
+    rig.cloud.short_parts_once = True
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "PARTS_INVALID"
+    old = _first_window(rig)["import_id"]
+    for name in ("a01.bin", "a02.bin"):
+        (rig.source / name).write_bytes(b"changed after the abandon")
+
+    result = rig.run()
+
+    assert rig.cloud.cancelled == [old] and old not in result["import_ids"]
+    assert rig.cloud.all_sent() == ["a03.bin"] and result["not_sent"] == ["a01.bin", "a02.bin"]
+
+
+def test_rule_f_a_network_error_never_cancels_an_attempt(rig):
+    """Rule (f): catches a cancel that a failed row read reaches, which ends an attempt on no evidence."""
     rig.files(a01__bin=800, a02__bin=800)
     rig.cloud.short_parts_once = True
     with pytest.raises(CloudImportError):
@@ -1211,10 +1224,8 @@ def test_rule_f_a_network_error_or_an_unknown_listing_never_cancels_an_attempt(r
     old = _first_window(rig)["import_id"]
     (rig.source / "a02.bin").write_bytes(b"changed after the abandon")
     creates = rig.cloud.creates
-    if hostile == "network error":  # Cloud stops answering reads once the changed declaration conflicts.
-        rig.cloud.on_read = lambda import_id: _network_error() if rig.cloud.creates > creates else None
-    else:
-        rig.cell.windows_unknown = "the window records cannot be listed"
+    # Cloud stops answering reads once the changed declaration conflicts.
+    rig.cloud.on_read = lambda import_id: _network_error() if rig.cloud.creates > creates else None
 
     with pytest.raises(CloudImportError) as stop:
         rig.run()
@@ -1247,21 +1258,35 @@ def test_rule_c_a_done_attempt_whose_receipt_the_cell_lists_once_cloud_finishes_
     assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
-@pytest.mark.parametrize("hostile", ["network error", "unknown listing"])
-def test_rule_c_a_network_error_or_an_unknown_listing_never_sends_a_done_window_again(rig, hostile):
-    """Rule (c): catches a failed row read or an unknown listing taken as a lost receipt, which lands the window twice."""
+def test_rule_c_an_unknown_listing_never_sends_a_done_window_again(rig):
+    """Rule (c): catches an unknown listing taken as a lost receipt, which lands the window twice."""
     old = _stop_after_complete_while_cloud_imports(rig)
     rig.cloud.release()
     rig.cell.windows.clear()
-    if hostile == "network error":
-        rig.cloud.on_read = _network_error
-    else:  # The listing is known when the rerun starts and turns unknown once the CLI reads the done row.
-        rig.cloud.on_read = lambda import_id: setattr(rig.cell, "windows_unknown", "the window records cannot be listed")
+    # The listing is known when the rerun starts and turns unknown once the CLI reads the done row.
+    rig.cloud.on_read = lambda import_id: setattr(rig.cell, "windows_unknown", "the window records cannot be listed")
 
     with pytest.raises(CloudImportError) as stop:
         rig.run()
 
     assert stop.value.resume and NOT_IN_EXOMEM in stop.value.message
     assert rig.cloud.completed == [old] and len(rig.cloud.rows) == 1
-    if hostile == "unknown listing":
-        assert f"import_discard, import_id {old}" in stop.value.message
+    assert f"import_discard, import_id {old}" in stop.value.message
+
+
+def test_rule_c_a_home_cancel_of_an_importing_attempt_whose_discard_leaves_a_record_files_each_member_once(rig):
+    """Rule (c): catches an ended attempt read as over while the cell holds its record, so a rerun and a resend file it twice."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.release()  # The Job imports the window before cellctl stops it.
+    del rig.cell.windows[old]
+    rig.cloud.rows[old].update(requested_state="cancelled", observed_state="discarded")  # The person pressed Cancel in Home.
+    # The discard's residual record appears after the rerun lists the receipts and before it reads the row.
+    rig.cloud.on_read = lambda import_id: rig.cell.discard(old, ["a01.bin", "a02.bin"]) if import_id == old else None
+
+    rig.run()
+    rig.run()
+    rig.run(resend_residual=True)
+
+    # The old import carries both members and its discard files neither, so the resend files each member once.
+    assert rig.cloud.all_sent() == ["a01.bin", "a01.bin", "a02.bin", "a02.bin"]
+    assert _first_window(rig)["import_id"] == old and _first_window(rig)["attempts"] == []

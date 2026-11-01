@@ -184,28 +184,35 @@ class Member:
 
 # A window's import identity. Cloud's create replays a known import ID whatever the row's state, refuses a known ID with
 # another declaration (IMPORT_CONFLICT), and refuses a new row while another import holds the cell (IMPORT_CONFLICT,
-# from the unique index of open imports in Substrate migration 0061). Cloud has no row for an ID only when it answers
-# 404 IMPORT_NOT_FOUND for it; a network error or any other answer proves nothing, and the run stops with the notice.
-# A rerun reads the row of each open window before it sends the window. So:
-# (a) A window keeps its import ID while Cloud has no row for it, while its row is open or done with a receipt, after the
-#     client gives up its checkpoint, after any failure that Cloud did not end, and after a member change: the create
-#     decides, as Cloud inserts the new declaration under an ID that it never saw.
+# from the unique index of open imports in Substrate migration 0061). Cloud cannot show a row for an ID when it answers
+# 404 IMPORT_NOT_FOUND for it; that answer is per principal, so it does not prove that no row exists. A network error
+# or any other answer proves nothing, and the run stops with the notice. A rerun reads the row of each open window
+# before it sends the window. So:
+# (a) A window keeps its import ID while Cloud cannot show a row for it, while its row is open or done with a receipt,
+#     after the client gives up its checkpoint, after any failure that Cloud did not end, and after a member change: the
+#     create decides, as Cloud inserts the new declaration under an ID that it never saw.
 # (b) A window gets a new import ID only when its own attempt is over (rule c): in the wait, by a rerun's read of the row,
 #     or by a read of the row after IMPORT_CONFLICT at register. The old ID moves to `attempts`, and a receipt for any of
 #     the IDs lands the window. After a renewal at register, the send is retried once, never more.
-# (c) An attempt is over when its row is `failed`, `expired` or `discarded` and no longer holds the cell. A `done` row
-#     has landed, unless a known receipt listing, read after the row, holds none of the window's IDs: a restore lost the
-#     receipt, so the attempt is over. While the listing is unknown, the run stops and names the discard route. A row
-#     whose upload never completed (`requested`) still holds the cell until Cloud ends it.
-# (d) IMPORT_CONFLICT at register while Cloud has no row for the window's ID means that another import holds the cell:
-#     the run stops, and resumes under the same ID once that import ends. IMPORT_CONFLICT with the window's own row
-#     open past its upload, or done with a receipt, means its earlier attempt with another member set holds the cell:
-#     the run stops, and resumes.
-# (e) A window's checkpoint is stale when Cloud has no row for the window's ID: a rerun drops it and sends the window
-#     afresh under the same ID (rule a), because the checkpoint may hold a copy for a key or upload that no row knows.
-# (f) IMPORT_CONFLICT with the window's own row `key_ready` and never uploaded means that its earlier attempt with
-#     another member set holds the cell. The CLI cancels that attempt through Cloud's cancel route, the one that Home
-#     uses, waits until Cloud ends it (rule c), and renews (rule b). It cancels only an ID that the series record holds.
+# (c) An attempt is over when two things hold: its row is `done`, or is `failed`, `expired` or `discarded` and no longer
+#     holds the cell; and a known receipt listing, read after the row, holds none of the window's IDs. A record for one
+#     of the IDs lands the window instead. Only a listing read after the row is proof: the cell records a receipt before
+#     Cloud reports the import done, and the discard of an import that the Job already imported leaves a record. A
+#     `done` row with no receipt means that a restore lost the receipt. While the listing is unknown, the run stops, and
+#     for a `done` row it names the discard route. A row whose upload never completed (`requested`) still holds the cell
+#     until Cloud ends it.
+# (d) IMPORT_CONFLICT at register while Cloud cannot show a row for the window's ID means that another import holds the
+#     cell: the run stops, and resumes under the same ID once that import ends. IMPORT_CONFLICT with the window's own row
+#     holding the cell, other than in rule (f), means its earlier attempt with another member set holds the cell: the run
+#     stops, and resumes.
+# (e) A window's checkpoint is stale when Cloud cannot show a row for the window's ID: a rerun drops it and sends the
+#     window afresh under the same ID (rule a), because the checkpoint may hold a copy for a key or upload that no row knows.
+# (f) The window's own attempt that is `key_ready` and never completed its upload (`requested`) holds the cell and can
+#     leave no receipt. The CLI cancels it through Cloud's cancel route, the one that Home uses, in two cases: IMPORT_CONFLICT
+#     at register meets it as an earlier attempt with another member set, or a member change empties the window, so the
+#     record is about to forget its ID. The CLI then waits until Cloud ends the attempt, and at register it renews (rule b).
+#     It cancels only an ID that the series record holds, and it waits only on its own cancel: a row that someone else
+#     cancelled follows rules (c) and (d).
 
 
 @dataclass
@@ -226,6 +233,13 @@ class SentWindow:
         if self.import_id:
             self.attempts.append(self.import_id)
         self.import_id = str(uuid.uuid4())
+
+    def land(self, import_id: str) -> None:
+        """The cell holds a record for one of the window's IDs: that ID lands the window, and the others stay attempts."""
+        self.attempts = [other for other in self.ids() if other != import_id]
+        self.import_id = import_id
+        if self.state == "open":
+            self.state = "landed"
 
 
 @dataclass
@@ -404,12 +418,15 @@ class _Run:
             self.progress.say(f"Not sent, because the source file changed or vanished since the series began ({len(gone):,}); "
                               "keep the source: " + _listed(gone))
             if not kept:
+                row = await self._own_row(window.import_id)
+                if row is not None and _unsent(row):  # Rule (f): settle the attempt before the record forgets its ID.
+                    await self._cancel(window.import_id)
                 self.series.windows.remove(window)
                 self.series.write(self.record)
                 return
             self.series.write(self.record)
         self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
-        renewed = False
+        renewed, result = False, None
         while True:
             try:
                 result = await import_source(
@@ -430,9 +447,11 @@ class _Run:
                     refused = error.import_id or window.import_id  # The ID that the create declared.
                     row = await self._own_row(refused)
                     if row is not None and not renewed and refused in window.ids() and _unsent(row):
-                        row = await self._cancel(refused, row)  # Rule (f).
+                        row = await self._cancel(refused)  # Rule (f).
+                    over = row is not None and await self._over(window, row)
+                    if window.state == "landed":  # Rule (c): the cell holds a record for one of the window's IDs.
+                        break
                     # Rule (b): one renewal and one retry. A renewed ID has no row, so its conflict reads as rule (d); the flag bounds the loop all the same.
-                    over = row is not None and (_ended(row) or (row["observed_state"] == "done" and await self._receipt_lost(window)))
                     if over and not renewed:
                         window.renew()
                         shutil.rmtree(checkpoint, ignore_errors=True)  # Its checkpoint holds the dead ID, and a checkpoint's ID wins over the window's.
@@ -441,11 +460,13 @@ class _Run:
                         continue
                     if row is None:  # Rule (d).
                         message = "another import is open; cancel it in Home or wait for it to end"
+                        if window.attempts:  # An earlier attempt that rule (c) counts as over holds the cell only while Cloud discards it.
+                            message += f". The open import can be {window.attempts[-1]}, an earlier attempt of this window that Cloud is still discarding"
                     else:
                         message = (f"Cloud import {refused} is an earlier attempt of this window with another member set, "
                                    f"and its state is {safe_code(row['observed_state']) or 'unknown'}. The run continues once the cell "
                                    "receives it or Cloud ends it")
-                        if row["observed_state"] != "done":
+                        if row["observed_state"] != "done":  # Cloud refuses to cancel a done import, so the stop names no cancel route for one.
                             message += f". To end it now, {_STOP_ON_CLOUD}"
                     resume = True
                 elif error.ended:
@@ -460,10 +481,8 @@ class _Run:
                     resume = True
                 raise Stopped(error.phase, error.code, f"{message}. {not_sent_notice(self.series.not_landed())}",
                               error.import_id, resume=resume) from None
-        if window.import_id != result["import_id"]:  # The import resumed from a checkpoint that holds its own ID.
-            window.attempts = [import_id for import_id in window.ids() if import_id != result["import_id"]]
-            window.import_id = result["import_id"]
-        window.state = "landed"
+        if result is not None:  # Else rule (c) landed the window on a record for one of its IDs.
+            window.land(result["import_id"])  # The import may resume from a checkpoint that holds its own ID.
         self.series.write(self.record)
         self.refused = None
         await self.settle(window)
@@ -472,7 +491,7 @@ class _Run:
         return self.config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports/" + import_id
 
     async def _own_row(self, import_id: str) -> dict | None:
-        """Cloud's row for one of the window's import IDs, or None when Cloud has none."""
+        """Cloud's row for one of the window's import IDs, or None when Cloud cannot show a row for it."""
         try:
             response = await self.api.request("GET", self._row_url(import_id))
             response.raise_for_status()
@@ -483,12 +502,11 @@ class _Run:
             raise
         return response.json()["import"]
 
-    async def _cancel(self, import_id: str, row: dict) -> dict | None:
+    async def _cancel(self, import_id: str) -> dict | None:
         """Rule (f): cancel the window's own unsent attempt, and return its row once Cloud has ended it."""
-        if row["requested_state"] != "cancelled":
-            response = await self.api.request("POST", self._row_url(import_id) + "/cancel")
-            response.raise_for_status()
-            self.progress.say(f"Cancelled Cloud import {import_id}, an earlier attempt of this window that never uploaded.")
+        response = await self.api.request("POST", self._row_url(import_id) + "/cancel")
+        response.raise_for_status()
+        self.progress.say(f"Cancelled Cloud import {import_id}, an earlier attempt of this window that never completed its upload.")
         since = self.clock()
         while (row := await self._own_row(import_id)) is not None and not _ended(row):
             await self.wait(since, f"Cloud is ending import {import_id}, which the CLI cancelled")
@@ -566,50 +584,62 @@ class _Run:
                 self.progress.say(f"The cell has no receipt for window {self.series.windows.index(window) + 1}; sending it again.")
                 self.series.windows.remove(window)
             elif received is not None:
-                window.attempts = [import_id for import_id in window.ids() if import_id != received]
-                window.import_id = received
-                if window.state == "open":
-                    window.state = "landed"  # The import finished, and the stop came before the record said so.
+                window.land(received)  # An open window: the import finished, and the stop came before the record said so.
         self.series.write(self.record)
         for window in list(self.series.windows):
             if window.state == "open":
                 await self.resume(window)
+            if window.state == "open":
                 await self.send(window)
             elif window.state == "landed":
                 await self.settle(window)
 
     async def resume(self, window: SentWindow) -> None:
-        """Rules (b), (c) and (e) on a rerun: the window's own row decides whether its checkpoint and import ID still hold."""
+        """Rules (b), (c) and (e) on a rerun: the window's own row decides whether its checkpoint and import ID still hold.
+
+        A record for one of the window's IDs lands the window instead (rule c), and the caller sends nothing.
+        """
         checkpoint = self.record.parent / window.dir
-        number = self.series.windows.index(window) + 1
         row = await self._own_row(window.import_id)
         if row is None:
             if (checkpoint / "checkpoint.json").exists():
                 shutil.rmtree(checkpoint)
-                self.progress.say(f"Cloud has no import {window.import_id} for window {number}, so its checkpoint is stale; "
-                                  "sending the window afresh.")
-        elif _ended(row) or (row["observed_state"] == "done" and await self._receipt_lost(window)):
-            if row["observed_state"] == "done":
-                self.progress.say(f"The cell has no receipt for window {number}, whose import Cloud finished; sending it again.")
+                self.progress.say(f"Cloud cannot show import {window.import_id} of window {self.series.windows.index(window) + 1}, "
+                                  "so its checkpoint is stale; sending the window afresh.")
+        elif await self._over(window, row):
             window.renew()
             shutil.rmtree(checkpoint, ignore_errors=True)  # Its checkpoint holds the old ID, and a checkpoint's ID wins.
             self.series.write(self.record)
 
-    async def _receipt_lost(self, window: SentWindow) -> bool:
-        """Rule (c) for a `done` row: whether a listing read after the row holds none of the window's IDs.
+    async def _over(self, window: SentWindow, row: dict) -> bool:
+        """Rule (c): whether the window's attempt with this row is over, so that a new import ID cannot land it twice.
 
-        The cell records a window's receipt before Cloud reports its import done, so only a listing read after the row
-        proves that the receipt is gone. An unknown listing proves nothing, and the run stops.
+        Only a known receipt listing, read after the row, proves a `done` or ended row over: the cell records a receipt
+        before Cloud reports the import done, and the discard of an import that the Job already imported leaves a record.
+        A record for one of the window's IDs lands the window instead, and the caller sends nothing. An unknown listing
+        proves nothing, and the run stops.
         """
+        # The Cloud import protocol fixes `done`: Cloud reports it only once the cell holds the window's receipt.
+        done = row["observed_state"] == "done"
+        if not done and not _ended(row):
+            return False
         reading = await self.read()
         if reading.windows_unknown:
+            route = (". If a restore of the cell lost that window, ask your assistant to call transfer_memory with action "
+                     f"import_discard, import_id {window.import_id} and confirm=true; the next run then sends the window again")
             raise self.stop("RECEIPTS_UNKNOWN", (
-                f"Cloud finished import {window.import_id}, and the cell cannot list its window records "
-                f"({reading.windows_unknown}), so the CLI cannot tell whether the cell still holds that window. Run the "
-                "command again later. If a restore of the cell lost that window, ask your assistant to call transfer_memory "
-                f"with action import_discard, import_id {window.import_id} and confirm=true; the next run then sends the window again"))
+                f"Cloud {'finished' if done else 'ended'} import {window.import_id}, and the cell cannot list its window records "
+                f"({reading.windows_unknown}), so the CLI cannot tell whether the cell holds that window. Run the command "
+                f"again later{route if done else ''}"))
         receipts = {item.get("import_id") for item in reading.windows}
-        return receipts.isdisjoint(window.ids())
+        received = next((import_id for import_id in window.ids() if import_id in receipts), None)
+        if received is not None:
+            window.land(received)
+            return False
+        if done:
+            self.progress.say(f"The cell has no receipt for window {self.series.windows.index(window) + 1}, whose import Cloud "
+                              "finished; sending it again.")
+        return True
 
     async def finish(self) -> dict:
         final = await self.cell.status()
@@ -635,14 +665,14 @@ def _holds_cell(row: dict) -> bool:
 
 
 def _ended(row: dict) -> bool:
-    """Rule (c): the attempt is over, so a new import ID cannot land the window twice or meet this row in the index."""
+    """Rule (c): Cloud ended the attempt short of `done`, and its row no longer holds the cell."""
     return row["observed_state"] != "done" and not _holds_cell(row)
 
 
 def _unsent(row: dict) -> bool:
-    """Rule (f): Cloud holds the attempt, and its upload never completed, or a cancel of it is already under way."""
-    # The Cloud import protocol fixes these states: Cloud keeps `requested` until the upload completes, and its cancel sets `cancelled`.
-    return row["requested_state"] == "cancelled" or (row["requested_state"] == "requested" and row["observed_state"] == "key_ready")
+    """Rule (f): Cloud holds the attempt, and its upload never completed, so no receipt can come from it."""
+    # The Cloud import protocol fixes these states: Cloud keeps `requested` and `key_ready` until the upload completes.
+    return row["requested_state"] == "requested" and row["observed_state"] == "key_ready"
 
 
 def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:
