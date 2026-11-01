@@ -223,11 +223,18 @@ def text_under_test(scenario: Scenario) -> dict[str, str]:
 
 
 def repo_sha() -> str:
-    """The checkout's commit, or `unknown` when git cannot say."""
+    """The checkout's commit, `-dirty` when tracked files differ from it, or `unknown` when git cannot say."""
     done = subprocess.run(  # noqa: S603,S607
         ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
     )
-    return done.stdout.strip() if done.returncode == 0 and done.stdout.strip() else "unknown"
+    if done.returncode != 0 or not done.stdout.strip():
+        return "unknown"
+    changed = subprocess.run(  # noqa: S603,S607
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True
+    )
+    if changed.returncode != 0:
+        return "unknown"
+    return done.stdout.strip() + ("-dirty" if changed.stdout.strip() else "")
 
 
 def run_once(
