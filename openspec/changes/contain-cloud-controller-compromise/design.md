@@ -95,7 +95,7 @@ The admission policy therefore accepts a cell StatefulSet or Job only when its w
 - there is no `lifecycle`, and probes are `httpGet` on the cell's own fixed ports and paths;
 - `volumeMounts` are exactly the known (name, mountPath) pairs for that subcommand, with no `subPath` and no `volumeDevices`;
 - `workingDir` is unset;
-- there is no `envFrom`. Every environment entry's name is on the allowlist for that subcommand. A `valueFrom` names only an allowlisted key of `cell-credentials`, and a trust anchor is always a literal `value` (D2). The one exception is `cell-export-verify`: it may also read the URL key of the Secret named for its own export ID, which stays per export so that cleanup removes only that export's Secret.
+- there is no `envFrom`. Every environment entry's name is on the allowlist for that subcommand. A `valueFrom` names only an allowlisted key of `cell-credentials`, or, for `cell-backup`, `cell-restore` and `cell-backup-migrate`, of `cell-object-store-key` (D9). A trust anchor is always a literal `value` (D2). The one exception is `cell-export-verify`: it may also read the URL key of the Secret named for its own export ID, which stays per export so that cleanup removes only that export's Secret.
 
 Pod Security `restricted` does not cover every security field, so admission also pins these on every container:
 - `readOnlyRootFilesystem: true` and the full container security context;
@@ -105,7 +105,7 @@ At the pod level:
 - the template has no ephemeral containers;
 - `dnsPolicy` is `ClusterFirst`, and there is no `dnsConfig`;
 - `enableServiceLinks` is false, so the kubelet injects no environment outside the allowlist;
-- each volume name is bound to its expected source: the data volume to the cell's own claim, and Secret volumes to `cell-credentials`.
+- each volume name is bound to its expected source: the data volume to the cell's own claim, and Secret volumes to `cell-credentials`, or to `cell-object-store-key` for the three backup subcommands.
 
 Admission already denies `hostAliases`.
 
@@ -310,7 +310,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 
 **The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
 - It runs as a scheduled CI job outside the cluster, at least hourly. It alerts with its own receiver credential, which no in-cluster component holds.
-- Its key in each account can only list keys and buckets and read bucket retention settings (`listKeys`, `listBuckets`, `readBucketRetentions`). The provider withholds a bucket's lock settings from a key without `readBucketRetentions`.
+- Its key in each account can only list keys and buckets and read bucket settings (`listKeys`, `listBuckets`, `readBucketRetentions`, `readBucketEncryption`, `readBucketReplications`). The provider withholds each of those settings from a key without the matching capability.
 - It matches every single-purpose key by its key ID, from Terraform outputs. That covers the custodian, the lock extender, the watcher, the infrastructure key, the durability keys and every other key in the account. A clone with the same name and capabilities therefore does not pass.
 - It matches each per-cell key on its exact bucket, prefix shape and capability set, with at most one key per prefix.
 - It compares the backup bucket's Object Lock, default retention, lifecycle rules, bucket type, encryption, replication and CORS settings with pinned values.

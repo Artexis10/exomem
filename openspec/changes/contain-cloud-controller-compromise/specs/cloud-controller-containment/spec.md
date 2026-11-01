@@ -203,11 +203,11 @@ The alert path SHALL NOT pass through the controller. Each alert SHALL carry onl
 
 ### Requirement: Only the key custodian can create object-store keys
 
-Cell data SHALL live in a provider account that holds no other data. No in-cluster component other than the key custodian SHALL hold a key that can create object-store keys, in any provider account.
+Cell backups SHALL live in a provider account that holds no other data. No in-cluster component other than the key custodian SHALL hold a key that can create object-store keys, in any provider account.
 
 The custodian SHALL run outside every namespace that the controller can write, on a node that runs no cell. It SHALL create only the per-cell key shape: the pinned bucket, the prefix of the cell ID in the cell's namespace name, and exactly `listBuckets`, `listFiles`, `readFiles`, `writeFiles` and `deleteFiles`. It SHALL write each key only to its own Secret in the cell's namespace, and SHALL read no other Secret. It SHALL hide a cell's prefix only on a deletion record that Substrate signed, after a grace period, and SHALL raise an alert on each hide.
 
-A key watcher SHALL run outside the cluster, at least hourly, with keys that can only list keys and buckets and read bucket retention settings. It SHALL match each single-purpose key by its key ID, and each per-cell key by its exact bucket, prefix shape and capability set, with at most one key per prefix. It SHALL raise an alert for every other key, for every backup bucket setting that differs from its pinned value, for every failure to authenticate or list, and for every missed run. Its alerts SHALL use a receiver credential that no in-cluster component holds.
+A key watcher SHALL run outside the cluster, at least hourly, with keys that can only list keys and buckets and read bucket retention, encryption and replication settings. It SHALL match each single-purpose key by its key ID, and each per-cell key by its exact bucket, prefix shape and capability set, with at most one key per prefix. It SHALL raise an alert for every other key, for every backup bucket setting that differs from its pinned value, for every failure to authenticate or list, and for every missed run. Its alerts SHALL use a receiver credential that no in-cluster component holds.
 
 #### Scenario: The controller's keys are searched for key creation
 
