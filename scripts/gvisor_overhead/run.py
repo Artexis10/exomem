@@ -37,7 +37,7 @@ CELL_ID = "abcdefghijklmnop"
 CELL_PORT = 8765
 PROTOCOL = "2025-11-25"
 IMPORT_NAME = "Project Archive"
-RUNTIMES = ("runc", "runsc", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug")
+RUNTIMES = ("runc", "runsc", "runsc-kvm", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug")
 MEDIA_DIR = "Knowledge Base/Sources/Media"
 # Plain runsc cannot start the cell on a volume: the sandbox refuses renameat2(RENAME_NOREPLACE)
 # on its gofer-backed mounts, and the cell's filesystem probe then fails closed. So both arms run
@@ -396,6 +396,24 @@ shutil.rmtree(root, ignore_errors=True)
 print(json.dumps(out))
 '''
 
+BRAKE_SCRIPT = r'''
+import json, os, pathlib
+facts = {}
+for path in ("/proc/self/cgroup", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.high", "/sys/fs/cgroup/memory.current",
+             "/sys/fs/cgroup/cgroup.controllers", "/sys/fs/cgroup/cpu.max"):
+    try:
+        facts[path] = pathlib.Path(path).read_text().strip()[:200]
+    except OSError as error:
+        facts[path] = "unreadable: %s" % error
+facts["ls_sys_fs_cgroup"] = sorted(os.listdir("/sys/fs/cgroup"))[:40] if os.path.isdir("/sys/fs/cgroup") else "absent"
+try:
+    from exomem import media_brakes
+    facts["media_brakes.read_cell"] = repr(media_brakes.read_cell())
+except Exception as error:
+    facts["media_brakes.read_cell"] = "%s: %s" % (type(error).__name__, error)
+print(json.dumps(facts))
+'''
+
 REBUILD_SCRIPT = r'''
 import json, time
 from pathlib import Path
@@ -421,6 +439,7 @@ class Lab:
         (self.out / "logs").mkdir(exist_ok=True)
         self.results = (self.out / "results.jsonl").open("a", encoding="utf-8")
         self.events = (self.out / "events.log").open("a", encoding="utf-8")
+        self.arms: list[str] = ["runc", "runsc"]
         self.stems: list[str] = []
         self.import_counts: dict = {}
         self.media_files: list[str] = []
@@ -478,8 +497,11 @@ class Lab:
         return self.docker(*argv, timeout=timeout)
 
     def oneshot(self, runtime: str, volume: str, entrypoint_args: list[str], *, entrypoint: str | None = None,
-                mounts: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 600):
+                mounts: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 600,
+                limits: bool = False):
         argv = ["run", "--rm", "--runtime", runtime, "--network", "none", *self.security(), "-v", f"{volume}:/data"]
+        if limits:
+            argv += ["--cpus", "2", "--memory", "3g"]
         for mount in mounts or []:
             argv += ["-v", mount]
         for key, value in {"EXOMEM_CLOUD_CELL": "1", "EXOMEM_CLOUD_CELL_ID": CELL_ID, **(env or {})}.items():
@@ -574,6 +596,15 @@ class Lab:
         self.docker("rm", "-f", name, check=False)
         self.diag("runsc_facts", facts)
 
+    def detect_kvm(self) -> None:
+        """Add the KVM-platform arm when this runner can start a sandbox on it."""
+        probe = sh(["docker", "run", "--rm", "--runtime", "runsc-kvm", "--entrypoint", "true", self.image],
+                   check=False, timeout=120)
+        self.log(f"runsc-kvm start rc={probe.returncode} {(probe.stdout + probe.stderr).strip()[-300:]}")
+        self.diag("kvm_start", {"rc": probe.returncode, "output": (probe.stdout + probe.stderr)[-2000:]})
+        if probe.returncode == 0 and self.args.kvm:
+            self.arms.append("runsc-kvm")
+
     # -- compatibility
     def compat(self) -> None:
         """Which kernel primitives the cell's filesystem layer needs, per runtime and root; unmeasured."""
@@ -595,6 +626,20 @@ class Lab:
                       f"grep -rhiE '{pattern}' /tmp/runsc-debug | cut -c1-300 | sort | uniq -c | sort -rn | head -60"],
                      check=False, timeout=120)
         self.diag("runsc_debug_unsupported", listing.stdout + listing.stderr)
+
+    def cgroup_probe(self) -> None:
+        """What the cell's media brakes read from the cgroup files, in a container limited like the cell."""
+        volume = f"gv-brake-{self.run_id}"
+        self.new_volume(volume)
+        try:
+            for runtime in self.arms:
+                wall, probed = self.oneshot(runtime, volume, ["python", "-c", BRAKE_SCRIPT], entrypoint="env",
+                                            timeout=300, limits=True)
+                self.log(f"cgroup {runtime} rc={probed.returncode} {probed.stdout.strip()[:1400]}{probed.stderr.strip()[-300:]}")
+                self.diag(f"cgroup-{runtime}", {"rc": probed.returncode, "stdout": probed.stdout,
+                                                "stderr": probed.stderr[-2000:]})
+        finally:
+            self.docker("volume", "rm", "-f", volume, check=False)
 
     # -- seed
     def make_fixtures(self) -> None:
@@ -872,7 +917,7 @@ class Lab:
                 continue
             states: list[str] = []
             final = ""
-            deadline = time.monotonic() + 300
+            deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 status = mcp.call("media", {"operation": "status", "path": path})
                 state = ""
@@ -965,14 +1010,17 @@ class Lab:
         try:
             self.environment()
             self.runsc_facts()
+            self.detect_kvm()
             self.compat()
+            self.cgroup_probe()
             if self.args.compat_only:
                 return
             self.make_fixtures()
             self.seed()
             for rep in range(1, self.args.repeats + 1):
-                order = ("runc", "runsc") if rep % 2 else ("runsc", "runc")
-                for arm in order:
+                # Each arm takes each position in the order once over a full cycle of repeats.
+                shift = (rep - 1) % len(self.arms)
+                for arm in self.arms[shift:] + self.arms[:shift]:
                     self.session(arm, rep)
         finally:
             self.docker("network", "rm", self.network, check=False)
@@ -987,6 +1035,8 @@ def main() -> int:
     parser.add_argument("--seed-notes", type=int, default=200)
     parser.add_argument("--only", default="search,write,media,import,fs")
     parser.add_argument("--compat-only", action="store_true", help="probe the runtimes and stop")
+    parser.add_argument("--kvm", action=argparse.BooleanOptionalAction, default=True,
+                        help="add a runsc arm on the KVM platform when the runner can start one")
     args = parser.parse_args()
     args.only = {part for part in args.only.split(",") if part}
     lab = Lab(args)

@@ -20,7 +20,7 @@ env:
   RUNSC_RELEASE: "20261026.0"
   # The image a cell runs in production (published, anonymous pull).
   CLOUD_IMAGE: ghcr.io/artexis10/exomem:0.154.0-cloud
-  REPEATS: "1"
+  REPEATS: "3"
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
   EXTRA_ARGS: ""
@@ -53,7 +53,8 @@ jobs:
           runsc --version
           # Systrap is the default platform in current releases; name it, and directfs, so the run records both.
           sudo runsc install --runtime=runsc -- --platform=systrap --directfs=true
-          # Variants for the compatibility probe only: no directfs, the ptrace platform, and a debug log.
+          # The KVM arm runs only when the runner can start it. The other variants serve the compatibility probe.
+          sudo runsc install --runtime=runsc-kvm -- --platform=kvm --directfs=true
           sudo runsc install --runtime=runsc-nodirectfs -- --platform=systrap --directfs=false
           sudo runsc install --runtime=runsc-ptrace -- --platform=ptrace
           sudo mkdir -p /tmp/runsc-debug
