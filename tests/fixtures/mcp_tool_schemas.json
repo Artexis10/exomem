@@ -4294,7 +4294,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "For `start`, subtree to scan (default: whole vault; ask which folder). For run-listing `status`, count filed originals under it (null if `complete=false`).",
+                  "description": "For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
                   "type": "string",
                   "default": ""
                 },
@@ -4314,7 +4314,7 @@
                 },
                 "after": {
                   "type": "string",
-                  "description": "For `start` or `status`, the last `next_after`."
+                  "description": "For `start` or `status`, the last same-action reply's `next_after`."
                 },
                 "consume": {
                   "description": "For `start`, false keeps staged copies.",
@@ -4528,7 +4528,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "For `acknowledge`, the person's decision: only paths they need no longer keep. Reversible by hand; none is refused."
+                  "description": "For `acknowledge`: only paths the person confirmed they need no longer keep. Ends their keep-source warning; no tool undoes it. None is refused."
                 }
               },
               "required": [
@@ -5498,7 +5498,7 @@
     }
   },
   "read_import": {
-    "description": "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>`, then start on the path it prints. Without a shell, give the person `exomem cloud import <folder>`; never upload files yourself. Status reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source` is true. Select one operation.kind.",
+    "description": "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5560,21 +5560,21 @@
                 },
                 "run_id": {},
                 "path": {
-                  "description": "For `start`, subtree to scan (default: whole vault; ask which folder). For run-listing `status`, count filed originals under it (null if `complete=false`).",
+                  "description": "For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
                   "type": "string",
                   "default": ""
                 },
                 "after": {
                   "type": "string",
-                  "description": "For `start` or `status`, the last `next_after`."
+                  "description": "For `start` or `status`, the last same-action reply's `next_after`."
                 },
                 "series_id": {
                   "type": "string",
-                  "description": "For `status`, a series needing room for its next window."
+                  "description": "Sender only: for `status`, a series needing room."
                 },
                 "next_window_bytes": {
                   "type": "integer",
-                  "description": "For `status`, that window's bytes."
+                  "description": "Sender only: that window's bytes."
                 }
               },
               "required": [

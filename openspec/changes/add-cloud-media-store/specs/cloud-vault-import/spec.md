@@ -231,7 +231,7 @@ For an `adopt` import, the import Job SHALL record each member's identity in the
 
 ### Requirement: A discard keeps a residual record
 
-When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each member of the stage manifest that adoption did not file, and each staged file that the manifest does not list, with its path, bytes and residual code. A member that is no longer in the stage SHALL keep the bytes of its manifest entry. A member is filed when a run's outcome says so, not when the stage no longer holds it. The record SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: `import_discard` with `walk_stage` set. That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A discard SHALL refuse `walk_stage` with `IMPORT_REQUEST_INVALID` when it can read the receipt, and keep the stage. A retried walk SHALL keep the record that an earlier walk wrote, and a discard that can read the receipt again SHALL NOT write an empty record over a walk record that lists members. When it writes a record with members, that record SHALL also list the walk's members that the manifest does not list, and carry the walk's `acknowledged` entries, so that the receipt's record does not hide them. When a member of the window is renamed but not committed, the discard SHALL refuse with `IMPORT_RENAMES_PENDING` before it writes any record. When the Job cannot read the receipt, it SHALL write the held paths under `renames_pending` into the walk file, which then holds no member list, and a retried walk SHALL replace that file with the member record. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
+When the discard Job discards a recorded stage, it SHALL keep a residual record in the window's receipt. The record SHALL list each member of the stage manifest that adoption did not file, and each staged file that the manifest does not list, with its path, bytes and residual code. A member that is no longer in the stage SHALL keep the bytes of its manifest entry. A member is filed when a run's outcome says so, not when the stage no longer holds it. The record SHALL leave out the series file. The Job SHALL write the record, empty or not, in the same receipt write that drops the member manifest. A retried discard SHALL keep the record that an earlier attempt wrote. When the stage exists and the Job cannot read its receipt, the discard SHALL refuse with `IMPORT_RECEIPT_UNREADABLE` and keep the stage. The refusal SHALL name its exit: the operator of the cell runs the walking discard (`cell-import discard --walk-stage`), and the owner and the agent see the window as `unreadable` in status (decided on 2026-11-01 under the operator's standing rule for reversible choices; the operator may revert it). That discard SHALL walk the stage and record each staged file except the series file, with its path, bytes and the code `receipt_unreadable`. It SHALL write that record to a separate file for the import ID, leave the unreadable receipt in place, and then remove the stage. A discard SHALL refuse `walk_stage` with `IMPORT_REQUEST_INVALID` when it can read the receipt, and keep the stage. A retried walk SHALL keep the record that an earlier walk wrote, and a discard that can read the receipt again SHALL NOT write an empty record over a walk record that lists members. When it writes a record with members, that record SHALL also list the walk's members that the manifest does not list, and carry the walk's `acknowledged` entries, so that the receipt's record does not hide them. When a member of the window is renamed but not committed, the discard SHALL refuse with `IMPORT_RENAMES_PENDING` before it writes any record. When the Job cannot read the receipt, it SHALL write the held paths under `renames_pending` into the walk file, which then holds no member list, and a retried walk SHALL replace that file with the member record. The status, a resend and an acknowledgement SHALL treat that record as the window's residual record. A record SHALL stay until a resend or an acknowledgement clears its members.
 
 #### Scenario: A discard after a path conflict
 
@@ -257,23 +257,23 @@ When the discard Job discards a recorded stage, it SHALL keep a residual record 
 #### Scenario: The receipt cannot be read
 
 - **WHEN** the person discards a window whose stage exists, and its receipt cannot be read
-- **THEN** the discard refuses with `IMPORT_RECEIPT_UNREADABLE`, names the `walk_stage` exit, and the stage stays
+- **THEN** the discard refuses with `IMPORT_RECEIPT_UNREADABLE`, names the walking discard for the operator of the cell, and the stage stays; status shows the window as `unreadable` with its problem
 
 #### Scenario: A discard walks the stage
 
-- **WHEN** an agent discards that window again with `walk_stage` set
+- **WHEN** the operator of the cell discards that window again with `--walk-stage`
 - **THEN** a separate record lists each staged file except the series file, with the code `receipt_unreadable`
 - **AND** the unreadable receipt stays, the stage folder is gone, and the status lists those files as "discarded, not filed"
 
 #### Scenario: A walk while a renamed member has no page
 
-- **WHEN** an agent discards a window with `walk_stage` set, the Job cannot read its receipt, and one member is renamed but its Source page is not committed
+- **WHEN** the operator of the cell discards a window with `--walk-stage`, the Job cannot read its receipt, and one member is renamed but its Source page is not committed
 - **THEN** the discard refuses with `IMPORT_RENAMES_PENDING`, the walk file lists that member's Knowledge Base path under `renames_pending`, and the stage stays
 - **AND** after the person moves that file and keeps the source, a retried walk records the staged files and the walk file no longer carries `renames_pending`
 
 #### Scenario: A walk with a readable receipt
 
-- **WHEN** an agent discards a window with `walk_stage` set, and the Job can read its receipt
+- **WHEN** the operator of the cell discards a window with `--walk-stage`, and the Job can read its receipt
 - **THEN** the discard refuses with `IMPORT_REQUEST_INVALID`, writes no record, and the stage stays
 
 ### Requirement: Each window carries the series file

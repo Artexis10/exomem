@@ -10696,18 +10696,17 @@ def op_adoption_studio(
     drafts notes under own-note rules; cancel closes pre-apply; finish reports
     recall and coverage. Resume plan/apply with `continuation`.
     work-item reads context; propose submits; apply-proposal approves.
-    acknowledge is the person's decision: it moves paths of a discarded window's
-    "discarded, not filed" record to `acknowledged`, listed and reversible by hand.
-    Status reports window budgets and the effective file limit (`unknown` is
-    not zero); keep the source while `keep_source` is true.
+    acknowledge is the person's decision: it ends the keep-source warning for paths
+    of a window's "discarded, not filed" record; no tool undoes it.
+    Status without run_id reports windows, budgets and the file limit (`unknown`
+    is not zero); keep the source while `keep_source.keep` is true.
     Details: references/operations.md.
 
     Args:
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
-        path: For `start`, subtree to scan (default: whole vault; ask which folder).
-            For run-listing `status`, count filed originals under it (null if
-            `complete=false`).
+        path: For `start`, subtree (default: whole vault; ask which folder).
+            For `status`, count filed originals under it.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
@@ -10727,13 +10726,14 @@ def op_adoption_studio(
         expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
-        after: For `start` or `status`, the last `next_after`.
+        after: For `start` or `status`, the last same-action reply's `next_after`.
         consume: For `start`, false keeps staged copies.
-        series_id: For `status`, a series needing room for its next window.
-        next_window_bytes: For `status`, that window's bytes.
+        series_id: Sender only: for `status`, a series needing room.
+        next_window_bytes: Sender only: that window's bytes.
         import_id: For `acknowledge`, the discarded window.
-        paths: For `acknowledge`, the person's decision: only paths they need no
-            longer keep. Reversible by hand; none is refused.
+        paths: For `acknowledge`: only paths the person confirmed they need no
+            longer keep. Ends their keep-source warning; no tool undoes it. None
+            is refused.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -10877,8 +10877,6 @@ def op_transfer_memory(
 
     import_cancel: stops an open import; no confirm.
     import_discard: permanently deletes the staged originals; needs confirm=true.
-    `IMPORT_RENAMES_PENDING`: run apply, or move the file and keep the source.
-    `IMPORT_RECEIPT_UNREADABLE`: the owner discards with `--walk-stage`.
     export_request: packs your memory, pauses your assistants while it packs and
     replaces any ready export. Call it without confirm for the effects and a fresh
     export_id; ask the owner; then repeat with confirm=true and that export_id

@@ -123,8 +123,8 @@
     - the discard Job keeps a residual record of the unfiled manifest members in the receipt, in the same write that drops the manifest, and lists a renamed member that has no page;
     - a retried discard keeps that record, and a discard writes an empty record when every member was filed;
     - a discard refuses with `IMPORT_RECEIPT_UNREADABLE` and keeps the stage when it cannot read the receipt;
-    - a discard with `walk_stage` set records each staged file except the series file in a separate file, keeps the receipt and removes the stage;
-    - a discard with `walk_stage` set refuses with `IMPORT_REQUEST_INVALID` and keeps the stage when it can read the receipt;
+    - the operator's walking discard (`--walk-stage`) records each staged file except the series file in a separate file, keeps the receipt and removes the stage;
+    - the operator's walking discard (`--walk-stage`) refuses with `IMPORT_REQUEST_INVALID` and keeps the stage when it can read the receipt;
     - a retried walk keeps the record that the first walk wrote, and a later discard writes no empty record over it;
     - the file watcher and media scans bind no renamed file before replay settles it.
   - [ ] 5.4.6 Report these in `adoption_studio status`: both budgets, the job-pinned bytes and the effective file limit. Also report the classification inputs, the remaining allowance, the drain state and each window's residual with its paths. Report each landed window's unfiled members, with or without a run, and never count the series file. Report each residual record's members as "discarded, not filed", and add `adoption_studio(action="acknowledge")` with explicit paths. Accept a series ID and the next window's bytes as that series' demand. Verify these with tests:
