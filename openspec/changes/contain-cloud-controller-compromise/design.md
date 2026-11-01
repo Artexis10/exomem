@@ -96,7 +96,17 @@ The admission policy therefore accepts a cell StatefulSet or Job only when its w
 - `workingDir` is unset;
 - there is no `envFrom`. Every environment entry's name is on the allowlist for that subcommand. A `valueFrom` names only an allowlisted key of `cell-credentials`, and a trust anchor is always a literal `value` (D2).
 
-At the pod level, the template has no ephemeral containers, `dnsPolicy` is `ClusterFirst`, and there is no `dnsConfig`. Admission already denies `hostAliases`.
+Pod Security `restricted` does not cover every security field, so admission also pins these on every container:
+- `readOnlyRootFilesystem: true` and the full container security context;
+- `terminationMessagePolicy: File`, because the default copies the log tail into the message that `cellctl` reads.
+
+At the pod level:
+- the template has no ephemeral containers;
+- `dnsPolicy` is `ClusterFirst`, and there is no `dnsConfig`;
+- `enableServiceLinks` is false, so the kubelet injects no environment outside the allowlist;
+- each volume name is bound to its expected source: the data volume to the cell's own claim, and Secret volumes to `cell-credentials`.
+
+Admission already denies `hostAliases`.
 
 The `cell-credentials` Secret's data keys must come from an allowlist too. Its values stay free, but no allowlisted environment name or mount reads one as configuration that changes trust.
 
@@ -148,7 +158,7 @@ A mismatch refuses the operation and logs a cataloged, content-free event (D7).
 - **Imports.** Today the cell's import recipient reaches the browser through `cellctl`, which writes the `recipient` column. So `cellctl` can substitute its own key and decrypt the upload.
 
 The fix in both cases:
-- **Exports.** The tenant's browser generates an `age` key pair when it requests the export. Substrate puts the public recipient into the signed export grant. The cell encrypts the archive to that recipient before upload, and the browser decrypts it after download. The private key never leaves the browser.
+- **Exports.** The tenant's browser generates an `age` key pair when it requests the export. Substrate takes the public recipient from the authenticated browser session, and stores it in a column that only Substrate's role writes, never `cellctl`'s. It also puts the recipient into the signed export grant. The cell encrypts the archive to that recipient before upload, and the browser decrypts it after download. The private key never leaves the browser.
 - **Imports.** The serving cell publishes its import recipient on a route that the gateway calls with a signed proof (D1). `cellctl` cannot reach that port, so the path excludes it. Substrate puts the recipient into the signed import grant, and the cell checks that the grant's recipient is its own before it decrypts.
 
 **Backups need no grant.** The cell derives its repository from its own cell ID and the pinned endpoint and bucket. `cell-backup` takes no destination.
@@ -216,6 +226,8 @@ A compromised `cellctl` cannot suppress these signals, because they come from th
 The admission policy accepts any digest from the cell image repository. The attested-image verifier (`make-cloud-cells-operator-resistant` task 4.1) limits digests to release-attested ones. A compromised `cellctl` could still choose an older attested image with a known flaw.
 
 This change adds a minimum release that the chart pins, so that admission refuses a rollback below it. This is a required task, not an option: without it, `cellctl` can roll a cell back to a release that lacks these checks.
+
+The cellctl admission policy matches only the digest pattern, and it cannot order releases. The attested-image verifier (`make-cloud-cells-operator-resistant` task 4.1) therefore enforces the floor. It reads the release version from the attestation and refuses one below the pinned minimum.
 
 ## Reuse
 

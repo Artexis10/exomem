@@ -4,7 +4,7 @@
 
 Cloud cell backups SHALL live in a bucket with Object Lock in compliance mode and a default retention period. No running service and no single key SHALL be able to remove a backup version before its retention ends. A delete by a backup credential SHALL hide a version, not remove it.
 
-The platform SHALL keep every current version's lock at least 29 days in the future, so that a version hidden at any time remains for at least 29 days. The job that extends locks SHALL NOT run in the controller. It SHALL hold no capability that shortens or removes a lock, and an alert SHALL fire when a run is missed.
+The platform SHALL keep every current version's lock at least 23 days in the future, so that a version hidden at any time remains for at least 23 days. The job that extends locks SHALL run outside the controller and outside every namespace the controller can write. It SHALL hold no capability that shortens or removes a lock, and an alert SHALL fire when a run is missed. It SHALL refuse to set a retention date more than 31 days ahead, because a compliance-mode extension cannot be undone.
 
 A lifecycle rule SHALL remove only hidden versions whose lock has expired, and never a current version.
 
@@ -15,12 +15,17 @@ A procedure SHALL restore a cell's backup repository from its hidden versions. A
 #### Scenario: The controller deletes every backup
 
 - **WHEN** an identity holding everything the controller holds deletes every object under every cell's backup prefix
-- **THEN** every version remains for at least 29 days, including packs written long before, and the recovery procedure restores each repository
+- **THEN** every version remains for at least 23 days, including packs written long before, and the recovery procedure restores each repository
 
 #### Scenario: An old pack is hidden
 
 - **WHEN** a restic pack written 60 days ago is hidden today
-- **THEN** its version stays locked for at least 29 more days
+- **THEN** its version stays locked for at least 23 more days
+
+#### Scenario: The extender computes a wrong date
+
+- **WHEN** the extender computes a retention date more than 31 days ahead
+- **THEN** it applies no extension and raises an alert
 
 #### Scenario: Restic prunes
 

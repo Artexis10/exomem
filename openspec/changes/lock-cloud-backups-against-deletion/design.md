@@ -28,12 +28,17 @@ The backups therefore move to a new bucket with Object Lock enabled and default 
 
 - **Compliance mode.** No key can shorten or remove a version's retention in this mode, the account owner's included. Governance mode allows a bypass with a capability, and that capability would be one more key to protect.
 - **Retention runs from creation, not from deletion.** The default retention sets each version's lock to its creation time plus N days. Restic keeps long-lived packs for stable data. A pack written 25 days ago with a 30-day default is locked for only 5 more days. If an attacker hides it today and the hide is noticed a week later, the pack is gone.
-- **Locks are extended on a schedule.** Compliance mode allows a lock to be extended, never shortened. A daily job extends the lock of every current version in the backup bucket to today plus 30 days. So whenever a delete happens, every version that it hides stays locked for at least 29 days afterwards.
+- **Locks are extended on a schedule.** Compliance mode allows a lock to be extended, never shortened. A daily job extends the lock of each current version in the backup bucket to today plus 30 days. So whenever a delete happens, every version that it hides stays locked for at least 23 days afterwards (see the 7-day rule below).
   - The job holds a key that can only list files and extend retention. In compliance mode, that key cannot shorten or remove anything.
-  - It runs outside `cellctl`, as its own small CronJob with its own service account.
+  - It runs as its own small CronJob, with its own service account, in its own namespace, outside both the `exo-cell-*` namespaces and `cellctl`'s namespace. `cellctl`'s admission scope and RBAC reach neither its Job nor its key.
   - A missed run reduces the margin by one day, and an alert fires on a missed run.
+  - It extends only versions whose lock ends within 7 days. That keeps the margin at least 23 days, with far fewer calls than extending every version daily.
+- **An extension is irreversible, so the extender fails closed.** In compliance mode, nobody can undo a lock date that was set too far ahead. A bug that set years instead of days would lock every version, and its storage cost, for years.
+  - The target is a fixed constant: today plus 30 days.
+  - The job refuses any retention date more than 31 days ahead, and alerts instead of applying it.
+  - Its key is admin-tier custody under `make-cloud-cells-operator-resistant` D6.
 - **30 days.** This margin covers the time to notice a mass deletion and recover from it.
-- **Cost.** One retention update per current version per day, at the provider's per-call price. Task 1.2 measures it with the storage.
+- **Cost.** One retention update per current version each time its lock nears expiry, across all cells, at the provider's per-call price. Task 1.2 measures it at fleet scale with the storage.
 
 ### D3. Deletes hide; the lifecycle removes after the lock
 
