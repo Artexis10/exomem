@@ -1,7 +1,7 @@
 """The out-of-cluster B2 key watcher: what it alerts on, what it sends, what it prints.
 
 HTTP is injected at the transport. `FakeTransport` stands in for urllib's opener and
-answers B2 native API v3 and receiver requests with producer-shaped responses.
+answers B2 native API v4 and receiver requests with producer-shaped responses.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class FakeTransport:
         url = request.full_url
         if url.startswith("https://alerts.example.test/"):
             endpoint = "alert"
-        elif url.startswith("https://api.backblazeb2.com/b2api/v3/"):
+        elif url.startswith("https://api.backblazeb2.com/b2api/v4/"):
             endpoint = "authorize"
         else:
             endpoint = url.rsplit("/", 1)[-1]
@@ -180,7 +180,7 @@ def unlocked_settings() -> dict[str, Any]:
 def listed_bucket(
     bucket_id: str, settings: dict[str, Any], *, readable: bool = True
 ) -> dict[str, Any]:
-    """B2 v3 wire shape: three settings come wrapped, and withheld without the read capability."""
+    """B2 v4 wire shape: three settings come wrapped, and withheld without the read capability."""
     retention = settings["defaultRetention"] or {"mode": None, "period": None}
 
     def wrap(value: Any) -> dict[str, Any]:

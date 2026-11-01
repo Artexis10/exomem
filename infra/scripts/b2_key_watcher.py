@@ -33,7 +33,10 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, TextIO
 from urllib.parse import urlsplit
 
-AUTHORIZE_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
+# v4, not v3: on 2026-11-01 the v3 b2_list_keys of a live account returned 6 of
+# its 25 keys (the v4 listing returned all 25), so a v3 watcher would be blind to
+# most keys. v4 also reports a key's restriction as the `bucketIds` list.
+AUTHORIZE_URL = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account"
 SCHEMA_VERSION = 1
 JOB = "b2-key-watcher"
 HEARTBEAT_ALERT = "KEY_WATCHER_RUN"
@@ -289,7 +292,7 @@ def _api_post(
     opener: Opener, session: Session, endpoint: str, body: dict[str, Any]
 ) -> dict[str, Any]:
     request = urllib.request.Request(
-        f"{session.api_url}/b2api/v3/{endpoint}",
+        f"{session.api_url}/b2api/v4/{endpoint}",
         data=json.dumps(body).encode("utf-8"),
         headers={"Authorization": session.token, "Content-Type": "application/json"},
         method="POST",
