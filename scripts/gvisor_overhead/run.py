@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -36,15 +37,16 @@ CELL_ID = "abcdefghijklmnop"
 CELL_PORT = 8765
 PROTOCOL = "2025-11-25"
 IMPORT_NAME = "Project Archive"
-RUNTIMES = ("runc", "runsc", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug", "runsc-overlay")
-# The runtime that runs the long-lived cell in each arm. Plain runsc cannot start the cell on a
-# volume: the sandbox refuses renameat2(RENAME_NOREPLACE) on its gofer-backed mounts, and the
-# cell's filesystem probe then fails closed. `runsc-overlay` keeps the volume as a read-only
-# lower layer and holds every write in sandbox memory, so the cell runs but its writes do not persist.
-CELL_RUNTIME = {"runc": "runc", "runsc": "runsc-overlay"}
+RUNTIMES = ("runc", "runsc", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug")
 MEDIA_DIR = "Knowledge Base/Sources/Media"
+# Plain runsc cannot start the cell on a volume: the sandbox refuses renameat2(RENAME_NOREPLACE)
+# on its gofer-backed mounts, and the cell's filesystem probe then fails closed. So both arms run
+# the cell with /data on a tmpfs, filled from the session volume (mounted read-only at /seed) by
+# this wrapper. The copy time is printed so that start-up can be reported with and without it.
 CELL_COMMAND = (
-    'ulimit -c 0 && mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && exec "$@"'
+    'ulimit -c 0; t0=$(date +%s%N); cp -a /seed/. /data/ || exit 70; t1=$(date +%s%N); '
+    'echo "restore_ms=$(( (t1 - t0) / 1000000 ))" >&2; '
+    'mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && exec "$@"'
 )
 # Closed tool-name sets: the grouped execution name stays callable, the public name is listed.
 TOOLS = {
@@ -352,6 +354,48 @@ for root in sys.argv[1:]:
 print(json.dumps(report))
 '''
 
+FS_SCRIPT = r'''
+import json, os, shutil, sqlite3, sys, time
+root, count = sys.argv[1], 200
+os.makedirs(root, exist_ok=True)
+payload, clock, out = b"x" * 2048, time.perf_counter, {}
+t = clock()
+for i in range(count):
+    fd = os.open("%s/f%d.tmp" % (root, i), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, payload)
+    os.fsync(fd)
+    os.close(fd)
+    os.replace("%s/f%d.tmp" % (root, i), "%s/f%d" % (root, i))
+out["write_fsync_replace_200"] = (clock() - t) * 1000
+t = clock()
+for i in range(count):
+    with open("%s/f%d" % (root, i), "rb") as handle:
+        handle.read()
+out["read_200"] = (clock() - t) * 1000
+t = clock()
+for i in range(count):
+    os.stat("%s/f%d" % (root, i))
+out["stat_200"] = (clock() - t) * 1000
+t = clock()
+database = sqlite3.connect(root + "/bench.db")
+database.execute("create table t (a integer, b text)")
+for i in range(count):
+    database.execute("insert into t values (?, ?)", (i, "row"))
+    database.commit()
+database.close()
+out["sqlite_commit_200"] = (clock() - t) * 1000
+t = clock()
+fd = os.open(root + "/big", os.O_WRONLY | os.O_CREAT, 0o600)
+chunk = b"y" * (1 << 20)
+for _ in range(64):
+    os.write(fd, chunk)
+os.fsync(fd)
+os.close(fd)
+out["write_64mib_fsync"] = (clock() - t) * 1000
+shutil.rmtree(root, ignore_errors=True)
+print(json.dumps(out))
+'''
+
 REBUILD_SCRIPT = r'''
 import json, time
 from pathlib import Path
@@ -454,7 +498,9 @@ class Lab:
     def start_cell(self, runtime: str, name: str, volume: str) -> tuple[str, float, float]:
         """Returns (base url, `docker run -d` milliseconds, clock at the call)."""
         argv = ["run", "-d", "--name", name, "--runtime", runtime, "--network", self.network,
-                "--cpus", "2", "--memory", "3g", *self.security(), "-v", f"{volume}:/data", *self.cell_env(),
+                "--cpus", "2", "--memory", "3g", *self.security(),
+                "--tmpfs", "/data:rw,nosuid,nodev,uid=10001,gid=10001,mode=2770,size=2g",
+                "-v", f"{volume}:/seed:ro", *self.cell_env(),
                 "--entrypoint", "sh", self.image, "-c", CELL_COMMAND, "cell-process", "exomem",
                 "--transport", "http", "--host", "0.0.0.0", "--port", str(CELL_PORT)]
         t0 = now_ms()
@@ -647,16 +693,24 @@ class Lab:
                 import_id = self.import_stage(arm, rep, volume)
             except Exception as error:  # noqa: BLE001 - recorded, the session goes on
                 self.fail(arm, rep, "c.import_stage_job", f"{type(error).__name__}: {error}")
+        if "fs" in a.only:
+            self.fs_micro(arm, rep, volume)
         # (e) startup
-        url, created, t0 = self.start_cell(CELL_RUNTIME[arm], name, volume)
+        url, created, t0 = self.start_cell(arm, name, volume)
         live = self.wait_http(url, "/health", t0, 240, name)
         ready = self.wait_http(url, "/health/ready", t0, 400, name)
         self.record(arm, rep, "e.docker_run_returns", [created])
+        restore = re.search(r"restore_ms=(\d+)", self.docker("logs", name, check=False).stderr)
+        restore_ms = float(restore.group(1)) if restore else None
+        if restore_ms is not None:
+            self.record(arm, rep, "e.restore_copy_into_tmpfs", [restore_ms], note="cp -a of the volume, inside the sandbox")
         for case, value in (("e.start_to_live", live), ("e.start_to_ready", ready)):
             if value is None:
                 self.fail(arm, rep, case, "never answered 200")
             else:
-                self.record(arm, rep, case, [value])
+                self.record(arm, rep, case, [value], note="includes the restore copy")
+                if restore_ms is not None:
+                    self.record(arm, rep, case + "_after_copy", [value - restore_ms])
         if ready is None:
             self.stop_cell(name, f"{tag}-cell")
             return
@@ -798,8 +852,7 @@ class Lab:
 
     # -- (d)
     def work_media(self, arm: str, rep: int, mcp: Mcp, container: str) -> None:
-        # Files go in through the running container, so both runtimes see them the same way
-        # (a host-side copy into the volume is invisible to a sandbox with an overlay over it).
+        # The cell's /data is a tmpfs inside the container, so files go in through the container itself.
         for filename in self.media_files:
             with (self.fx / "media" / filename).open("rb") as source:
                 staged = subprocess.run(
@@ -835,6 +888,15 @@ class Lab:
             total = now_ms() - start
             self.record(arm, rep, case, [total], ok=final.startswith(("complete", "done")),
                         note=f"ack_ms={ack_ms:.0f} states={states} first_ack={json.dumps(acked.structured)[:200]}")
+
+    def fs_micro(self, arm: str, rep: int, volume: str) -> None:
+        """Small-file I/O on the volume itself, which the cell cannot use under runsc; not a product workload."""
+        wall, result = self.oneshot(arm, volume, ["python", "-c", FS_SCRIPT, "/data/fsbench"], entrypoint="env")
+        if result.returncode != 0:
+            self.fail(arm, rep, "f.volume_io", result.stdout[-300:] + result.stderr[-500:])
+            return
+        for case, value in json.loads(result.stdout.strip().splitlines()[-1]).items():
+            self.record(arm, rep, f"f.{case}", [value], items=200 if case.endswith("_200") else 1)
 
     # -- (c)
     def import_stage(self, arm: str, rep: int, volume: str) -> str:
@@ -923,7 +985,7 @@ def main() -> int:
     parser.add_argument("--work", required=True)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed-notes", type=int, default=200)
-    parser.add_argument("--only", default="search,write,media,import")
+    parser.add_argument("--only", default="search,write,media,import,fs")
     parser.add_argument("--compat-only", action="store_true", help="probe the runtimes and stop")
     args = parser.parse_args()
     args.only = {part for part in args.only.split(",") if part}

@@ -75,10 +75,10 @@ def fmt(value, digits=1):
     return "-" if value is None else f"{value:,.{digits}f}"
 
 
-ARMS = ("runc: the cell on Docker's default runtime, data on a Docker volume. "
-        "runsc: the cell on gVisor (runsc 20261026.0, systrap, directfs on) with the volume as a read-only lower "
-        "layer and every write held in sandbox memory (`--overlay2=all:memory`), because plain runsc cannot start "
-        "the cell on a volume. The init container and the import Job run on plain runsc over the volume.")
+ARMS = ("runc: Docker's default runtime. runsc: gVisor runsc 20261026.0, systrap, directfs on. "
+        "Plain runsc cannot start the cell on a volume, so in both arms the cell runs with /data on a tmpfs "
+        "inside the container, copied from the session volume at start: the cells here never touch a disk. "
+        "The init container, the import Job and the f.* file benchmarks run on the volume itself.")
 
 
 def render(summary: dict[str, dict]) -> str:
