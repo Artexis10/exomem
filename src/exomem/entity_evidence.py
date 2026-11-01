@@ -15,8 +15,7 @@ The store is read through and exact at call time:
   only the pages that audience may see reach aggregation. Governance verdicts are
   never stored.
 * A page that is not indexable, or whose path is raw-protected, stores no content. It
-  is read live on every sweep, as is a page whose status label only its own registry
-  instance can classify.
+  is read live on every sweep.
 * Any store fault makes the caller run the full sweep for that call.
 
 Dropping the file changes cost only, never an answer.
@@ -25,12 +24,14 @@ Dropping the file changes cost only, never an answer.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
 import os
 import sqlite3
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -47,7 +48,7 @@ from .entity_recurrence import (
 )
 from .entity_types import EntityTypeRegistry
 from .kbdir import kb_prefix
-from .vault import WikilinkResolver, kb_root
+from .vault import WikilinkResolver, kb_root, yaml_safe_dump_for_parse, yaml_safe_load
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,8 @@ def _meta(vault_root: Path) -> dict[str, str]:
         "predicates": entity_recurrence.PREDICATE_TABLE_DIGEST,
         "vault": str(Path(vault_root).resolve()),
         "kb_prefix": kb_prefix(),
+        # Identities are NFKC-casefolded; a new Unicode database can fold a name differently.
+        "unicode": unicodedata.unidata_version,
     }
 
 
@@ -213,6 +216,11 @@ def _encode(evidence: PageEvidence) -> tuple[str, str]:
         "title": evidence.title,
         "status": evidence.status,
         "registry": evidence.registry_facts,
+        "frontmatter": (
+            None
+            if evidence.frontmatter is None
+            else yaml_safe_dump_for_parse(dict(evidence.frontmatter))
+        ),
     }
     facts = {
         "links": [[link.target, link.name, link.suffix] for link in evidence.links],
@@ -245,7 +253,11 @@ def _encode(evidence: PageEvidence) -> tuple[str, str]:
 def _decode_head(path: str, head_json: str) -> PageEvidence:
     head = json.loads(head_json)
     return PageEvidence(
-        path=path, title=head["title"], status=head["status"], registry_facts=head["registry"]
+        path=path,
+        title=head["title"],
+        status=head["status"],
+        registry_facts=head["registry"],
+        frontmatter=None if head["frontmatter"] is None else yaml_safe_load(head["frontmatter"]),
     )
 
 
@@ -333,7 +345,8 @@ def sweep(
     cues = entity_recurrence.cue_grammar(entity_types)
     try:
         conn = _connect(vault_root, _meta(vault_root))
-    except (sqlite3.Error, OSError) as error:
+    except (sqlite3.Error, OSError, ValueError) as error:
+        # ValueError: a state root the vault refuses; the full sweep needs no state.
         raise StoreFault(str(error)) from error
     try:
         try:
@@ -429,7 +442,8 @@ def _refresh(
             if row is not None and row.sha256 == digest and row.cue_key == cue_key:
                 # The same bytes under a new or racy identity: keep the facts.
                 _use_row(entry, row)
-                touches.append((*identity, verified_at, entry.rel))
+                if identity != row.identity or (trust_ctime and row.racy):
+                    touches.append((*identity, verified_at, entry.rel))
                 continue
             page = find_corpus.parse_page(
                 entry.path, entry.info.st_mtime, vault_root, content=content
@@ -469,12 +483,8 @@ def _cue_key(rel: str, cues: CueGrammar) -> str:
 
 def _volatile(entry: _Visible, evidence: PageEvidence) -> bool:
     """Whether this page's evidence must be re-read every sweep instead of stored."""
-    from . import lifecycle_statuses
-
     return (
         entry.path_volatile
-        # Only the page's own registry instance can classify a non-canonical label.
-        or lifecycle_statuses.canonical_class(evidence.status) is None
         # A row is keyed by the walked path, so the page must agree with it.
         or evidence.path != entry.rel
     )
@@ -560,9 +570,12 @@ def _aggregate(
             and entity_recurrence.counts_as_evidence(
                 entry.page
                 if entry.page is not None
-                # A stored row holds a canonical label, which classifies without the rest.
+                # A stored row holds the frontmatter only where the label needs it.
                 else SimpleNamespace(
-                    rel_path=entry.rel, frontmatter={"status": entry.evidence.status}
+                    rel_path=entry.rel,
+                    frontmatter=entry.evidence.frontmatter
+                    if entry.evidence.frontmatter is not None
+                    else {"status": entry.evidence.status},
                 ),
                 indexable=entry.indexable,
                 status_basis=status_basis,
@@ -588,3 +601,85 @@ def _aggregate(
             attachment_probe=attachment_probe,
             grammar=entity_recurrence.frame_grammar(entity_types, registry, cues=cues),
         )
+
+
+# ---------------------------------------------------------------- comparison
+
+@dataclass(frozen=True, slots=True)
+class SweepRun:
+    """One explicit `entity_recurrence` audit, as findings and measurements."""
+
+    findings: str
+    wall_s: float
+    thread_cpu_s: float
+    #: The counters each `entity_evidence.*` span reported, by span name.
+    spans: Mapping[str, Mapping[str, int]]
+
+
+def run_sweep(
+    vault_root: Path, *, principal: Any = None, stored: bool = True
+) -> SweepRun:
+    """Run one `entity_recurrence`-only audit as `principal` (None is the owner).
+
+    `stored=False` runs the full sweep, which is the oracle for the store.
+    """
+    from . import audit
+    from .governance.principal import library_scope, request_scope
+
+    token = f"entity-evidence-run-{time.monotonic_ns()}"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    wall, cpu = time.perf_counter(), time.thread_time()
+    try:
+        with library_scope() if principal is None else request_scope(principal):
+            with contextlib.nullcontext() if stored else full_sweep():
+                report = audit.audit(vault_root, categories=["entity_recurrence"])
+    finally:
+        spans = call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+    return SweepRun(
+        findings=json.dumps(
+            [dataclasses.asdict(finding) for finding in report.findings],
+            sort_keys=True,
+            default=str,
+        ),
+        wall_s=time.perf_counter() - wall,
+        thread_cpu_s=time.thread_time() - cpu,
+        spans={
+            span["name"]: {
+                key: value
+                for key, value in span.get("fields", {}).items()
+                if key not in call_spans.CPU_FIELDS
+            }
+            for span in spans
+            if span["name"].startswith("entity_evidence.")
+        },
+    )
+
+
+def compare_sweeps(vault_root: Path, *, principal: Any = None) -> dict[str, Any]:
+    """Compare the full sweep with the store sweep on one vault, and time both.
+
+    Read-only on the vault. Set `EXOMEM_STATE_ROOT` to an absolute directory first,
+    so the store lands there and not in the live state. The store is built by the
+    first stored sweep and read warm by the second. Call it as:
+    `python -c "from pathlib import Path; from exomem import entity_evidence as e;
+    print(e.compare_sweeps(Path('<vault>')))"`.
+    """
+    full = run_sweep(vault_root, principal=principal, stored=False)
+    first = run_sweep(vault_root, principal=principal)
+    warm = run_sweep(vault_root, principal=principal)
+
+    def timing(run: SweepRun) -> dict[str, Any]:
+        return {
+            "wall_s": round(run.wall_s, 2),
+            "thread_cpu_s": round(run.thread_cpu_s, 2),
+            "spans": {name: dict(fields) for name, fields in run.spans.items()},
+        }
+
+    return {
+        "findings": len(json.loads(full.findings)),
+        "identical": full.findings == first.findings == warm.findings,
+        "full": timing(full),
+        "stored_first": timing(first),
+        "stored_warm": timing(warm),
+    }

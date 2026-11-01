@@ -466,6 +466,9 @@ class PageEvidence:
     status: str | None
     #: The registry-relevant frontmatter of an Entities page, else None.
     registry_facts: Mapping[str, Any] | None = None
+    #: The whole frontmatter, kept only when `status` is not a canonical label: only
+    #: the page's own registry instance can classify such a label, from its frontmatter.
+    frontmatter: Mapping[str, Any] | None = None
     #: Distinct body links that name an identity other than the page's own;
     #: empty on a navigation page (design D4).
     links: tuple[Wikilink, ...] = ()
@@ -661,14 +664,13 @@ def _origin_ref(page: Any) -> str:
     return f"page:{identity_key(page.rel_path)}"
 
 
-def _origin_refs(pages: Iterable[PageEvidence]) -> dict[str, str]:
+def _origin_refs(pages: tuple[Any, ...]) -> dict[str, str]:
     """Collapse overlapping Source declarations into derivative components."""
     from . import provenance
 
-    rows = tuple(pages)
     return provenance.origin_keys(
-        {row.path: frozenset(row.source_refs) for row in rows},
-        fallback={row.path: row.origin_ref for row in rows},
+        {str(page.rel_path): _source_refs(page) for page in pages},
+        fallback={str(page.rel_path): _origin_ref(page) for page in pages},
     )
 
 
@@ -1141,16 +1143,21 @@ def extract_identity_frames(
     entity_types: EntityTypeRegistry,
     registry: RegistryIndex,
     grammar: FrameGrammar | None = None,
+    scan: tuple[Iterable[EvidenceContext], Iterable[str]] | None = None,
 ) -> tuple[EvidenceContext, ...]:
     """Extract only the five closed ``identity-frames-v1`` frame shapes.
 
     A sweep passes the `grammar` it compiled once for `entity_types` and
-    `registry`; without one, this call compiles its own.
+    `registry`; without one, this call compiles its own. A sweep that holds a
+    page's `PageEvidence` passes its cue frames and relation clauses as `scan`
+    instead of the body, and every sweep reads its frames through this one seam.
     """
     grammar = grammar or frame_grammar(entity_types, registry)
     if grammar is None:
         return ()
-    cue_frames, relation_clauses = _scan_body(body, grammar.cues, path=path)
+    cue_frames, relation_clauses = (
+        scan if scan is not None else _scan_body(body, grammar.cues, path=path)
+    )
     # Frames of different types never share a dedupe key, because the frame type
     # is part of `facet_hash`, so the two passes' union is the whole body's frames.
     rows = (*cue_frames, *anchor_frames(relation_clauses, grammar, path=path))
@@ -1415,7 +1422,7 @@ def _registry_facts(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
 
 def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
     """Everything one sweep reads from one page's own bytes (see `PageEvidence`)."""
-    from . import provenance
+    from . import lifecycle_statuses, provenance
 
     rel_path = str(page.rel_path)
     raw_status = page.frontmatter.get("status")
@@ -1458,6 +1465,9 @@ def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
         path=rel_path,
         title=page.title,
         status=status,
+        frontmatter=(
+            page.frontmatter if lifecycle_statuses.canonical_class(status) is None else None
+        ),
         links=tuple(links),
         source_refs=tuple(sorted(_source_refs(page))),
         origin_ref=_origin_ref(page),
@@ -1524,6 +1534,8 @@ def aggregate(
 
     `grammar` is None when no cue and no anchor exists, and then no page yields a frame.
     """
+    from . import provenance
+
     evidence_rows = tuple(sorted(evidence, key=lambda row: row.path))
     mentions: dict[str, dict[str, str]] = {}
     suffixed: dict[str, set[str]] = {}
@@ -1541,7 +1553,15 @@ def aggregate(
         evidence_by_path[page.path] = page
         if grammar is not None:
             self_identities = _self_identities(page.title, page.path)
-            for context in (*page.frames, *anchor_frames(page.relation_clauses, grammar, path=page.path)):
+            for context in extract_identity_frames(
+                "",
+                path=page.path,
+                origin="",
+                entity_types=entity_types,
+                registry=registry,
+                grammar=grammar,
+                scan=(page.frames, page.relation_clauses),
+            ):
                 if context.identity and context.identity not in self_identities:
                     ordinary.setdefault(context.identity, []).append(context)
         for link in page.links:
@@ -1584,14 +1604,12 @@ def aggregate(
             evidence_by_path[path]
             for path in sorted({row.path for row in raw_rows})
         )
-        identity_origins = _origin_refs(contributing_pages)
+        identity_origins = provenance.origin_keys(
+            {page.path: frozenset(page.source_refs) for page in contributing_pages},
+            fallback={page.path: page.origin_ref for page in contributing_pages},
+        )
         rows = tuple(
-            replace(
-                row,
-                origin=identity_origins[row.path],
-                registry_fingerprint=entity_types.fingerprint,
-            )
-            for row in raw_rows
+            replace(row, origin=identity_origins[row.path]) for row in raw_rows
         )
         matches = registry.matches(identity)
         ordinary_qualifies = _qualifies(

@@ -26,9 +26,8 @@ from pathlib import Path
 
 from . import activation as activation_module
 from . import audit as audit_module
-from . import call_spans
+from . import call_spans, fusion
 from . import contradiction_stance as contradiction_stance_module
-from . import fusion
 from . import review_state as review_state_module
 from .audit import AuditFinding
 
