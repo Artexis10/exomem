@@ -87,6 +87,7 @@ from . import (
     mutation_lock,
     request_budget,
     reserved_paths,
+    source_taxonomy,
     state_paths,
 )
 from .find_types import RankingPage
@@ -3148,6 +3149,9 @@ class _AdmittedRecallRows:
     paths: frozenset[str]
     carry_candidates: tuple[str, ...]
     outside_carry: tuple[str, ...]
+    # In-scope raw material that is not an Episode: the pages `carry_candidates` leaves out
+    # by the same SQL clause, so the two partitions split the scope exactly.
+    captured_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -3190,16 +3194,31 @@ class RequestQueryContext:
     `catalogue_ranking` is the caller's configuration-only finding that this
     admission can withhold no page, so a ranking may use the catalogue's own
     statistics; which pages exist never decides it. `complete` is each
-    snapshot's check of that finding.
+    snapshot's check of that finding. `captured` also admits the in-scope raw
+    material that is not an Episode (`_AdmittedRecallRows.captured_candidates`),
+    so a ranking over it counts those pages under the caller's own admission.
     """
 
     vault_root: Path
     visible: Callable[[str], bool]
     status_basis: Any
     catalogue_ranking: bool = False
+    captured: bool = False
     generation: tuple | None = None
     admitted_paths: set[str] | None = None
     complete: bool = False
+    captured_paths: frozenset[str] = frozenset()
+
+    def with_captured(self) -> RequestQueryContext:
+        """The same reader and lifecycle basis, admitting the captured partition too.
+
+        A new context: it shares no admitted set with this one, so the compiled
+        carry's statistics are never recounted over raw material.
+        """
+        return RequestQueryContext(
+            self.vault_root, self.visible, self.status_basis,
+            catalogue_ranking=self.catalogue_ranking, captured=True,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -3457,6 +3476,26 @@ def search_bm25_result(
         term_budget=term_budget,
         query_units=units if term_budget is not None or excluded_corroboration_stems else None,
         term_selection=term_selection,
+    )
+
+
+def captured_pool(
+    vault_root: Path,
+    query_context: RequestQueryContext,
+    *,
+    freshness: tuple | None = None,
+    recall_checkpoint: Any | None = None,
+) -> CatalogQueryResult[frozenset[str]]:
+    """The captured pages (raw material but Episodes) that `query_context` admits.
+
+    `query_context` must have been made with `RequestQueryContext.with_captured`.
+    Read on the ranking's own readiness rules: no foreground delta, and an
+    incomplete catalogue reported rather than repaired.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root).captured_pool(
+        query_context, freshness=freshness, recall_checkpoint=recall_checkpoint
     )
 
 
@@ -9402,6 +9441,25 @@ class LexicalStore:
             recall_checkpoint=recall_checkpoint,
         )
 
+    def captured_pool(
+        self,
+        query_context: RequestQueryContext,
+        *,
+        freshness: tuple | None,
+        recall_checkpoint: Any | None,
+    ) -> CatalogQueryResult[frozenset[str]]:
+        if not query_context.captured:
+            raise ValueError("a captured pool needs a context that admits the captured partition")
+
+        def query(conn: sqlite3.Connection) -> frozenset[str]:
+            self._request_admitted_paths(conn, query_context)
+            return query_context.captured_paths
+
+        return self._serve_from_ready_catalog_result(
+            "kb", freshness, query, "lexical sidecar captured pool failed (%s)",
+            recall_checkpoint=recall_checkpoint, allow_delta=False,
+        )
+
     def carry_term_statistics(
         self,
         stemmed_tokens: list[str],
@@ -9799,7 +9857,7 @@ class LexicalStore:
         snapshot = self._snapshot_generation(conn)
         generation = (
             str(self.vault_root.absolute()), scope,
-            id(context.visible), id(context.status_basis), *snapshot
+            id(context.visible), id(context.status_basis), context.captured, *snapshot
         )
         if context.generation != generation or context.admitted_paths is None:
             col = "in_vault" if scope == "vault" else "in_kb"
@@ -9807,6 +9865,8 @@ class LexicalStore:
             # Hidden labels never reach classification; navigation and retired
             # pages still belong in the admitted denominator.
             candidates = rows.carry_candidates
+            if context.captured:
+                candidates = (*candidates, *rows.captured_candidates)
             admission = admission_of(context.visible)
             identity = admission.identity() if admission is not None else None
             if identity is None:
@@ -9820,6 +9880,10 @@ class LexicalStore:
                 )
                 verdicts = self._publish_verdicts(plan, admission)
                 context.admitted_paths = {path for path in candidates if verdicts[path]}
+            context.captured_paths = (
+                frozenset(rows.captured_candidates) & context.admitted_paths
+                if context.captured else frozenset()
+            )
             # Checked only where configuration allows catalogue ranking: its
             # statistics count every page row, raw material and pages outside
             # the scope included. Stops at the first withheld row.
@@ -10978,20 +11042,26 @@ class LexicalStore:
                 if rows is None:
                     col = "in_vault" if scope == "vault" else "in_kb"
                     raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
+                    # The captured partition is the in-scope complement of that same clause, less Episodes.
+                    episodes = f"{kb_dirname()}/Sources/{source_taxonomy.EPISODE_PATH_LABEL}/"
                     with call_spans.span("lexical.resolver_entries", {}) as measured:
-                        entries, candidates, outside = [], [], []
+                        entries, candidates, outside, captured = [], [], [], []
                         # Cache the SQL partitions, then decide visibility anew for each request.
-                        for path, title, in_scope, carry in conn.execute(
-                            f"SELECT p.path, p.title, p.{col}, (p.{col} = 1{raw_clause}) "
-                            "FROM pages p ORDER BY p.path", raw_params,
+                        for path, title, in_scope, carry, raw in conn.execute(
+                            f"SELECT p.path, p.title, p.{col}, (p.{col} = 1{raw_clause}), "
+                            f"(p.{col} = 1 AND NOT (1 = 1{raw_clause}) AND substr(p.path, 1, ?) != ?) "
+                            "FROM pages p ORDER BY p.path",
+                            [*raw_params, *raw_params, len(episodes), episodes],
                         ):
                             path = str(path)
                             if in_scope == 1:
                                 entries.append((path, title))
                             (candidates if carry else outside).append(path)
+                            if raw:
+                                captured.append(path)
                         rows = _AdmittedRecallRows(
                             tuple(entries), frozenset(path for path, _title in entries),
-                            tuple(candidates), tuple(outside),
+                            tuple(candidates), tuple(outside), tuple(captured),
                         )
                         measured["rows"] = len(entries)
                     with self._term_frequency_cache_lock:
