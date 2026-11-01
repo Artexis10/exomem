@@ -262,6 +262,7 @@ class WriteIntentJournal:
         clock: Callable[[], float] = time.time,
         free_bytes: Callable[[Path], int] | None = None,
     ):
+        self.vault_root = Path(vault_root)
         self.vault_id = vault_id
         self.replica_id = replica_id
         self.bounds = bounds if bounds is not None else Bounds.from_env()
@@ -395,7 +396,8 @@ class WriteIntentJournal:
         if existing is not None and existing.active:
             return existing, False
         intent_id = uuid.uuid4().hex
-        request_id = uuid.uuid4().hex
+        # The canonical UUIDv4 spelling: the receipt's terminal projection rejects any other request id.
+        request_id = str(uuid.uuid4())
         key = retry_key if retry_key is not None else f"intent:{intent_id}"
         window = window_seconds if window_seconds is not None else INTENT_RETENTION_SECONDS
         argument_text = _dump(arguments)
@@ -597,6 +599,59 @@ class WriteIntentJournal:
         finally:
             conn.close()
         return [_decode(row) for row in rows]
+
+    # -- apply (the applier's transitions) --------------------------------------------------------------
+
+    @property
+    def applier_lock_path(self) -> Path:
+        """The OS lock file of the one applier of this vault (design D4); its sidecar names a preferred applier."""
+        return self.state_dir / f"{JOURNAL_FILENAME}.applier.lock"
+
+    @_unavailable_on_sqlite_error
+    def next_accepted(self) -> Intent | None:
+        """The oldest `accepted` intent. An `applying` row left by a dead applier is skipped: crash recovery owns it."""
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM intents WHERE state = 'accepted' ORDER BY seq LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        return None if row is None else _decode(row)
+
+    @_unavailable_on_sqlite_error
+    def begin_apply(self, intent_id: str) -> bool:
+        """Move one `accepted` intent to `applying` and count the attempt. False when another writer moved it first."""
+        return self._move(intent_id, "accepted", "applying", count_attempt=True)
+
+    @_unavailable_on_sqlite_error
+    def requeue(self, intent_id: str, cause: str) -> bool:
+        """Return an `applying` intent to `accepted` after an attempt that committed nothing, naming why it waits.
+
+        `wait_since` keeps the time the same cause began, so the age of a wait survives repeated attempts.
+        """
+        return self._move(intent_id, "applying", "accepted", wait_cause=cause)
+
+    def _move(
+        self,
+        intent_id: str,
+        source: str,
+        target: str,
+        *,
+        count_attempt: bool = False,
+        wait_cause: str | None = None,
+    ) -> bool:
+        now = self.clock()
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "UPDATE intents SET state = ?, updated_at = ?, attempts = attempts + ?, "
+                "wait_since = CASE WHEN ? IS NULL THEN wait_since WHEN wait_cause IS ? THEN wait_since ELSE ? END, "
+                "wait_cause = COALESCE(?, wait_cause) "
+                "WHERE intent_id = ? AND state = ?",
+                (target, now, int(count_attempt), wait_cause, wait_cause, now, wait_cause, intent_id, source),
+            )
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
 
     # -- end of life ----------------------------------------------------------------------------------
 

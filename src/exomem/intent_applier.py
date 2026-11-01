@@ -1,0 +1,438 @@
+"""The applier of the write-intent journal (design D4): one per vault, FIFO, through the ordinary command path.
+
+An accepted intent commits exactly once, in acceptance order, as the caller who sent it. The applier
+rebuilds that caller's principal from the row's bearer-free snapshot, revalidates the login, and
+dispatches the stored arguments through `writer_lease.invoke_command`, so admission, the leaf, the
+receipts and the postfilter are the synchronous path's own. The applier-dispatch context variable
+(`intent_accept.ApplierDispatch`) makes that dispatch claim the key accept recorded, with the original
+digest, and take no accept deadline.
+
+One OS lock per vault (`WriteIntentJournal.applier_lock_path`) admits one applier across processes.
+The service is the preferred applier: it holds the lock while it runs, and holds a shared lock on a
+sidecar that a CLI applier reads to stand aside. A CLI applier releases the lock after each intent.
+
+Crash recovery of an `applying` row, fencing and idle release, vocabulary binding release and the
+per-intent bound belong to later tasks; the seams are marked `# seam:`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import copy
+import json
+import logging
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Any, BinaryIO
+
+from . import capabilities, intent_accept, mutation_lock, write_intents
+from .cli_ops import error_dict
+
+log = logging.getLogger(__name__)
+
+KIND_SERVICE = "service"
+KIND_CLI = "cli"
+
+#: How often an idle service applier looks for rows that another process journaled.
+IDLE_POLL_SECONDS = 0.5
+#: How often an applier that does not hold the lock tries for it.
+LOCK_POLL_SECONDS = 0.25
+#: A CLI applier that finds the lock taken waits this long for its holder to end or hand over before it leaves.
+CLI_LOCK_GRACE_SECONDS = 2.0
+#: Pause after an attempt that committed nothing, so a held boundary is retried and not spun on.
+RETRY_PAUSE_SECONDS = 0.1
+#: A service stop waits this long for the applier thread; only a leaf that outlasts it leaves a row `applying`.
+STOP_JOIN_SECONDS = 15.0
+
+# Causes this module writes to `conflict` and `wait_cause`: the applier's own protocol, not vocabulary.
+CAUSE_REVOKED = "authorization_revoked"
+CAUSE_EXPIRED = "authorization_expired"
+CAUSE_APPLY_FAILED = "apply_failed"
+CAUSE_REVIEW_REQUIRED = "review_required"
+CAUSE_STOPPING = "applier_stopping"
+# Error codes of a refusal that passes, which the applier waits out and re-runs (design D5: "wait and re-run").
+# Closed protocol codes that the writer raises, not vocabulary; task 5.1 owns the full outcome table.
+_WAIT_CODES = ("CLOUD_CELL_READ_ONLY", "WRITER_FENCED")  # nosemgrep: ep-word-set -- closed protocol error codes
+
+
+# -- the per-vault lock and its preferred-applier sidecar --------------------------------------------
+
+
+class _ApplierLock:
+    """The cross-process applier lock of one vault."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._handle: BinaryIO | None = None
+        self._preferred: BinaryIO | None = None
+
+    def try_acquire(self) -> bool:
+        if self._handle is not None:
+            return True
+        handle = mutation_lock._open_lock_handle(self.path)
+        if mutation_lock._try_os_lock(handle):
+            self._handle = handle
+            return True
+        handle.close()
+        return False
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            mutation_lock._release_os_lock(handle)
+        except OSError:
+            pass
+        finally:
+            handle.close()
+
+    def _sidecar(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.preferred")
+
+    def prefer(self) -> None:
+        """Hold a shared lock on the sidecar for as long as this (service) applier lives, so a CLI applier yields.
+
+        The kernel drops it when the process exits. Windows has no shared advisory lock here, so a CLI
+        applier there does not yield; it still never runs beside the service, because of the main lock.
+        """
+        if os.name == "nt" or self._preferred is not None:
+            return
+        import fcntl
+
+        handle = mutation_lock._open_lock_handle(self._sidecar())
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return
+        self._preferred = handle
+
+    def unprefer(self) -> None:
+        handle, self._preferred = self._preferred, None
+        if handle is not None:
+            try:
+                mutation_lock._release_os_lock(handle)
+            except OSError:
+                pass
+            finally:
+                handle.close()
+
+    def preferred_applier_present(self) -> bool:
+        """Whether a service in another process holds the sidecar. An exclusive try fails only for a holder."""
+        if os.name == "nt" or self._preferred is not None or not self._sidecar().exists():
+            return False
+        import fcntl
+
+        try:
+            descriptor = os.open(self._sidecar(), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            return False
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        finally:
+            os.close(descriptor)
+        return False
+
+
+# -- the applier -------------------------------------------------------------------------------------
+
+
+class Applier:
+    """Applies one vault's accepted intents, oldest first, on its own thread."""
+
+    def __init__(
+        self,
+        manager: Any,
+        vault_root: Path,
+        journal: write_intents.WriteIntentJournal,
+        *,
+        kind: str,
+        on_end: Any = None,
+    ):
+        self.manager = manager
+        self.vault_root = vault_root
+        self.journal = journal
+        self.kind = kind
+        self._lock = _ApplierLock(journal.applier_lock_path)
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._on_end = on_end
+
+    @property
+    def alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        # A fresh context: the thread must not inherit the request that happened to start it.
+        context = contextvars.Context()
+        self._thread = threading.Thread(
+            target=context.run, args=(self._run,), name=f"write-intent-applier-{self.kind}", daemon=True
+        )
+        self._thread.start()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def stop(self, timeout: float = STOP_JOIN_SECONDS) -> None:
+        self._stop.set()
+        self._wake.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
+    # -- loop --------------------------------------------------------------------------------------
+
+    def _run(self) -> None:
+        try:
+            if self.kind == KIND_SERVICE:
+                self._lock.prefer()
+                self._serve()
+            else:
+                self._drain_as_cli()
+        except Exception:  # noqa: BLE001 - an applier that dies must say so; the next accept starts another
+            log.exception("write-intent applier stopped on an error")
+        finally:
+            self._lock.release()
+            self._lock.unprefer()
+            if self._on_end is not None:
+                self._on_end(self)
+
+    def _serve(self) -> None:
+        """The service's loop: hold the lock for the lifetime, apply as rows arrive, wait on a wake or the poll."""
+        while not self._stop.is_set():
+            if not self._lock.try_acquire():
+                self._stop.wait(LOCK_POLL_SECONDS)
+                continue
+            self._apply_next_or_idle(idle_seconds=IDLE_POLL_SECONDS)
+
+    def _drain_as_cli(self) -> None:
+        """A CLI applier's loop: take the lock when free, release it after each intent, stand aside for a service."""
+        grace_until = time.monotonic() + CLI_LOCK_GRACE_SECONDS
+        while not self._stop.is_set():
+            if self._lock.preferred_applier_present():
+                return
+            if not self._lock.try_acquire():
+                if time.monotonic() >= grace_until:
+                    return
+                self._stop.wait(LOCK_POLL_SECONDS)
+                continue
+            try:
+                applied = self._apply_next_or_idle(idle_seconds=0.0)
+            finally:
+                # Between intents, so a service that started takes over and other processes interleave.
+                self._lock.release()
+            if not applied:
+                if self._on_end is not None and self._on_end(self, only_if_idle=True):
+                    return
+            grace_until = time.monotonic() + CLI_LOCK_GRACE_SECONDS
+
+    def _apply_next_or_idle(self, *, idle_seconds: float) -> bool:
+        # seam: crash recovery (task 3.4) starts here, by resolving rows left `applying` by a dead applier
+        # before the queue is read. Until then such a row is skipped, never re-run.
+        try:
+            intent = self.journal.next_accepted()
+        except write_intents.JournalRefusal:
+            log.warning("write-intent journal unreadable; the applier retries", exc_info=True)
+            self._stop.wait(max(idle_seconds, LOCK_POLL_SECONDS))
+            return False
+        if intent is None:
+            if idle_seconds:
+                self._wake.wait(idle_seconds)
+                self._wake.clear()
+            return False
+        self._apply(intent)
+        return True
+
+    # -- one intent --------------------------------------------------------------------------------
+
+    def _apply(self, intent: write_intents.Intent) -> None:
+        journal = self.journal
+        try:
+            if not journal.begin_apply(intent.intent_id):
+                return
+            self._settle(intent, self._attempt(intent))
+        except write_intents.JournalRefusal:
+            # The journal could not record the move. The row keeps its state; the next pass reads it again.
+            log.warning("write-intent journal could not record an apply step", exc_info=True)
+            self._stop.wait(RETRY_PAUSE_SECONDS)
+
+    def _attempt(self, intent: write_intents.Intent) -> tuple[str, Any]:
+        """One dispatch. Returns `(outcome, detail)`: committed, wait, conflicted or rejected."""
+        from . import auth_sessions, upload_tokens, writer_lease
+        from . import schema as schema_module
+        from .governance import principal as principal_module
+
+        command = _command(intent.command, intent.surface)
+        if command is None:
+            return "conflicted", {"cause": CAUSE_APPLY_FAILED, "error": {"code": "UNKNOWN_COMMAND"}}
+        try:
+            principal = upload_tokens._principal_from_values(copy.deepcopy(intent.principal))
+        except (TypeError, ValueError, AttributeError):
+            return "conflicted", {"cause": CAUSE_APPLY_FAILED, "error": {"code": "PRINCIPAL_UNREADABLE"}}
+        # The authority the caller held at accept is not the authority it holds now (design D4, D5).
+        session = principal.verified_authorization_session
+        if session is not None and time.time() > session.expires_at:
+            return "conflicted", {"cause": CAUSE_EXPIRED}
+        if not asyncio.run(auth_sessions.origin_session_active(principal)):
+            return "conflicted", {"cause": CAUSE_REVOKED}
+
+        injected = (
+            (self.vault_root, schema_module.load_source_schema(self.vault_root))
+            if command.needs_schema
+            else (self.vault_root,)
+        )
+        # The descriptor admits exactly this command; the intent's recorded surface keeps surface-bound checks the same.
+        descriptor = capabilities.ActiveSurfaceDescriptor(intent.surface, "full", True, (command.name,))
+        dispatch = intent_accept.ApplierDispatch(
+            intent_id=intent.intent_id,
+            key=intent.retry_key,
+            digest=intent.digest,
+            window_seconds=intent.window_seconds,
+            request_id=intent.request_id,
+            stop=self._stop,
+        )
+        # The leaf receives the rewritten arguments when a rewrite exists; the claim keeps the original digest.
+        arguments = dict(intent.leaf_arguments if intent.leaf_arguments is not None else intent.arguments)
+        try:
+            with (
+                principal_module.request_scope(principal),
+                capabilities.active_surface(descriptor),
+                principal_module.invocation_scope(),
+                intent_accept.applier_dispatch(dispatch),
+            ):
+                result = writer_lease.invoke_command(
+                    command, *injected, mutation_request_id=intent.request_id, **arguments
+                )
+        except Exception as error:  # noqa: BLE001 - every dispatch failure is classified, never lost
+            return self._classify_error(intent, error)
+        return self._classify_result(result)
+
+    def _classify_result(self, result: Any) -> tuple[str, Any]:
+        if isinstance(result, dict) and result.get("state") == "committed":
+            return "committed", _portable_value(result)
+        # Design D5 (task 5.1) replaces this with the full table. Until then a write
+        # that did not commit is held as conflicted, never reported as committed.
+        return "conflicted", {"cause": CAUSE_REVIEW_REQUIRED, "result": _portable_value(result)}
+
+    def _classify_error(self, intent: write_intents.Intent, error: Exception) -> tuple[str, Any]:
+        if intent_accept.is_precommit_refusal(error) or getattr(error, "code", None) in _WAIT_CODES:
+            return "wait", getattr(error, "details", {}).get("cause") or getattr(error, "code", "busy")
+        public = error_dict(error)
+        if getattr(error, "committed", False) is True:
+            # A write that committed is never retried; its recorded failure is its terminal.
+            log.warning("an applied intent committed without a persisted terminal: %s", public.get("code"), exc_info=error)
+            return "committed", {"ok": False, "state": "committed", "error": public}
+        # seam: the full outcome table (design D5, task 5.1) splits this by code. The synchronous error is
+        # recorded as it is, so a caller that polls sees what a synchronous caller would have seen.
+        if intent.validation == "deferred":
+            return "rejected", {"error": public}
+        return "conflicted", {"cause": CAUSE_APPLY_FAILED, "error": public}
+
+    def _settle(self, intent: write_intents.Intent, attempt: tuple[str, Any]) -> None:
+        outcome, detail = attempt
+        journal = self.journal
+        if outcome == "wait":
+            journal.requeue(intent.intent_id, str(detail))
+            if str(detail) != CAUSE_STOPPING:
+                self._stop.wait(RETRY_PAUSE_SECONDS)
+            return
+        if outcome == "committed":
+            journal.finish(intent.intent_id, "committed", terminal=detail)
+        elif outcome == "rejected":
+            journal.finish(intent.intent_id, "rejected", terminal={"ok": False, "state": "rejected", **detail})
+        else:
+            journal.finish(intent.intent_id, "conflicted", conflict=detail)
+        intent_accept.notify_applier_progress()
+
+
+def _command(name: str, surface: str) -> Any | None:
+    """The registry command as the surface that accepted it exports it; a library caller's command may be on no surface, so the full registry serves last."""
+    from .commands import COMMANDS, PRODUCT_COMMANDS, product_commands_for
+
+    for commands in (product_commands_for(surface), PRODUCT_COMMANDS, COMMANDS):
+        found = next((command for command in commands if command.name == name), None)
+        if found is not None:
+            return found
+    return None
+
+
+def _portable_value(value: Any) -> Any:
+    """The terminal as the journal stores it: JSON, with anything else as its text."""
+    return json.loads(json.dumps(value, default=str))
+
+
+# -- the process's appliers --------------------------------------------------------------------------
+
+_APPLIERS: dict[str, Applier] = {}
+_REGISTRY_LOCK = threading.Lock()
+
+
+def _forget(applier: Applier, *, only_if_idle: bool = False) -> bool:
+    """Drop an ending applier from the registry. With `only_if_idle`, do so only while no intent waits.
+
+    The recheck runs under the registry lock that `ensure_running` takes after its row commits, so an
+    intent accepted a moment later either shows here or starts a new applier.
+    """
+    with _REGISTRY_LOCK:
+        if only_if_idle:
+            try:
+                if applier.journal.next_accepted() is not None:
+                    return False
+            except write_intents.JournalRefusal:
+                pass
+        for identity, held in list(_APPLIERS.items()):
+            if held is applier:
+                del _APPLIERS[identity]
+        return True
+
+
+def ensure_running(manager: Any, vault_root: Path | str, *, kind: str = KIND_CLI) -> Applier | None:
+    """Start this process's applier for a vault unless one runs, and wake it. Nothing starts with the journal off.
+
+    A CLI applier does not start while a service holds the preference, so a service-less process
+    never takes work the service would run with its own environment and code version.
+    """
+    if intent_accept.mode() == "off":
+        return None
+    try:
+        journal = manager._intent_journal(vault_root)
+    except write_intents.JournalRefusal:
+        return None
+    if journal is None:
+        return None
+    identity = str(journal.path)
+    with _REGISTRY_LOCK:
+        held = _APPLIERS.get(identity)
+        if held is not None and held.alive:
+            held.wake()
+            return held
+        applier = Applier(manager, Path(vault_root), journal, kind=kind, on_end=_forget)
+        _APPLIERS[identity] = applier
+    applier.start()
+    return applier
+
+
+def stop_all(timeout: float = STOP_JOIN_SECONDS) -> None:
+    """Stop every applier of this process, within a bound. An apply that has not reached the boundary returns to `accepted`."""
+    with _REGISTRY_LOCK:
+        appliers = list(_APPLIERS.values())
+    for applier in appliers:
+        applier._stop.set()
+        applier._wake.set()
+    for applier in appliers:
+        applier.stop(timeout)
+    with _REGISTRY_LOCK:
+        for applier in appliers:
+            for identity, held in list(_APPLIERS.items()):
+                if held is applier:
+                    del _APPLIERS[identity]
+
+
+__all__ = ["Applier", "ensure_running", "stop_all", "KIND_CLI", "KIND_SERVICE"]

@@ -4478,6 +4478,10 @@ def _effective_idempotency_key(
 ) -> tuple[str | None, float | None, Any]:
     from .governance.principal import effective_principal
 
+    dispatch = intent_accept.current_applier_dispatch()
+    if dispatch is not None:
+        # The applier claims the key that accept recorded, never one derived again from its own context.
+        return dispatch.key, dispatch.window_seconds, None
     identity = canonical_mutation_identity(mutation_subject)
     namespace = f"cell:{manager.config.vault_id}" if manager.config.vault_id else identity
     binding = effective_principal().client_binding
@@ -4750,7 +4754,7 @@ def _await_intent_commit(
         return intent
     try:
         while intent.active and window.left() > 0:
-            time.sleep(min(intent_accept.POST_ROW_POLL_SECONDS, window.left()))
+            intent_accept.wait_for_applier_progress(min(intent_accept.POST_ROW_POLL_SECONDS, window.left()))
             try:
                 latest = journal.get(intent.intent_id)
             except write_intents.JournalRefusal:
@@ -5616,6 +5620,8 @@ class LeaseManager:
         # An eligible write that has not committed yields to every accepted write, before it takes the
         # boundary and again once it holds it (design D2). Another process may have journaled in between.
         ordered = mutation_lock.current_accept_window() is not None and not coordinator.current_thread_holds_boundary()
+        if not coordinator.current_thread_holds_boundary():
+            intent_accept.refuse_if_applier_stopping()
         if ordered:
             self._refuse_if_intents_queued(vault_root)
         direct_boundary: tuple[str, Path] | None = None
@@ -5911,7 +5917,10 @@ class LeaseManager:
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
         mutation_subject = self._mutation_subject(injected)
         receipt_vault_root = self._receipt_vault_root(injected)
-        digest = _command_digest(command, kwargs)
+        dispatch = intent_accept.current_applier_dispatch()
+        # The claim carries the caller's original digest, so a resend of the original input meets this
+        # intent and never `IDEMPOTENCY_KEY_REUSED`, even when the leaf receives rewritten arguments.
+        digest = dispatch.digest if dispatch is not None else _command_digest(command, kwargs)
         key, expires_after, on_replay = _effective_idempotency_key(
             self,
             command=command,
@@ -7041,6 +7050,9 @@ class LeaseManager:
                 result = accept_attempt()
                 if result is _ACCEPTED:
                     return accepted_answer()
+            elif intent_accept.current_applier_dispatch() is not None:
+                # One attempt: the applier owns the wait, as a loop of bounded acquires (design D4).
+                result = run_idempotent()
             else:
                 result = self._run_absorbing_capture_contention(
                     command,
@@ -7095,9 +7107,11 @@ class LeaseManager:
                     error.details["idempotency_key"] = effective_public_idempotency_key
             # The request thread attempts a handed-back write again and journals only its final refusal.
             handed_off = store_attempt is not None and error is store_attempt.handed_off
+            # The applier's own loop owns a wait that ended before any effect: no row, no client-visible busy.
+            applier_wait = intent_accept.current_applier_dispatch() is not None and intent_accept.is_precommit_refusal(error)
             _log_mutation_event(
                 "interrupted",
-                level=logging.DEBUG if handed_off else logging.WARNING,
+                level=logging.DEBUG if handed_off or applier_wait else logging.WARNING,
                 request_id=request_id,
                 command=command.name,
                 receipt=receipt or "none",
@@ -7125,7 +7139,7 @@ class LeaseManager:
             )
             if handed_off:
                 store_attempt.deferred_refusal = journal_refusal
-            else:
+            elif not applier_wait:
                 journal_refusal()
                 # The refusal leaves invoke here, so this is where a busy becomes visible to the caller.
                 if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
@@ -7205,8 +7219,17 @@ class LeaseManager:
                 "IDEMPOTENCY_KEY_REUSED",
                 "idempotency key was already used for different input",
             )
+        self._ensure_applier(journal)
         intent = _await_intent_commit(journal, intent, accept.window)
         return intent_accept.answer_for(intent, receipt_id=receipt, idempotency_key=public_key)
+
+    def _ensure_applier(self, journal: write_intents.WriteIntentJournal | None) -> None:
+        """Make sure an applier of this vault runs in this process, or in the service that holds the preference."""
+        if journal is None:
+            return
+        from . import intent_applier
+
+        intent_applier.ensure_running(self, journal.vault_root)
 
     def _accepted_answer(
         self,
@@ -7236,12 +7259,13 @@ class LeaseManager:
                 targets=[str(subject)],
                 boundary_timing=(accept.waited_ms, None),
             )
+        try:
+            journal = accept.open_journal()
+        except write_intents.JournalRefusal:
+            journal = None
+        self._ensure_applier(journal)
         if accept.key is not None:
             # A write with no retry identity answers at once: a short answer keeps its client's resend window short.
-            try:
-                journal = accept.open_journal()
-            except write_intents.JournalRefusal:
-                journal = None
             intent = _await_intent_commit(journal, intent, accept.window)
         return intent_accept.answer_for(intent, receipt_id=receipt, idempotency_key=public_key)
 
@@ -9053,6 +9077,14 @@ def start_server_lifecycle() -> LeaseManager:
         store_runtime.serve(resolve_vault(), manager)
     except Exception:  # noqa: BLE001 - file collections serve regardless; store routes refuse
         logger.warning("collection store serving did not start", exc_info=True)
+    try:
+        from . import intent_applier
+        from .vault import resolve_vault as _vault
+
+        # The service is the preferred applier of its vault; nothing starts with the journal off.
+        intent_applier.ensure_running(manager, _vault(), kind=intent_applier.KIND_SERVICE)
+    except Exception:  # noqa: BLE001 - writes still commit inline; accepted writes wait for another applier
+        logger.warning("write-intent applier did not start", exc_info=True)
     return manager
 
 
@@ -9067,6 +9099,10 @@ def stop_server_lifecycle() -> None:
         manager = _MANAGERS.get(LeaseConfig.from_env())
     if manager is None or not manager._serves_collection_store:
         return
+    from . import intent_applier
+
+    # Before the manager closes: an apply that waits for the boundary returns to `accepted`.
+    intent_applier.stop_all()
     try:
         manager.close()
     except OpError as error:
@@ -9082,6 +9118,9 @@ def stop_server_lifecycle() -> None:
 
 def reset_managers_for_tests() -> None:
     """Close and clear process globals; intentionally public for deterministic tests."""
+    from . import intent_applier
+
+    intent_applier.stop_all()
     with _MANAGERS_LOCK:
         managers = list(_MANAGERS.values())
         _MANAGERS.clear()

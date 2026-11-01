@@ -19,6 +19,7 @@ from test_mutation_lock import _process_hold
 from exomem import (
     commands,
     intent_accept,
+    intent_applier,
     mutation_journal,
     state_paths,
     write_intents,
@@ -34,6 +35,8 @@ _DEADLINE = intent_accept.ACCEPT_DEADLINE_SECONDS
 @pytest.fixture(autouse=True)
 def _journal_on(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "on")
+    # These cases end at the answer or the journal row; the applier has its own file.
+    monkeypatch.setattr(intent_applier, "ensure_running", lambda *args, **kwargs: None)
     yield
     writer_lease.reset_managers_for_tests()
 

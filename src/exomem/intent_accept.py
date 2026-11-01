@@ -10,9 +10,11 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +36,71 @@ ACCEPT_DEADLINE_SECONDS = 2.0
 POLL_AFTER_MS = 2000
 #: How often a request thread re-reads the row while it waits for the applier, which may be in another process.
 POST_ROW_POLL_SECONDS = 0.25
+
+
+@dataclass(frozen=True)
+class ApplierDispatch:
+    """What the applier's dispatch of one intent carries into `invoke_command` (design D4).
+
+    The dispatch claims `key` with `digest`, the caller's original input, whatever arguments the leaf
+    receives. It carries no accept window, so it is exempt from `intents_queued` on every thread that
+    copies this context. `stop` is the applier's stop flag, read before each boundary acquire.
+    """
+
+    intent_id: str
+    key: str
+    digest: str
+    window_seconds: float
+    request_id: str
+    stop: threading.Event
+
+
+_APPLIER_DISPATCH: ContextVar[ApplierDispatch | None] = ContextVar("exomem_applier_dispatch", default=None)
+
+
+def current_applier_dispatch() -> ApplierDispatch | None:
+    return _APPLIER_DISPATCH.get()
+
+
+@contextmanager
+def applier_dispatch(dispatch: ApplierDispatch) -> Iterator[ApplierDispatch]:
+    token = _APPLIER_DISPATCH.set(dispatch)
+    try:
+        yield dispatch
+    finally:
+        _APPLIER_DISPATCH.reset(token)
+
+
+def refuse_if_applier_stopping() -> None:
+    """The applier takes no boundary once its stop flag is set; the intent returns to `accepted` (design D4, shutdown)."""
+    dispatch = _APPLIER_DISPATCH.get()
+    if dispatch is not None and dispatch.stop.is_set():
+        raise OpError(
+            "MUTATION_BUSY",
+            "the write applier is stopping",
+            "The accepted write stays queued and the next applier commits it.",
+            details={"status": "retryable", "committed": False, "cause": "applier_stopping"},
+        )
+
+
+# An applier in this process signals here when an intent ends, so a request thread inside its accept
+# window answers with the committed terminal at once. Another process's applier is found by polling.
+_PROGRESS = threading.Condition()
+_progress_count = 0
+
+
+def notify_applier_progress() -> None:
+    global _progress_count
+    with _PROGRESS:
+        _progress_count += 1
+        _PROGRESS.notify_all()
+
+
+def wait_for_applier_progress(timeout: float) -> None:
+    """Sleep until an in-process applier ends an intent or `timeout` passes, whichever is first."""
+    with _PROGRESS:
+        seen = _progress_count
+        _PROGRESS.wait_for(lambda: _progress_count != seen, timeout=timeout)
 
 
 def mode() -> str:
@@ -74,6 +141,10 @@ def deadline_at(arrival: float | None = None) -> float:
 def arrival(command: Any, kwargs: Mapping[str, Any], *, read_only: bool) -> Iterator[None]:
     """Open the accept window at the arrival of an eligible write; a nested call keeps its caller's window."""
     if read_only or mode() == "off" or not eligible(command, kwargs):
+        yield
+        return
+    if current_applier_dispatch() is not None:
+        # The applier waits as long as the boundary takes; an accept deadline would journal the intent again.
         yield
         return
     if mutation_lock.current_accept_window() is not None:
