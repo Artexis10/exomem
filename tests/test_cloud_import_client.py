@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from exomem import cloud_export_client, cloud_import_client
+from exomem import cloud_export_client, cloud_import_client, cloud_import_windows
 from exomem.cli_progress import Progress
 from exomem.cloud_import import DEFAULT_RESERVE_BYTES
 from exomem.cloud_import_client import (
@@ -54,10 +54,20 @@ class FakeCloud:
         self.listing = {}
         self.refusal_limit = None
         self.prepare_refusal = None
+        self.holding = False  # Cloud keeps the import `uploaded` after /complete until the third read of its row.
+        self.fail_next_read = False
+        self.reads = 0
 
     def _api(self, request):
         self.requests.append((request.method, request.url.path))
         assert request.headers["authorization"] == "Bearer example-session"
+        if request.method == "GET" and self.row["observed_state"] == "uploaded":
+            if self.fail_next_read:
+                self.fail_next_read = False
+                raise httpx2.ConnectError("interrupted")
+            self.reads += 1
+            if self.reads >= 3:
+                self.row.update(observed_state="done")
         if request.method == "GET" and request.url.path == "/api/exomem/cloud/imports":
             return httpx2.Response(200, json={"imports": [], **self.listing})
         if request.method == "POST":
@@ -76,7 +86,7 @@ class FakeCloud:
                 combined = b"".join(self.uploaded[n] for n in sorted(self.uploaded))
                 assert hashlib.sha256(combined).hexdigest() == body["ciphertext_sha256"]
                 assert body["part_etags"] == [{"part_number": n, "etag": f'"part-{n}"'} for n in sorted(self.uploaded)]
-                self.row.update(requested_state="uploaded", observed_state="done")
+                self.row.update(requested_state="uploaded", observed_state="uploaded" if self.holding else "done")
             elif self.refuse_registration:
                 status, code = self.registration_refusal
                 return httpx2.Response(status, json={"error": {"code": code, "limit": self.refusal_limit}})
@@ -128,6 +138,27 @@ def test_interrupted_upload_resumes_same_ciphertext(tmp_path):
     assert asyncio.run(run())["observed_state"] == "done"
     assert encrypted == cloud.ciphertext
     assert not (tmp_path / "checkpoint/archive.age").exists()
+
+
+@needs_age
+def test_a_missing_encrypted_copy_after_complete_resumes_the_wait_instead_of_abandoning_the_import(tmp_path):
+    """Catches an abandon that removes the checkpoint of an import that Cloud is still importing."""
+    source = tmp_path / "export.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("sample.json", '{"value":23}')
+    _, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    cloud.holding = cloud.fail_next_read = True
+    checkpoint = tmp_path / "checkpoint"
+
+    def run():
+        return cloud.run(source, checkpoint, scope="Device", category="Exports")
+    with pytest.raises(CloudImportError) as failed:
+        asyncio.run(run())
+    assert failed.value.code == "NETWORK_ERROR"
+    (checkpoint / "archive.age").unlink()
+
+    assert asyncio.run(run())["observed_state"] == "done"
 
 
 def _members(identity: Path, ciphertext: bytes) -> dict[str, bytes | None]:
@@ -416,11 +447,23 @@ def test_failed_import_reports_phase_code_import_id_and_the_copy_it_still_holds(
 def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfig:
     seen = []
 
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
     async def capture(source, config, checkpoint, **kwargs):
         seen.append(config)
-        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "observed_state": "done"}
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "windows": 1}
 
-    monkeypatch.setattr(cloud_import_client, "import_source", capture)
+    # A folder goes by windows, through the cell's tools; this test only reads which endpoints the command takes.
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
     assert cloud_import_client.main(["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp"), *arguments]) == 0
     return seen[0]
 

@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
 
@@ -518,6 +519,113 @@ def _guard(vault: Path, operation: str):
     return get_manager().mutation_guard(vault, operation=operation, holder_kind="background")
 
 
+def _binding_of(vault: Path, snapshot: OriginalSnapshot) -> originals.BinaryBinding:
+    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    return originals.BinaryBinding(snapshot.path.relative_to(vault).as_posix(),
+                                   snapshot.binary_sha256, snapshot.binary_size)
+
+
+class OffloadBatch:
+    """One owner census for a run of offloads, kept across guard releases (D10).
+
+    The batch never holds the mutation boundary, so other writes run between two members. It rests
+    on offload being the only writer that binds a version the census has not seen while the runtime
+    serves (task 5.4.9 lists the others). `charge` adds each version that a member publishes. `end`
+    drops the census so that the next member reads it again, and `failed` does so only for a member
+    that reached `charge`: a refused member bound nothing, so the next one reuses the census. A stale
+    census can wrongly refuse a member, which the next scan releases, because refusals are read again
+    from a fresh census.
+    """
+
+    def __init__(self, vault: Path) -> None:
+        self._vault = Path(vault).resolve()
+        self._usage: media_allowance.ReferenceUsage | None = None
+        self._charged = False
+
+    def usage(self, ledger: MediaJobStore) -> media_allowance.ReferenceUsage:
+        if self._usage is None:
+            self._usage = media_allowance.reference_usage(self._vault)
+            _record_census(ledger, self._usage)
+        return self._usage
+
+    def begin(self) -> None:
+        self._charged = False
+
+    def charge(self, ledger: MediaJobStore, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
+        self._charged = True
+        self._usage = self.usage(ledger).charged(_binding_of(self._vault, snapshot), reference)
+        _record_census(ledger, self._usage)
+
+    def failed(self) -> None:
+        """A member raised: drop the census when that member may have half-published, which the census cannot know."""
+        if self._charged:
+            self.end()
+
+    def end(self) -> None:
+        self._usage = None
+
+
+# What reading or writing the media ledger can raise.
+_LEDGER_UNREADABLE = (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+
+
+def _record_census(ledger: MediaJobStore, usage: media_allowance.ReferenceUsage) -> None:
+    """Keep the latest owner census for the window status, so that a status call never walks the vault (D12).
+
+    A census that could not count is kept as unknown, so that the status never shows an older figure in its
+    place. A failed write is dropped, because it costs the status only a fresher figure and must not stop an offload.
+    """
+    with suppress(*_LEDGER_UNREADABLE), closing(ledger._connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO media_owner_census(singleton, used_bytes, observed_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, observed_at=excluded.observed_at",
+            (usage.used_bytes, usage.observed_at),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedCensus:
+    """An owner census as recorded: the bytes in use, or None when it could not count, and when it was read."""
+
+    used_bytes: int | None
+    observed_at: str
+
+    def older_than(self, seconds: float) -> bool:
+        """Whether the census is older than `seconds`; a time that cannot be read counts as older."""
+        try:
+            observed = datetime.fromisoformat(self.observed_at)
+        except ValueError:
+            return True
+        return observed.tzinfo is None or (datetime.now(UTC) - observed).total_seconds() > seconds
+
+
+def take_census(vault: Path) -> RecordedCensus:
+    """Count the owner references now and record the result, as an offload batch does; for a status with a demand (D12)."""
+    vault = Path(vault).resolve()
+    usage = media_allowance.reference_usage(vault)
+    with suppress(*_LEDGER_UNREADABLE):  # The reading is still returned; only the record is lost.
+        _record_census(MediaJobStore(vault), usage)
+    return RecordedCensus(usage.used_bytes, usage.observed_at)
+
+
+def recorded_census(vault: Path) -> RecordedCensus | None:
+    """The latest census that offload recorded, or None when it recorded none.
+
+    Raises `MediaStoreError` when the ledger cannot be read. A ledger from before the record has no table: none.
+    """
+    ledger = MediaJobStore(Path(vault).resolve(), create=False)
+    if not ledger.path.exists():
+        return None
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_owner_census'").fetchone() is None:
+                return None
+            row = conn.execute("SELECT used_bytes, observed_at FROM media_owner_census").fetchone()
+    except _LEDGER_UNREADABLE as error:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
+    return None if row is None else RecordedCensus(None if row["used_bytes"] is None else int(row["used_bytes"]), str(row["observed_at"]))
+
+
 def _offload_admission(
     vault: Path, snapshot: OriginalSnapshot, *, reference: StoredObject | None = None,
     select_reuse: bool = True, usage: media_allowance.ReferenceUsage | None = None,
@@ -525,12 +633,10 @@ def _offload_admission(
     """Select current live reuse and its quota projection under one read boundary."""
     from .writer_lease import get_manager
 
-    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
-    binary = originals.BinaryBinding(snapshot.path.relative_to(vault).as_posix(),
-                                     snapshot.binary_sha256, snapshot.binary_size)
+    binary = _binding_of(vault, snapshot)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
         config = originals.configuration(vault) or {}
-        # A caller can share one census only while its enclosing consistency guard holds.
+        # A caller shares one census while its enclosing consistency guard holds, or as an `OffloadBatch`.
         if usage is None:
             usage = media_allowance.reference_usage(vault)
         reuse = None
@@ -753,22 +859,38 @@ def _finish_reference(ledger: MediaJobStore, snapshot: OriginalSnapshot, source:
         conn.close()
 
 
-def offload(vault: Path, path: Path) -> StoredObject | None:
+def _no_census() -> None:
+    return None
+
+
+def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
     None means that the original stays local: notes and datasets are never
     offloaded. Quota refusals raise so that the worker retains retryable demand (D10).
+    A `batch` shares its census with this member's checks; without one, each check reads its own.
     """
-    vault = Path(vault).resolve()
+    if batch is not None:
+        batch.begin()
+    try:
+        return _offload_member(Path(vault).resolve(), path, batch)
+    except BaseException:
+        if batch is not None:
+            batch.failed()
+        raise
+
+
+def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> StoredObject | None:
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
     backend = store_for(vault)
     ledger = MediaJobStore(vault)
+    census = (lambda: batch.usage(ledger)) if batch is not None else _no_census
     with _pin(vault, path) as (_ledger, token), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
-        refusal = _refused(ledger, snapshot, config)
+        refusal = _refused(ledger, snapshot, config, usage=census())
         if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
             _require_allowance(ledger, snapshot, refusal)
         if refusal is not None:
@@ -804,7 +926,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
             _refuse(ledger, snapshot, MediaStoreError(RESIDENT_CODE, "the original stays on the volume"),
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
-        decision, reuse = _offload_admission(vault, snapshot)
+        decision, reuse = _offload_admission(vault, snapshot, usage=census())
         _require_allowance(ledger, snapshot, decision.code)
         name_key = Path(str(config["name_key_path"])).read_bytes()
         if len(name_key) < 32:
@@ -826,6 +948,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                     reuse = None
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reuse.reference if reuse is not None else None, select_reuse=False,
+                    usage=census(),
                 )
                 _require_allowance(ledger, snapshot, decision.code)
                 _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
@@ -865,8 +988,13 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                decision, _candidate = _offload_admission(vault, snapshot, reference=reference, select_reuse=False)
+                decision, _candidate = _offload_admission(
+                    vault, snapshot, reference=reference, select_reuse=False, usage=census(),
+                )
                 _require_allowance(ledger, snapshot, decision.code)
+                if batch is not None:
+                    # Charged before the write: a failed write leaves the batch over-counting, never under.
+                    batch.charge(ledger, snapshot, reference)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
         return reference
@@ -1217,6 +1345,68 @@ _EVICTION_ORDER = (
     "CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
     "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read, binary_rel"
 )
+
+
+# An offload job that no claimed, unfinished job pins; a pinned original is counted as job-pinned instead.
+_UNPINNED_OFFLOAD = (
+    "SELECT DISTINCT offload.binary_rel FROM jobs AS offload WHERE offload.media_type = :offload "
+    "AND offload.do_offload = 1 AND offload.state IN ('pending', 'running') "
+    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = offload.binary_rel AND {_JOB_PINS})"
+)
+_PINNED_ORIGINALS = f"SELECT DISTINCT jobs.binary_rel FROM jobs WHERE {_JOB_PINS}"
+
+
+@dataclass(frozen=True, slots=True)
+class Occupancy:
+    """What the media ledger holds on the volume that the window budget counts (D12).
+
+    Each figure counts offloadable originals only: a resident original never leaves the volume.
+    A pinned original is in `pinned_bytes` alone, so no byte is in two figures.
+    """
+
+    evictable_bytes: int
+    pending_offloads: int
+    pending_offload_bytes: int
+    pinned_bytes: int
+
+
+def _volume_bytes(vault: Path, relatives, largest_offloadable: int) -> tuple[int, int]:
+    """The count and bytes of the originals that the volume holds now and that the rule calls offloadable."""
+    count = total = 0
+    for relative in relatives:
+        try:
+            size = os.lstat(vault / relative).st_size
+        except FileNotFoundError:
+            continue  # A moved or evicted original holds no byte on the volume.
+        if size <= largest_offloadable:
+            count, total = count + 1, total + size
+    return count, total
+
+
+def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_seconds: float | None) -> Occupancy:
+    """Read the ledger for the window budget; raises `MediaStoreError` when it cannot be read.
+
+    `eviction_idle_seconds` is the policy's minimum idle age, or None when eviction is off: then no
+    cached original is evictable, because a window can never reuse its room. A missing ledger holds nothing.
+    """
+    vault = Path(vault).resolve()
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        return Occupancy(0, 0, 0, 0)
+    largest = bounds.largest_offloadable()
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            evictable = 0
+            if eviction_idle_seconds is not None:
+                evictable = int(conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE,
+                    {"hydration": bounds.hydration_bytes, "idle_before": time.time() - eviction_idle_seconds},
+                ).fetchone()[0])
+            pending = _volume_bytes(vault, (row[0] for row in conn.execute(_UNPINNED_OFFLOAD, {"offload": OFFLOAD_MEDIA_TYPE})), largest)
+            pinned = _volume_bytes(vault, (row[0] for row in conn.execute(_PINNED_ORIGINALS)), largest)[1]
+    except _LEDGER_UNREADABLE as error:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
+    return Occupancy(evictable, pending[0], pending[1], pinned)
 
 
 def record_demand(vault: Path, series: str, demand_bytes: int, *, budget: int, reachable_budget: int) -> bool:
