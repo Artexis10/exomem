@@ -10627,7 +10627,7 @@ def op_adopt_vault(
     return _carrying_batch_advisories(vault_root, result)
 
 
-_ADOPTION_STUDIO_ACTIONS = (
+_ADOPTION_STUDIO_ACTIONS = (  # nosemgrep: ep-word-set -- the CLI's own action names, a closed set that this module implements
     "start",
     "status",
     "select",
