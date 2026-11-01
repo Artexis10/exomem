@@ -1085,6 +1085,11 @@ def clear_deferred_work(
 _SQLITE_HELD_CODES: Final = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
 
 
+#: The mutation boundary's code for a bounded wait that lost to a holder: a
+#: live commit. The one refusal the graph drain counts as losing a race.
+_BUSY_BOUNDARY_CODE: Final = "MUTATION_BUSY"
+
+
 def _readiness_refusal(error: BaseException) -> str | None:
     """The refusal's label when `error` says "not now", never "this page".
 
@@ -1139,7 +1144,7 @@ def _drain_graph_work(
     `epoch_admits_incremental_repair`, which re-reads under the canonical
     boundary rather than condemning a lineage on one sample taken mid-batch.
     """
-    from . import epistemic_graph
+    from . import epistemic_graph, graph_drain
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -1147,6 +1152,7 @@ def _drain_graph_work(
     )
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if pending_generation is None and not receipts:
+        graph_drain.note_per_path_race(vault_root, raced=False)
         # An empty queue is where a withdrawn marker gets stranded: the routes
         # that withdraw pair it with queued repair, and the drain republishes
         # while repairing, so the LAST withdrawal -- the one that lands after
@@ -1157,6 +1163,7 @@ def _drain_graph_work(
         return 0
 
     if pending_generation is not None:
+        graph_drain.note_per_path_race(vault_root, raced=False)
         result = epistemic_graph.converge_full_graph_marker(vault_root)
         if result.outcome != "completed":
             log.info(
@@ -1168,15 +1175,32 @@ def _drain_graph_work(
         # Whole-vault convergence covers every receipt in this exact snapshot;
         # compare-and-swap receipt clearing preserves anything newer.
         return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
-    from . import graph_drain
+    processed, raced = _drain_graph_receipts(vault_root, index, receipts)
+    graph_drain.note_per_path_race(vault_root, raced=raced)
+    return processed
+
+
+def _drain_graph_receipts(
+    vault_root: Path, index, receipts: list
+) -> tuple[int, bool]:
+    """Repair these receipts per path; return what cleared and whether commits won the pass.
+
+    The second value is True only when the pass cleared nothing and every
+    failure was a live commit, or a busy mutation boundary, beating it to the
+    lock. That says nothing about the receipts, and a whole-vault pass would
+    lose to the same commits at far greater cost. Any other failure makes it False.
+    """
+    from . import epistemic_graph, graph_drain
 
     if not index.epoch_admits_incremental_repair():
         # Not a warning: under a live writer the ordinary cause is a batch
         # mid-flight, which the next tick clears. The work stays queued.
         log.info("deferred graph drain skipped; graph epoch is not settled")
         graph_drain.note_per_path_repair(vault_root, admissible=False)
-        return 0
+        return 0, False
     processed = 0
+    lost_to_commits = False
+    failed_on_its_own = False
     batch = [vault_root / receipt.rel_path for receipt in receipts]
     try:
         report = index.drain_paths(batch)
@@ -1188,10 +1212,12 @@ def _drain_graph_work(
             # meet the same refusal once per page, each with a boundary wait.
             # The per-path record keeps its last verdict: a held boundary says
             # nothing about per-path readiness, and releasing barrier recovery
-            # would start a whole-vault pass against that same boundary. A
-            # refusal that persists releases it through the oldest receipt's age.
+            # would start a whole-vault pass against that same boundary. A busy
+            # boundary counts as a lost race and holds off the age escalation;
+            # any other refusal that persists releases it through the oldest
+            # receipt's age.
             log.info("deferred graph batch refused (%s); work remains queued", refusal)
-            return 0
+            return 0, refusal == _BUSY_BOUNDARY_CODE
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
     if report.get("requires_rebuild"):
@@ -1204,7 +1230,7 @@ def _drain_graph_work(
         # through the checkpoint's own full-scope marker.
         log.info("deferred graph drain deferred; vault not ready for incremental repair")
         graph_drain.note_per_path_repair(vault_root, admissible=False)
-        return 0
+        return 0, False
     if report:
         # The pass ran per path. A failed batch, isolated below, says nothing
         # about readiness either way.
@@ -1217,7 +1243,7 @@ def _drain_graph_work(
     if not stalled:
         if not deferred_index.snapshot_graph(vault_root, limit=1):
             _republish_graph_availability(index)
-        return processed
+        return processed, False
 
     for done_count, receipt in enumerate(stalled):
         if done_count and index.boundary_waiters():
@@ -1243,6 +1269,10 @@ def _drain_graph_work(
                     refusal,
                     len(stalled) - done_count,
                 )
+                if refusal == _BUSY_BOUNDARY_CODE:
+                    lost_to_commits = True
+                else:
+                    failed_on_its_own = True
                 break
             # Anything else raised out of the pass is not proven to be the
             # page's fault either, so it never counts.
@@ -1250,6 +1280,7 @@ def _drain_graph_work(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            failed_on_its_own = True
             continue
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
@@ -1258,7 +1289,13 @@ def _drain_graph_work(
             # A race or a vault not ready: the page is not the problem, and
             # counting it would quarantine a page for being written to.
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            if single.get("commit_race"):
+                lost_to_commits = True
+            else:
+                failed_on_its_own = True
             continue
+        # Whatever follows is the page's own outcome, or progress.
+        failed_on_its_own = True
         cause = index._underivable_cause(receipt.rel_path)
         if cause == "no_rows":
             # Deleted, or no longer recall Markdown: the pass removed its rows,
@@ -1301,7 +1338,7 @@ def _drain_graph_work(
         # This tick cleared the last receipt, so the same stranding applies to
         # whatever withdrew while it ran.
         _republish_graph_availability(index)
-    return processed
+    return processed, lost_to_commits and not failed_on_its_own and processed == 0
 
 
 def _graph_stat_token(path: Path) -> str:

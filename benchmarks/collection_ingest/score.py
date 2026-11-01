@@ -9,6 +9,11 @@ through a fresh server session started with the drive run's own isolated setting
 Every metric is a ``{numerator, denominator}`` pair. A pair that cannot be measured is
 reported ``unknown`` with its reason, never as zero.
 
+A key from a ``raw`` profile adds three sections. ``landing.lost`` counts key items that have
+no page and no recorded refusal. ``raw`` scores each class of messy input: filed, refused or
+lost, original bytes kept, and the probe phrase found by search. ``existing_vault`` scores a
+run that started from pages the vault already held: none replaced, collisions renamed.
+
     python score.py --key K --drive-log D --out METRICS.json --python PY
 """
 
@@ -65,6 +70,15 @@ def split_front_matter(text: str) -> tuple[dict[str, Any] | None, str]:
     return (loaded if isinstance(loaded, dict) else None), text[end + len(FRONT_DELIM) + 1 :]
 
 
+def sha256_file(path: Path) -> str:
+    """The sha256 of a file read in blocks: a stored original can be larger than memory allows."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def scan_vault(vault: Path) -> dict[str, Any]:
     pages: dict[str, dict[str, Any]] = {}
     media_files: dict[str, str] = {}
@@ -81,7 +95,7 @@ def scan_vault(vault: Path) -> dict[str, Any]:
                 unparseable += 1
             pages[rel] = {"front": front or {}, "text": text, "body": body}
         else:
-            media_files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+            media_files[rel] = sha256_file(path)
     return {"pages": pages, "media_files": media_files, "unparseable_front_matter": unparseable}
 
 
@@ -98,7 +112,10 @@ def counterparts(scan: dict[str, Any], collection: str) -> dict[str, dict[str, l
         value = page["front"].get("imported_from")
         if isinstance(value, str):
             by_value.setdefault(value, []).append(rel)
-    return {"exact": by_value, "nfc": {nfc(k): v for k, v in by_value.items()}, "prefix": collection}
+    by_nfc: dict[str, list[str]] = {}
+    for value, pages in by_value.items():
+        by_nfc.setdefault(nfc(value), []).extend(pages)  # two names equal after NFC keep both pages
+    return {"exact": by_value, "nfc": by_nfc, "prefix": collection}
 
 
 def find_pages(index: dict[str, Any], key_path: str) -> tuple[list[str], str | None]:
@@ -184,6 +201,20 @@ class Probe:
     loose: bool = False  # the phrase is in the text of some page in the top 5
     first_strict: bool = False
     top5: list[str] = field(default_factory=list)
+    item: str = ""  # the key path (raw) or page id (seeded) that the probe stands for
+    promised: bool = False  # the import contract promises that search finds this phrase
+    failed: bool = False  # the last search call failed or returned no hit list this scorer reads
+
+
+def refusal_lookup(refusals: list[dict[str, Any]], collection: str) -> dict[str, str]:
+    """Map each refused original path (NFC, with and without the collection prefix) to its code.
+    A refusal that carries no code reads ``NO_CODE``: it is a refusal, but not a coded one."""
+    out: dict[str, str] = {}
+    for row in refusals:
+        path = str(row["path"])
+        for form in (path, path.removeprefix(collection + "/")):
+            out[nfc(form)] = str(row.get("code") or NO_CODE)
+    return out
 
 
 def recall_table(probes: list[Probe], kind: str, flag: str, *, landed: bool = False) -> dict[str, Any]:
@@ -194,6 +225,213 @@ def recall_table(probes: list[Probe], kind: str, flag: str, *, landed: bool = Fa
             slot[0] += bool(getattr(probe, flag))
             slot[1] += 1
     return {lang: frac(*slot) for lang, slot in sorted(slots.items())}
+
+
+# --------------------------------------------------------------------------- #
+# raw items and the existing vault
+# --------------------------------------------------------------------------- #
+LOST_SAMPLES = 25
+NO_CODE = "UNKNOWN"  # what a refusal reads when the reply names no code; drive.py uses the same label
+
+
+def raw_pages(item: dict[str, Any], index: dict[str, Any], scan: dict[str, Any],
+              twinned: set[str]) -> list[str]:
+    """Pages for a raw item. Names that are equal after NFC (``twinned``) can share one
+    ``imported_from`` or fall back to each other's page, so a twin counts only the pages that carry
+    its own bytes: the page of a missing twin never stands in for it. Any other item keeps the
+    pages found by name when no page names its bytes."""
+    found, _ = find_pages(index, item["path"])
+    same = [p for p in found if scan["pages"][p]["front"].get("original_sha256") == item["sha256"]]
+    return same if nfc(item["path"]) in twinned else same or found
+
+
+def original_bytes_held(item: dict[str, Any], pages: list[str], scan: dict[str, Any], vault: Path,
+                        collection: str, inline_bound: int) -> str:
+    """``artifact`` or ``text`` when the original bytes are held, ``missing`` when they are not,
+    ``unknown`` when this scorer has no verified copy of the original to compare a text page with.
+
+    Artifact bytes are found by hash among the stored files. A text original is found verbatim
+    inside a page file: the vault's own placed copy of the original is the reference, and it is
+    used only when its hash equals the key's.
+    """
+    if any(digest == item["sha256"] for digest in scan["media_files"].values()):
+        return "artifact"
+    if item["form"] == "artifact" or item["bytes"] > inline_bound:
+        return "missing"
+    placed = vault / collection / item["path"]
+    if not placed.is_file() or sha256_file(placed) != item["sha256"]:
+        return "unknown"
+    original = placed.read_bytes()
+    return "text" if any(original in (vault / page).read_bytes() for page in pages) else "missing"
+
+
+def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[str, list[str]],
+                refused: dict[str, str], probes: list[Probe], scan: dict[str, Any], vault: Path,
+                collection: str) -> dict[str, Any]:
+    """Score every raw item: filed, refused or lost; bytes held; probe phrase found by search."""
+    if not raw:
+        return {"state": "unknown", "reason": "the key has no raw items (not a raw profile)"}
+    inline_bound = key["raw"]["inline_text_bound"]
+    probe_of = {p.item: p for p in probes if p.kind == "raw"}
+    classes: dict[str, Counter[str]] = {}
+    problems: list[dict[str, Any]] = []
+    for item in raw:
+        pages = pages_of[item["path"]]
+        code = refused.get(nfc(item["path"]))
+        state = "filed" if pages else ("refused" if code else "lost")
+        # The key names no refusal code: any coded refusal meets a filed-or-refused item, and the code seen is reported.
+        allowed = item["outcome"] == "filed-or-refused" and code != NO_CODE
+        meets = state == "filed" or (state == "refused" and allowed)
+        row = classes.setdefault(item["raw_class"], Counter())
+        row["items"] += 1
+        row[state] += 1
+        if state == "refused":
+            row["code:" + str(code)] += 1
+        row["meets_key"] += meets
+        if not meets:
+            problems.append({"path": item["path"], "class": item["raw_class"], "state": state,
+                             "code": code, "key_outcome": item["outcome"]})
+        probe = probe_of.get(item["path"])
+        if pages:
+            held = original_bytes_held(item, pages, scan, vault, collection, inline_bound)
+            row["bytes_" + ("held" if held in ("artifact", "text") else held)] += 1
+            if held != "unknown":
+                row["form_checked"] += 1
+                row["form_as_key"] += held == item["form"]
+            if probe is not None and probe.failed:
+                row["probe_unknown"] += 1
+            elif probe is not None:
+                row["probed"] += 1
+                row["found"] += probe.strict
+                if probe.promised:
+                    row["promised"] += 1
+                    row["promised_found"] += probe.strict
+
+    def table(row: Counter[str]) -> dict[str, Any]:
+        checked = row["bytes_held"] + row["bytes_missing"]
+        return {
+            "items": row["items"],
+            "filed": frac(row["filed"], row["items"]),
+            "refused": row["refused"],
+            "refused_by_code": {k.removeprefix("code:"): n for k, n in sorted(row.items())
+                                if k.startswith("code:")},
+            "lost": row["lost"],
+            "meets_key": frac(row["meets_key"], row["items"]),
+            "original_bytes_held_of_filed": {**frac(row["bytes_held"], checked),
+                                             "unknown": row["bytes_unknown"]},
+            "form_as_key_of_filed": {**frac(row["form_as_key"], row["form_checked"]),
+                                     "unknown": row["bytes_unknown"]},
+            "readable_observed_of_filed": {**frac(row["found"], row["probed"]),
+                                           "unknown": row["probe_unknown"]},
+            "readable_promised_of_filed": frac(row["promised_found"], row["promised"]),
+        }
+
+    total: Counter[str] = Counter()
+    for row in classes.values():
+        total.update(row)
+    return {
+        "state": "measured",
+        "readable_means": "search_memory(probe phrase, limit 5) returns a page of the item's own "
+                          "Source; 'promised' is the subset whose text the import contract keeps in a page",
+        "all": table(total),
+        "by_class": {name: {**table(row), "contract": key["raw"]["classes"][name]["contract"]}
+                     for name, row in sorted(classes.items())},
+        "not_meeting_key": problems[:LOST_SAMPLES],
+        "not_meeting_key_count": len(problems),
+    }
+
+
+def raw_gaps(section: dict[str, Any]) -> dict[str, int]:
+    """Counts of raw checks that could not be made: each one makes the raw metrics a lower bound."""
+    if section.get("state") != "measured":
+        return {}
+    row = section["all"]
+    return {"probe_searches_failed": row["readable_observed_of_filed"]["unknown"],
+            "originals_not_comparable": row["original_bytes_held_of_filed"]["unknown"]}
+
+
+def first_journey_state(log: dict[str, Any]) -> str:
+    """Whether the first journey ran to its end. A stopped run lists every item it never reached
+    as lost, so the stop is named beside the count, and a log without a first journey is not a clean run."""
+    journey = next((j for j in log["journeys"] if j["name"] == "first"), None)
+    if journey is None:
+        return "no first journey in the drive log"
+    if "stopped_at" not in journey:
+        return "the drive log does not record whether the first journey stopped"
+    return f"stopped at {journey['stopped_at']}" if journey["stopped_at"] else "ran to the end"
+
+
+def collided_name(page: str, stem: str) -> bool:
+    """Whether ``page`` is named ``<stem>-<number>...``, the form the importer gives a taken name."""
+    rest = Path(page).name.removeprefix(stem + "-")
+    return rest != Path(page).name and rest.split(".")[0].isdigit()
+
+
+def existing_vault_section(key: dict[str, Any], log: dict[str, Any], vault: Path,
+                           pages_of: dict[str, list[str]], probes: list[Probe]) -> dict[str, Any]:
+    """Whether the pages the vault held first survived, and how incoming items took their names."""
+    block = key.get("existing_vault")
+    seeded = log.get("existing_vault") or {}
+    if not block:
+        return {"state": "unknown", "reason": "the key has no existing_vault block (not a raw profile)"}
+    if not seeded.get("seeded"):
+        return {"state": "unknown",
+                "reason": "the drive log records no seeded pages (the driver ran without --existing-pages)"}
+    written = {row["id"]: row for row in seeded["pages"]}
+    probe_of = {p.item: p for p in probes if p.kind == "seeded"}
+    day = seeded["day"]
+    unchanged: list[str] = []
+    changed: list[str] = []
+    missing: list[str] = []
+    unknown: list[str] = []
+    detail: list[dict[str, Any]] = []
+    colliders: Counter[str] = Counter()
+    bystanders: Counter[str] = Counter()
+    for spec in block["pages"]:
+        row = written.get(spec["id"])
+        if row is None:
+            unknown.append(spec["id"])
+            continue
+        file = vault / row["path"]
+        if not file.is_file():
+            missing.append(spec["id"])
+        elif sha256_file(file) != row["sha256"]:
+            changed.append(spec["id"])
+        else:
+            unchanged.append(spec["id"])
+        if spec["role"] == "bystander":
+            bystanders["items"] += 1
+            bystanders["unchanged"] += spec["id"] in unchanged
+            continue
+        item_pages = pages_of.get(spec["collides_with"], [])
+        renamed = bool(item_pages) and all(
+            collided_name(p, spec["stem"].replace("{today}", day)) for p in item_pages)
+        colliders["items"] += 1
+        colliders["unchanged"] += spec["id"] in unchanged
+        colliders["filed"] += bool(item_pages)
+        colliders["renamed"] += renamed
+        detail.append({"id": spec["id"], "item": spec["collides_with"], "seeded_page": row["path"],
+                       "item_pages": item_pages, "renamed_by_the_allocator": renamed})
+    asked = [p for p in probe_of.values() if not p.failed]
+    return {
+        "state": "partial" if unknown else "measured",
+        "unknown_pages": unknown,
+        "day": day,
+        "seeded_pages_unchanged": frac(len(unchanged), len(block["pages"]) - len(unknown)),
+        "seeded_pages_changed": changed,
+        "seeded_pages_missing": missing,
+        "colliding_items": {
+            "item_filed": frac(colliders["filed"], colliders["items"]),
+            "item_took_a_numbered_name": frac(colliders["renamed"], colliders["items"]),
+            "seeded_page_unchanged": frac(colliders["unchanged"], colliders["items"]),
+            "note": "a filed item that took no numbered name was planned on another day than the seed day",
+        },
+        "bystander_pages_unchanged": frac(bystanders["unchanged"], bystanders["items"]),
+        "seeded_pages_found_by_search": {
+            **frac(sum(p.strict for p in asked), len(asked)),
+            "unknown": len(probe_of) - len(asked)},
+        "colliders": detail,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -210,6 +448,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     notes = [i for i in key["items"] if i["kind"] == "note"]
     atts = [i for i in key["items"] if i["kind"] == "attachment"]
     junk = [i for i in key["items"] if i["kind"] == "junk"]
+    raw = [i for i in key["items"] if i["kind"] == "raw"]
     resolver = LinkTargets(scan)
 
     # ---- landing ---------------------------------------------------------
@@ -222,14 +461,15 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             match_forms[f"{item['kind']}:{form}"] += 1
     landed = {i["path"] for i in notes + atts if pages_of[i["path"]]}
     refusals = [r for j in log["journeys"] if j["name"] == "first" for r in j["refusals"]]
-    refused_by_key: dict[str, str] = {}
-    for row in refusals:
-        path = str(row["path"])
-        original = path.removeprefix(collection + "/")
-        for item in notes + atts:
-            if item["path"] in (original, path) or nfc(item["path"]) == nfc(original):
-                refused_by_key[item["path"]] = str(row["code"])
+    refused_codes = refusal_lookup(refusals, collection)
+    refused_by_key = {i["path"]: refused_codes[nfc(i["path"])]
+                      for i in notes + atts if nfc(i["path"]) in refused_codes}
     absent = [i for i in notes + atts if i["path"] not in landed and i["path"] not in refused_by_key]
+    nfc_names = Counter(nfc(i["path"]) for i in raw)
+    twinned = {name for name, n in nfc_names.items() if n > 1}
+    raw_pages_of = {i["path"]: raw_pages(i, index, scan, twinned) for i in raw}
+    raw_lost = [i for i in raw if not raw_pages_of[i["path"]] and nfc(i["path"]) not in refused_codes]
+    lost = [*absent, *raw_lost]
 
     def landing(items: list[dict[str, Any]]) -> dict[str, Any]:
         return frac(sum(1 for i in items if i["path"] in landed), len(items))
@@ -251,6 +491,11 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         "items_refused": frac(len(refused_by_key), len(notes) + len(atts)),
         "items_refused_by_code": dict(sorted(Counter(refused_by_key.values()).items())),
         "items_silently_absent": frac(len(absent), len(notes) + len(atts)),
+        # An item with no page and no refusal recorded by the first journey.
+        "lost": {**frac(len(lost), len(notes) + len(atts) + len(raw)),
+                 "by_kind": dict(Counter(i["kind"] for i in lost)),
+                 "paths": [i["path"] for i in lost[:LOST_SAMPLES]],
+                 "first_journey": first_journey_state(log)},
         "items_silently_absent_by_kind": dict(Counter(i["kind"] for i in absent)),
         "items_silently_absent_by_extension": dict(
             Counter(i.get("ext", ".md") for i in absent).most_common()),
@@ -307,6 +552,9 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     link_by_form: dict[str, list[int]] = {}
     embed_total = embed_kept = embed_both_landed = 0
     link_samples: list[dict[str, Any]] = []
+    # What each key item and each distinct edge came to, for a caller that compares two runs item by item.
+    edge_kept: dict[str, bool] = {}
+    embed_edge_kept: dict[str, bool] = {}
     pairs_seen: set[tuple[str, str]] = set()
     entry_forms: Counter[str] = Counter()
     probes: list[Probe] = []
@@ -345,6 +593,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
                     continue  # two links from one note to one target are one outbound edge
                 pairs_seen.add(pair)
                 both = bool(own and targets)
+                edge_kept[f"{note['path']} -> {lk['target']}"] = bool(kept)
                 link_total += 1
                 link_kept += kept
                 link_both_landed += both
@@ -364,11 +613,22 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
                 hit = any(resolver.names_page(e, t) for e in entries for t in targets) or any(
                     resolver.names_file(e, f) for e in entries for f in files)
                 embed_kept += bool(hit and own)
+                embed_edge_kept[f"{note['path']} -> {emb['attachment']}"] = bool(hit and own)
 
         # recall@5: one query per note probe and one per distinct media phrase
         for note in notes:
             probes.append(Probe("note", note["probe"]["lang"], note["probe"]["text"],
                                 set(pages_of[note["path"]])))
+        for item in raw:
+            if item["probe"]:
+                probes.append(Probe("raw", item["probe"]["lang"], item["probe"]["text"],
+                                    set(raw_pages_of[item["path"]]), item=item["path"],
+                                    promised=item["probe"]["promised"]))
+        seeded_rows = {r["id"]: r for r in (log.get("existing_vault") or {}).get("pages", [])}
+        for spec in (key.get("existing_vault") or {}).get("pages", []):
+            if spec["id"] in seeded_rows:
+                probes.append(Probe("seeded", "en", spec["probe"], {seeded_rows[spec["id"]]["path"]},
+                                    item=spec["id"]))
         seen: set[str] = set()
         for att in atts:
             phrase = (att["media_phrase"] or {}).get("text")
@@ -389,6 +649,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             paths = result_paths(data) if outcome == "ok" else []
             if paths is None:
                 unreadable_replies += 1
+            probe.failed = paths is None or outcome != "ok"
             probe.top5 = paths or []
             probe.strict = probe.strict or bool(probe.expected & set(probe.top5))
             needle = probe.query.lower()
@@ -405,9 +666,12 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             for probe in missed:
                 await ask(probe)
                 settle["requeried"] += 1
-                settle["recovered_" + probe.kind] += probe.strict
+                settle["recovered_" + probe.kind] = settle.get("recovered_" + probe.kind, 0) + probe.strict
     scorer_calls = session.calls
     scorer_wall = round(time.perf_counter() - started, 1)
+    raw_metrics = raw_section(key, raw, raw_pages_of, refused_codes, probes, scan, vault, collection)
+    existing_metrics = existing_vault_section(key, log, vault, raw_pages_of, probes)
+    ranked = [p for p in probes if p.kind in ("note", "media")]  # the samples below stay as they were
 
     # ---- media states ------------------------------------------------------
     media_status = (log["media"]["after_rerun"].get("final_status") or {})
@@ -464,6 +728,8 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         "drive": {"path": str(args.drive_log), "profile": log["profile"], "server": log["server"],
                   "label": log.get("label")},
         "landing": landing_metrics,
+        "raw": raw_metrics,
+        "existing_vault": existing_metrics,
         "links_preserved": {
             "of_all_resolvable_links": frac(link_kept, link_total),
             "of_links_with_both_ends_landed": frac(link_both_kept, link_both_landed),
@@ -473,6 +739,13 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         },
         "embeds_bound": {"of_all_embeds": frac(embed_kept, embed_total),
                          "of_embeds_with_both_ends_landed": frac(embed_kept, embed_both_landed)},
+        "per_item": {
+            "unit": "key path -> page count; edges are 'source -> target' over distinct pairs",
+            "pages_per_item": {i["path"]: len(pages_of[i["path"]]) for i in notes + atts},
+            "junk_pages": {i["path"]: len(pages_of[i["path"]]) for i in junk},
+            "links_kept": edge_kept,
+            "embeds_kept": embed_edge_kept,
+        },
         "fidelity": fidelity,
         "homes": homes,
         "rerun_duplicates": duplicates,
@@ -513,6 +786,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         "measurement_gaps": {
             **Counter(c["tool"] for c in scorer_calls if c["outcome"] != "ok"),
             **({"search_memory_unreadable_reply": unreadable_replies} if unreadable_replies else {}),
+            **{f"raw_{name}": count for name, count in raw_gaps(raw_metrics).items() if count},
         },
         "samples": {
             "silently_absent": [i["path"] for i in absent[:SAMPLES]],
@@ -521,15 +795,42 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             "links": link_samples,
             "recall_misses_of_landed_items": [
                 {"kind": p.kind, "query": p.query, "expected": sorted(p.expected), "top5": p.top5}
-                for p in probes if p.expected and not p.strict][:SAMPLES],
+                for p in ranked if p.expected and not p.strict][:SAMPLES],
             "recall_hits": [{"kind": p.kind, "query": p.query, "top5": p.top5}
-                            for p in probes if p.strict][:SAMPLES],
+                            for p in ranked if p.strict][:SAMPLES],
             "classified_page_paths": outside[:SAMPLES],
         },
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(metrics, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return metrics
+
+
+def raw_headline(m: dict[str, Any]) -> dict[str, Any]:
+    raw, vault = m["raw"], m["existing_vault"]
+    out: dict[str, Any] = {}
+    if raw["state"] == "measured":
+        total = raw["all"]
+        out["raw"] = {
+            "meets_key": f"{total['meets_key']['numerator']}/{total['meets_key']['denominator']}",
+            "filed": f"{total['filed']['numerator']}/{total['filed']['denominator']}",
+            "refused": total["refused"], "lost": total["lost"],
+            "readable_promised": (f"{total['readable_promised_of_filed']['numerator']}/"
+                                  f"{total['readable_promised_of_filed']['denominator']}"),
+            "classes_not_meeting_key": sorted(n for n, c in raw["by_class"].items()
+                                              if c["meets_key"]["numerator"] != c["meets_key"]["denominator"]),
+        }
+    else:
+        out["raw"] = raw
+    if vault["state"] == "unknown":
+        out["existing_vault"] = vault
+    else:
+        kept = vault["seeded_pages_unchanged"]
+        out["existing_vault"] = {"state": vault["state"],
+                                 "seeded_pages_unchanged": f"{kept['numerator']}/{kept['denominator']}",
+                                 "changed": vault["seeded_pages_changed"],
+                                 "missing": vault["seeded_pages_missing"]}
+    return out
 
 
 def headline(m: dict[str, Any]) -> dict[str, Any]:
@@ -542,6 +843,8 @@ def headline(m: dict[str, Any]) -> dict[str, Any]:
         "attachments_landed": pair(m["landing"]["attachments_landed"]),
         "refused": m["landing"]["items_refused_by_code"],
         "silently_absent": pair(m["landing"]["items_silently_absent"]),
+        "lost": pair(m["landing"]["lost"]),
+        "first_journey": m["landing"]["lost"]["first_journey"],
         "links_preserved": pair(m["links_preserved"]["of_all_resolvable_links"]),
         "embeds_bound": pair(m["embeds_bound"]["of_all_embeds"]),
         "tags_carried": pair(m["fidelity"]["tags_carried"]),
@@ -555,6 +858,7 @@ def headline(m: dict[str, Any]) -> dict[str, Any]:
                                      m["recall_at_5"]["media_phrases"]["counterpart_in_top5"].items()},
         "recall_media_text_any_page": {k: pair(v) for k, v in
                                        m["recall_at_5"]["media_phrases"]["text_on_any_top5_page"].items()},
+        **raw_headline(m),
     }
 
 

@@ -40,6 +40,7 @@ Building the normal-table catalog needs no FTS5, so these run everywhere.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import threading
@@ -47,12 +48,13 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from exomem import file_watcher, find_types, freshness, lexstore, reserved_paths, writer_lease
 from exomem import find as find_module
-from exomem import find_types, freshness, lexstore, reserved_paths
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -82,6 +84,27 @@ _HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
 _FOREGROUND_BOUND_SECONDS = 0.5
 _STILL_BLOCKED_SECONDS = 1.0
+
+
+@contextmanager
+def _a_write_in_flight(vault: Path) -> Any:
+    """Another writer holds the vault's mutation boundary, as a write does while it publishes."""
+    holder = writer_lease.LeaseManager(writer_lease.LeaseConfig.from_env())
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with holder.mutation_guard(vault, request_id="writer", operation="semantic edit"):
+            holding.set()
+            release.wait(_HOLD_SECONDS)
+
+    writer = threading.Thread(target=hold)
+    writer.start()
+    assert holding.wait(_OBSERVE_SECONDS)
+    try:
+        yield
+    finally:
+        release.set()
+        writer.join(_OBSERVE_SECONDS)
 
 
 @pytest.fixture(autouse=True)
@@ -274,6 +297,8 @@ def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
         assert "pbefore" in contents and "qbefore" in contents
         assert "pafter" not in contents and "qafter" not in contents
         assert "punreported" not in contents
+        # No write was in flight, so the census refused at once, not after a wait.
+        assert store._last_decline_cause == lexstore.DeclineCause.UNOBSERVED_DRIFT
         return
     for page, how in ((p, before_walk), (q, after_walk)):
         if how is None:
@@ -284,6 +309,57 @@ def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
     assert lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False) is not None
+
+
+def test_a_census_waits_for_writes_whose_events_are_still_on_their_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import batch rewrites a shared page P and adds a new page N on disk
+    before its events reach the registry. The census walk sees both first. The
+    census must wait for the events and replay the pages. Before, it found the
+    walk ahead of the registry and discarded the build.
+
+    P's event lands before N's, so the census waits for every page it saw.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_walk = store._walk_entries
+    late_events: list[threading.Timer] = []
+    walks = 0
+
+    def deliver_later(seconds: float, page: Path) -> None:
+        late = threading.Timer(
+            seconds, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [page]}
+        )
+        late_events.append(late)
+        late.start()
+
+    def census_walk_during_an_unpublished_batch() -> Any:
+        nonlocal walks
+        walks += 1
+        if walks == 2:
+            p.write_text(_page_text("p", "- [config] pafter ^u1"), encoding="utf-8")
+            _touch_future(p)
+            n = _kb_file(tmp_path, "n.md", "- [config] nnew ^u2")
+            deliver_later(0.5, p)
+            deliver_later(1.0, n)
+        return real_walk()
+
+    monkeypatch.setattr(store, "_walk_entries", census_walk_during_an_unpublished_batch)
+    with _a_write_in_flight(tmp_path):
+        published = store.rebuild_atomic()
+    for late in late_events:
+        late.join()
+    assert walks >= 2
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pafter" in contents and "nnew" in contents
+    assert "pbefore" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
 
 
 def test_a_replay_survives_an_observed_write_to_another_page(
@@ -331,6 +407,284 @@ def test_a_replay_survives_an_observed_write_to_another_page(
     assert "pbefore" not in contents and "qbefore" not in contents
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+def test_a_replay_waits_for_a_rewrite_whose_event_is_still_on_its_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A governed write changes a page on disk before its event reaches the
+    registry. A page that every write rewrites is often in that gap when the
+    build replays it. The replay must wait for the event and replay the newer
+    page. Before, it saw the page differ from its target and discarded the
+    whole build.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    late_events: list[threading.Timer] = []
+
+    def rewrite(token: str) -> None:
+        p.write_text(_page_text("p", f"- [config] {token} ^u1"), encoding="utf-8")
+        _touch_future(p)
+
+    def materialize_then_rewrite_p_twice(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        if not late_events:
+            rewrite("pfirst")
+            freshness.on_files_changed(tmp_path, changed=[p])
+            rewrite("psecond")
+            late = threading.Timer(
+                1.0, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [p]}
+            )
+            late_events.append(late)
+            late.start()
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p_twice)
+    with _a_write_in_flight(tmp_path):
+        published = store.rebuild_atomic()
+    late_events[0].join()
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "psecond" in contents
+    assert "pbefore" not in contents and "pfirst" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+@pytest.mark.parametrize(
+    ("reserved_page", "published", "cause"),
+    [
+        pytest.param("p.md", True, None, id="the_page_is_still_publishing"),
+        pytest.param(
+            "other.md", False, lexstore.DeclineCause.UNOBSERVED_DRIFT, id="another_page_is_publishing"
+        ),
+    ],
+)
+def test_a_replay_waits_for_the_event_of_a_write_that_already_released_the_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reserved_page: str,
+    published: bool,
+    cause: lexstore.DeclineCause | None,
+) -> None:
+    """An import batch releases the mutation boundary and publishes its pages
+    up to a second later. Its publication intent for a page stays open until the
+    registry holds the event. A replay that meets such a page must wait for the
+    event, though no boundary is held. A replay that meets a page that no open
+    intent covers still refuses at once.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    other = _kb_file(tmp_path, "other.md", "plain body text")
+    _seed(tmp_path, [p, other])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    late_events: list[threading.Timer] = []
+    reserved = tmp_path / "Knowledge Base" / reserved_page
+    content = reserved.read_bytes()
+    descriptor = os.open(reserved, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            tmp_path, [(reserved, descriptor, hashlib.sha256(content).hexdigest())]
+        )
+    finally:
+        os.close(descriptor)
+
+    def publish_and_close() -> None:
+        freshness.on_files_changed(tmp_path, changed=[p])
+        file_watcher.finalize_publication_intents((intent,))
+
+    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        p.write_text(_page_text("p", "- [config] pafter ^u1"), encoding="utf-8")
+        _touch_future(p)
+        if published:
+            late = threading.Timer(0.3, publish_and_close)
+            late_events.append(late)
+            late.start()
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    try:
+        result = store.rebuild_atomic()
+    finally:
+        for late in late_events:
+            late.join()
+        file_watcher.clear_self_write_registry()
+    assert result is published
+    if cause is not None:
+        assert store._last_decline_cause == cause
+        return
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pafter" in contents and "pbefore" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+def test_a_replay_drops_the_rows_of_pages_deleted_and_renamed_while_it_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import batch rewrites Q, deletes P and renames R to S on disk. Q's first
+    event reaches the registry at once; the events of the whole batch arrive
+    late. The replay waits for them. The published catalogue must hold S and the
+    newer Q, and none of the rows of P or R. A replay that waits but forgets the
+    late deletions never matches the registry, so it declines the pass instead
+    of publishing.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
+    r = _kb_file(tmp_path, "r.md", "- [config] rbefore ^u3")
+    _seed(tmp_path, [p, q, r])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    late_events: list[threading.Timer] = []
+    moved = tmp_path / "Knowledge Base" / "s.md"
+
+    def rewrite_q(token: str) -> None:
+        q.write_text(_page_text("q", f"- [config] {token} ^u2"), encoding="utf-8")
+        _touch_future(q)
+
+    def materialize_then_publish_a_batch_late(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        if not late_events:
+            rewrite_q("qfirst")
+            freshness.on_files_changed(tmp_path, changed=[q])
+            rewrite_q("qsecond")
+            p.unlink()
+            r.unlink()
+            moved.write_text(_page_text("s", "- [config] rmoved ^u3"), encoding="utf-8")
+            late = threading.Timer(
+                1.0,
+                freshness.on_files_changed,
+                args=(tmp_path,),
+                kwargs={"changed": [q, moved], "deleted": [p, r]},
+            )
+            late_events.append(late)
+            late.start()
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_publish_a_batch_late)
+    with _a_write_in_flight(tmp_path):
+        published = store.rebuild_atomic()
+    late_events[0].join()
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "qsecond" in contents and "rmoved" in contents
+    assert "pbefore" not in contents and "rbefore" not in contents and "qfirst" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+@pytest.mark.parametrize(
+    ("write_in_flight", "cause"),
+    [
+        pytest.param(True, lexstore.DeclineCause.OBSERVATION_TIMED_OUT, id="write_never_publishes"),
+        pytest.param(False, lexstore.DeclineCause.UNOBSERVED_DRIFT, id="no_write_in_flight"),
+    ],
+)
+def test_a_replay_that_cannot_prove_a_page_names_what_ended_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_in_flight: bool,
+    cause: lexstore.DeclineCause,
+) -> None:
+    """A page changes on disk and its event never arrives. While a write holds
+    the boundary, the replay waits out its bound. With none, it refuses at
+    once. Either way the pass keeps the live catalogue and says which it was.
+    """
+    # A write that never publishes holds the replay for this long.
+    monkeypatch.setattr(lexstore, "_REPLAY_OBSERVATION_WAIT_SECONDS", 0.2)
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+
+    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        for token, reported in (("pfirst", True), ("punreported", False)):
+            p.write_text(_page_text("p", f"- [config] {token} ^u1"), encoding="utf-8")
+            _touch_future(p)
+            if reported:
+                freshness.on_files_changed(tmp_path, changed=[p])
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    if write_in_flight:
+        with _a_write_in_flight(tmp_path):
+            published = store.rebuild_atomic()
+    else:
+        published = store.rebuild_atomic()
+    assert published is False
+    assert store._last_decline_cause == cause
+
+
+def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer that rewrites P each time the build's replay reads it keeps P
+    from ever proving its target, although the registry observes each write
+    soon after. The replay must stop after a bounded number of retargets and
+    keep the live catalogue, not follow the writer for as long as it writes.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    real_apply_rows = store._apply_delta_rows
+    writer_stopped = threading.Event()
+    late_events: list[threading.Timer] = []
+    rewrites = 0
+
+    def rewrite_p() -> None:
+        nonlocal rewrites
+        rewrites += 1
+        p.write_text(_page_text("p", f"- [config] prewrite{rewrites} ^u1"), encoding="utf-8")
+        _touch_future(p)
+
+    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        rewrite_p()
+        freshness.on_files_changed(tmp_path, changed=[p])
+        return built
+
+    def apply_rows_then_rewrite_p_with_a_late_event(conn: sqlite3.Connection, delta: Any) -> None:
+        real_apply_rows(conn, delta)
+        if writer_stopped.is_set():
+            return
+        rewrite_p()
+        late = threading.Timer(
+            0.2, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [p]}
+        )
+        late_events.append(late)
+        late.start()
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p_with_a_late_event)
+    outcome: dict[str, bool] = {}
+    build = threading.Thread(target=lambda: outcome.setdefault("published", store.rebuild_atomic()))
+    with _a_write_in_flight(tmp_path):
+        build.start()
+        build.join(timeout=_OBSERVE_SECONDS)
+        finished = not build.is_alive()
+        writer_stopped.set()
+        build.join()
+    for late in late_events:
+        late.join()
+    assert finished, "the replay kept chasing a page that never stopped changing"
+    assert outcome["published"] is False
+    assert store._last_decline_cause == lexstore.DeclineCause.RETARGETS_EXHAUSTED
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pbefore" in contents and "prewrite" not in contents
 
 
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
@@ -2474,3 +2828,38 @@ def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
     assert sorted(parsed) == ["Knowledge Base/lost.md", "Knowledge Base/other.md"]
     hits = lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb")
     assert [path for path, _score in hits] == ["Knowledge Base/lost.md"]
+
+
+def test_a_census_refuses_when_the_registry_holds_two_spellings_of_one_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows two spellings of one page digest to one key. When the registry
+    holds both and the walk finds the page once, the census must refuse, as it
+    did before the census view digested paths once. A view keyed by digest alone
+    keeps one spelling, sees one entry on each side, and excuses the drift.
+    """
+    # Windows folds case in the digest; this platform does not.
+    monkeypatch.setattr(freshness, "_digest_path", str.casefold)
+    lineage = {"instance_id": "registry", "policy_version": 1, "access_policy_fingerprint": "f"}
+    start = SimpleNamespace(generation=4, **lineage)
+    after_walk_checkpoint = SimpleNamespace(generation=5, **lineage)
+    replayed = freshness.RecallDelta(
+        from_=start,
+        to=SimpleNamespace(generation=5, **lineage),
+        complete=True,
+        changed=frozenset(),
+        deleted=frozenset(),
+    )
+    signature = (100, 100, 10)
+    after_walk = (
+        after_walk_checkpoint,
+        {"Knowledge Base/Note.md": signature, "Knowledge Base/note.md": signature},
+    )
+    view = lexstore.LexicalStore._census_view(
+        [("Knowledge Base/Note.md", signature)], after_walk
+    )
+
+    assert (
+        lexstore.LexicalStore._census_agrees_outside_replay(start, replayed, after_walk, view)
+        is None
+    )

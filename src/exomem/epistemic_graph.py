@@ -1198,7 +1198,8 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     unavailable until the stall escalation, longer than a reader waits. Nor
     does a queue whose oldest receipt has waited the drain's stall threshold:
     one receipt that never drains, behind writes that do, held the barrier for
-    good, because their progress restarts the stall escalation's clock.
+    good, because their progress restarts the stall escalation's clock. A queue
+    that only loses races to live commits stays the queue's, whatever its age.
     """
     from . import freshness
 
@@ -1228,8 +1229,12 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
     not refused by the epoch or by an unready vault. The oldest receipt's age
     bounds it: a requeue keeps a receipt's first enqueue time, so a receipt
     that never drains ages past the threshold however much drains around it.
-    An unreadable queue reads as empty, which leaves recovery to the reasons
-    after this one.
+    The age does not bound a queue whose latest pass cleared nothing only
+    because live commits won the race for it
+    (`graph_drain.per_path_repair_raced`): that queue is old because writes keep
+    coming, and a whole-vault pass would lose to the same writes at far greater
+    cost. It drains once they pause. An unreadable queue reads as empty, which
+    leaves recovery to the reasons after this one.
     """
     from . import graph_drain
 
@@ -1240,7 +1245,10 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
         return (
             count > 0
             and oldest_age is not None
-            and oldest_age < graph_drain.stall_seconds()
+            and (
+                oldest_age < graph_drain.stall_seconds()
+                or graph_drain.per_path_repair_raced(vault_root)
+            )
             and deferred_index.graph_full_rebuild_pending(vault_root) is None
         )
     except Exception:  # noqa: BLE001 - an unreadable queue owns no repair
@@ -2879,8 +2887,9 @@ class EpistemicGraphIndex:
     def republish_availability_if_current(self) -> bool | None:
         """Restore a withdrawn availability marker once nothing is queued against it.
 
-        True restores availability, False declines the proof, and None defers for
-        foreground work. Deferral must not turn an intact graph into rebuild debt.
+        True restores availability, False declines the proof, and None defers:
+        for foreground work, or for an external change the watcher has yet to
+        repair. Deferral must not turn an intact graph into rebuild debt.
 
         Every route that withdraws -- the path-scoped fence, the cold-resolver
         defer, an adopted residue -- pairs the withdrawal with durable repair,
@@ -2936,11 +2945,12 @@ class EpistemicGraphIndex:
         if freshness.external_pending(self.vault_root):
             # The watcher owns that repair and republishes through its own
             # route when it lands. Proving here would spend the whole corpus to
-            # reach a refusal that is already known. A watcher that is dead or
-            # exhausted does not strand the graph on this: the drain daemon's
-            # availability arm falls through to `_request_full_rebuild`, so an
-            # unreadable graph nobody is repairing still gets its repair.
-            return False
+            # reach a refusal that is already known. That makes this a deferral,
+            # not a declined proof. A watcher that is dead or exhausted does not
+            # strand the graph on it: the drain daemon's availability arm queues
+            # a whole-vault rebuild once the same change has stood for
+            # `graph_drain.stall_seconds()`.
+            return None
         if not self._republish_attempt_due():
             return False
         # Parse and reconstruct topology without excluding canonical writers.
@@ -7295,7 +7305,10 @@ class EpistemicGraphIndex:
                 or freshness.external_pending_epoch(self.vault_root) != external_epoch
             ):
                 log.info("deferred graph drain outcome=moved_before_pass queued=%d", len(paths))
-                return {**report, "moved": 1}
+                # A commit landed between sampling and the lock: a live writer
+                # won the race, not a fault of this pass's pages. Callers tell
+                # it apart from a pass that failed for a reason of its own.
+                return {**report, "moved": 1, "commit_race": 1}
             before = _incremental_projection_identity(self.vault_root)
             queued_rels = {
                 rel

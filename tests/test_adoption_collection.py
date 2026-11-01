@@ -1093,7 +1093,9 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
     monkeypatch.setattr(adoption_run, "REPLY_SECONDS_PER_ITEM", 0.0)
     monkeypatch.setattr(adoption_run, "APPLY_CHUNK_BUDGET_SHARE", 1.0)
     vault = _vault(tmp_path, {})
-    batch = types.SimpleNamespace(handoff_outcome=None, handoff_error=None)
+    batch = types.SimpleNamespace(
+        receipt=types.SimpleNamespace(batch_id="b", paths=()), handoff_outcome=None, handoff_error=None
+    )
     session = writer_lease._FastAcknowledgementSession(
         vault_root=vault, request_id="r", mutation_attempt_digest="d",
         terminal_replay_until=0.0, advisory_required=False, batches=[batch],
@@ -1121,8 +1123,8 @@ def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_betwe
         # A handoff near zero still reserves the floor (2 s), not nothing.
         measure_handoff(0.0)
         assert items_admitted(12) == 5
-        # A 1.5 s handoff per batch reserves 3 s: the session's batch and the chunk's.
-        measure_handoff(1.5)
+        # A 3 s handoff per batch reserves 3 s for the chunk's batch: the session's is handed off.
+        measure_handoff(3.0)
         assert items_admitted(12) == 4
         # A 100 s handoff reserves no more than the ceiling (20 s).
         measure_handoff(100.0)

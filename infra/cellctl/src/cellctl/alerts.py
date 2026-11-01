@@ -4,10 +4,11 @@ One alert fires while a running cell's last successful backup is older than
 its schedule allows (task 2.8), and one while a local cell past 80% use cannot
 grow, because its node has no room or it is at its cap (D10). Two more fire
 for a dedicated host before any cell runs there: its cell array is degraded
-(task 5.5) or its thin pool is nearly full (task 5.6). Two more fire for a
+(task 5.5) or its thin pool is nearly full (task 5.6). Three more fire for a
 serving cell, with thresholds from the observability contract
 (cloud-platform-operations, "Monitoring spans independent failure domains"):
-it has stayed unready, or its volume has little free space left. Each goes
+it has stayed unready, its volume has little free space left, or its recall
+serves a catalogue that has stopped advancing. Each goes
 through the existing alert receiver as the same content-free transition the
 hosted scheduler evaluator sends (`infra/helm/platform/files/scheduler_runtime.py`).
 Substrate's receiver (`alert-receiver.ts`) is the contract both senders follow:
@@ -58,6 +59,9 @@ ARRAY_DISKS_REQUIRED = "node_md_disks_required"
 # Protocol tokens: the receiver keys on them and the runbook names them; they are not vocabulary.
 UNAVAILABLE_ALERT = "cell-unavailable"
 DISK_LOW_ALERT = "cell-disk-low"
+# A serving cell whose recall serves a catalogue that has not advanced, read
+# from the cell's own readiness answer.
+RECALL_LAG_ALERT = "cell-recall-lagging"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
@@ -67,12 +71,13 @@ SERVING_STATES = ("running", "read_only")
 
 @dataclass(frozen=True)
 class AlertThresholds:
-    """The observability contract's `alerts.*` values the two cell alerts read.
+    """The observability contract's `alerts.*` values the cell alerts read.
     The chart renders them into cellctl's environment from the contract file,
     and main.py refuses to start without them: no second copy lives in code."""
 
     unavailable_after: timedelta  # pending_operation_warn_seconds
     disk_free_floor_bytes: int  # pvc_reserved_free_bytes
+    recall_lag_after: timedelta  # recall_lag_warn_seconds
 
 
 def stale_backups(
@@ -153,6 +158,27 @@ def disk_low(rows: Iterable[CellRow], free_bytes: Mapping[str, int], *, floor: i
         return True
     unmeasured = any(row.desired_state in SERVING_STATES and row.cell_id not in free_bytes for row in rows)
     return None if unmeasured else False
+
+
+def recall_lagging_cells(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> list[str]:
+    """Serving cells whose last definite verdict (cell_readiness.recall_lag_verdict)
+    showed recall lagging past the threshold. `verdicts` lives in cellctl's memory."""
+
+    return sorted(row.cell_id for row in rows if row.desired_state in SERVING_STATES and verdicts.get(row.cell_id))
+
+
+def recall_lagging(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> bool | None:
+    """Whether any serving cell's recall has lagged past the threshold, from
+    each serving cell's last definite verdict. Unknown (None), never
+    "resolved", while a serving cell has no verdict yet: after a cellctl
+    restart, a cell may report a young lag for an old stall until its age
+    reaches the threshold or it reads ready. False only when every serving
+    cell's last definite verdict is strictly ready."""
+
+    serving = [verdicts.get(row.cell_id) for row in rows if row.desired_state in SERVING_STATES]
+    if True in serving:
+        return True
+    return None if None in serving else False
 
 
 def growth_blocked(

@@ -137,7 +137,6 @@ python:
   roots:
     - "src"
     - "plugins/claude-code/hooks"
-    - "sidecar/diarizer"
     - "infra/cellctl/src"
     - "infra/cloud-rehearsal/src"
   # Called by name from outside the code: Textual event and action handlers (watch_*
@@ -175,7 +174,6 @@ duplicates:
   paths:
     - "src"
     - "plugins/claude-code/hooks"
-    - "sidecar/diarizer"
     - "infra/cellctl/src"
     - "infra/cloud-rehearsal/src"
   ignore: ["**/_sample_vault/**", "**/_scaffold/**"]

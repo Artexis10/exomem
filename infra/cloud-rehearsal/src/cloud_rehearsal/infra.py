@@ -28,7 +28,7 @@ import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import images, tls
+from . import host_speed, images, tls
 from .shell import run, wait_for
 
 K3S_POD_CIDR = "10.42.0.0/16"
@@ -478,5 +478,6 @@ def environment_facts() -> dict[str, object]:
         "cpus": docker.get("NCPU"),
         "memory_bytes": docker.get("MemTotal"),
         "kernel": docker.get("KernelVersion"),
+        **host_speed.cpu_facts(),
         "ci": bool(os.environ.get("CI")),
     }

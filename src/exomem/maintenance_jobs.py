@@ -129,7 +129,8 @@ class _Live:
 _JOB: contextvars.ContextVar[_Live | None] = contextvars.ContextVar("exomem_maintenance_job", default=None)
 _LIVE: dict[str, _Live] = {}
 #: Held across claim and registration, and by the sweep, so a row this process
-#: just inserted is never read as an orphan before its thread is registered.
+#: just inserted is never read as an orphan before its thread is registered. A read holds it from
+#: taking a row to classifying it, so a job that ends in between is never read as an orphan either.
 _LIVE_LOCK = threading.Lock()
 
 
@@ -440,7 +441,7 @@ def job_status(vault_root: Path, run_id: str, cursor: str | None = None) -> dict
     """One job's state, or with a `cursor` one page of the paths its receipt lists."""
     require_owner(vault_root)
     try:
-        with _store(vault_root, create=False) as conn:
+        with _LIVE_LOCK, _store(vault_root, create=False) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 raise _not_found()
@@ -504,7 +505,7 @@ def _page(conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str) -> dic
 def job_list(vault_root: Path) -> dict[str, Any]:
     require_owner(vault_root)
     try:
-        with _store(vault_root, create=False) as conn:
+        with _LIVE_LOCK, _store(vault_root, create=False) as conn:
             rows = conn.execute("SELECT * FROM jobs ORDER BY started_at DESC, seq DESC").fetchall()
             totals = _totals(conn)
             return {"jobs": [_view(conn, row, totals.get(row["run_id"], {}), full=False) for row in rows]}
