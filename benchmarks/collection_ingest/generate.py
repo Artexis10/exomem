@@ -1,16 +1,21 @@
 #!/usr/bin/env python
-"""Generate an invented, Obsidian-style note collection plus its answer key.
+"""Generate an invented note collection plus its answer key.
 
 Seeded and deterministic: the same ``--seed`` and ``--profile`` write byte-identical
 files and a byte-identical key. The key is written from this generator's own random
 draws, never from product output, and it is written OUTSIDE the collection folder so
 the product under test can never read it.
 
+The ``small``, ``standard`` and ``heavy`` profiles write an Obsidian-style collection that
+fits the vault. The ``raw`` and ``raw-standard`` profiles add messy real-world input beside
+it (see ``raw_corpus.py``) and write the page spec of an existing vault next to the key.
+
 Pure standard library. Fixture bytes come from ``tests/fixtures`` (media samples and
 the base64 graph-value media); unique-phrase variants of the same formats are
 rebuilt here so each carries its own recall phrase.
 
     python generate.py --seed 7 --profile standard --out /scratch/collection --key /scratch/key.json
+    python generate.py --seed 7 --profile raw --out /scratch/raw --key /scratch/raw.key.json
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import raw_corpus
 
 GENERATOR_VERSION = 1
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,12 +54,16 @@ class Profile:
     duplicate_basename_pairs: int
     folders: int | None  # None = every folder in FOLDERS
     heavy_bytes: int = 0
+    raw_snippets: int | None = None  # None = no raw items; else the file count of the flat dump
 
 
+# A raw profile has its own name, so its draws never move those of the profile it resembles.
 PROFILES = {
     "small": Profile(60, 15, 3, 2, 2, 2, 9),
     "standard": Profile(1000, 100, 24, 10, 8, 8, None),
     "heavy": Profile(1000, 100, 24, 10, 8, 8, None, heavy_bytes=2 * 1024**3),
+    "raw": Profile(60, 15, 3, 2, 2, 2, 9, raw_snippets=40),
+    "raw-standard": Profile(1000, 100, 24, 10, 8, 8, None, raw_snippets=300),
 }
 
 JA_RATIO = 0.10
@@ -725,6 +736,21 @@ def write_filler(root: Path, rel: str, seed: int, size: int, order: int) -> None
     os.utime(target, (stamp, stamp))
 
 
+def write_stream(root: Path, rel: str, chunks: Iterator[bytes], order: int) -> tuple[str, int]:
+    """Write a file block by block; return its sha256 and size without reading it back."""
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest, size = hashlib.sha256(), 0
+    with target.open("wb") as handle:
+        for block in chunks:
+            handle.write(block)
+            digest.update(block)
+            size += len(block)
+    stamp = MTIME_BASE + order * 61
+    os.utime(target, (stamp, stamp))
+    return digest.hexdigest(), size
+
+
 def build_junk(rng: random.Random, profile: Profile, notes: list[Note],
                contents: dict[str, bytes]) -> list[dict]:
     """Add junk files to ``contents`` and return their key rows."""
@@ -782,8 +808,11 @@ def tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
-def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_bytes: int = 0) -> dict:
+def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_bytes: int = 0,
+             huge_bytes: int | None = None) -> dict:
     profile = PROFILES[profile_name]
+    if huge_bytes is not None and profile.raw_snippets is None:
+        raise SystemExit("--huge-bytes applies only to the raw profiles")
     out = out.resolve()
     key_path = key_path.resolve()
     if key_path == out or out in key_path.parents:
@@ -817,12 +846,30 @@ def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_byte
             contents[att.path] = att.data
     junk_rows = build_junk(rng, profile, notes, contents)
 
+    corpus = None
+    huge_total = raw_corpus.DEFAULT_HUGE_BYTES if huge_bytes is None else huge_bytes
+    if profile.raw_snippets is not None:
+        corpus = raw_corpus.build(
+            random.Random(f"collection-ingest/{GENERATOR_VERSION}/{profile_name}/{seed}/raw"),
+            flat_files=profile.raw_snippets, huge_bytes=huge_total,
+            prose=sentence, probe_words=(PHRASE_ADJ, PHRASE_NOUN))
+        for item in corpus.items:
+            if item.path in contents:
+                raise SystemExit(f"raw path {item.path!r} collides with a collection path")
+            if not item.streamed:
+                contents[item.path] = item.data
+
     order = 0
     for rel in sorted(contents):
         write_bytes(out, rel, contents[rel], order)
         order += 1
     for index, att in enumerate(a for a in attachments if a.filler):
         write_filler(out, att.path, seed * 1000 + index, filler_sizes[att.path], order)
+        order += 1
+    raw_streamed: dict[str, tuple[str, int]] = {}
+    for item in (i for i in (corpus.items if corpus else []) if i.streamed):
+        raw_streamed[item.path] = write_stream(
+            out, item.path, raw_corpus.huge_chunks(item, f"{seed}/{item.path}", sentence), order)
         order += 1
 
     items = []
@@ -859,6 +906,8 @@ def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_byte
             "embedded_by": sorted(att.embedded_by),
         })
     items += junk_rows
+    if corpus is not None:
+        items += [raw_corpus.key_row(item, raw_streamed.get(item.path)) for item in corpus.items]
     items.sort(key=lambda row: row["path"])
 
     groups: dict[str, list[str]] = {}
@@ -883,6 +932,8 @@ def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_byte
         "duplicate_groups": sum(1 for m in groups.values() if len(m) > 1),
         "total_bytes": sum(r["bytes"] for r in items),
     }
+    if corpus is not None:
+        summary.update(raw_corpus.summary(corpus))
     key = {
         "format": 1, "generator_version": GENERATOR_VERSION, "seed": seed, "profile": profile_name,
         "fixture_tree_sha256": tree_hash(out), "summary": summary,
@@ -890,6 +941,12 @@ def generate(seed: int, profile_name: str, out: Path, key_path: Path, heavy_byte
         "items": items,
     }
     key_path.parent.mkdir(parents=True, exist_ok=True)
+    if corpus is not None:
+        key["raw"] = raw_corpus.key_block(corpus, huge_total)
+        key["existing_vault"] = raw_corpus.existing_vault_block(corpus)
+        raw_corpus.vault_pages_path(key_path).write_text(
+            json.dumps(raw_corpus.vault_pages_spec(corpus), ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+            encoding="utf-8")
     key_path.write_text(json.dumps(key, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
                         encoding="utf-8")
     return key
@@ -903,8 +960,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--key", type=Path, required=True, help="answer key path, outside --out")
     parser.add_argument("--heavy-bytes", type=int, default=0,
                         help="override the filler byte total of the heavy profile (default 2 GiB)")
+    parser.add_argument("--huge-bytes", type=int, default=None,
+                        help="byte total of the two huge raw files, a text file and a binary file "
+                             f"(raw profiles only; default {raw_corpus.DEFAULT_HUGE_BYTES})")
     args = parser.parse_args(argv)
-    key = generate(args.seed, args.profile, args.out, args.key, args.heavy_bytes)
+    key = generate(args.seed, args.profile, args.out, args.key, args.heavy_bytes, args.huge_bytes)
     print(json.dumps({"fixture_tree_sha256": key["fixture_tree_sha256"], **key["summary"]}, indent=1))
     return 0
 
