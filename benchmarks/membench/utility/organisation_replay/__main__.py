@@ -7,7 +7,8 @@ the seed builder and the readback then all load the arm's own package.
 1. ``bind`` writes ``OUT/binding-ARM.json`` from a slot of its own.
 2. ``run`` runs each situation file through that binding.
 3. ``check`` reports each way a run file departs from ``SCHEMA.md``.
-4. ``score`` scores both arms' run files against the keys (``score.py``).
+4. ``score`` scores both arms' run files against the keys (``score.py``); it
+   takes each arm's role from its binding record.
 
 Exit codes are switch evaluation's: 0 done, 2 refused, aborted or stopped after
 a struck situation, 75 paused on a quota. Rerun the same ``run`` command to
@@ -180,17 +181,15 @@ def cmd_check(args) -> int:
 
 
 def cmd_score(args) -> int:
-    from .score import ScoreRefused, score, write_report
+    from .score import ScoreRefused, _read_json, score, write_report
 
     def read(path: str | None):
-        return json.loads(Path(path).read_text(encoding="utf-8")) if path else None
+        return _read_json(Path(path)) if path else None
 
     try:
         report = score(
             Path(args.out),
             Path(args.keys),
-            baseline=args.baseline,
-            candidate=args.candidate,
             manifest=Path(args.manifest) if args.manifest else None,
             expect=args.expect or (),
             judgements=read(args.judgements),
@@ -256,8 +255,6 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("score", help="score both arms' run files against the key files")
     p.add_argument("--out", required=True, help="the run root that holds OUT/<situation>/<arm>/")
     p.add_argument("--keys", required=True, help="the directory that holds the key files")
-    p.add_argument("--baseline", required=True, help="the baseline's opaque arm label")
-    p.add_argument("--candidate", required=True, help="the candidate's opaque arm label")
     p.add_argument(
         "--manifest", help="the custody manifest; held-out keys need the preregistered one"
     )
@@ -267,7 +264,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--judgements", help="the blind judge's verdicts on the residual items")
     p.add_argument("--judge-key", help="the judge-key.json that issued the verdicts' item ids")
     p.add_argument(
-        "--to", required=True, help="scores.json and judge-key.json; the items go to TO/judge"
+        "--to",
+        required=True,
+        help="TO/scores.json, the arm key in TO/key, the items alone in TO/judge",
     )
     p.set_defaults(func=cmd_score)
 

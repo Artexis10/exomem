@@ -1,7 +1,9 @@
 """The f34 scorer: PREREGISTRATION section 7 sequence 8, with ``protocol.yaml``.
 
-It reads run directories (``OUT/<situation>/<arm>/run.json``) and the key files
-of the situations those runs name, and nothing else. It makes no model call.
+It reads the run root (``OUT/binding-<arm>.json`` and
+``OUT/<situation>/<arm>/run.json``) and the key files of the situations the run
+declares, and nothing else. It makes no model call. Each arm's role comes from
+its binding record, never from a label the operator types.
 A residual answer goes to a blind judge as a five-field item; the scorer
 never judges one, and a judge never overturns a deterministic result.
 
@@ -12,6 +14,8 @@ rule it does not implement, rather than ignore what it cannot read.
 The run reaches a decision only when every situation it declares has both arms
 finished, no more than two are struck and every residual item has a verdict.
 Otherwise the report says which of those states it is in, and gives no table.
+The ``score`` command exits 0 when it decided or awaits the judge, 1 for a void
+or incomplete run, and 2 when it refuses an input.
 """
 
 from __future__ import annotations
@@ -99,6 +103,18 @@ KEY_SCHEMA = {
 }
 #: The fields a key must carry for every rule.
 KEY_REQUIRED = ("id", "case_sha256", "category", "variant", "client_shape", "state_success")
+#: The false-precision field each variant's protocol.yaml rule reads. Variants are
+#: SCHEMA.md's closed tokens; without its field a key would score no false precision.
+FALSE_PRECISION_FIELD = {
+    "specific_fits": "false_precision.pairs",
+    "generic_or_none": "false_precision.pairs",
+    "positive": "false_precision.wrong_core_types",
+    "durability_twin": "false_precision.twin_promoted",
+    "under_expected_home": "false_precision.wrong_homes",
+    "outside_unrelated_homes": "false_precision.wrong_homes",
+    "promoted_entity_type": "false_precision.wrong_core_types",
+    "promoted_relation": "false_precision.pairs",
+}
 
 
 class ScoreRefused(RuntimeError):
@@ -766,7 +782,10 @@ def missing_fields(key: Mapping) -> list[str]:
     rule = (key.get("state_success") or {}).get("rule")
     if rule not in RULES:
         return [f"state_success.rule (no implemented rule {rule!r})"]
-    needed = [*KEY_REQUIRED, *RULES[rule][1]]
+    variant = key.get("variant")
+    if variant not in FALSE_PRECISION_FIELD:
+        return [f"variant (no known variant {variant!r})"]
+    needed = [*KEY_REQUIRED, *RULES[rule][1], FALSE_PRECISION_FIELD[variant]]
     needed += [f"{view}.{name}" for view in ("answer", "judge_reference_view") for name in _ANSWER]
     missing = [path for path in needed if not _has(key, path)]
     pairs = (key.get("false_precision") or {}).get("pairs") or []
@@ -797,15 +816,15 @@ def held_out(situation_id: str) -> bool:
 
 
 def load_key(keys: Path, situation_id: str, manifest: Path | None) -> dict:
+    """The situation's key; ``score`` has already checked a held-out run's custody."""
+
     path = keys / key_name(situation_id)
     if not path.is_file():
         raise ScoreRefused(f"{path.name} is missing from {keys}")
+    if path.resolve().name != path.name:
+        # A key name that links to another file could open another situation's key.
+        raise ScoreRefused(f"{path.name} links to {path.resolve().name}")
     raw = path.read_bytes()
-    if held_out(situation_id):
-        try:
-            _refuse_held_out_without_custody(path.name, manifest)
-        except SituationRefused as refused:
-            raise ScoreRefused(str(refused)) from refused
     if manifest is not None:
         expected = manifest_digests(manifest).get(path.name)
         if expected != hashlib.sha256(raw).hexdigest():
@@ -845,15 +864,65 @@ def _read_runs(out: Path, situation_id: str, arms: Sequence[str]) -> dict[str, d
         path = out / situation_id / arm / "run.json"
         if not path.is_file():
             continue
-        run = json.loads(path.read_text(encoding="utf-8"))
+        run = _read_json(path)
+        if not isinstance(run, dict):
+            raise ScoreRefused(f"{path} is not a run file")
         if (run.get("situation_id"), run.get("arm")) != (situation_id, arm):
             raise ScoreRefused(f"{path} holds {run.get('situation_id')!r} {run.get('arm')!r}")
         runs[arm] = run
     return runs
 
 
-def _check_pair(situation_id: str, key: Mapping, runs: Mapping[str, Mapping], out: Path) -> None:
+def _read_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ScoreRefused(f"{path} cannot be read as JSON: {error}") from error
+
+
+def arm_roles(out: Path) -> dict[str, dict]:
+    """``role -> binding record``, read from the run root's binding records.
+
+    The role is the one ``runner.bind`` recorded as ``reason_capable``, and the
+    bind's rule must hold: only the candidate differs from the base revision.
+    """
+
+    from .runner import REASON_CAPABLE
+
+    by_capability = {capable: role for role, capable in REASON_CAPABLE.items()}
+    roles: dict[str, dict] = {}
+    for path in sorted(out.glob("binding-*.json")):
+        binding = _read_json(path)
+        if not isinstance(binding, dict) or not all(
+            isinstance(binding.get(name), str)
+            for name in ("arm", "binding_ref", "revision", "base_revision")
+        ):
+            raise ScoreRefused(f"{path.name} is not a binding record")
+        role = by_capability.get(binding.get("reason_capable"))
+        if role is None or path.name != f"binding-{binding['arm']}.json":
+            raise ScoreRefused(f"{path.name} names no role or another arm")
+        if (role == "candidate") == (binding["revision"] == binding["base_revision"]):
+            raise ScoreRefused(
+                f"{path.name}: a {role} at {binding['revision']} contradicts its base"
+            )
+        if role in roles:
+            raise ScoreRefused(f"the run root holds two {role} bindings")
+        roles[role] = binding
+    if set(roles) != set(REASON_CAPABLE):
+        raise ScoreRefused(
+            f"the run root needs one baseline and one candidate binding, has {sorted(roles)}"
+        )
+    if roles["baseline"]["base_revision"] != roles["candidate"]["base_revision"]:
+        raise ScoreRefused("the two bindings name different base revisions")
+    return roles
+
+
+def _check_pair(
+    situation_id: str, key: Mapping, runs: Mapping[str, Mapping], out: Path, refs: Mapping[str, str]
+) -> None:
     for arm, run in runs.items():
+        if run.get("binding_ref") != refs[arm]:
+            raise ScoreRefused(f"{situation_id} {arm}: binding_ref is not its arm's binding")
         problems = check_run(run, out / situation_id / arm)
         if problems:
             raise ScoreRefused(
@@ -867,9 +936,27 @@ def _check_pair(situation_id: str, key: Mapping, runs: Mapping[str, Mapping], ou
             )
 
 
+def _issued(judge_key: Mapping | None) -> dict[tuple[str, str], tuple[str, str]]:
+    """``(situation, arm) -> (item id, answer digest)`` from an earlier judge key."""
+
+    if judge_key is None:
+        return {}
+    fields = ("situation_id", "arm", "answer_sha256")
+    if not isinstance(judge_key, dict) or not all(
+        isinstance(entry, dict) and all(isinstance(entry.get(f), str) for f in fields)
+        for entry in judge_key.values()
+    ):
+        raise ScoreRefused("the judge key is not a judge-key.json")
+    return {
+        (e["situation_id"], e["arm"]): (item, e["answer_sha256"]) for item, e in judge_key.items()
+    }
+
+
 def _verdicts(judgements: Mapping | None) -> dict[str, bool]:
     if judgements is None:
         return {}
+    if not isinstance(judgements, dict):
+        raise ScoreRefused("the judgement file is not a mapping")
     if not str(judgements.get("judge_model") or "").strip():
         raise ScoreRefused("the judgement file records no judge_model")
     verdicts = judgements.get("verdicts")
@@ -885,8 +972,6 @@ def score(
     out: Path,
     keys: Path,
     *,
-    baseline: str,
-    candidate: str,
     manifest: Path | None = None,
     expect: Sequence[str] = (),
     judgements: Mapping | None = None,
@@ -908,10 +993,7 @@ def score(
     verdicts = _verdicts(judgements)
     if verdicts and judge_key is None:
         raise ScoreRefused("verdicts need the judge key that issued their item ids")
-    issued = {
-        (entry["situation_id"], entry["arm"]): (item, entry["answer_sha256"])
-        for item, entry in (judge_key or {}).items()
-    }
+    issued = _issued(judge_key)
     declared = expected_situations(manifest, expect)
     if any(held_out(situation_id) for situation_id in declared):
         # Checked once up front, so a run whose every situation is struck still checks it.
@@ -919,6 +1001,9 @@ def score(
             _refuse_held_out_without_custody("this held-out run", manifest)
         except SituationRefused as refused:
             raise ScoreRefused(str(refused)) from refused
+    roles = arm_roles(out)
+    baseline, candidate = roles["baseline"]["arm"], roles["candidate"]["arm"]
+    refs = {binding["arm"]: binding["binding_ref"] for binding in roles.values()}
     present = {
         p.name
         for p in out.iterdir()
@@ -945,7 +1030,7 @@ def score(
             }
             continue
         key = load_key(keys, situation_id, manifest)
-        _check_pair(situation_id, key, runs, out)
+        _check_pair(situation_id, key, runs, out, refs)
         row = {
             "situation_id": situation_id,
             "category": key["category"],
@@ -992,6 +1077,7 @@ def score(
     pending = sorted(i["id"] for i in items if i["id"] not in verdicts)
     report = {
         "rows": rows,
+        "arms": {"baseline": baseline, "candidate": candidate},
         "declared": sorted(declared),
         "struck": struck,
         "incomplete": incomplete,
@@ -1024,12 +1110,13 @@ def score(
 
 
 def write_report(report: Mapping, to: Path) -> None:
-    """``scores.json`` and ``judge-key.json`` in ``to``; the judge's items alone in ``to/judge``."""
+    """``to/scores.json``, the arm key in ``to/key`` and the judge's items alone in ``to/judge``."""
 
-    (to / "judge").mkdir(parents=True, exist_ok=True)
+    for part in ("key", "judge"):
+        (to / part).mkdir(parents=True, exist_ok=True)
     body = {k: v for k, v in report.items() if k not in ("judge_items", "judge_key")}
     (to / "scores.json").write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
-    (to / "judge-key.json").write_text(
+    (to / "key" / "judge-key.json").write_text(
         json.dumps(report["judge_key"], indent=2, sort_keys=True), encoding="utf-8"
     )
     (to / "judge" / "judge-items.json").write_text(

@@ -125,8 +125,12 @@ def write_run(
     shape: str = "hookless",
     reasons: dict | None = None,
 ) -> dict:
-    """A run file that conforms to SCHEMA.md section 2, with the given end state."""
+    """A run file that conforms to SCHEMA.md section 2, with the given end state.
 
+    The run root gets the default binding records first: x1 baseline, x2 candidate.
+    """
+
+    write_bindings(out, baseline="x1", candidate="x2", keep=True)
     run_dir = out / situation / arm
     run_dir.mkdir(parents=True)
     for name in ("transcript.jsonl", "tap.jsonl"):
@@ -169,6 +173,26 @@ def write_run(
     return run
 
 
+def write_bindings(out: Path, *, baseline: str, candidate: str, keep: bool = False) -> None:
+    """Binding records as ``runner.bind`` writes them; ``keep`` leaves existing ones."""
+
+    out.mkdir(parents=True, exist_ok=True)
+    if keep and any(out.glob("binding-*.json")):
+        return
+    for path in out.glob("binding-*.json"):
+        path.unlink()
+    base = "b" * 40
+    for arm, revision, capable in ((baseline, base, False), (candidate, "c" * 40, True)):
+        record = {
+            "arm": arm,
+            "binding_ref": f"{arm}-binding",
+            "revision": revision,
+            "base_revision": base,
+            "reason_capable": capable,
+        }
+        (out / f"binding-{arm}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
 def write_key(keys: Path, key: dict) -> None:
     keys.mkdir(exist_ok=True)
     view = {
@@ -207,7 +231,7 @@ def baseline_row(tmp_path: Path, key: dict, **run) -> dict:
     write_key(keys, key)
     write_run(out, key["id"], "x1", **run)
     write_run(out, key["id"], "x2", **run)
-    report = score(out, keys, baseline="x1", candidate="x2", expect=[key["id"]])
+    report = score(out, keys, expect=[key["id"]])
     return report["rows"][0]["baseline"]
 
 
@@ -251,8 +275,8 @@ def test_the_score_command_writes_the_paired_table_and_the_decision_rule(tmp_pat
             changed=[ALPHA["path"]],
             answer="Entity Beta.",
         )
-    argv = ["score", "--out", str(out), "--keys", str(keys), "--baseline", "x1"]
-    argv += ["--candidate", "x2", "--expect", "d01", "--expect", "d02", "--to", str(to)]
+    argv = ["score", "--out", str(out), "--keys", str(keys)]
+    argv += ["--expect", "d01", "--expect", "d02", "--to", str(to)]
 
     assert replay_main(argv) == 0
     report = json.loads((to / "scores.json").read_text(encoding="utf-8"))
@@ -267,6 +291,53 @@ def test_the_score_command_writes_the_paired_table_and_the_decision_rule(tmp_pat
     # Per-shape and per-category tables are description only.
     assert all("decision_rule" not in table for table in report["descriptive"].values())
     assert json.loads((to / "judge" / "judge-items.json").read_text(encoding="utf-8")) == []
+
+
+def test_a_lower_bound_of_exactly_zero_does_not_merge():
+    both = {"baseline": {"success": True, "false_precision": False}}
+    both["candidate"] = both["baseline"]
+    neither = {"baseline": {"success": False, "false_precision": False}}
+    neither["candidate"] = neither["baseline"]
+    stats = statistics([both] * 10 + [neither] * 10)
+    assert stats["success"]["lower"] == 0.0
+    assert stats["decision_rule"]["merge"] is False
+
+
+def test_each_arms_role_comes_from_its_binding_record(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_bindings(out, baseline="x2", candidate="x1")
+    write_key(keys, pair_key("d01", "specific_fits", SUPPORTED, "pair_edge_supported"))
+    write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
+    write_run(
+        out,
+        "d01",
+        "x2",
+        pages=[ALPHA, BETA],
+        edges=[edge(ALPHA, "relation-r", BETA)],
+        changed=[ALPHA["path"]],
+        answer="Entity Beta.",
+    )
+    report = score(out, keys, expect=["d01"])
+    assert report["arms"] == {"baseline": "x2", "candidate": "x1"}
+    # The arm that wrote the supported edge is the baseline, so the table shows c, not b.
+    assert report["statistics"]["success"]["c"] == 1
+
+
+@pytest.mark.parametrize("forgery", ["candidate_at_base", "foreign_binding_ref"])
+def test_a_forged_binding_or_a_run_of_another_binding_is_refused(tmp_path, forgery):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
+    write_run(out, "d01", "x1", pages=[ALPHA, BETA])
+    run = write_run(out, "d01", "x2", pages=[ALPHA, BETA])
+    if forgery == "candidate_at_base":
+        record = json.loads((out / "binding-x2.json").read_text(encoding="utf-8"))
+        record["revision"] = record["base_revision"]
+        (out / "binding-x2.json").write_text(json.dumps(record), encoding="utf-8")
+    else:
+        run["binding_ref"] = "x1-binding"
+        (out / "d01" / "x2" / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    with pytest.raises(ScoreRefused, match="contradicts its base|binding_ref"):
+        score(out, keys, expect=["d01"])
 
 
 def test_a_run_with_more_than_two_struck_situations_decides_nothing(tmp_path):
@@ -285,8 +356,8 @@ def test_a_run_with_more_than_two_struck_situations_decides_nothing(tmp_path):
         changed=[ALPHA["path"]],
         answer="Entity Beta.",
     )
-    argv = ["score", "--out", str(out), "--keys", str(keys), "--baseline", "x1"]
-    argv += ["--candidate", "x2", "--to", str(to)]
+    argv = ["score", "--out", str(out), "--keys", str(keys)]
+    argv += ["--to", str(to)]
     argv += [arg for s in ("d01", "d02", "d03", "d04") for arg in ("--expect", s)]
 
     assert replay_main(argv) == 1
@@ -302,7 +373,7 @@ def test_a_declared_situation_with_one_arm_missing_leaves_the_run_undecided(tmp_
     write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
     write_run(out, "d01", "x2", pages=[ALPHA, BETA], answer="Entity Beta.")
     write_run(out, "d02", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
-    report = score(out, keys, baseline="x1", candidate="x2", expect=["d01", "d02", "d03"])
+    report = score(out, keys, expect=["d01", "d02", "d03"])
     assert (report["verdict"], report["incomplete"]) == ("incomplete", ["d02", "d03"])
     assert isinstance(report["statistics"], str)
 
@@ -325,7 +396,7 @@ def test_an_all_struck_held_out_run_still_checks_its_manifest(tmp_path):
     write_run(out, "h01", "x1", status="struck")
     write_run(out, "h01", "x2", status="struck")
     with pytest.raises(ScoreRefused, match="preregistered"):
-        score(out, keys, baseline="x1", candidate="x2", manifest=manifest)
+        score(out, keys, manifest=manifest)
 
 
 def test_a_key_without_a_field_its_rule_reads_is_refused_by_name(tmp_path):
@@ -335,6 +406,34 @@ def test_a_key_without_a_field_its_rule_reads_is_refused_by_name(tmp_path):
         baseline_row(tmp_path, key, pages=[ALPHA, BETA])
 
 
+def test_a_key_without_its_variants_false_precision_field_is_refused(tmp_path):
+    key = pair_key("d01", "specific_fits", SUPPORTED, "pair_edge_supported")
+    del key["false_precision"]
+    with pytest.raises(ScoreRefused, match=r"false_precision\.pairs"):
+        baseline_row(tmp_path, key, pages=[ALPHA, BETA])
+
+
+def test_a_key_file_name_that_links_to_another_file_is_refused(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
+    (keys / "dk01.yaml").rename(keys / "elsewhere.yaml")
+    (keys / "dk01.yaml").symlink_to(keys / "elsewhere.yaml")
+    write_run(out, "d01", "x1", pages=[ALPHA, BETA])
+    write_run(out, "d01", "x2", pages=[ALPHA, BETA])
+    with pytest.raises(ScoreRefused, match="links to"):
+        score(out, keys, expect=["d01"])
+
+
+def test_a_malformed_run_file_refuses_with_exit_2(tmp_path):
+    out, keys = tmp_path / "out", tmp_path / "keys"
+    write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
+    write_run(out, "d01", "x1", pages=[ALPHA, BETA])
+    write_run(out, "d01", "x2", pages=[ALPHA, BETA])
+    (out / "d01" / "x2" / "run.json").write_text("{not json", encoding="utf-8")
+    argv = ["score", "--out", str(out), "--keys", str(keys), "--expect", "d01"]
+    assert replay_main([*argv, "--to", str(tmp_path / "scores")]) == 2
+
+
 def test_a_situation_the_run_did_not_declare_is_refused(tmp_path):
     out, keys = tmp_path / "out", tmp_path / "keys"
     write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
@@ -342,7 +441,7 @@ def test_a_situation_the_run_did_not_declare_is_refused(tmp_path):
         write_run(out, situation, "x1", pages=[ALPHA, BETA])
         write_run(out, situation, "x2", pages=[ALPHA, BETA])
     with pytest.raises(ScoreRefused, match="undeclared"):
-        score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+        score(out, keys, expect=["d01"])
 
 
 def test_a_held_out_key_with_a_manifest_that_is_not_the_preregistered_one_is_refused(tmp_path):
@@ -354,7 +453,7 @@ def test_a_held_out_key_with_a_manifest_that_is_not_the_preregistered_one_is_ref
     write_run(out, "h01", "x1", pages=[ALPHA, BETA])
     write_run(out, "h01", "x2", pages=[ALPHA, BETA])
     with pytest.raises(ScoreRefused, match="preregistered"):
-        score(out, keys, baseline="x1", candidate="x2", manifest=manifest)
+        score(out, keys, manifest=manifest)
 
 
 def test_a_run_of_another_case_file_than_the_keys_is_refused(tmp_path):
@@ -371,7 +470,7 @@ def test_a_run_file_without_its_fresh_session_is_refused(tmp_path):
     run["sessions"] = run["sessions"][:1]
     (out / "d01" / "x2" / "run.json").write_text(json.dumps(run), encoding="utf-8")
     with pytest.raises(ScoreRefused, match="SCHEMA.md"):
-        score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+        score(out, keys, expect=["d01"])
 
 
 def test_a_struck_situation_leaves_both_arms_without_opening_its_key(tmp_path):
@@ -379,7 +478,7 @@ def test_a_struck_situation_leaves_both_arms_without_opening_its_key(tmp_path):
     keys.mkdir()
     write_run(out, "d01", "x1", status="struck")
     write_run(out, "d01", "x2", answer="anything")
-    report = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    report = score(out, keys, expect=["d01"])
     assert (report["rows"], list(report["struck"])) == ([], ["d01"])
     assert report["struck"]["d01"] == {"x1": ["harness_fault: x"]}
 
@@ -389,8 +488,8 @@ def test_a_missing_key_file_and_a_foreign_kb_folder_refuse_with_exit_2(tmp_path,
     keys.mkdir()
     write_run(out, "d01", "x1", pages=[ALPHA, BETA])
     write_run(out, "d01", "x2", pages=[ALPHA, BETA])
-    argv = ["score", "--out", str(out), "--keys", str(keys), "--baseline", "x1"]
-    argv += ["--candidate", "x2", "--expect", "d01", "--to", str(tmp_path / "scores")]
+    argv = ["score", "--out", str(out), "--keys", str(keys)]
+    argv += ["--expect", "d01", "--to", str(tmp_path / "scores")]
     assert replay_main(argv) == 2
     write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
     monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Another Folder")
@@ -580,7 +679,8 @@ def test_an_accepted_value_inside_a_longer_number_does_not_match():
 
 
 def test_the_dash_set_is_the_unicode_dash_property():
-    regex = pytest.importorskip("regex")
+    import regex  # in uv.lock; a missing package fails this test rather than skip it
+
     dash = {chr(c) for c in range(sys.maxunicode + 1) if regex.match(r"\p{Dash}", chr(c))}
     assert dash == DASHES
 
@@ -597,7 +697,7 @@ def test_a_residual_answer_goes_to_the_judge_and_its_verdict_completes_the_table
         out, "d01", "x2", pages=[ALPHA, BETA], answer="The other one.", tool_results=["Entity Beta"]
     )
 
-    pending = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    pending = score(out, keys, expect=["d01"])
     assert pending["verdict"] == "awaiting_judge"
     [item] = pending["judge_items"]
     assert set(item) == {"id", "question", "key_fact", "accepted_values", "answer"}
@@ -607,8 +707,6 @@ def test_a_residual_answer_goes_to_the_judge_and_its_verdict_completes_the_table
     judged = score(
         out,
         keys,
-        baseline="x1",
-        candidate="x2",
         expect=["d01"],
         judgements={"judge_model": "judge-model-id", "verdicts": {item["id"]: False}},
         judge_key=pending["judge_key"],
@@ -622,7 +720,7 @@ def test_a_verdict_on_an_answer_that_changed_since_its_item_was_issued_is_refuse
     write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
     write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
     write_run(out, "d01", "x2", pages=[ALPHA, BETA], answer="Other.", tool_results=["Entity Beta"])
-    pending = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    pending = score(out, keys, expect=["d01"])
     [item] = pending["judge_items"]
     run_file = out / "d01" / "x2" / "run.json"
     run = json.loads(run_file.read_text(encoding="utf-8"))
@@ -632,8 +730,6 @@ def test_a_verdict_on_an_answer_that_changed_since_its_item_was_issued_is_refuse
         score(
             out,
             keys,
-            baseline="x1",
-            candidate="x2",
             expect=["d01"],
             judgements={"judge_model": "judge-model-id", "verdicts": {item["id"]: True}},
             judge_key=pending["judge_key"],
@@ -646,7 +742,7 @@ def test_generic_edge_reasons_are_counted_per_arm_or_unavailable(tmp_path):
     write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
     record = {"status": "available", "generic_added_edges": 3, "reasons_recorded": 2}
     write_run(out, "d01", "x2", pages=[ALPHA, BETA], answer="Entity Beta.", reasons=record)
-    report = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    report = score(out, keys, expect=["d01"])
     counts = report["diagnostics"]["edge_review_reasons"]
     assert counts["baseline"] == {"status": "unavailable"}
     assert counts["candidate"] == {
@@ -671,13 +767,11 @@ def test_a_judge_pass_never_clears_false_precision(tmp_path):
             answer="The other one.",
             tool_results=["Entity Beta"],
         )
-    pending = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    pending = score(out, keys, expect=["d01"])
     verdicts = {item["id"]: True for item in pending["judge_items"]}
     judged = score(
         out,
         keys,
-        baseline="x1",
-        candidate="x2",
         expect=["d01"],
         judgements={"judge_model": "judge-model-id", "verdicts": verdicts},
         judge_key=pending["judge_key"],
@@ -720,15 +814,13 @@ def test_a_verdict_that_is_not_a_boolean_or_names_no_item_is_refused(tmp_path, v
     write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
     write_run(out, "d01", "x1", pages=[ALPHA, BETA], answer="Entity Beta.")
     write_run(out, "d01", "x2", pages=[ALPHA, BETA], answer="Other.", tool_results=["Entity Beta"])
-    pending = score(out, keys, baseline="x1", candidate="x2", expect=["d01"])
+    pending = score(out, keys, expect=["d01"])
     [item] = pending["judge_items"]
     verdicts = {item["id"] if k == "ID" else k: v for k, v in verdicts.items()}
     with pytest.raises(ScoreRefused, match=match):
         score(
             out,
             keys,
-            baseline="x1",
-            candidate="x2",
             expect=["d01"],
             judgements={"judge_model": "judge-model-id", "verdicts": verdicts},
             judge_key=pending["judge_key"],
