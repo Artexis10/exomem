@@ -46,7 +46,7 @@ The adversary has code execution inside the `cellctl` pod, with its environment,
 | Closed pod template (D3) | Running any command, hook or probe against a cell's volume or Secret; planting a CA or a DNS override | A cell subcommand that is itself exploitable |
 | Signed grants, destination checks and recipients (D4) | Exporting, importing or restoring without a Substrate grant; sending data to an address that `cellctl` chose; reading an owner export or an import upload in transit | A compromised Substrate |
 | Cell-held backup keys (D5) | Decrypting any backup with what `cellctl` holds | The operator opening the escrow copy with their presence |
-| Key custodian and key watcher (D9) | Creating an object-store key with any capability; changing the backup bucket's lock settings unnoticed | A compromised custodian or node, within the provider account |
+| Key custodian and key watcher (D9) | Creating an object-store key with any capability; changing the backup bucket's lock settings unnoticed | A compromised custodian or node, within the cell-data account |
 | Independent attack alerts (D7) | A compromise that stays unnoticed | Root on the node suppressing events before they leave it |
 
 ## Decisions
@@ -165,7 +165,7 @@ The fix in both cases:
 - **Export verification.** The verify Job cannot read an archive encrypted to the browser's key. So the export Job checks the plaintext archive with the canonical reader as it streams, before encryption. The verify Job then checks the uploaded ciphertext's size and SHA-256 against what the cell reported.
 - **Imports.** The serving cell publishes its import recipient on a route that the gateway calls with a signed proof (D1). `cellctl` cannot reach that port, so the path excludes it. Substrate puts the recipient into the signed import grant, and the cell checks that the grant's recipient is its own before it decrypts.
 
-**Backups need no grant.** The cell derives its repository from its own cell ID and the pinned endpoint and bucket. `cell-backup` takes no destination.
+**Backups need no grant.** The cell derives its repository from its own cell ID, its repository generation and the pinned endpoint and bucket: `cells/<cell_id>/repo-<generation>`. It keeps the generation on its volume and raises it only on a migration or on leaving the lock. `cell-backup` takes no destination.
 
 **Restores need a grant.** A restore can roll a cell back. Substrate signs a restore grant only for an operator-initiated or tenant-initiated restore request.
 
@@ -191,23 +191,28 @@ The fix in both cases:
   - The cell keeps the highest generation that it has seen on its volume and refuses an older statement. So `cellctl` can neither substitute a recipient nor downgrade a locked cell by replaying an old standard-mode statement.
   - The statement carries its own audience, `exomem-cell-mode`, which differs from the operation grants' audience. So no operation grant passes as a mode statement, and no mode statement passes as a grant.
   - A cell whose volume carries the tenant's inner layer never writes an operator escrow copy. Leaving the lock takes a newer, tenant-authenticated statement.
-  - **Leaving the lock starts a new repository.** The cell runs `exomem cell-backup-migrate` into a new repository with a new password, and escrows only that password to the operator. The repository from the locked period keeps its tenant-only escrow and expires with its retention. So the operator never gets a password that opens a snapshot taken while the cell was locked.
-- **Tenant-locked cells keep their keys inside the inner layer.** The backup password sits inside the tenant's inner layer, not only on the outer volume, whose passphrase the platform keeps. A restore after volume loss receives the password on the tenant-lock key channel, never through a cluster Secret.
+  - Entering the lock follows `make-cloud-cells-operator-resistant` D3.
+  - **Leaving the lock starts an empty repository.** The cell initialises a repository at the next generation, with a new password, and copies nothing into it. It escrows only the new password to the operator.
+    - Before the platform re-wraps the cell root key, the cell erases the locked-period password.
+    - The cell then hides the locked-period repository, so its versions expire after the lock margin.
+    - A tenant who wants those snapshots restores or exports them before leaving.
+    - So the operator never gets a password that opens a snapshot taken while the cell was locked.
+- **Tenant-locked cells keep their keys inside the inner layer.** The backup password sits only inside the tenant's inner layer, never on the outer volume, whose passphrase the platform keeps. A restore after volume loss receives the password on the tenant-lock key channel, never through a cluster Secret.
 - **Neither mode stops one thing:** whoever controls the node can read a running, unlocked cell. Only a confidential cell (`make-cloud-cells-operator-resistant` D8) closes that.
 
 The steps:
 - **Generate.** On first start, `exomem cell-init` generates the restic password and writes it to the cell's encrypted volume, at a path outside both backup roots (`/data/vault` and `/data/host`). Otherwise the password would sit inside the repository that it protects. It also stays outside the export root.
-- **Escrow.** It writes an escrow copy, encrypted with `age`, to the cell's own prefix in the locked backup bucket (`lock-cloud-backups-against-deletion`), so no running service can destroy it before retention ends. The recipient comes only from a valid **mode statement** (see below), never from a value that `cellctl` renders.
+- **Escrow.** It writes an escrow copy, encrypted with `age`, to the cell's own prefix in the locked backup bucket (`lock-cloud-backups-against-deletion`), so no running service can destroy it before retention ends. The copy's name carries the repository generation and a hash of the password, so a recreated namespace cannot overwrite it. The recipient comes only from a valid **mode statement** (see below), never from a value that `cellctl` renders.
 - **Back up.** `cell-backup` reads the password from the volume. The backup Job already mounts the volume.
 - **Restore with the volume.** A restore onto an existing volume uses that password.
 - **Restore after volume loss.** The operator decrypts the escrow copy with their presence-gated identity (`make-cloud-cells-operator-resistant` D6) and supplies the password to the restore through a one-time Secret.
-- **What `cellctl` keeps.** It no longer creates object-store keys (D9). It keeps a key that can only list files, for version bookkeeping.
+- **What `cellctl` keeps.** It no longer creates object-store keys (D9). Its remaining object-store keys cannot read a backup's plaintext.
 
 **Existing cells move to a new repository.** Restic's `key add` and `key remove` change only key files, and every key file wraps the same master key. A re-key would therefore leave every snapshot readable to anyone who holds the old platform password and a copy of an old key file. Instead, each cell runs a new subcommand, `exomem cell-backup-migrate`:
 1. `restic init` a new repository with the cell-held password, with `--copy-chunker-params` so deduplication continues.
 2. `restic copy` every snapshot from the old repository. This re-encrypts every snapshot under the new master key.
 3. Write the escrow copy.
-4. Run `restic check` on the new repository, and compare its snapshot list with the old repository's.
+4. Run `restic check --read-data` on the new repository. Check that every snapshot of the old repository appears in it, matched by the original snapshot ID that `restic copy` records.
 5. Only when both pass, destroy the platform-wrapped password. Otherwise keep it and report the cell as not migrated.
 
 This is the same move as `lock-cloud-backups-against-deletion` D5, which copies each repository into the locked bucket, so there is one migration, not two.
@@ -259,7 +264,12 @@ The cellctl admission policy matches only the digest pattern, and it cannot orde
 - A key that can create keys can create a key with any capability. A key without `writeBuckets` or `bypassGovernance` created keys with `writeBuckets`, `bypassGovernance`, `writeFileRetentions` and `readFiles`. The provider has no rule that limits a new key to its creator's capabilities.
 - A key that can create keys cannot be limited to a bucket. The provider refuses `writeKeys` on a bucket-level key.
 
-So `cellctl`'s parent key can today create a key that reads, deletes or reconfigures any bucket in the provider account. That includes the buckets of other workloads in the same account. In the locked bucket of `lock-cloud-backups-against-deletion`, such a key could also:
+So `cellctl`'s parent key can today create a key that reads, deletes or reconfigures any bucket in the provider account. The account also holds:
+- the Terraform state, which holds the Cloudflare tunnel token and the Access service-token secret as plain JSON. Server-side encryption does not hide them from a key that can read files. With the tunnel token, a rogue tunnel connector receives tenant requests, which bypasses D1 to D5;
+- the recovery and database backup buckets, which use governance mode, so a created key with `bypassGovernance` deletes them;
+- the buckets of another product.
+
+In the locked bucket of `lock-cloud-backups-against-deletion`, such a key could also:
 - remove the default retention, so that new backups are written unlocked and can be deleted outright (shown in the same test);
 - extend locks without bound, which nobody can undo in compliance mode.
 
@@ -270,30 +280,47 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 | Option | Who can create keys | Cost |
 |---|---|---|
 | Keep minting in `cellctl` | `cellctl`, its whole attack surface | None, and it fails the goal |
-| A key custodian in the same account | One small component | One new component; a compromised custodian or node still reaches the whole account |
-| Keys minted ahead, outside the cluster | A scheduled job outside the cluster | A pool of reserved cell IDs, and a minting key in CI secrets |
-| A separate account for cell data | The custodian, within cell data only | One more provider account for the operator to create |
+| A key custodian in the same account | One small component | A compromised custodian or node still reaches the Terraform state, the platform backups and the other product |
+| A separate account for cell data, with the custodian only there | The custodian, within cell data only | One more provider account for the operator to create |
+| Keys created ahead of time, outside the cluster | A scheduled job outside the cluster | A pool of reserved cell IDs, and a key-creating key in CI secrets |
 
-**Decision.** The operator chose these on 2026-11-01:
-- A key custodian, in the current account, now.
-- A separate member account in the provider's account group for cell data, created at the backup-lock migration (`lock-cloud-backups-against-deletion` D5). The group bills both accounts together.
+**Decision.** The operator chose on 2026-11-01 to isolate the account first. Key custody is phase 1 of this change, before every other phase:
+1. The operator creates a member account in the provider's account group, for cell data only. The group bills both accounts together.
+2. The custodian runs only in that account. New cells get their keys and repositories there.
+3. `cellctl`'s parent key in the current account is deleted. No in-cluster component then holds a key that can create keys in the current account. The Terraform state, the platform backups and the other product's buckets are then out of the cluster's reach.
+4. The operator rotates the tunnel token and the Access service-token secret, because both sat within reach of `cellctl`'s key.
+5. Existing cells keep their prefix-limited keys in the current account until the backup-lock migration moves their data. The operator's infrastructure tooling deletes those keys when a cell migrates or is deleted.
 
 **The custodian.**
 - It runs as its own small Deployment, with its own service account and image, in its own namespace. That namespace is outside every namespace that admission rule 1 lets `cellctl` write. The same chart check as the lock extender's enforces this.
-- It takes no inbound traffic. It reads namespace names and writes only the object-store key entries of each cell's `cell-credentials` Secret.
-- It holds the only key that can create keys.
-- It creates exactly one key shape. The bucket is pinned in the chart, the name prefix is `cells/<cell_id>/`, and the capability set is fixed. The cell ID comes from the namespace name, never from a request. No created key carries `writeKeys`, `writeBuckets`, `writeFileRetentions`, `bypassGovernance` or `shareFiles`.
-- It deletes the key of a cell whose namespace is gone, after it hides that cell's prefix with the cell's own key.
-- `cellctl` loses its parent key. It keeps a key that can only list files, for version bookkeeping.
+- It runs on a node that runs no cell. A default-deny NetworkPolicy lets it reach only the API server and the object store. It takes no inbound traffic.
+- It receives its key through a Secret reference, never as a literal environment value, because `cellctl` can list pods cluster-wide.
+- It writes one Secret of its own in each cell namespace, `cell-object-store-key`, and no other Secret. Admission limits its writes to that name, because RBAC `resourceNames` cannot limit `create`. It never reads `cell-credentials`.
+- Admission rule 7 already keeps `cellctl` off every Secret name except its own, so `cellctl` cannot read a key through a patch response. The closed pod template (D3) mounts `cell-object-store-key` only in the subcommands that need it.
+- It creates exactly one key shape:
+  - the bucket pinned in the chart;
+  - the name prefix `cells/<cell_id>/`, where the cell ID comes from the namespace name, never from a request;
+  - exactly `listBuckets`, `listFiles`, `readFiles`, `writeFiles` and `deleteFiles`.
+- It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret.
+- It hides a cell's prefix, and then deletes its key, only on a deletion record that Substrate signed with the grant key (audience `exomem-cell-delete`), and only after a 7-day grace period. It raises an alert on each hide. A deleted or recreated namespace alone hides nothing.
+
+**What `cellctl` keeps.** It keeps two keys that cannot create keys:
+- a key limited to the staging bucket, for presigning and removing export and import objects;
+- a key that can only list files in the backup bucket, for version bookkeeping.
 
 **The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
-- A scheduled check runs outside the cluster, with a key that can only list keys and buckets.
-- It compares every key in the account with the fixed shapes: the custodian, the lock extender, the per-cell keys, the watcher and the infrastructure key.
-- It compares the backup bucket's Object Lock, default retention, lifecycle rules and bucket type with pinned values.
-- It raises an alert through the platform receiver on any difference. The alert path excludes the cluster, so a compromised node cannot suppress it.
-- The 23-day lock margin leaves time to act on the alert before any hidden version expires.
+- It runs as a scheduled CI job outside the cluster, at least hourly. It alerts with its own receiver credential, which no in-cluster component holds.
+- Its key in each account can only list keys and buckets and read bucket retention settings (`listKeys`, `listBuckets`, `readBucketRetentions`). The provider withholds a bucket's lock settings from a key without `readBucketRetentions`.
+- It matches every single-purpose key by its key ID, from Terraform outputs. That covers the custodian, the lock extender, the watcher, the infrastructure key, the durability keys and every other key in the account. A clone with the same name and capabilities therefore does not pass.
+- It matches each per-cell key on its exact bucket, prefix shape and capability set, with at most one key per prefix.
+- It compares the backup bucket's Object Lock, default retention, lifecycle rules, bucket type, encryption, replication and CORS settings with pinned values.
+- It raises an alert on any difference, on an authentication or listing failure, and on a missed run, because the receiver expects its heartbeat. Deleting the watcher's key therefore raises an alert.
+- A version written after its default retention was removed can be deleted at once, so the run interval bounds that window. The 23-day margin protects every version written before the change.
 
-**Residual.** A compromised custodian or node can still create any key in the account until the separate account exists. That includes keys that extend locks without bound. The watcher reports such a key, but it cannot undo an extension.
+**Residual.**
+- Until phase 1 ships, `cellctl`'s key reaches everything listed above.
+- After phase 1, a compromised custodian or node can still create any key in the cell-data account. Such a key can extend locks without bound or remove the default retention. The split does not shrink this, because there is no subset rule. The watcher reports such a key, but it cannot undo an extension.
+- Keys created ahead of time outside the cluster would remove key creation from the cluster. That option stays open (Open Questions).
 
 ## Reuse
 
@@ -311,11 +338,11 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 
 ## Migration Plan
 
-1. **Cell-side checks in report mode.** The cell verifies proofs, grants and destinations and logs each would-be refusal, but does not refuse. Substrate starts signing grants.
-2. **Command pin.** Add `cell-backup` and `cell-restore`, and render every Job through them. The admission rules for command, environment names and anchors enforce once the K3s Live job admits every rendered kind.
-3. **Enforcement.** The cell refuses a request without a proof, and an operation without a grant or with a foreign destination.
-4. **Backup custody.** Cells move to new repositories one at a time, owner first. `cellctl` stops holding backup passwords.
-5. **Key custody** (D9). The custodian and the key watcher start, then `cellctl`'s parent key is deleted.
+1. **Key custody** (D9 phase 1). The cell-data account, the custodian and the key watcher start. Then `cellctl`'s parent key is deleted, and the tunnel token and the Access secret are rotated.
+2. **Cell-side checks in report mode.** The cell verifies proofs, grants and destinations and logs each would-be refusal, but does not refuse. Substrate starts signing grants.
+3. **Command pin.** Add `cell-backup` and `cell-restore`, and render every Job through them. The admission rules for command, environment names and anchors enforce once the K3s Live job admits every rendered kind.
+4. **Enforcement.** The cell refuses a request without a proof, and an operation without a grant or with a foreign destination.
+5. **Backup custody.** Cells move to new repositories one at a time, owner first. `cellctl` stops holding backup passwords.
 6. **Retirements.** Retire the bearer, then the master keys' backup wrapping.
 7. **Egress proxy** (D6).
 
@@ -324,3 +351,4 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - The browser side of encrypted owner exports (D4): `age` in the browser, and how a tenant who loses the export key asks for a new export.
 - Whether a tenant-initiated restore needs a confirmation step in Substrate before it signs a restore grant.
 - The age-custody recovery path for the escrow identity, shared with `make-cloud-cells-operator-resistant` task 4.5.
+- Whether to create cell keys ahead of time outside the cluster, which removes key creation from the cluster at the cost of a pool of reserved cell IDs (D9).

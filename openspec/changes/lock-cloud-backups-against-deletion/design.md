@@ -46,10 +46,10 @@ The backups therefore move to a new bucket with Object Lock enabled and default 
 - **What restic sees.** A delete through the S3 API on a versioned bucket hides the file and keeps its versions. Restic sees a normal delete, and its `prune` works on the visible files. Task 1.1 confirmed this with restic 0.19.1 over the S3 API: `init`, `backup`, `forget --prune`, `check`, `key add` and `key remove` all succeeded in compliance mode. Every delete, restic's lock files included, became a hidden version, and every upload carried the default lock.
 - **Removal.** A lifecycle rule removes hidden (noncurrent) versions once their lock has expired. It never expires a current version, so live restic packs and the cell's escrow copy (`contain-cloud-controller-compromise` D5) stay until something hides them.
 - **Minted keys are not limited.** Task 1.1 refuted the assumption that a minted key holds only a subset of its parent key's capabilities. A key without `writeBuckets` or a bypass capability minted keys with `writeBuckets`, `bypassGovernance`, `writeFileRetentions` and `readFiles`. A key with `writeBuckets` then removed the bucket's default retention, and the next upload carried no lock and could be deleted outright. No key could switch Object Lock off, or shorten or remove an existing lock.
-  - So whoever can create keys can make new backups unlocked, or extend locks without bound. `contain-cloud-controller-compromise` D9 therefore moves key creation out of the controller into a key custodian, and adds a key watcher outside the cluster that alerts on any other key and on any change to this bucket's settings.
+  - So whoever can create keys can make new backups unlocked, or extend locks without bound. That stays true for the custodian after the account split, because there is no subset rule. `contain-cloud-controller-compromise` D9 therefore moves key creation out of the controller into a key custodian, and adds a key watcher outside the cluster that alerts on any other key and on any change to this bucket's settings.
   - Versions locked before such a change stay locked for at least the margin, so an alert leaves 23 days to act.
-- **The per-cell keys.** In compliance mode, no key can remove a locked version. A per-cell key may therefore keep the delete capability that restic needs, because on a locked version that delete only hides. Task 1.1 confirmed that restic's deletes through a per-cell key became hidden versions. The controller keeps only a key that can list files, so it removes nothing directly.
-- **A deleted cell.** The key custodian hides the cell's files with its per-cell key, then deletes the key. The lifecycle rule removes the versions once their retention ends.
+- **The per-cell keys.** In compliance mode, no key can remove a locked version. A per-cell key may therefore keep the delete capability that restic needs, because on a locked version that delete only hides. Task 1.1 confirmed that restic's deletes through a per-cell key became hidden versions. The controller keeps only a list-only key for this bucket, so it removes nothing here directly.
+- **A deleted cell.** The key custodian hides the cell's files with its per-cell key, then deletes the key. It does this only on a deletion record that Substrate signed, after a grace period (`contain-cloud-controller-compromise` D9). The lifecycle rule removes the versions once their retention ends.
 
 ### D4. Recovery from a mass deletion
 
@@ -57,11 +57,11 @@ A runbook procedure lists a cell's file versions as of a point in time and resto
 
 ### D5. Migration
 
-0. The operator creates a separate member account in the provider's account group, for cell data only (`contain-cloud-controller-compromise` D9). The locked bucket and the key custodian's key live in that account. The other platform buckets stay in the current account, out of reach of any key that the custodian can create.
+0. The locked bucket lives in the cell-data member account that `contain-cloud-controller-compromise` D9 phase 1 creates. The custodian's key belongs to that account. The other platform buckets stay in the current account, out of reach of any key that the custodian can create.
 1. New cells start in the locked bucket.
 2. Each existing cell copies its repository with `restic copy` into a new repository in the new bucket, one cell at a time. The new repository has a new master key and the cell-held password (`contain-cloud-controller-compromise` D5), so this one move also retires the platform password.
 3. Each cell then switches its repository.
-4. The old repository stays until the cell's newest copied snapshot is 30 days old, then cellctl removes it.
+4. The old repository stays until the cell's newest copied snapshot is 30 days old. Then the cell hides it with its old per-cell key, and the operator's infrastructure tooling deletes that key.
 
 ## Risks / Trade-offs
 

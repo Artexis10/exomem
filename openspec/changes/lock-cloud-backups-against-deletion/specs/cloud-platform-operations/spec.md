@@ -8,7 +8,7 @@ The platform SHALL keep every current version's lock at least 23 days in the fut
 
 A lifecycle rule SHALL remove only hidden versions whose lock has expired, and never a current version.
 
-Only the key custodian SHALL hold a key that can create keys or change the locked bucket's settings. A key watcher outside the cluster SHALL raise an alert when the bucket's Object Lock, default retention, lifecycle rules or bucket type differ from their pinned values.
+No in-cluster component other than the key custodian SHALL hold a key that can create keys or change the locked bucket's settings. A key watcher outside the cluster SHALL raise an alert when the bucket's Object Lock, default retention, lifecycle rules or bucket type differ from their pinned values.
 
 Import and export staging objects SHALL NOT be stored in the locked bucket.
 

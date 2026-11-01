@@ -14,7 +14,7 @@
 
 ## 2. Bucket and keys
 
-- [ ] 2.1 Add the locked backup bucket and its noncurrent-only lifecycle rule in Terraform, in the separate member account for cell data (design D5 step 0).
+- [ ] 2.1 Add the locked backup bucket and its noncurrent-only lifecycle rule in Terraform, in the cell-data member account (`contain-cloud-controller-compromise` task 1.1).
 - [ ] 2.2 Scope new per-cell keys to the locked bucket, and point new cells' repositories at it.
 - [ ] 2.3 Add the lock-extension CronJob in its own namespace, with its own extend-only key and service account, the 31-day guard checked against the provider's time, and an alert on a missed run.
 
