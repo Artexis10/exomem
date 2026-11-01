@@ -464,3 +464,29 @@ def test_should_rerank_counts_unspaced_runs_as_query_words() -> None:
     assert not find_policy.should_rerank([], "a-b c d e")
     assert find_policy.should_rerank([], "Python入門ガイド 東京 タワー 高さ")
     assert not find_policy.should_rerank([], "東京タワーの高さは何メートルですか")
+
+
+def test_a_media_sidecar_ranks_on_its_own_text_after_rerank(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rerank path once applied the Source penalty to a photo's text page, so it scored below a plain
+    capture of equal relevance."""
+    sources = tmp_path / "Knowledge Base" / "Sources"
+    sources.mkdir(parents=True)
+    for name, extra in (("a-plain-capture", ""), ("z-photo-sidecar", "media_type: image\n")):
+        (sources / f"{name}.md").write_text(
+            f"---\ntype: source\ntitle: {name}\nstatus: active\nupdated: 2026-07-01\n{extra}---\n\n"
+            f"# {name}\n\nbounded reranker candidate needle\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    monkeypatch.setattr(embeddings, "rerank_pairs", lambda _query, passages: [2.0] * len(passages))
+
+    hits = find_module.find(tmp_path, **_find_kwargs())
+
+    scores = {hit.path.rsplit("/", 1)[-1]: hit.rerank_score for hit in hits}
+    assert scores["z-photo-sidecar.md"] == 2.0  # neutral: ranks on its own text
+    assert scores["a-plain-capture.md"] < 2.0  # the control: a plain capture still yields to compiled notes

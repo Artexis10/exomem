@@ -157,6 +157,23 @@ def type_multiplier(
     return config.note_type_factor(note_type.role if note_type is not None else None)
 
 
+def page_type_factor(
+    page_type: str | None,
+    media_type: str | None,
+    config: RankingConfig = DEFAULT_RANKING,
+    type_basis: note_types.Basis | None = None,
+) -> float:
+    """The compiled-preference factor for one ranked page.
+
+    A media sidecar ranks neutral: its body is the extracted text of the
+    original, so the source penalty would bury a document the search matched
+    on its own words. Every other page takes its type's role factor.
+    """
+    if media_type:
+        return 1.0
+    return type_multiplier(page_type, config, type_basis)
+
+
 def status_multiplier(
     status: str | None, config: RankingConfig = DEFAULT_RANKING
 ) -> float:
@@ -177,14 +194,12 @@ def apply_type_boost(
     adjusted: list[tuple[str, float]] = []
     for path, score in fused:
         page = page_of(path)
-        if page is not None and getattr(page, "media_type", None):
-            mult = 1.0
-        else:
-            mult = type_multiplier(
-                getattr(page, "page_type", None) if page is not None else None,
-                config,
-                type_basis,
-            )
+        mult = page_type_factor(
+            getattr(page, "page_type", None),
+            getattr(page, "media_type", None),
+            config,
+            type_basis,
+        )
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted
@@ -331,14 +346,12 @@ def apply_post_rrf_multipliers(
             [] if evidence_out is not None else None
         )
         if prefer_compiled:
-            if page is not None and getattr(page, "media_type", None):
-                factor = 1.0
-            else:
-                factor = type_multiplier(
-                    getattr(page, "page_type", None) if page is not None else None,
-                    config,
-                    type_basis,
-                )
+            factor = page_type_factor(
+                getattr(page, "page_type", None),
+                getattr(page, "media_type", None),
+                config,
+                type_basis,
+            )
             if chain is None:
                 score *= factor
             else:

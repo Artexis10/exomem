@@ -92,7 +92,7 @@ def test_canonical_inspection_versions_do_not_depend_on_unaccepted_view_edits(st
 
 
 @pytest.mark.parametrize("action", ["inspect", "query"])
-def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store, action):
+def test_mcp_result_keeps_provenance_but_json_copy_has_no_exemption(store, action):
     """The real adapter retains the carrier; wire JSON cannot recreate it."""
     import json
 
@@ -246,10 +246,12 @@ def test_planning_query_rechecks_sources_for_hierarchy_nodes_outside_the_row_lim
 @pytest.mark.parametrize("keeps_changing", [False, True])
 def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
         store, monkeypatch, keeps_changing, include_history):
-    """An edit between release passes yields a fresh read, or bounded BUSY under continuous edits."""
+    """An edit between the query and its release yields a fresh read, or bounded BUSY under continuous edits."""
+    from dataclasses import replace
+
     from test_collection_store_edit_back import SETTLED, passes
 
-    from exomem import command_surface, commands, writer_lease
+    from exomem import command_surface, commands
     from exomem.collection_store import capability
 
     monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.COLLECTION_VIEWS_V1})
@@ -258,12 +260,13 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
     receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     store.reconcile_views()
     page = store.root / receipt["affected_paths"][0]
-    invoke = writer_lease.invoke_command
+    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    leaf = command.leaf
     reads = 0
 
     def edit_after_read(*args, **kwargs):
         nonlocal reads
-        result = invoke(*args, **kwargs)
+        result = leaf(*args, **kwargs)
         reads += 1
         if reads == 1 or keeps_changing:
             before, after = ("One", "Two") if reads == 1 else ("Two", "Three")
@@ -271,8 +274,7 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
             passes(store, 0.0, SETTLED)
         return result
 
-    monkeypatch.setattr(writer_lease, "invoke_command", edit_after_read)
-    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    command = replace(command, leaf=edit_after_read)
     bound = command_surface.bind_vault(command.leaf, store.root, command=command)
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
         result = bound(action="query", collection=CID, view="recent", include_agent_history=include_history)
@@ -291,9 +293,15 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
 
 
 @pytest.mark.parametrize("include_history", [False, True])
-def test_mcp_history_refresh_drops_a_row_that_loses_authority_between_passes(store, monkeypatch, include_history):
-    """A still-readable collection cannot disclose stale rows or history after row authority changes."""
-    from exomem import command_surface, commands, writer_lease
+def test_mcp_history_refresh_drops_a_row_that_loses_authority_before_release(store, monkeypatch, include_history):
+    """A still-readable collection cannot disclose stale rows or history after row authority changes.
+
+    The store here is unserved, so the release reads policy live. A served store pins a read's
+    policy through its release, and the response then matches the policy it loaded.
+    """
+    from dataclasses import replace
+
+    from exomem import command_surface, commands
 
     store.create_collection(manifest_path(), manifest_text(), why="create")
     restricted = store.append_record(CID, item={"title": "Restricted value"}, item_key=KEY,
@@ -301,20 +309,20 @@ def test_mcp_history_refresh_drops_a_row_that_loses_authority_between_passes(sto
     store.append_record(CID, item={"title": "Public value"}, item_key=OTHER, why="Public rationale")
     store.reconcile_views()
     path = restricted["affected_paths"][0]
-    invoke = writer_lease.invoke_command
+    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    leaf = command.leaf
     reads = 0
 
     def revoke_after_read(*args, **kwargs):
         nonlocal reads
-        result = invoke(*args, **kwargs)
+        result = leaf(*args, **kwargs)
         reads += 1
         if reads == 1:
             write_scope(store.root, paths=path.removeprefix("Knowledge Base/"))
             write_rule(store.root, ceiling=0)
         return result
 
-    monkeypatch.setattr(writer_lease, "invoke_command", revoke_after_read)
-    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    command = replace(command, leaf=revoke_after_read)
     bound = command_surface.bind_vault(command.leaf, store.root, command=command)
     with preview_store(store.root, store.handle), request_scope(_external()):
         result = bound(action="query", collection=CID, include_agent_history=include_history)

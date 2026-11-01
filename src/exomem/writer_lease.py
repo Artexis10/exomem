@@ -8133,7 +8133,7 @@ def _invocation_provenance(
     """Give each dispatched command one record of what it served, for its own guard passes only.
 
     Outermost, so a store-routed call fills the same record from the store's thread. Under the
-    MCP surface this joins the record that the surface opened for its second pass.
+    MCP surface this joins the record that the surface opened.
     """
     @wraps(function)
     def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
@@ -8453,7 +8453,7 @@ def invoke_command(
         kwargs = normalize_edit_surface_arguments(kwargs)
 
     # Terminal egress filter (design D1). THIS is the one dispatcher shared by
-    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
+    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` serves MCP
     # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.

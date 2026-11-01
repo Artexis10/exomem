@@ -312,6 +312,7 @@ class ReadScope:
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.initial = None
+        self.store_enrolled = False
         self.finished = False
 
     def proof(self):
@@ -400,11 +401,17 @@ def file_only(root):
     """The global empty-policy shortcut requires a complete negative, recorded by the enclosing read."""
     try:
         scope = _READ.get()
-        if (scope is not None and scope.root == state_paths.resolved_vault_path(root, expanduser=False)
-                and scope.initial is not None):
+        if scope is not None and scope.root != state_paths.resolved_vault_path(root, expanduser=False):
+            scope = None
+        if scope is not None and scope.initial is not None:
             return scope.initial.marker is None
+        if scope is not None and scope.store_enrolled:
+            return False
         _, recorded = enrollment(root)
         if "collections-store-v1" in recorded:
+            if scope is not None:
+                # False keeps the ordinary per-path decision, so the scope can keep it without a proof.
+                scope.store_enrolled = True
             return False
         return current(root).marker is None
     except Exception:  # noqa: BLE001 - uncertainty retains the ordinary per-path decision
