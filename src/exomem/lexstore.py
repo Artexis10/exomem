@@ -918,6 +918,14 @@ def _a_write_may_be_publishing(vault_root: Path, paths: Iterable[str]) -> bool:
     publication runs behind the release, up to about a second later in an
     import (attributed 2026-11-01, 7 of 7 declines). A write in another
     process reaches the registry only as an event, and is not seen here.
+
+    After the boundary is released, only an open publication intent keeps the
+    wait going, and some writes have none. A replay or census that meets one of
+    these refuses at once as `unobserved_drift`, which costs the pass, not data:
+    - a deleted page, and the old path of a renamed page;
+    - a Markdown page over `PUBLICATION_INTENT_MAX_BYTES`;
+    - a write past the cap on open intents;
+    - an intent past its deadline.
     """
     if mutation_lock.active_mutation_snapshot()["state"] == "held":
         return True
@@ -1441,19 +1449,27 @@ class CatalogUnavailable(RuntimeError):
 
 
 class _CensusView(NamedTuple):
-    """One scope's census walk and the registry's map after it, each keyed by digested path."""
+    """One scope's census walk and the registry's map after it.
 
-    walked: dict[str, tuple[str, tuple[int, int, int]]]
-    registry: dict[str, tuple[str, tuple[int, int, int]]]
+    Each entry is the digested path key, the path and its normalized signature.
+    The entries stay lists, not maps, so two registry spellings of one page that
+    digest to the same key both count in the census, as a Windows alias did
+    before this view existed.
+    """
+
+    walked: tuple[tuple[str, str, tuple[int, int, int]], ...]
+    registry: tuple[tuple[str, str, tuple[int, int, int]], ...]
 
     def disagreements(self) -> set[str]:
         """The paths that only one side has, or whose signatures differ.
 
         Spelled as the registry spells them when it has them.
         """
+        walked = {key: (path, sig) for key, path, sig in self.walked}
+        registry = {key: (path, sig) for key, path, sig in self.registry}
         disagreeing = set()
-        for key in self.walked.keys() | self.registry.keys():
-            walked_entry, registry_entry = self.walked.get(key), self.registry.get(key)
+        for key in walked.keys() | registry.keys():
+            walked_entry, registry_entry = walked.get(key), registry.get(key)
             if walked_entry is None or registry_entry is None or walked_entry[1] != registry_entry[1]:
                 disagreeing.add((registry_entry or walked_entry)[0])
         return disagreeing
@@ -8879,10 +8895,10 @@ class LexicalStore:
         signature = freshness_module._normalize_signature
         _registry_checkpoint, registry_entries = after_walk
         return _CensusView(
-            walked={digest(path): (path, signature(sig)) for path, sig in walked},
-            registry={
-                digest(path): (path, signature(sig)) for path, sig in registry_entries.items()
-            },
+            walked=tuple((digest(path), path, signature(sig)) for path, sig in walked),
+            registry=tuple(
+                (digest(path), path, signature(sig)) for path, sig in registry_entries.items()
+            ),
         )
 
     def _await_census_observation(
@@ -8979,8 +8995,8 @@ class LexicalStore:
         # a replayed path is excused on both sides or on neither.
         digest = freshness_module._digest_path
         excused = {digest(path) for path in (*replayed_delta.changed, *replayed_delta.deleted)}
-        walked_outside = [entry for key, entry in view.walked.items() if key not in excused]
-        registry_outside = [entry for key, entry in view.registry.items() if key not in excused]
+        walked_outside = [(path, sig) for key, path, sig in view.walked if key not in excused]
+        registry_outside = [(path, sig) for key, path, sig in view.registry if key not in excused]
         if freshness_module.triple_from_entries(
             walked_outside
         ) != freshness_module.triple_from_entries(registry_outside):
