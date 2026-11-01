@@ -708,6 +708,39 @@ validation.
 - **THEN** the census excuses no path
 - **AND** publishes only when the whole walk matches the rebased target
 
+#### Scenario: A write still publishing during a detached replay is replayed, not discarded
+
+- **WHEN** a governed write changes a replayed page on disk before its event
+  reaches the registry
+- **AND** the detached replay runs off the publication barrier
+- **THEN** the replay waits for the registry to observe the newer state of
+  that page, and then replays the newer delta
+- **AND** waits only while a write in the process holds a mutation boundary or
+  has a publication intent still open for one of the pages, and for at most a
+  bounded time shared by every path of one round
+- **AND** retargets at most a bounded number of times in one replay
+- **AND** declines the pass as `source_changed` when the registry does not
+  observe the newer state in time, when no write is in flight and the page
+  still differs, or when the page changes again after each retarget
+- **AND** a replay under the publication barrier never waits and declines as
+  before
+- **AND** the repair telemetry counts the retargets of each pass
+- **AND** `lexical_repair_finished` names which of those three bounds ended a
+  pass that declined, as `declined_for`
+
+#### Scenario: A write still publishing during the census walk is replayed, not refused
+
+- **WHEN** the final census walk sees a page that a governed write changed,
+  created or deleted before its event reached the registry
+- **THEN** the census waits, while a write in the process holds a mutation
+  boundary or has a publication intent still open for the path, and for a
+  bounded time, for the registry to observe each path where the walk and the
+  registry disagree
+- **AND** replays and re-proves those paths before the census judges the walk
+- **AND** declines the pass as `source_changed` at the census when the registry
+  does not observe such a path in time, or when no write is in flight
+- **AND** a delta that needs a source proof still excuses no path
+
 ### Requirement: Bounded write-time index maintenance
 
 A component deferral that has already durably recorded path-exact receipts covering the batch SHALL count as batch-report success and SHALL NOT seed a full-component refresh demand. The system SHALL mint a durable full-component refresh demand from a write-time outcome only for a component whose incomplete work has no durable path coverage, and SHALL count both outcomes — covered deferrals accepted and uncovered deferrals escalated — in stable content-free telemetry.
@@ -1035,3 +1068,29 @@ flagged row never requests a full repair.
 - **THEN** the repair replays the deltas from its start checkpoints, persists
   the target checkpoints, folds the WAL and publishes under the same guards and
   retries as a whole-corpus build
+
+### Requirement: Full Lexical Repair Yields To Foreground Writes
+
+A detached full lexical repair SHALL pause at its yields while foreground work
+runs, including every hold of and wait for a mutation boundary. It SHALL pause
+for most of its elapsed time beyond one grace wait, and SHALL pause for no more
+than a fixed total in one pass, so that a pass that meets no gap finishes
+within its work plus that total. It SHALL continue its work without waiting
+for a boundary to be released. `lexical_repair_finished` SHALL report the
+seconds that each full pass paused as `parked_s`.
+
+#### Scenario: A full repair beside an import's apply parks and publishes
+
+- **WHEN** an import's apply holds the mutation boundary for the whole of a
+  detached full repair
+- **THEN** the repair pauses at its yields for longer than its own work, within
+  its progress floor
+- **AND** publishes while the apply still holds the boundary
+- **AND** reports the seconds it paused as `parked_s` in
+  `lexical_repair_finished`
+
+#### Scenario: A full repair that never meets a gap stops pausing at its ceiling
+
+- **WHEN** foreground work runs at every yield of a full repair
+- **THEN** the repair's pauses total no more than its fixed ceiling
+- **AND** the repair runs the rest of its work without a pause
