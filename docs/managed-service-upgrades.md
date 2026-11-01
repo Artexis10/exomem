@@ -328,8 +328,8 @@ The issue command runs in a subshell from the empty working directory, so a
 The probe loop sends one MCP read and one MCP write every 30 seconds for 50
 minutes, which covers the 45 minutes after a switch made within 5 minutes of
 its start. It writes one line per call, `TIME read|write RESPONSE`, and each
-write records a disposable episode in the copy. An episode passes the vault's
-write rules, so the write reaches the mutation path and commits:
+write records a disposable episode in the copy. The `record_episode` tool
+ships in 0.149.0 and later, so rehearse from 0.149.0 or a newer release:
 
 ```sh
 TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
@@ -345,14 +345,14 @@ while [ "$(date +%s)" -lt "$END" ]; do
 done
 ```
 
-A call fails when its line holds `"isError":true`, `"success":false`,
-`MUTATION_BUSY`, `VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. A
-refused write still returns a `"result"`, with `"success":false` inside it,
-so the check must look for both. The check command prints two counts; expect
-both to be 0:
+The check looks for success, not for each kind of failure. A read passes
+when its line holds `"isError":false`. A write passes when its line holds
+`"state":"committed"`. A refused call still returns a normal `"result"`, so
+the absence of an error is not proof that a write committed. The check
+command prints the failed reads, then the failed writes; expect both to be 0:
 
 ```sh
-grep -cE '"isError":true|success\\?":false|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
+awk '$2 == "read"' /tmp/xr/calls.log | grep -vc '"isError":false'; awk '$2 == "write"' /tmp/xr/calls.log | grep -vc '"state":"committed"'
 ```
 
 The worker also inherits the user manager's environment. Run `systemctl --user
