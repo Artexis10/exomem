@@ -1,6 +1,7 @@
 """A discard of an adopt import's stage keeps a residual record, and never passes over a member that is not filed."""
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import uuid
@@ -15,6 +16,20 @@ from exomem import adoption_run, cloud_import_job, import_stage
 from exomem.cloud_import import ArchiveRefused
 
 KB_SCAN = "Knowledge Base/Sources/Imported/2026-10-27-scan.bin"
+
+
+def _cellctl_constants(*names: str) -> tuple[str, ...]:
+    """cellctl's own values for `names`, read from its source: cellctl needs dependencies this suite lacks.
+
+    cellctl reads the Job's owner mark by these names, so a rename on either side fails the tests that use them."""
+    path = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "imports.py"
+    found = {node.targets[0].id: node.value.value for node in ast.parse(path.read_text(encoding="utf-8")).body
+             if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+             and isinstance(node.value, ast.Constant)}
+    return tuple(found[name] for name in names)
+
+
+OWNER_MARK = dict([_cellctl_constants("RETRY_OWNER_KEY", "RETRY_OWNER")])
 
 
 @pytest.fixture
@@ -186,7 +201,7 @@ def test_a_discard_that_waits_on_a_renamed_member_tells_the_controller_that_the_
 
     result = _run_discard(monkeypatch, vault, import_id, tmp_path=tmp_path)
 
-    assert result == {"ok": False, "error": "IMPORT_RENAMES_PENDING", "retry": "owner"}
+    assert result == {"ok": False, "error": "IMPORT_RENAMES_PENDING", **OWNER_MARK}
 
 
 def test_a_discard_that_fails_for_a_reason_a_retry_may_fix_carries_no_retry_value(
@@ -218,7 +233,7 @@ def test_a_discard_refuses_and_keeps_the_stage_when_it_cannot_read_the_receipt(
 
     result = _run_discard(monkeypatch, vault, import_id, tmp_path=tmp_path)
 
-    assert result == {"ok": False, "error": "IMPORT_RECEIPT_UNREADABLE", "retry": "owner"}
+    assert result == {"ok": False, "error": "IMPORT_RECEIPT_UNREADABLE", **OWNER_MARK}
     assert (_stage_dir(vault, import_id) / "Field Notes" / "scan.bin").read_bytes() == PDF
     assert _receipt_file(vault, import_id).read_text(encoding="utf-8") == damaged
 
