@@ -2353,8 +2353,6 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         if _admit_if_current(vault_root):
             return True
         return _log_catch_up_decline("not_current")
-    except _SourceMoved:
-        raise
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):
             raise
@@ -2524,13 +2522,10 @@ def _schedule_repair(
                     try:
                         caught_up = _caught_up_without_rebuild(vault_root, store)
                     except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
-                        if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
+                        if not _is_repair_contention(error):
                             raise
                         _log_repair_finished(
-                            "catch_up",
-                            "source_changed" if isinstance(error, _SourceMoved) else "error",
-                            RepairStage.TARGETED,
-                            catch_up_started,
+                            "catch_up", "error", RepairStage.TARGETED, catch_up_started
                         )
                         with _REPAIRS_LOCK:
                             _yield_targeted_repair(key, paths, error, lag_only=True)
