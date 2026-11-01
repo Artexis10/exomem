@@ -131,8 +131,8 @@ class _Live:
     #: Checkpoints the leaf has passed; a dispatch that passed none has written nothing.
     checkpoints: int = 0
     committed_paths: list[str] = field(default_factory=list)
-    #: Pages a preview's leaf reported as planned, kept until the preview ends well (see ``record_planned``).
-    planned: list[tuple[str, str | None]] = field(default_factory=list)
+    #: Entries a preview's leaf reported as (kind, path, value), kept until the preview ends well (see ``record_planned``).
+    planned: list[tuple[str, str, str | None]] = field(default_factory=list)
 
 
 _JOB: contextvars.ContextVar[_Live | None] = contextvars.ContextVar("exomem_maintenance_job", default=None)
@@ -389,8 +389,11 @@ _COMMITTED = "committed"
 _SKIPPED = "skipped_changed"
 _PENDING = "pending"
 _UNKNOWN = "outcome_unknown"
-#: A page a preview says its plan would write. A preview writes nothing, so no other kind appears beside it.
+#: What a preview's receipt lists. A preview writes nothing, so no write kind appears beside these.
+#: ``planned`` is a page its plan would write; the other two name what a leaf must report beside its plan.
 _PLANNED = "planned"
+IDENTITY_ISSUE = "identity_issue"  # a page with a duplicate or malformed exomem_id
+SKIPPED_PAGE = "skipped"  # a page the plan passes over; its value is the reason
 
 
 def _totals(conn: sqlite3.Connection, run_id: str | None = None) -> dict[str, dict[str, int]]:
@@ -447,9 +450,9 @@ def _view(
         entries = sum(counts.values())
         view["receipt"] = {
             **totals,
-            # A planned page belongs to no write chunk.
+            # A preview's entries sit in chunk 0 and belong to no write chunk; a write's chunks count from 1.
             "chunks": conn.execute(
-                "SELECT COUNT(DISTINCT chunk) FROM entries WHERE run_id = ? AND kind != ?", (row["run_id"], _PLANNED)
+                "SELECT COUNT(DISTINCT chunk) FROM entries WHERE run_id = ? AND chunk > 0", (row["run_id"],)
             ).fetchone()[0],
             "notes": json.loads(row["notes"]) if row["notes"] else {},
             "result": stored.get("result"),
@@ -774,9 +777,9 @@ def _run(
             if isinstance(result, Mapping) and "graph_sync" in result:
                 # The dispatcher joined the graph after the leaf, so its outcome replaces the leaf's "pending".
                 note(graph=result["graph_sync"])
-            if live.planned:
-                # Only a preview that ended well lists its pages: a stopped one has no plan_id to start from.
-                _insert(live, 0, _PLANNED, live.planned)
+            # Only a preview that ended well lists its entries: a stopped one has no plan_id to start from.
+            for kind in dict.fromkeys(kind for kind, _, _ in live.planned):
+                _insert(live, 0, kind, [(path, value) for entry, path, value in live.planned if entry == kind])
         state, error_code, outcome = COMPLETED, None, {"result": _bounded(result)}
     except JobStop as stop:
         state, error_code, outcome = stop.state, stop.code, {}
@@ -967,14 +970,15 @@ def record_paths(paths: Sequence[str], *, committed: bool) -> None:
         live.committed_paths.extend(paths)
 
 
-def record_planned(items: Iterable[tuple[str, str | None]]) -> None:
-    """List the pages a preview's plan would write, as `(path, what the plan does to it)`, in the job's receipt.
+def record_planned(items: Iterable[tuple[str, str | None]], *, kind: str = _PLANNED) -> None:
+    """List entries in a preview's receipt, as `(path, what the plan does to it or why)`; `kind` says which list.
 
-    Only a preview calls this. The job keeps the list until the preview ends well; outside a job it does nothing.
+    Only a preview calls this, once per kind. The job keeps the entries until the preview ends well;
+    outside a job it does nothing.
     """
     live = _JOB.get()
     if live is not None:
-        live.planned = list(items)
+        live.planned.extend((kind, path, value) for path, value in items)
 
 
 def _insert(live: _Live, chunk: int, kind: str, items: Sequence[tuple[str, str | None]]) -> dict[str, int]:
