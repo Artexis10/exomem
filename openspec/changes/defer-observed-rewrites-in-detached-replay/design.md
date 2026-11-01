@@ -31,6 +31,7 @@ A scope that fails these records nothing. The round counts as advanced only when
 
 ## Risks / Trade-offs
 
+- **A watcher row written before the round plans the page.** A bounded watcher apply can write a row for a page after the round starts and before any plan names the page. The round then counts that row as held at the start, and the absent-page rule does not see it. A stale hit needs that row, a recorded checkpoint older than the page, the page's deletion, and every other change in the scope after the checkpoint reverting exactly. The next catch-up or watcher batch heals it. It is the same class as the live write path's in-flight exposure.
 - **The barrier replay cap.** The census walk yields to imports, so the delta between the census and the barrier may exceed 32 pages. If the repro shows `delta_unavailable` at the barrier, the next fix is to drop the second source walk of a catch-up retry. Raising the cap is not the fix.
 - **The two scope deltas are read one after the other.** An event between the two reads leaves one scope's plan stamped earlier than the other. Each scope still records only a checkpoint it applied, so this costs a later lag-only catch-up and no wrong row.
 - **A very large deferred set** would mean that most of the catalogue is behind its checkpoint. The repro reports the deferred count. A count in the thousands reopens this design.

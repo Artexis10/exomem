@@ -183,9 +183,13 @@ validation.
 - **WHEN** a page is absent at the checkpoint that a replacement or a catch-up
   records, whether the checkpoint's delta deleted it or the page was created
   after the checkpoint
-- **THEN** the catalogue holds no row for that page in that scope, because
-  readers compare the content state of a checkpoint without its generation and
-  absence is the one state that can recur exactly
+- **THEN** the catalogue holds no row for that page in that scope that the
+  replay or the catch-up wrote, because readers compare the content state of a
+  checkpoint without its generation and absence is the one state that can
+  recur exactly
+- **AND** a row that a bounded watcher apply wrote before the round first
+  planned the page may remain until the next catch-up or watcher batch removes
+  it, as the live write path already allows for a write in flight
 - **AND** a replay never defers a page that is absent at its target while its
   row holds a present state
 - **AND** a catch-up round records no checkpoint for a scope while a page that
