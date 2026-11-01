@@ -349,34 +349,44 @@ def _walk_md_entry(
     answers for one path by the same rule, not by a copy that can drift. Callers
     import `reserved_paths` once per walk and pass it in, as the walk always did.
     """
+    return _classify_walk_entry(anchor, child, reserved_paths, on_error)[0]
+
+
+def _classify_walk_entry(
+    anchor: Path,
+    child: Path,
+    reserved_paths,
+    on_error: Callable[[OSError], None] | None = None,
+) -> tuple[str | None, os.stat_result | None]:
+    """`_walk_md_entry`'s answer, with the `lstat` that decided it when there was one."""
     try:
         relative = child.absolute().relative_to(anchor.absolute()).as_posix()
     except ValueError:
-        return None
+        return None, None
     if reserved_paths.classify_logical(relative).blocked:
-        return None
+        return None, None
     try:
         info = child.lstat()
     except OSError as error:
         if on_error is not None:
             on_error(error)
-        return None
+        return None, None
     if stat.S_ISLNK(info.st_mode) or bool(
         getattr(os.path, "isjunction", lambda _path: False)(child)
     ):
-        return None
+        return None, info
     if stat.S_ISDIR(info.st_mode):
         if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(EXCLUDED_DIR_PREFIXES):
-            return None
-        return "dir"
+            return None, info
+        return "dir", info
     if (
         stat.S_ISREG(info.st_mode)
         and info.st_nlink == 1
         and child.suffix.lower() == ".md"
         and ".sync-conflict-" not in child.name
     ):
-        return "md"
-    return None
+        return "md", info
+    return None, info
 
 
 def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
@@ -387,6 +397,16 @@ def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
     `on_error` receives every directory or entry the walk could not read, so a
     caller can tell an incomplete walk from a whole one; without it the walk
     stays best-effort.
+    """
+    for path, _info in walk_md_with_stat(root, on_error=on_error):
+        yield path
+
+
+def walk_md_with_stat(root: Path, *, on_error: Callable[[OSError], None] | None = None):
+    """`walk_md`, yielding `(path, lstat)`: the stat that admitted each page.
+
+    A caller that keys on file identity takes it from here instead of statting
+    every page a second time.
     """
     from . import foreground_priority, reserved_paths
 
@@ -402,11 +422,11 @@ def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
             return
         for child in children:
             foreground_priority.check_cancelled()
-            kind = _walk_md_entry(anchor, child, reserved_paths, on_error)
+            kind, info = _classify_walk_entry(anchor, child, reserved_paths, on_error)
             if kind == "dir":
                 yield from walk(child)
             elif kind == "md":
-                yield child
+                yield child, info
 
     yield from walk(anchor)
 
