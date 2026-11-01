@@ -214,8 +214,8 @@
     4. A second request carries the cell's digest. The edge finishes the large file only when the two digests match, and cancels it otherwise.
     5. A head request for a streamed version confirms only that it exists and its size. With no stored digest, it answers "unconfirmed", never "absent".
     - Verify: an offload of a 5 GiB file writes no ciphertext temporary file, and a digest mismatch leaves no finished version.
-- [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, with its network and admission rules (the Job and its policy do not exist before this task), and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.
   - [ ] 5.4.19 Follow-up, optional for closing this change: give the import row a cellctl-owned `cleanup_retry_at` column and a discard request stamp, through one Substrate migration and its grant. cellctl then stores an owner refusal's next attempt there instead of in `urls_expire_at`, and a new discard request from the owner re-arms the attempt at once. Verify: a test shows a new request after an owner refusal runs the discard without the daily wait, and `urls_expire_at` is never written during `cleanup_pending`.
+- [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, with its network and admission rules (the Job and its policy do not exist before this task), and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.
 
 ## 6. Rollout (D11)
 
