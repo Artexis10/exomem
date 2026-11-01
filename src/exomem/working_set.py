@@ -3973,7 +3973,7 @@ def compile_packet(
             packet = _with_source_pointers(
                 vault_root, packet, scan, slots=slots, status_basis=status_basis,
                 freshness_snapshot=kwargs.get("freshness_snapshot"),
-                query_context=kwargs.get("lexical_admission"),
+                query_context=scan.query_context or kwargs.get("lexical_admission"),
             )
     _label_origins(
         packet,
@@ -4003,6 +4003,8 @@ class _SourceScan:
 
     phrases: list[Any] = field(default_factory=list)
     visible: Callable[[str], bool] | None = None
+    #: The compile's own lexical admission, whose verdicts the captured admission reuses.
+    query_context: Any = None
 
 
 def _compiled_citations(
@@ -4862,6 +4864,8 @@ def _compile_packet(
         from . import working_set_runtime
 
         query_context = working_set_runtime.request_admission(root, visible, status_basis, lexical_admission)
+        if _source_scan is not None:
+            _source_scan.query_context = query_context
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,

@@ -3208,16 +3208,19 @@ class RequestQueryContext:
     admitted_paths: set[str] | None = None
     complete: bool = False
     captured_paths: frozenset[str] = frozenset()
+    #: The compiled context this one widens: its verdicts are reused, so only the captured pages are decided again.
+    parent: RequestQueryContext | None = None
 
     def with_captured(self) -> RequestQueryContext:
         """The same reader and lifecycle basis, admitting the captured partition too.
 
-        A new context: it shares no admitted set with this one, so the compiled
-        carry's statistics are never recounted over raw material.
+        A new context: its admitted set is its own, so the compiled carry's
+        statistics are never recounted over raw material. It reuses this
+        context's verdicts for the compiled pages and decides only the captured ones.
         """
         return RequestQueryContext(
             self.vault_root, self.visible, self.status_basis,
-            catalogue_ranking=self.catalogue_ranking, captured=True,
+            catalogue_ranking=self.catalogue_ranking, captured=True, parent=self,
         )
 
 
@@ -9865,21 +9868,28 @@ class LexicalStore:
             # Hidden labels never reach classification; navigation and retired
             # pages still belong in the admitted denominator.
             candidates = rows.carry_candidates
+            inherited: set[str] = set()
+            decide = candidates
             if context.captured:
                 candidates = (*candidates, *rows.captured_candidates)
+                decide = candidates
+                if context.parent is not None and context.parent.visible is context.visible:
+                    # The compiled verdicts are the parent's, decided once per request.
+                    inherited = set(self._request_admitted_paths(conn, context.parent, scope))
+                    decide = rows.captured_candidates
             admission = admission_of(context.visible)
             identity = admission.identity() if admission is not None else None
             if identity is None:
                 # A collection store decides its pages on one thread: the pages it owns share one store request.
-                with deciding(candidates):
-                    context.admitted_paths = {path for path in candidates if context.visible(path)}
+                with deciding(decide):
+                    context.admitted_paths = inherited | {path for path in decide if context.visible(path)}
             else:
                 plan = self._published_plan(
-                    (scope, identity), snapshot, col, tuple(candidates), frozenset(),
+                    (scope, identity), snapshot, col, tuple(decide), frozenset(),
                     lambda: self._page_signatures(conn, col),
                 )
                 verdicts = self._publish_verdicts(plan, admission)
-                context.admitted_paths = {path for path in candidates if verdicts[path]}
+                context.admitted_paths = inherited | {path for path in decide if verdicts[path]}
             context.captured_paths = (
                 frozenset(rows.captured_candidates) & context.admitted_paths
                 if context.captured else frozenset()

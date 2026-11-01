@@ -4015,17 +4015,18 @@ def guard_working_set(
     # empty blocks would state that the turn resolved and the vault had nothing,
     # which is a different and false claim. Everything downstream of an anchor
     # goes with it, since a unit's only warrant was the anchor it hung from.
-    # A packet that resolved no anchor but served material (a captured pointer) is emptied the same way:
-    # nothing it served survived, so what is left is an abstention, not a served packet with nothing to say.
-    # nosemgrep: ep-word-set -- The packet schema fixes the sections that serve material.
-    served_sections = ("units", "pointers", "current_state")
-    emptied = (
-        bool(packet.get("anchors"))
-        or (
-            any(packet.get(section) for section in served_sections)
-            and not any(guarded.get(section) for section in served_sections)
-        )
+    # A packet served only because the turn named captured material (no anchor, only captured pointers) is
+    # emptied the same way when none of those pointers survives: it becomes the abstention it was before the
+    # captured pass, so it says no more than a vault without those pages. Other anchorless packets keep their
+    # shape, so a withheld pointer never makes them differ from a packet that had none.
+    from .. import working_set
+
+    pointers = packet.get("pointers") or ()
+    captured_only = (
+        not packet.get("anchors") and not packet.get("units") and not packet.get("current_state")
+        and bool(pointers) and all(working_set.is_source_pointer(pointer) for pointer in pointers)
     )
+    emptied = bool(packet.get("anchors")) or (captured_only and not guarded.get("pointers"))
     if emptied and not guarded["anchors"] and not guarded.get("abstained"):
         guarded["abstained"] = True
         # At L0 the turn resolved nothing the caller may know of, which is
