@@ -1635,14 +1635,15 @@ def _decode_by_evidence(data: bytes) -> tuple[str, str]:
 
 def _mostly_utf8(data: bytes, replaced: str) -> bool:
     """Whether `replaced`, the UTF-8 reading of `data` with replacement characters, comes from UTF-8
-    with a few stray bytes: it holds more valid multi-byte characters than replacement characters.
-    Pure ASCII counts, because it is valid UTF-8."""
+    with a few stray bytes: it holds at least as many valid multi-byte characters as replacement
+    characters. A stray byte inside a character makes two replacement characters of it, so a tie
+    still means UTF-8. Pure ASCII counts, because it is valid UTF-8."""
     invalid = replaced.count("\ufffd")
     if not invalid:
         return True
     ascii_count = len(data) - len(data.translate(None, bytes(range(0x80))))
     multibyte = len(replaced) - ascii_count - invalid
-    return multibyte > invalid
+    return multibyte >= invalid
 
 
 def _confident_guess(data: bytes) -> str | None:
