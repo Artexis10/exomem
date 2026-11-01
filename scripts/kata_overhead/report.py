@@ -71,9 +71,11 @@ def summarize(rows: list[dict], base: str = "runc", test: str = "kata") -> dict[
     return result
 
 
-ARMS = ("runc: Docker's default runtime (runc). kata: Kata Containers through Docker, QEMU hypervisor, "
-        "default configuration. Both arms run the unmodified Cloud cell image with /data on a real Docker volume, "
-        "a read-only root, no capabilities, 2 CPUs and 3 GiB. Within-run comparisons only.")
+ARMS = ("runc: Docker's default runtime (runc), /data on a Docker volume. kata: Kata Containers through Docker, "
+        "QEMU hypervisor, /data on the same kind of Docker volume, shared into the guest with virtio-fs. kata-blk: "
+        "Kata as kata, but /data is an ext4 loop-device image given to the guest as a block device. Every arm runs "
+        "the unmodified Cloud cell image with a read-only root, no capabilities, 2 CPUs and 3 GiB. "
+        "Within-run comparisons only.")
 
 
 def fmt(value, digits=1):

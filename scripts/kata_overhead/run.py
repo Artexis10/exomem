@@ -738,7 +738,7 @@ class Lab:
             raise HarnessError(f"host memory read failed: {result.stderr[-400:]}")
         return json.loads(result.stdout)
 
-    def memory(self, arm: str, rep: int, container: str, moment: str, baseline_used_kb: float) -> None:
+    def memory(self, arm: str, rep: int, container: str, moment: str) -> None:
         """Record the host-side memory of the cell and what the cell sees, in kB."""
         try:
             host = self.host_memory(container)
@@ -746,8 +746,6 @@ class Lab:
             self.record(arm, rep, f"m.host_pss_{moment}", [host["pss_kb"]], unit="kB",
                         note=json.dumps(host["by_comm"])[:500])
             self.record(arm, rep, f"m.host_rss_{moment}", [host["rss_kb"]], unit="kB")
-            self.record(arm, rep, f"m.host_used_delta_{moment}", [host["host_used_kb"] - baseline_used_kb], unit="kB",
-                        note="host MemTotal - MemFree - Buffers - Cached - SReclaimable, minus the value before the cell started")
             if host["cgroup_current_kb"] is not None:
                 self.record(arm, rep, f"m.host_cgroup_{moment}", [host["cgroup_current_kb"]], unit="kB",
                             note=json.dumps(host["cgroups"])[:500])
@@ -954,11 +952,6 @@ class Lab:
         if "fs" in a.only:
             self.fs_micro(arm, rep, volume)
         # (e) startup
-        try:
-            baseline_used = self.host_memory("none")["host_used_kb"]
-        except Exception as error:  # noqa: BLE001 - recorded, the session goes on
-            baseline_used = 0
-            self.fail(arm, rep, "m.baseline", f"{type(error).__name__}: {error}")
         url, created, t0 = self.start_cell(arm, name, volume)
         live = self.wait_http(url, "/health", t0, 240, name)
         ready = self.wait_http(url, "/health/ready", t0, 400, name)
@@ -972,7 +965,7 @@ class Lab:
             self.stop_cell(name, f"{tag}-cell")
             return
         time.sleep(5)
-        self.memory(arm, rep, name, "idle", baseline_used)
+        self.memory(arm, rep, name, "idle")
         mcp = Mcp(url, self.token)
         try:
             mcp.initialize()
@@ -990,7 +983,7 @@ class Lab:
                 except Exception as error:  # noqa: BLE001 - recorded, the session goes on
                     self.fail(arm, rep, f"section.{key}", f"{type(error).__name__}: {error}")
             self.diag(f"spellings-{tag}", mcp.names)
-            self.memory(arm, rep, name, "after", baseline_used)
+            self.memory(arm, rep, name, "after")
         finally:
             mcp.close()
             facts = self.stop_cell(name, f"{tag}-cell")
