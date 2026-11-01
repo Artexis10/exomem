@@ -655,8 +655,10 @@ def test_a_failed_cleanup_records_the_code_its_report_names():
     decision, *_ = _failed_discard({"ok": False, "error": "IMPORT_RENAMES_PENDING", "retry": "owner"})
     assert decision.import_updates["error_code"] == "IMPORT_RENAMES_PENDING"
     assert decision.import_updates["observed_state"] == "cleanup_pending"
+    # An unmarked cleanup failure keeps the row's outcome: finalize reads error_code, so writing one would turn a
+    # filed import into "failed".
     unnamed, *_ = _failed_discard({})
-    assert unnamed.import_updates["error_code"] == "IMPORT_FAILED"
+    assert unnamed.import_updates.get("error_code") is None
 
 
 def test_a_discard_that_waits_on_the_owner_does_not_stop_the_cell_again_for_a_day():
