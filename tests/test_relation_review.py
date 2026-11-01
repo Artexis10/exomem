@@ -702,6 +702,7 @@ def test_resumed_prepared_creation_keeps_extra_vocabulary_guards(
             relation_disposition="reviewed_none",
             relation_review_hash=validation.draft_hash,
             extra_required_guards=(guard,),
+            vocabulary_guards=(guard,),
         )
 
     assert error.value.code == "STALE_VOCABULARY_BINDING"
