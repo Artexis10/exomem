@@ -20,7 +20,7 @@ env:
   # (Docker supports the Go runtime with QEMU only). The sha256 is the digest GitHub publishes for the
   # release asset; the install step checks the download against it and against the API at run time.
   KATA_RELEASE: "4.3.1"
-  KATA_SHA256: "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97"
+  KATA_SHA256: "66b35b06f6b41b56f8606ddf3ed3e5660b0971d1e309d903457c4056a0b9eff0"
   KATA_ASSET: "kata-go-static-4.3.1-amd64.tar.zst"
   # The image a cell runs in production (published, anonymous pull).
   CLOUD_IMAGE: ghcr.io/artexis10/exomem:0.154.0-cloud
