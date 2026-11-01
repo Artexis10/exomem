@@ -118,6 +118,14 @@ def test_the_status_reports_the_window_budget_from_its_inputs(vault: Path, store
     assert reply["drain"]["unfiled_bytes"]["text"] == GIB // 2
 
 
+def test_the_status_reports_the_bytes_that_the_volume_uses(vault: Path, store_policy, monkeypatch) -> None:
+    """Catches a status without the volume's use: the sender cannot check a window against the cell's admission rule."""
+    store_policy(growth_threshold=0.8, max_temporary_bytes=int(5.25 * GIB), max_hydrations=1)
+    _volume(monkeypatch, total=20 * GIB, used=3 * GIB)
+
+    assert _status(vault)["window_budget"]["volume"] == {"used_bytes": 3 * GIB}
+
+
 @pytest.mark.parametrize("without", ["no store", "a disabled store"])
 def test_a_cell_without_the_media_store_reports_no_window_budget(vault: Path, store_policy, without) -> None:
     """Catches a budget computed from a store that is off: the sender would size windows for room that never frees."""
@@ -147,6 +155,8 @@ def test_an_input_that_cannot_be_read_makes_the_budgets_unknown_and_never_zero(
 
     for name in ("window_budget", "reachable_budget", "effective_file_limit"):
         assert list(reply[name]) == ["unknown"] and mentioned in reply[name]["unknown"]
+    if cause == "volume":
+        assert list(reply["volume"]) == ["unknown"] and mentioned in reply["volume"]["unknown"]
 
 
 # The windows
@@ -178,8 +188,11 @@ def test_a_landed_window_with_a_run_reports_only_the_members_that_the_run_did_no
     assert window["unfiled"] == {"count": 1, "bytes": len(PDF + b"left")}
 
 
-def test_a_series_that_is_fully_filed_and_discarded_reports_no_member_and_stops_asking_to_keep_the_source(vault: Path) -> None:
-    """Catches a status that keeps asking for the source after adoption filed everything and the stage is gone."""
+def test_a_series_that_is_fully_filed_and_discarded_stays_listed_with_no_member_and_stops_asking_to_keep_the_source(vault: Path) -> None:
+    """Catches a status that keeps asking for the source after adoption filed everything, or that drops the window's receipt.
+
+    The sender finds a window's receipt by its import ID in this list, and sends a window again when it is absent.
+    """
     import_id = _window(vault, {"a.pdf": PDF, "b.pdf": PDF + b"b"})
     _file_all_but(vault, import_id)
     cloud_import_job.discard(vault, import_id)
@@ -187,8 +200,8 @@ def test_a_series_that_is_fully_filed_and_discarded_reports_no_member_and_stops_
 
     reply = _status(vault)
 
-    assert _windows(reply) == []
-    assert reply["import_windows"]["counts"]["discarded"] == 1
+    (window,) = _windows(reply)
+    assert (window["import_id"], window["state"], window["residual"]) == (import_id, "discarded", {"count": 0, "bytes": 0})
     assert reply["import_windows"]["keep_source"] == {"keep": False, "message": None}
 
 

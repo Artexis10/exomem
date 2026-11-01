@@ -143,3 +143,33 @@ def test_the_series_file_is_never_an_item_of_a_run_and_never_a_hidden_file_to_re
 
     assert [row["path"] for row in run["inventory"] if row.get("kind") != "folder"] == [f"_Imports/{import_id}/Notes/c.md"]
     assert run["hidden_files_skipped"] == 0
+
+
+def test_a_path_list_relative_to_the_source_folder_leaves_the_root_and_the_collection_paths_to_the_manifest(vault: Path) -> None:
+    """The stage holds the source folder, but its series file lists paths without it: no file lies at those paths."""
+    import_id = _window(
+        vault, {"Field Notes/Recordings/a.md": b"# A\n", "Field Notes/Notes/b.md": b"# B\n"},
+        series=["Recordings/a.md", "Notes/b.md"])
+
+    run = _start(vault, import_id)
+
+    assert run["collection"] == {"label": LABEL, "root": f"_Imports/{import_id}/Field Notes"}
+    assert set(_plan_items(vault, import_id)) == {"Recordings/a.md", "Notes/b.md"}
+
+
+def test_a_path_list_that_names_no_member_of_the_stage_is_no_scope_for_a_link_and_no_root(vault: Path) -> None:
+    import_id = _window(
+        vault, {"Journal/day.md": b"# Day\n\nSee [[todo]].\n", "Notes/todo.md": b"# Todo\n"}, series=["Archive/todo.md"])
+
+    assert _start(vault, import_id)["collection"]["root"] == f"_Imports/{import_id}"
+    links = _plan_items(vault, import_id)["Journal/day.md"]["links"]
+    assert links["unresolved"] == [] and len(links["resolved"]) == 1
+
+
+def test_a_window_whose_artifacts_are_all_filed_reports_no_residual_file_for_its_series_file(vault: Path) -> None:
+    import_id = _window(vault, {"Recordings/a.pdf": consume.PDF}, series=["Recordings/a.pdf"])
+    run_id, _plan_id, _reply = consume._adopt(vault, f"_Imports/{import_id}")
+
+    residual = adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)["finish"]["residual"]
+
+    assert (residual["files"], residual["by_reason"], residual["discard"]) == (0, {}, None)

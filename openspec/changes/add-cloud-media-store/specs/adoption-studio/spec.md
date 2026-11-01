@@ -104,7 +104,7 @@ A rollback of a failed batch SHALL rename each renamed binary back to its staged
 
 ### Requirement: Links resolve against the whole series
 
-When a recorded stage holds a series file, adoption SHALL pass its path list as `whole_scan`. A bare link name then resolves against every file of the series. Adoption SHALL never list or file the series file itself.
+When a recorded stage holds a series file whose path list names every manifest member of the stage other than the series file, adoption SHALL pass that path list as `whole_scan`. A bare link name then resolves against every file of the series. Adoption SHALL never list or file the series file itself.
 
 #### Scenario: A name repeats in a later window
 
@@ -113,7 +113,7 @@ When a recorded stage holds a series file, adoption SHALL pass its path list as 
 
 ### Requirement: The collection root of a recorded stage comes from its record
 
-Adoption SHALL take the collection root of a recorded stage from its record, not from a walk of the stage. For a stage with a series file, it SHALL apply the collection-root rule to the series path list. It SHALL take the series label as the default label. For any other recorded stage, it SHALL apply the rule to the manifest's member paths. The series file SHALL NOT count as a member for this rule.
+Adoption SHALL take the collection root of a recorded stage from its record, not from a walk of the stage. For a stage with a series file whose path list names every manifest member of the stage other than the series file, it SHALL apply the collection-root rule to that path list. It SHALL take the series label as the default label. For any other recorded stage, including a stage whose series file lists no usable path or lists paths that do not name its members, it SHALL apply the rule to the manifest's member paths. The series file SHALL NOT count as a member for this rule.
 
 #### Scenario: A stage whose artifacts are all filed
 
@@ -130,9 +130,14 @@ Adoption SHALL take the collection root of a recorded stage from its record, not
 - **WHEN** a resend window holds only residual members under `Recordings/`, and it carries the first series' file
 - **THEN** it gets the first series' collection root and label, and each member's collection path is its path in the source folder
 
+#### Scenario: A path list that does not name the stage's members
+
+- **WHEN** the stage holds `Field Notes/Recordings/a.md`, and its series file lists `Recordings/a.md`, without the source folder
+- **THEN** adoption takes the collection root from the manifest, `_Imports/<import_id>/Field Notes`, and the item's collection path is `Recordings/a.md`
+
 ### Requirement: The residual tells the person to keep the source
 
-`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While a landed window has an unfiled member, the tool text SHALL tell the person to keep the source folder. It SHALL also do so while a residual record lists a member. An unfiled member is a manifest member, other than the series file, that no adoption run has filed. A landed window with no run therefore counts every member except the series file. A residual record that lists no member SHALL NOT count. `adoption_studio(action="acknowledge")` SHALL take an import ID and a list of the paths to clear from that window's residual record. It SHALL refuse a call without such a list. It SHALL move each cleared entry, with the time, under an `acknowledged` list of the same record in one write. The status SHALL NOT count an acknowledged member as unfiled, and SHALL list it under `acknowledged` with that time. Its tool text SHALL say that acknowledging is the person's decision.
+`adoption_studio(action="finish")` and the status SHALL report the residual of each recorded stage with counts and bytes. The series file SHALL NOT be part of it, so that a fully filed window reports no file. They SHALL list its members by path, page by page. The status SHALL also list the members of each residual record as "discarded, not filed". While a landed window has an unfiled member, the tool text SHALL tell the person to keep the source folder. It SHALL also do so while a residual record lists a member. An unfiled member is a manifest member, other than the series file, that no adoption run has filed. A landed window with no run therefore counts every member except the series file. A residual record that lists no member SHALL NOT count. `adoption_studio(action="acknowledge")` SHALL take an import ID and a list of the paths to clear from that window's residual record. It SHALL refuse a call without such a list. It SHALL move each cleared entry, with the time, under an `acknowledged` list of the same record in one write. The status SHALL NOT count an acknowledged member as unfiled, and SHALL list it under `acknowledged` with that time. Its tool text SHALL say that acknowledging is the person's decision.
 
 #### Scenario: A window keeps a residual
 

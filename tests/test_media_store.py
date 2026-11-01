@@ -7,12 +7,12 @@ import json
 import shutil
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from exomem import originals
+from exomem import held_fs, originals, reserved_paths
 
 
 @pytest.fixture
@@ -2823,3 +2823,73 @@ def test_a_batch_member_whose_reference_changed_before_publication_is_refused(va
 
     assert refused.value.code == "MEDIA_ORIGINAL_CHANGED"
     assert originals.original_state(vault, second).reference == elsewhere[0]
+
+
+def test_a_census_that_could_not_count_replaces_an_older_known_figure_in_the_status(vault: Path, selected_store, monkeypatch):
+    """Catches a status that keeps showing the last known use after the references could no longer be counted."""
+    from exomem import media_allowance, media_store
+
+    _recorded_by_a_batch(vault)
+    unreadable = media_allowance.ReferenceUsage(None, "2026-11-01T08:00:00+00:00")
+    monkeypatch.setattr(media_allowance, "reference_usage", lambda *args, **kwargs: unreadable)
+    next_member = _filed(vault, 2, category="next")[1]
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, next_member, batch=media_store.OffloadBatch(vault))
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert "used_bytes" not in allowance and allowance["unknown"] and allowance["observed_at"] == unreadable.observed_at
+
+
+def test_a_status_with_a_demand_counts_afresh_once_the_recorded_census_is_older_than_the_demand_lease(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a series that sizes its window by a figure from before the lease, which later offloads may have changed."""
+    from exomem import media_jobs, media_store
+
+    used = _recorded_by_a_batch(vault)
+    old = (datetime.now(UTC) - timedelta(seconds=media_store.DEMAND_LEASE_SECONDS + 60)).isoformat()
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_owner_census SET observed_at = ?", (old,))
+    censuses = _count_censuses(monkeypatch)
+
+    plain = _window_status(vault)["media_allowance"]
+    assert censuses == [] and plain["observed_at"] == old and plain["used_bytes"] == used
+
+    fresh = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
+    again = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
+
+    assert len(censuses) == 1 and fresh["observed_at"] > old and again["observed_at"] == fresh["observed_at"]
+    assert media_store.recorded_census(vault).observed_at == fresh["observed_at"]
+
+
+def test_members_that_the_allowance_refuses_share_the_batch_census(vault: Path, selected_store, monkeypatch):
+    """Catches a batch that reads the owner census again after each refused member, which makes a refused series quadratic."""
+    from exomem import media_store
+
+    first, *refused = _filed(vault, 4)
+    _configure(selected_store, vault, allowance_bytes=first.stat().st_size)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, first, batch=batch)
+
+    for path in refused:
+        with pytest.raises(media_store.MediaStoreError) as error:
+            media_store.offload(vault, path, batch=batch)
+        assert error.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("error", [held_fs.HeldFsError("PATH_NOT_FOUND", "the ledger"), reserved_paths.ReservedPathLeafError("RESERVED")])
+def test_a_ledger_that_refuses_the_census_record_does_not_stop_the_batch(vault: Path, selected_store, error):
+    """Catches an offload that stops because its status record was refused, which costs the status only a fresher figure."""
+    from exomem import media_store
+
+    class RefusingLedger:
+        def _connect(self, **_options):
+            raise error
+
+    usage = media_store.OffloadBatch(vault).usage(RefusingLedger())
+
+    assert usage.versions is not None

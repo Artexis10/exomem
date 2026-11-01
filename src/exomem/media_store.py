@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
 
@@ -529,14 +530,17 @@ class OffloadBatch:
 
     The batch never holds the mutation boundary, so other writes run between two members. It rests
     on offload being the only writer that binds a version the census has not seen while the runtime
-    serves (task 5.4.9 lists the others). `charge` adds each version that a member publishes, and
-    `end` drops the census so that the next member reads it again. A stale census can wrongly refuse
-    a member, which the next scan releases, because refusals are read again from a fresh census.
+    serves (task 5.4.9 lists the others). `charge` adds each version that a member publishes. `end`
+    drops the census so that the next member reads it again, and `failed` does so only for a member
+    that reached `charge`: a refused member bound nothing, so the next one reuses the census. A stale
+    census can wrongly refuse a member, which the next scan releases, because refusals are read again
+    from a fresh census.
     """
 
     def __init__(self, vault: Path) -> None:
         self._vault = Path(vault).resolve()
         self._usage: media_allowance.ReferenceUsage | None = None
+        self._charged = False
 
     def usage(self, ledger: MediaJobStore) -> media_allowance.ReferenceUsage:
         if self._usage is None:
@@ -544,33 +548,68 @@ class OffloadBatch:
             _record_census(ledger, self._usage)
         return self._usage
 
+    def begin(self) -> None:
+        self._charged = False
+
     def charge(self, ledger: MediaJobStore, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
+        self._charged = True
         self._usage = self.usage(ledger).charged(_binding_of(self._vault, snapshot), reference)
         _record_census(ledger, self._usage)
+
+    def failed(self) -> None:
+        """A member raised: drop the census when that member may have half-published, which the census cannot know."""
+        if self._charged:
+            self.end()
 
     def end(self) -> None:
         self._usage = None
 
 
+# What reading or writing the media ledger can raise.
+_LEDGER_UNREADABLE = (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+
+
 def _record_census(ledger: MediaJobStore, usage: media_allowance.ReferenceUsage) -> None:
     """Keep the latest owner census for the window status, so that a status call never walks the vault (D12).
 
-    An unknown census is not kept. A failed write is dropped, because it costs the status only a fresher figure
-    and must not stop an offload.
+    A census that could not count is kept as unknown, so that the status never shows an older figure in its
+    place. A failed write is dropped, because it costs the status only a fresher figure and must not stop an offload.
     """
-    used = usage.used_bytes
-    if used is None:
-        return
-    with suppress(sqlite3.Error, OSError), closing(ledger._connect()) as conn, conn:
+    with suppress(*_LEDGER_UNREADABLE), closing(ledger._connect()) as conn, conn:
         conn.execute(
             "INSERT INTO media_owner_census(singleton, used_bytes, observed_at) VALUES (1, ?, ?) "
             "ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, observed_at=excluded.observed_at",
-            (used, usage.observed_at),
+            (usage.used_bytes, usage.observed_at),
         )
 
 
-def recorded_census(vault: Path) -> tuple[int, str] | None:
-    """The used bytes and the time of the latest census that offload recorded, or None when it recorded none.
+@dataclass(frozen=True, slots=True)
+class RecordedCensus:
+    """An owner census as recorded: the bytes in use, or None when it could not count, and when it was read."""
+
+    used_bytes: int | None
+    observed_at: str
+
+    def older_than(self, seconds: float) -> bool:
+        """Whether the census is older than `seconds`; a time that cannot be read counts as older."""
+        try:
+            observed = datetime.fromisoformat(self.observed_at)
+        except ValueError:
+            return True
+        return observed.tzinfo is None or (datetime.now(UTC) - observed).total_seconds() > seconds
+
+
+def take_census(vault: Path) -> RecordedCensus:
+    """Count the owner references now and record the result, as an offload batch does; for a status with a demand (D12)."""
+    vault = Path(vault).resolve()
+    usage = media_allowance.reference_usage(vault)
+    with suppress(*_LEDGER_UNREADABLE):  # The reading is still returned; only the record is lost.
+        _record_census(MediaJobStore(vault), usage)
+    return RecordedCensus(usage.used_bytes, usage.observed_at)
+
+
+def recorded_census(vault: Path) -> RecordedCensus | None:
+    """The latest census that offload recorded, or None when it recorded none.
 
     Raises `MediaStoreError` when the ledger cannot be read. A ledger from before the record has no table: none.
     """
@@ -582,9 +621,9 @@ def recorded_census(vault: Path) -> tuple[int, str] | None:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_owner_census'").fetchone() is None:
                 return None
             row = conn.execute("SELECT used_bytes, observed_at FROM media_owner_census").fetchone()
-    except (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+    except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
-    return None if row is None else (int(row["used_bytes"]), str(row["observed_at"]))
+    return None if row is None else RecordedCensus(None if row["used_bytes"] is None else int(row["used_bytes"]), str(row["observed_at"]))
 
 
 def _offload_admission(
@@ -831,12 +870,13 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> St
     offloaded. Quota refusals raise so that the worker retains retryable demand (D10).
     A `batch` shares its census with this member's checks; without one, each check reads its own.
     """
+    if batch is not None:
+        batch.begin()
     try:
         return _offload_member(Path(vault).resolve(), path, batch)
     except BaseException:
         if batch is not None:
-            # The failed member may have half-published, which the batch census cannot know.
-            batch.end()
+            batch.failed()
         raise
 
 
@@ -1364,7 +1404,7 @@ def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_secon
                 ).fetchone()[0])
             pending = _volume_bytes(vault, (row[0] for row in conn.execute(_UNPINNED_OFFLOAD, {"offload": OFFLOAD_MEDIA_TYPE})), largest)
             pinned = _volume_bytes(vault, (row[0] for row in conn.execute(_PINNED_ORIGINALS)), largest)[1]
-    except (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+    except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     return Occupancy(evictable, pending[0], pending[1], pinned)
 

@@ -310,6 +310,37 @@ def test_a_plain_discard_after_a_walk_writes_no_empty_record_over_the_walk(vault
         {"path": "Field Notes/plan.md", "bytes": len(b"# Plan\n\nInvented plan.\n"), "code": "receipt_unreadable"}]
 
 
+def _walk_a_stage_with_a_file_the_manifest_does_not_list(vault: Path) -> str:
+    """A stage of one manifest member, `left.bin`, and `extra.bin` put there later, walked while the receipt is unreadable."""
+    import_id = _job_stage(vault, {"left.bin": PDF})
+    (_stage_dir(vault, import_id) / "Field Notes" / "extra.bin").write_bytes(OTHER)
+    _walk_then_make_the_receipt_readable_again(vault, import_id)
+    return import_id
+
+
+def test_a_plain_discard_after_a_walk_keeps_the_members_that_only_the_walk_listed(vault: Path) -> None:
+    """Catches a record built from the manifest alone: it outranks the walk's, which listed a file the manifest did not."""
+    import_id = _walk_a_stage_with_a_file_the_manifest_does_not_list(vault)
+
+    cloud_import_job.discard(vault, import_id)
+
+    assert {member["path"]: member["code"] for member in import_stage.read_residual(vault, import_id)} == {
+        "Field Notes/left.bin": "outside_run", "Field Notes/extra.bin": import_stage.UNREADABLE_CODE}
+
+
+def test_a_plain_discard_after_a_walk_keeps_a_member_that_the_person_cleared(vault: Path) -> None:
+    """Catches a record that forgets a clearance: the member comes back as unfiled, and a naive merge lists it twice."""
+    import_id = _walk_a_stage_with_a_file_the_manifest_does_not_list(vault)
+    import_stage.clear_residual(vault, import_id, {"Field Notes/left.bin"}, "2026-11-01T00:00:00Z")
+
+    cloud_import_job.discard(vault, import_id)
+
+    record = import_stage.window_record(vault, import_id)
+    assert (record.kind, record.source) == (import_stage.WINDOW_DISCARDED, import_stage.RECEIPT_SOURCE)
+    assert [member["path"] for member in record.members] == ["Field Notes/extra.bin"]
+    assert [member["path"] for member in record.acknowledged] == ["Field Notes/left.bin"]
+
+
 def test_a_walking_discard_of_an_import_with_no_stage_records_nothing(vault: Path) -> None:
     """Catches an empty record for an import nobody staged: the status would read it as a window filed whole."""
     import_id = str(uuid.uuid4())

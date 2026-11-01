@@ -21,7 +21,6 @@ from . import (
     adoption_run,
     cloud_import,
     import_stage,
-    media_allowance,
     media_capacity,
     media_store,
     originals,
@@ -30,8 +29,8 @@ from . import (
 
 # Members that one status reply lists; `next_after` continues the list.
 PAGE_MEMBERS = 200
-# These states and the stage label are the status protocol's words, not vault vocabulary.
-LANDED, DISCARDED, UNREADABLE = "landed", "discarded", "unreadable"
+# The label of a member of a discarded window is a status protocol word, not vault vocabulary. The states are
+# `import_stage.WINDOW_*`.
 DISCARDED_NOT_FILED = "discarded, not filed"
 # The longest series ID a demand lease accepts; the sender's IDs are short, and the lease is a row per series.
 MAX_SERIES_ID = 128
@@ -79,7 +78,7 @@ class Window:
 
     A landed window lists the manifest members that no run filed. A discarded one lists its residual record,
     and the members that the person acknowledged. An unreadable one has a record that cannot be used, or a
-    stage and no record, so nothing about its members is known; `staged` says whether its stage still holds files.
+    stage and no record, so nothing about its members is known; `staged` says whether its stage folder exists.
     `renames_pending` names the Knowledge Base paths that a refused discard found renamed and not committed.
     """
 
@@ -105,11 +104,11 @@ def census(root: Path) -> list[Window]:
             staged = {path for path, _size in import_stage.staged_files(root, import_id)}
             unfiled = adoption_run.unfiled_members(root, import_id, runs.get(import_id, ()))
             members = tuple({**member, "staged": member["path"] in staged} for member in unfiled)
-            windows.append(Window(import_id, LANDED, members, **common))
-        elif record.kind == import_stage.WINDOW_RESIDUAL:
-            windows.append(Window(import_id, DISCARDED, record.members, record.acknowledged, **common))
+            windows.append(Window(import_id, import_stage.WINDOW_LANDED, members, **common))
+        elif record.kind == import_stage.WINDOW_DISCARDED:
+            windows.append(Window(import_id, import_stage.WINDOW_DISCARDED, record.members, record.acknowledged, **common))
         else:
-            windows.append(Window(import_id, UNREADABLE, problem=record.problem, **common))
+            windows.append(Window(import_id, import_stage.WINDOW_UNREADABLE, problem=record.problem, **common))
     return windows
 
 
@@ -140,12 +139,12 @@ def _window_entry(window: Window, listed: dict[bool, list[dict]]) -> dict:
         entry["problem"] = window.problem
     if window.renames_pending:
         entry["renames_pending"] = list(window.renames_pending)
-    if window.state == LANDED:
+    if window.state == import_stage.WINDOW_LANDED:
         staged = [member for member in window.members if member["staged"]]
         entry["unfiled"] = {"count": len(window.members), "bytes": total}
         entry["unfiled_staged"] = {"count": len(staged), "bytes": sum(member["bytes"] for member in staged)}
         entry["members"] = [{**member, "state": "unfiled"} for member in listed[False]]
-    elif window.state == DISCARDED:
+    elif window.state == import_stage.WINDOW_DISCARDED:
         entry["residual"] = {"count": len(window.members), "bytes": total}
         entry["members"] = [{**member, "state": DISCARDED_NOT_FILED} for member in listed[False]]
         entry["acknowledged"] = {
@@ -157,9 +156,9 @@ def _window_entry(window: Window, listed: dict[bool, list[dict]]) -> dict:
 
 def _keep_source(windows: list[Window]) -> dict:
     """Whether the person still needs the source folder; a window that cannot be read counts, because it may hold a member."""
-    unfiled = sum(len(w.members) for w in windows if w.state == LANDED)
-    discarded = sum(len(w.members) for w in windows if w.state == DISCARDED)
-    unread = sum(w.state == UNREADABLE for w in windows)
+    unfiled = sum(len(w.members) for w in windows if w.state == import_stage.WINDOW_LANDED)
+    discarded = sum(len(w.members) for w in windows if w.state == import_stage.WINDOW_DISCARDED)
+    unread = sum(w.state == import_stage.WINDOW_UNREADABLE for w in windows)
     if not (unfiled or discarded or unread):
         return {"keep": False, "message": None}
     parts = [f"{unfiled} unfiled member(s) in landed windows"] if unfiled else []
@@ -170,11 +169,12 @@ def _keep_source(windows: list[Window]) -> dict:
 
 def _windows_section(windows: list[Window], after: str | None) -> dict:
     listed, next_after = _page(windows, after)
-    reported = [w for w in windows if w.state != DISCARDED or w.members or w.acknowledged or w.renames_pending]
-    counts = {state: sum(w.state == state for w in windows) for state in (LANDED, DISCARDED, UNREADABLE)}
+    states = (import_stage.WINDOW_LANDED, import_stage.WINDOW_DISCARDED, import_stage.WINDOW_UNREADABLE)
+    counts = {state: sum(w.state == state for w in windows) for state in states}
     return {
         "counts": counts,
-        "windows": [_window_entry(window, listed.get(window.import_id, {False: [], True: []})) for window in reported],
+        # Every window with a record is listed, a fully filed one too: the sender looks a window's receipt up by its ID.
+        "windows": [_window_entry(window, listed.get(window.import_id, {False: [], True: []})) for window in windows],
         "keep_source": _keep_source(windows),
         "next_after": next_after,
     }
@@ -234,9 +234,10 @@ def _unfiled(windows: _Reading, bounds: _Reading) -> dict[str, int]:
     rule = bounds.need()
     totals = {media_capacity.TEXT: 0, media_capacity.OFFLOADABLE: 0, media_capacity.RESIDENT: 0}
     for window in windows.need():
-        if window.state == UNREADABLE and window.staged:  # With no stage left, no byte of the window is on the volume.
+        # With no stage left, no byte of the window is on the volume.
+        if window.state == import_stage.WINDOW_UNREADABLE and window.staged:
             raise _Unknown(f"window {window.import_id} cannot be read, so its unfiled members are unknown")
-        if window.state == LANDED:
+        if window.state == import_stage.WINDOW_LANDED:
             for member in window.members:
                 size = member["bytes"]
                 totals[rule.classify(size, text=adoption_run.reads_as_text(member["path"], size))] += size
@@ -247,26 +248,26 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     """The allowance and the owner census that it was measured by, with the census's time.
 
     A census walks every note under the mutation boundary, which blocks filing for as long as the vault is large,
-    so a plain status reads the latest census that offload recorded. It counts afresh only when the call carries
-    a demand (`may_count`) and nothing is recorded. Otherwise the use is unknown, never 0.
+    so a plain status reads the latest census that offload recorded. A call that carries a demand (`may_count`)
+    counts afresh and records the result when nothing is recorded, or the record is older than the demand lease.
+    A census that could not count, or none at all, is unknown, never 0.
     """
     allowance = config.get("allowance_bytes")
     if type(allowance) is not int or allowance < 0:
         return {"unknown": "the media store policy sets no allowance"}
     try:
         counted = media_store.recorded_census(root)
+        if may_count and (counted is None or counted.older_than(media_store.DEMAND_LEASE_SECONDS)):
+            counted = media_store.take_census(root)
     except media_store.MediaStoreError as error:
         return {"allowance_bytes": allowance, "unknown": str(error)}
-    if counted is None and may_count:
-        usage = media_allowance.reference_usage(root)
-        counted = None if usage.used_bytes is None else (usage.used_bytes, usage.observed_at)
-        if counted is None:
-            return {"allowance_bytes": allowance, "unknown": "the stored versions cannot be counted"}
     if counted is None:
         return {"allowance_bytes": allowance, "unknown": "no owner census is recorded yet; the next offload records one"}
-    used, observed_at = counted
-    return {"allowance_bytes": allowance, "used_bytes": used, "remaining_bytes": max(0, allowance - used),
-            "observed_at": observed_at}
+    if counted.used_bytes is None:
+        return {"allowance_bytes": allowance, "unknown": "the stored versions could not be counted",
+                "observed_at": counted.observed_at}
+    return {"allowance_bytes": allowance, "used_bytes": counted.used_bytes,
+            "remaining_bytes": max(0, allowance - counted.used_bytes), "observed_at": counted.observed_at}
 
 
 def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[str, int] | None) -> dict:
@@ -307,12 +308,21 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         "job_pinned": _figure(lambda: occupancy.need().pinned_bytes),
         "effective_file_limit": _figure(effective),
         "classification": _classification(bounds),
+        "volume": _volume_section(volume),
         "media_allowance": _allowance(root, config, may_count=series is not None),
         "drain": _drain(unfiled, occupancy, idle),
     }
     if series is not None:
         section["demand"] = _demand(root, series, budget, reach)
     return section
+
+
+def _volume_section(volume: _Reading) -> dict:
+    """The bytes that the volume uses, which the sender's admission rule needs; unknown when the volume cannot be read."""
+    try:
+        return {"used_bytes": volume.need()[1]}
+    except _Unknown as why:
+        return {"unknown": str(why)}
 
 
 def _classification(bounds: _Reading) -> dict:
