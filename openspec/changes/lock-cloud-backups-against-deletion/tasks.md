@@ -1,11 +1,11 @@
 ## 1. Early checks
 
-- [ ] 1.1 On a disposable locked bucket, check the provider's semantics. Evidence: the command outputs and the version listings.
-  - Restic `init`, `backup`, `forget --prune`, `check`, `key add` and `key remove` succeed in compliance mode.
-  - A delete hides a version without removing it.
-  - A lock can be extended but not shortened.
-  - The lock time is anchored at creation.
-  - A key minted from the parent cannot carry `writeBuckets` or a bypass capability.
+- [x] 1.1 On a disposable locked bucket, check the provider's semantics. Evidence: the command outputs and the version listings, run on 2026-11-01.
+  - Restic `init`, `backup`, `forget --prune`, `check`, `key add` and `key remove` succeed in compliance mode. Confirmed with restic 0.19.1 over the S3 API.
+  - A delete hides a version without removing it. Confirmed, with and without a bypass flag.
+  - A lock can be extended but not shortened. Confirmed.
+  - The lock time is anchored at creation. Confirmed: the lock ended 24.0 hours after upload under a 1-day default.
+  - A key minted from the parent cannot carry `writeBuckets` or a bypass capability. Refuted: see design D3 and `contain-cloud-controller-compromise` D9.
 - [ ] 1.2 Measure the cost on a real cell's repository. Evidence: the bytes, the call counts and the monthly cost at the provider's published prices.
   - 30 days of hidden-version storage from its churn.
   - Lock extensions at fleet scale, for versions within 24 days of expiry.
@@ -14,7 +14,7 @@
 
 ## 2. Bucket and keys
 
-- [ ] 2.1 Add the locked backup bucket, its noncurrent-only lifecycle rule, and a parent key with no `deleteFiles` in Terraform.
+- [ ] 2.1 Add the locked backup bucket and its noncurrent-only lifecycle rule in Terraform, in the cell-data member account (`contain-cloud-controller-compromise` task 1.1).
 - [ ] 2.2 Scope new per-cell keys to the locked bucket, and point new cells' repositories at it.
 - [ ] 2.3 Add the lock-extension CronJob in its own namespace, with its own extend-only key and service account, the 31-day guard checked against the provider's time, and an alert on a missed run.
 

@@ -69,6 +69,7 @@ from .vault import (
     plan_log_writes,
     read_guarded_text,
     render_frontmatter_document,
+    yaml_flow_list,
 )
 
 log = logging.getLogger(__name__)
@@ -266,7 +267,7 @@ def edit(
         tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
-            fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"
+            fm_text = fm_text.rstrip() + "\ntags: " + yaml_flow_list(tags_clean)
         else:
             fm_text = fm_text.rstrip() + "\ntags: []"
 
@@ -1077,6 +1078,19 @@ def _set_or_append(fm_text: str, key: str, value: str) -> str:
     if pattern.search(fm_text):
         return pattern.sub(f"{key}: {value}", fm_text, count=1)
     return fm_text.rstrip() + f"\n{key}: {value}"
+
+
+def reviewed_render(text: str, stamp: str) -> str:
+    """The page `text` as this writer renders it at the reviewed instant `stamp`.
+
+    An edit stamps `updated:` with its commit instant. This puts the reviewed
+    instant back, so a page committed later can be compared with reviewed bytes.
+    """
+    match = _FM_PATTERN.match(text)
+    if match is None:
+        return text
+    fm_text = _set_or_append(match.group(1), "updated", stamp)
+    return render_frontmatter_document(fm_text, match.group(2), newline="\n")
 
 
 def _remove_yaml_key(fm_text: str, key: str) -> str:

@@ -3045,7 +3045,7 @@ def _validation(
     non_review = tuple(
         finding
         for finding in result.blocking_findings
-        if finding.resolved_rule != ("relations", "*", "disposition")
+        if finding.resolved_rule != semantic_contract.RELATION_DISPOSITION_RULE
     )
     return CreationDraftValidation(
         draft_id,

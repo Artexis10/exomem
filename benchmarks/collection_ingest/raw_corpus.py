@@ -52,6 +52,9 @@ CHUNK = 1024 * 1024  # the import path streams in blocks of this size
 # The documented limits of one import: bytes per name, bytes per relative path.
 NAME_MAX_BYTES = 255
 PATH_MAX_BYTES = 4096
+# A folder name that ends with a space may be refused: Windows drops the trailing space, so the name
+# would not survive a move of the vault (reserved_paths._normalized_parts refuses it on purpose).
+TRAILING_SPACE_NAME = "spaced folder /note in a spaced folder.md"
 
 CLASS_CONTRACT = {
     "plain-md": "Markdown without front matter. Filed as a Source, and as an own note when an include rule asks for one. Text is searchable.",
@@ -60,15 +63,15 @@ CLASS_CONTRACT = {
     "broken-frontmatter": "A front-matter block that never closes, one that is not valid YAML, and a rule line that opens one. Filed with the original text verbatim.",
     "line-endings": "UTF-8 with CRLF, mixed or lone-CR line endings. Filed with the original bytes; text is searchable.",
     "utf8-bom": "UTF-8 with a byte-order mark. Filed; text is searchable.",
-    "latin-1": "Latin-1 text, not valid UTF-8. Filed as an artifact with its bytes; the contract does not decode it.",
-    "utf-16-bom": "UTF-16 with a byte-order mark. Filed as an artifact with its bytes; the contract does not decode it.",
-    "shift-jis": "Shift-JIS text, not valid UTF-8. Filed as an artifact with its bytes; the contract does not decode it.",
-    "invalid-utf8": "Mostly UTF-8 with stray or truncated bytes. Filed as an artifact with its bytes.",
+    "latin-1": "Latin-1 text, not valid UTF-8. Filed as an artifact with its bytes; its text is extracted and searchable.",
+    "utf-16-bom": "UTF-16 with a byte-order mark. Filed as an artifact with its bytes; its text is extracted and searchable.",
+    "shift-jis": "Shift-JIS text, not valid UTF-8. Filed as an artifact with its bytes; its text is extracted and searchable.",
+    "invalid-utf8": "Mostly UTF-8 with stray or truncated bytes. Filed as an artifact with its bytes; the text around the bad bytes is searchable.",
     "mixed-types": "Files of many types: text suffixes (text Source), other suffixes and no suffix (artifact).",
     "duplicate": "Byte-identical copies under other names and folders, and one near copy. Every copy is filed.",
     "deep-path": "Files 1 to 24 folders deep. Filed.",
     "long-name": "File and folder names near 200 bytes. Filed.",
-    "odd-name": "Names with spaces, punctuation, symbols, emoji and other scripts. Filed.",
+    "odd-name": "Names with spaces, punctuation, symbols, emoji and other scripts. Filed, except a folder name that ends with a space: filed, or refused with a code.",
     "unsafe-name": "A name with a backslash. Filed, or refused with a code; any code counts and the scorer reports the one it saw. Never lost.",
     "unicode-twin": "Two files whose names differ only in Unicode normalisation. Both are filed.",
     "case-twin": "Two files whose names differ only in letter case. Both are filed.",
@@ -299,28 +302,30 @@ def build(
     collider_artifact = probe()
     add("legacy/latin1 river survey.txt", "latin-1", "artifact",
         _require_invalid_utf8(f"{legacy_body}{para()}\n{reference(collider_artifact)}\n".encode("latin-1"),
-                              "latin-1 text"), phrase=collider_artifact)
+                              "latin-1 text"), phrase=collider_artifact, promised=True)
     p = probe()
     add("legacy/latin1 cafe notes.md", "latin-1", "artifact",
         _require_invalid_utf8(f"# Café notes\n\n{legacy_body}\n{reference(p)}\n".encode("latin-1"),
-                              "latin-1 text"), phrase=p)
+                              "latin-1 text"), phrase=p, promised=True)
     p = probe()
     add("legacy/utf16 minutes.txt", "utf-16-bom", "artifact",
-        codecs.BOM_UTF16_LE + f"Minutes\n{para()}\n{reference(p)}\n".encode("utf-16-le"), phrase=p)
+        codecs.BOM_UTF16_LE + f"Minutes\n{para()}\n{reference(p)}\n".encode("utf-16-le"), phrase=p, promised=True)
     p = probe()
     add("legacy/utf16 agenda.md", "utf-16-bom", "artifact",
-        codecs.BOM_UTF16_BE + f"# Agenda\n\n{para()}\n{reference(p)}\n".encode("utf-16-be"), phrase=p)
+        codecs.BOM_UTF16_BE + f"# Agenda\n\n{para()}\n{reference(p)}\n".encode("utf-16-be"), phrase=p, promised=True)
     p = probe()
     sjis = f"港の潮見表を確認した。\n来週の予定を整理する。\n{reference(p)}\n"
     add("legacy/shiftjis memo.txt", "shift-jis", "artifact",
-        _require_invalid_utf8(sjis.encode("shift_jis"), "shift-jis text"), phrase=p)
+        _require_invalid_utf8(sjis.encode("shift_jis"), "shift-jis text"), phrase=p, promised=True)
     p = probe()
     stray = f"# Stray bytes\n\n{para()}\n".encode() + b"bad \xc3\x28 and \xff\xfe\xfd here\n" \
         + f"{reference(p)}\n".encode()
-    add("legacy/stray bytes.md", "invalid-utf8", "artifact", _require_invalid_utf8(stray, "stray bytes"), phrase=p)
+    add("legacy/stray bytes.md", "invalid-utf8", "artifact", _require_invalid_utf8(stray, "stray bytes"),
+        phrase=p, promised=True)
     p = probe()
     cut = f"{para()}\n{reference(p)}\n".encode() + "港".encode()[:2]
-    add("legacy/cut off.txt", "invalid-utf8", "artifact", _require_invalid_utf8(cut, "cut-off text"), phrase=p)
+    add("legacy/cut off.txt", "invalid-utf8", "artifact", _require_invalid_utf8(cut, "cut-off text"),
+        phrase=p, promised=True)
 
     # ---- many file types ----------------------------------------------------------------
     for name, promised in (
@@ -388,13 +393,17 @@ def build(
         "meeting notes (final) [v2].md", "Q&A what's next? #1.md", "100% done; really!.txt",
         "a   b    c.md", "-leading dash.md", "~tilde $dollar @at =eq +plus ,comma.md",
         'say "quoted" <angle> |pipe| *star*.md', "colon: separated.md", "emoji 📝 notes.md",
-        "Привет мир.md", "مرحبا بالعالم.md", "spaced folder /note in a spaced folder.md",
+        "Привет мир.md", "مرحبا بالعالم.md", TRAILING_SPACE_NAME,
         "v1.2.3 release notes.final.md", "fullwidth ＡＢＣ １２３.md",
     ):
         p = probe()
         stem = Path(name).stem
         body = markdown(stem if len(name) % 2 else None, p)
-        text(f"odd names/{name}", "odd-name", body, phrase=p)
+        refusal = (
+            {"promised": False, "outcome": FILED_OR_REFUSED}
+            if name == TRAILING_SPACE_NAME else {}
+        )
+        text(f"odd names/{name}", "odd-name", body, phrase=p, **refusal)
     p = probe()
     text("odd names/back\\slash note.md", "unsafe-name", markdown("Back slash note", p), phrase=p,
          promised=False, outcome=FILED_OR_REFUSED)

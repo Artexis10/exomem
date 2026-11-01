@@ -38,6 +38,12 @@ def _load_hook_module():
 
 
 hook_mod = _load_hook_module()
+credentials = hook_mod._local_credentials()
+
+
+def _lane(key: str = "key"):
+    """A REST lane carrying `key`, built by the same module the installed hook loads."""
+    return credentials.Lane("rest", None, key)
 
 
 @pytest.fixture(autouse=True)
@@ -307,7 +313,7 @@ def test_fetch_via_rest_success_returns_hits(monkeypatch: pytest.MonkeyPatch) ->
         return _FakeResponse(200, _envelope_bytes(hits))
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    result = hook_mod._fetch_via_rest("what did I conclude about X?", "secret-key")
+    result = hook_mod._fetch_via_rest("what did I conclude about X?", _lane("secret-key"))
 
     assert result == hits
     assert captured["url"] == "http://127.0.0.1:8765/api/search_memory"
@@ -330,7 +336,7 @@ def test_fetch_via_rest_respects_exomem_host(monkeypatch: pytest.MonkeyPatch) ->
         return _FakeResponse(200, _envelope_bytes([]))
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    hook_mod._fetch_via_rest("prompt", "key")
+    hook_mod._fetch_via_rest("prompt", _lane())
     assert captured["url"] == "http://10.0.0.5:8765/api/search_memory"
 
 
@@ -354,7 +360,7 @@ def test_fetch_via_rest_uses_valid_port_override(monkeypatch: pytest.MonkeyPatch
         return _FakeResponse(200, _envelope_bytes([]))
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    hook_mod._fetch_via_rest("prompt", "key")
+    hook_mod._fetch_via_rest("prompt", _lane())
     assert captured["url"] == "http://127.0.0.1:9123/api/search_memory"
 
 
@@ -367,7 +373,7 @@ def test_fetch_via_rest_rejects_invalid_port_without_request(monkeypatch: pytest
         raise AssertionError("request attempted")
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
-    assert hook_mod._fetch_via_rest("prompt", "key") is None
+    assert hook_mod._fetch_via_rest("prompt", _lane()) is None
     assert calls == []
 
 
@@ -376,7 +382,7 @@ def test_fetch_via_rest_success_false_returns_none(monkeypatch: pytest.MonkeyPat
         return _FakeResponse(200, json.dumps({"success": False, "error": {}}).encode())
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    assert hook_mod._fetch_via_rest("prompt", "key") is None
+    assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
 def test_fetch_via_rest_non_200_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,7 +390,7 @@ def test_fetch_via_rest_non_200_returns_none(monkeypatch: pytest.MonkeyPatch) ->
         return _FakeResponse(500, b"internal error")
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    assert hook_mod._fetch_via_rest("prompt", "key") is None
+    assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
 def test_fetch_via_rest_malformed_json_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,7 +398,7 @@ def test_fetch_via_rest_malformed_json_returns_none(monkeypatch: pytest.MonkeyPa
         return _FakeResponse(200, b"{not json")
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    assert hook_mod._fetch_via_rest("prompt", "key") is None
+    assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
 def test_fetch_via_rest_connection_error_returns_none_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -400,7 +406,7 @@ def test_fetch_via_rest_connection_error_returns_none_never_raises(monkeypatch: 
         raise ConnectionRefusedError("connection refused")
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    assert hook_mod._fetch_via_rest("prompt", "key") is None
+    assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
 def test_fetch_via_rest_timeout_returns_none_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +414,7 @@ def test_fetch_via_rest_timeout_returns_none_never_raises(monkeypatch: pytest.Mo
         raise TimeoutError("timed out")
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    assert hook_mod._fetch_via_rest("prompt", "key") is None
+    assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
 # --- CLI seam (_fetch_via_cli) ----------------------------------------------------
@@ -498,7 +504,7 @@ def test_fetch_via_cli_timeout_returns_none_never_raises(monkeypatch: pytest.Mon
 def test_gather_hits_rest_reachable_never_calls_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
-    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, api_key, **kw: hits)
+    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, lane, **kw: hits)
 
     def _boom(*a, **kw):
         raise AssertionError("_fetch_via_cli must not be called when REST succeeds")
@@ -509,7 +515,7 @@ def test_gather_hits_rest_reachable_never_calls_cli(monkeypatch: pytest.MonkeyPa
 
 def test_gather_hits_rest_failing_cli_unset_is_nudge_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
-    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, api_key, **kw: None)
+    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, lane, **kw: None)
 
     def _boom(*a, **kw):
         raise AssertionError("_fetch_via_cli must not be called when EXOMEM_RETRIEVE_INJECT_CLI is unset")
@@ -572,7 +578,7 @@ def test_fetch_via_rest_reads_marked_envelope(monkeypatch: pytest.MonkeyPatch) -
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
     body = json.dumps({"success": True, "data": {"hits": hits, "degraded": []}}).encode("utf-8")
     monkeypatch.setattr(hook_mod, "_open_no_redirect", lambda req, timeout=None: _FakeResponse(200, body))
-    assert hook_mod._fetch_via_rest("prompt", "key") == hits
+    assert hook_mod._fetch_via_rest("prompt", _lane()) == hits
 
 
 def test_fetch_via_rest_passes_the_rest_timeout_budget(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,12 +590,12 @@ def test_fetch_via_rest_passes_the_rest_timeout_budget(monkeypatch: pytest.Monke
         return _FakeResponse(200, _envelope_bytes([]))
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
-    hook_mod._fetch_via_rest("prompt", "key")
+    hook_mod._fetch_via_rest("prompt", _lane())
     assert captured["timeout"] == hook_mod.REST_TIMEOUT_SECONDS
     assert hook_mod.REST_TIMEOUT_SECONDS > 2.0
 
 
-# --- REST key resolution (_rest_api_key) ------------------------------------------
+# --- REST key resolution (credentials.rest_key) ------------------------------------------
 
 
 def _write_service_env(path: Path, key_line: str) -> None:
@@ -606,7 +612,7 @@ def test_rest_api_key_prefers_the_environment(monkeypatch: pytest.MonkeyPatch, t
     _write_service_env(env_file, "EXOMEM_REST_API_KEY=from-file")
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(env_file))
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "from-env")
-    assert hook_mod._rest_api_key() == "from-env"
+    assert credentials.rest_key()[0] == "from-env"
 
 
 @pytest.mark.parametrize(
@@ -628,7 +634,7 @@ def test_rest_api_key_falls_back_to_the_managed_service_env(
     env_file = tmp_path / "service.env"
     _write_service_env(env_file, key_line)
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(env_file))
-    assert hook_mod._rest_api_key() == expected
+    assert credentials.rest_key()[0] == expected
 
 
 def test_rest_api_key_ignores_other_keys_and_comments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -640,12 +646,12 @@ def test_rest_api_key_ignores_other_keys_and_comments(monkeypatch: pytest.Monkey
         encoding="utf-8",
     )
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(env_file))
-    assert hook_mod._rest_api_key() == ""
+    assert credentials.rest_key()[0] == ""
 
 
 def test_rest_api_key_absent_file_is_empty_never_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(tmp_path / "nowhere" / "service.env"))
-    assert hook_mod._rest_api_key() == ""
+    assert credentials.rest_key()[0] == ""
 
 
 def test_service_env_path_defaults_to_xdg_config_on_posix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -653,7 +659,7 @@ def test_service_env_path_defaults_to_xdg_config_on_posix(monkeypatch: pytest.Mo
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(hook_mod.os, "name", "posix")
     monkeypatch.setattr(hook_mod.sys, "platform", "linux")
-    assert hook_mod._service_env_path() == tmp_path / "xdg" / "exomem" / "service.env"
+    assert credentials.service_env_path() == tmp_path / "xdg" / "exomem" / "service.env"
 
 
 def test_service_env_path_on_macos_uses_application_support(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -661,7 +667,7 @@ def test_service_env_path_on_macos_uses_application_support(monkeypatch: pytest.
     monkeypatch.setattr(hook_mod.os, "name", "posix")
     monkeypatch.setattr(hook_mod.sys, "platform", "darwin")
     monkeypatch.setattr(hook_mod.Path, "home", classmethod(lambda cls: tmp_path / "mac-home"))
-    assert hook_mod._service_env_path() == (
+    assert credentials.service_env_path() == (
         tmp_path / "mac-home" / "Library" / "Application Support" / "Exomem" / "service.env"
     )
 
@@ -670,10 +676,10 @@ def test_service_env_path_is_none_on_windows(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("EXOMEM_SERVICE_ENV", raising=False)
     # Load the cached hook modules first: their loaders build a host Path,
     # which this POSIX host cannot construct while os.name says "nt".
-    hook_mod._state_core().local_credentials()
+    hook_mod._local_credentials()
     monkeypatch.setattr(hook_mod.os, "name", "nt")
-    assert hook_mod._service_env_path() is None
-    assert hook_mod._rest_api_key() == ""
+    assert credentials.service_env_path() is None
+    assert credentials.rest_key()[0] == ""
 
 
 def test_rest_api_key_reverses_the_installers_double_quote_escaping(
@@ -686,14 +692,14 @@ def test_rest_api_key_reverses_the_installers_double_quote_escaping(
     env_file = tmp_path / "service.env"
     env_file.write_text('EXOMEM_REST_API_KEY="a\\"b\\\\c"\n', encoding="utf-8")
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(env_file))
-    assert hook_mod._rest_api_key() == 'a"b\\c'
+    assert credentials.rest_key()[0] == 'a"b\\c'
 
 
 def test_rest_api_key_survives_a_byte_order_mark(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     env_file = tmp_path / "service.env"
     env_file.write_bytes("\ufeffEXOMEM_REST_API_KEY=first-line-key\n".encode("utf-8"))
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(env_file))
-    assert hook_mod._rest_api_key() == "first-line-key"
+    assert credentials.rest_key()[0] == "first-line-key"
 
 
 # --- a key read from disk only travels to loopback ------------------------------
@@ -748,7 +754,7 @@ def test_file_sourced_key_reaches_loopback_hosts(monkeypatch: pytest.MonkeyPatch
     if host:
         monkeypatch.setenv("EXOMEM_HOST", host)
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
-    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, api_key, **kw: hits)
+    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, lane, **kw: hits)
     assert hook_mod._gather_hits_with_lane("prompt") == (hits, "rest")
 
 
@@ -760,13 +766,13 @@ def test_env_sourced_key_keeps_the_configured_host(monkeypatch: pytest.MonkeyPat
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
     seen: dict = {}
 
-    def fake_rest(prompt, api_key, **kw):
-        seen["api_key"] = api_key
+    def fake_rest(prompt, lane, **kw):
+        seen["authorization"] = lane.request("http://unused.invalid/", b"").get_header("Authorization")
         return hits
 
     monkeypatch.setattr(hook_mod, "_fetch_via_rest", fake_rest)
     assert hook_mod._gather_hits_with_lane("prompt") == (hits, "rest")
-    assert seen["api_key"] == "from-env"
+    assert seen["authorization"] == "Bearer from-env"
 
 
 # --- one wall-clock budget across both rungs ------------------------------------
@@ -781,7 +787,7 @@ def test_gather_hits_hands_each_rung_the_remaining_budget(monkeypatch: pytest.Mo
     ticks = [100.0, 100.0, 103.5]
     monkeypatch.setattr(hook_mod.time, "monotonic", lambda: ticks.pop(0) if len(ticks) > 1 else ticks[0])
 
-    def fake_rest(prompt, api_key, **kw):
+    def fake_rest(prompt, lane, **kw):
         seen["rest_timeout"] = kw["timeout"]
         return None
 
@@ -808,7 +814,7 @@ def test_rest_rung_that_dribbles_past_its_socket_timeout_is_cut_at_the_budget(mo
     monkeypatch.setattr(hook_mod, "INJECT_BUDGET_SECONDS", 0.6)
     monkeypatch.setattr(hook_mod, "_MIN_RUNG_SECONDS", 0.05)
 
-    def dribbling_rest(prompt, api_key, **kw):
+    def dribbling_rest(prompt, lane, **kw):
         hook_mod.time.sleep(3.0)  # the socket-level timeout never fires; only the budget can
         return [{"path": "Notes/late.md"}]
 
@@ -829,7 +835,7 @@ def test_gather_hits_skips_a_rung_the_budget_cannot_cover(monkeypatch: pytest.Mo
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
     ticks = [100.0, 100.0, 100.0 + hook_mod.INJECT_BUDGET_SECONDS - 0.1]
     monkeypatch.setattr(hook_mod.time, "monotonic", lambda: ticks.pop(0) if len(ticks) > 1 else ticks[0])
-    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, api_key, **kw: None)
+    monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, lane, **kw: None)
 
     def _boom(*a, **kw):
         raise AssertionError("the CLI rung must be skipped when the budget is spent")
@@ -867,8 +873,8 @@ def test_gather_hits_uses_rest_when_the_key_is_only_in_service_env(
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
     seen: dict = {}
 
-    def fake_rest(prompt, api_key, **kw):
-        seen["api_key"] = api_key
+    def fake_rest(prompt, lane, **kw):
+        seen["authorization"] = lane.request("http://unused.invalid/", b"").get_header("Authorization")
         return hits
 
     def _boom(*a, **kw):
@@ -877,7 +883,7 @@ def test_gather_hits_uses_rest_when_the_key_is_only_in_service_env(
     monkeypatch.setattr(hook_mod, "_fetch_via_rest", fake_rest)
     monkeypatch.setattr(hook_mod, "_fetch_via_cli", _boom)
     assert hook_mod._gather_hits_with_lane("prompt")[0] == hits
-    assert seen["api_key"] == "from-file"
+    assert seen["authorization"] == "Bearer from-file"
 
 
 # --- the log names the lane and the hit count -------------------------------------

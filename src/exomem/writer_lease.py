@@ -43,6 +43,9 @@ from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
+    COORDINATOR_IDENTITY_DOMAIN,
+    COORDINATOR_IDENTITY_GATE,
+    COORDINATOR_VAULT_BOUNDARY,
     VaultMutationCoordinator,
     _mutation_busy,
     canonical_mutation_identity,
@@ -208,6 +211,24 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
+# True only inside ``progress_check``: a check that need not ask the coordinator itself.
+_PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+
+
+@contextmanager
+def progress_check() -> Iterator[None]:
+    """Run an authority check that need not ask the coordinator itself.
+
+    Inside it, ``LeaseManager.validate_fencing_token`` trusts a fresh local grant instead of
+    reading coordinator status. It suits a check that precedes no store transaction or vault name
+    change, or one that repeats a check asking the coordinator before the same effect. Every such
+    effect still follows a check outside it, so none lands after a lost lease.
+    """
+    reset = _PROGRESS_CHECK.set(True)
+    try:
+        yield
+    finally:
+        _PROGRESS_CHECK.reset(reset)
 
 _FAST_ACK_DEADLINE_SECONDS = 2.0
 
@@ -4801,7 +4822,8 @@ class LeaseManager:
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
-        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock.
+        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock;
+        # None after a renewal fails, until the next grant.
         self._granted_monotonic: float | None = None
         self._capture_queue = _FairCaptureQueue()
         self._lock = threading.RLock()
@@ -4861,14 +4883,24 @@ class LeaseManager:
             pass
 
     def _mutation_coordinator_for(
-        self, vault_root: os.PathLike[str] | str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        kind: str = COORDINATOR_VAULT_BOUNDARY,
+        name: str | None = None,
     ) -> VaultMutationCoordinator:
-        """Construct this manager's canonical boundary for one vault."""
+        """Construct this manager's canonical boundary for one vault.
+
+        `kind` and `name` say which lock a refusal came from; a synthetic reserved-identity
+        lock passes its own.
+        """
         return VaultMutationCoordinator(
             self.config.state_dir,
             vault_root,
             timeout_seconds=self._mutation_timeout_seconds,
             poll_interval_seconds=self._mutation_poll_interval_seconds,
+            kind=kind,
+            name=name,
         )
 
     @contextmanager
@@ -5111,6 +5143,23 @@ class LeaseManager:
         self._expires_at = expires_at
         self._granted_monotonic = time.monotonic()
 
+    def _note_renewal_failed(self) -> None:
+        """With the lock held: a renewal that failed leaves no fresh grant until the next one arrives."""
+        self._granted_monotonic = None
+
+    def _grant_fresh(self) -> bool:
+        """With the lock held: whether the held grant will outlast the next renewal.
+
+        Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen it.
+        A failed renewal ends it until the next grant; a refused one clears the token.
+        """
+        return (
+            self._expires_at is not None
+            and self._granted_monotonic is not None
+            and time.monotonic() - self._granted_monotonic
+            < self.config.ttl_seconds - self._renew_interval_seconds()
+        )
+
     def _reusable_operation_grant(self) -> LeaseRecord | None:
         """With the lock held: the grant this operation's outer guard holds, or None when the guard must acquire.
 
@@ -5129,11 +5178,7 @@ class LeaseManager:
             or self._active_mutations <= 0
             # Only a real acquire derives the file-store marker from the acquisition record.
             or (self._serves_collection_store and self._collection_store is None)
-            or self._expires_at is None
-            or self._granted_monotonic is None
-            # Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen the reuse.
-            or time.monotonic() - self._granted_monotonic
-            >= self.config.ttl_seconds - self._renew_interval_seconds()
+            or not self._grant_fresh()
         ):
             return None
         self._record_lease_op("acquire", "reused")
@@ -5243,54 +5288,95 @@ class LeaseManager:
         vault_identity = canonical_mutation_identity(vault_root)
         manager_deadline = time.monotonic() + self._mutation_timeout_seconds
         deadline = manager_deadline if deadline is None else min(deadline, manager_deadline)
-        gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
+        gate = self._mutation_coordinator_for(
+            f"reserved-identity-v1:gate:{vault_identity}", kind=COORDINATOR_IDENTITY_GATE
+        )
+        domain_locks = [
+            (
+                domain,
+                self._mutation_coordinator_for(
+                    f"reserved-identity-v1:{domain}:{vault_identity}",
+                    kind=COORDINATOR_IDENTITY_DOMAIN,
+                    name=domain,
+                ),
+            )
+            for domain in ordered_domains
+        ]
 
-        def enter(
-            stack: ExitStack,
-            mutation: VaultMutationCoordinator,
-            *,
-            operation_label: str | None = operation,
-        ) -> None:
+        def hold_args(label: str) -> dict[str, Any]:
+            return {
+                "request_id": request_id,
+                "operation": f"{operation}:{label}" if operation is not None else label,
+                "holder_kind": holder_kind,
+                "publish_holder_metadata": False,
+            }
+
+        def enter(stack: ExitStack, mutation: VaultMutationCoordinator, label: str) -> None:
             stack.enter_context(
                 mutation.hold(
-                    timeout_seconds=max(0.0, deadline - time.monotonic()),
-                    request_id=request_id,
-                    operation=operation_label,
-                    holder_kind=holder_kind,
-                    publish_holder_metadata=False,
+                    timeout_seconds=max(0.0, deadline - time.monotonic()), **hold_args(label)
                 )
             )
 
-        def enter_domains(stack: ExitStack) -> None:
-            for domain in ordered_domains:
-                identity = f"reserved-identity-v1:{domain}:{vault_identity}"
-                mutation = self._mutation_coordinator_for(identity)
-                label = f"{operation}:{domain}" if operation is not None else domain
-                enter(stack, mutation, operation_label=label)
-
         if exclusive:
             with ExitStack() as gate_stack:
-                gate_label = f"{operation}:gate" if operation is not None else "gate"
-                enter(gate_stack, gate, operation_label=gate_label)
+                enter(gate_stack, gate, "gate")
                 with ExitStack() as domains_stack:
-                    enter_domains(domains_stack)
+                    for domain, mutation in domain_locks:
+                        enter(domains_stack, mutation, domain)
                     yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
             return
 
+        if not advance_generation:
+            # No gate: this owner changes no identity, so no scanner needs ordering against it,
+            # and it holds only its own domains. It never asks for the gate while it holds them
+            # (reserved_paths forbids widening), so no domain-then-gate wait exists to invert the
+            # exclusive scanner's gate-then-domains order.
+            with ExitStack() as domains_stack:
+                for domain, mutation in domain_locks:
+                    enter(domains_stack, mutation, domain)
+                yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
+            return
+
+        # Admission order matches the exclusive scanner: gate first, then domains. Only a wait for
+        # one lock is ever blocking, and it starts with nothing held; every other lock is tried.
+        # A try never waits, so holding one lock while trying the next adds no wait-for edge. The
+        # lock won by waiting is kept, so a stream of short owners cannot take it back at release.
+        admission = [("gate", gate), *domain_locks]
         with ExitStack() as domains_stack:
-            with ExitStack() as gate_stack:
-                gate_label = f"{operation}:gate" if operation is not None else "gate"
-                enter(gate_stack, gate, operation_label=gate_label)
-                # Admission order matches the exclusive scanner: gate first,
-                # then domains.  The domain stack outlives the gate so exact
-                # owners still release admission before doing their work,
-                # without the gate/domain inversion that can deadlock a scan.
-                enter_domains(domains_stack)
-                generation = (
-                    _bump_reserved_identity_generation(self.config.state_dir, vault_root)
-                    if advance_generation
-                    else _read_reserved_identity_generation(self.config.state_dir, vault_root)
-                )
+            gate_stack = ExitStack()
+            with gate_stack:
+                held: set[str] = set()
+                won: tuple[str, VaultMutationCoordinator] | None = None
+                while True:
+                    if won is not None:
+                        # The deadline is checked here, not only inside the wait, so the retry
+                        # loop cannot outlive it; a lock still busy then is refused by name.
+                        label, mutation = won
+                        remaining = max(0.0, deadline - time.monotonic())
+                        stack = gate_stack if label == "gate" else domains_stack
+                        stack.enter_context(
+                            mutation.hold(timeout_seconds=remaining, **hold_args(label))
+                        )
+                        held.add(label)
+                        won = None
+                    for label, mutation in admission:
+                        if label in held:
+                            continue
+                        stack = gate_stack if label == "gate" else domains_stack
+                        if stack.enter_context(mutation.try_hold(**hold_args(label))):
+                            held.add(label)
+                            continue
+                        # Busy: release everything and wait for this lock alone.
+                        gate_stack.close()
+                        domains_stack.close()
+                        held.clear()
+                        won = (label, mutation)
+                        break
+                    else:
+                        break
+                generation = _bump_reserved_identity_generation(self.config.state_dir, vault_root)
+                gate_stack.close()
             yield generation
 
     @contextmanager
@@ -6672,10 +6758,12 @@ class LeaseManager:
                         with guard:
                             yield
                     finally:
-                        if not narrow_boundary:
-                            # Post-terminal housekeeping takes later, shorter holds that
-                            # would overwrite this one before the journal row is written.
-                            wide_hold["timing"] = last_mutation_timing()
+                        # The vault boundary's own hold: later holds of other coordinators
+                        # (identity gate, domains, review state) do not replace it, and
+                        # post-terminal housekeeping's later vault holds are not yet taken.
+                        wide_hold["timing"] = last_mutation_timing(
+                            self._mutation_coordinator_for(mutation_subject)
+                        )
                 finally:
                     _ACTIVE_FAST_ACK_SESSION.reset(token)
 
@@ -7279,10 +7367,16 @@ class LeaseManager:
         return None
 
     def validate_fencing_token(self, fencing_token: int) -> None:
-        """Fail closed unless the command's token is still locally and remotely current."""
+        """Fail closed unless the command's token is still locally and remotely current.
+
+        A progress check (``progress_check``) trusts a fresh local grant: an effect that follows
+        it validates again here outside one, and a fence change revokes the token at the coordinator.
+        """
         with self._lock:
             if self._fencing_token != fencing_token:
                 self._raise_fenced(fencing_token)
+            if _PROGRESS_CHECK.get() and self._grant_fresh():
+                return
         assert self.client is not None
         record = self.client.status()
         with self._lock:
@@ -7449,11 +7543,16 @@ class LeaseManager:
                         and time.monotonic() - self._last_renew_monotonic
                         < self._renew_interval_seconds()):
                     return
-            head = self._collection_store.report_head(token)
-            record = self.client.renew(
-                token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
-                collection_store_head=head,
-            )
+            try:
+                head = self._collection_store.report_head(token)
+                record = self.client.renew(
+                    token, collection_store_capability=COLLECTION_STORE_CAPABILITY,
+                    collection_store_head=head,
+                )
+            except Exception:
+                with self._lock:
+                    self._note_renewal_failed()
+                raise
             with self._lock:
                 if self._fencing_token != token:
                     self._raise_fenced(token)
@@ -7783,6 +7882,8 @@ class LeaseManager:
                         self._log_lease_event("lease_renew_rejected")
             except OpError as error:
                 # Mutations still revalidate synchronously and fail closed.
+                with self._lock:
+                    self._note_renewal_failed()
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("renew", "error")
                 continue
