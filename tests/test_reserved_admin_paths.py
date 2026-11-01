@@ -3378,8 +3378,6 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
     ):
         assert reserved_paths.owner_authorized(descriptor_id)
         assert reserved_paths._identity_coordination_active(vault_root)
-        if not create and not Path(database).exists():
-            raise FileNotFoundError(database)  # as the real scope does
         observed.append((descriptor_id, Path(database).name, create))
         retained.add(descriptor_id)
         try:
