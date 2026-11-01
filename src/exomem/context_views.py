@@ -54,6 +54,7 @@ from . import (
     topic_carriers,
     vocabulary_resolution,
     working_set,
+    working_set_conversation,
     working_set_index,
     working_set_resolve,
     working_set_runtime,
@@ -130,7 +131,7 @@ TURN_SLICE_SHARE = 0.25
 #: The key a turn slice's record is kept under. It names no view and is never served.
 SLICE_REF = "exomem://turn-slice"
 SLICE_DESCRIPTION = (
-    "What this turn's words reached, with the evidence. Not checked for relevance; read a ref before relying on it."
+    "What this turn and its conversation reached, with the evidence. Not checked for relevance; read a ref before relying on it."
 )
 #: The states of a turn slice. `ready` lists leads; `empty` is a turn that reached nothing the caller may
 #: see; `skipped` is a request budget or a share with no room for a line; `unavailable` is a fault.
@@ -1242,7 +1243,7 @@ def activation_packet(
 
     `turn_leads` turns the turn slice on: it holds back `TURN_SLICE_SHARE` of the budget for the slice
     (so the map is the same on every turn), and it is called once, after the map is compiled, with the
-    map's caller view, for what the turn's words reached. A fault in it, or no room for a line, sets the
+    map's caller view, for what the turn and its conversation reached. A fault in it, or no room for a line, sets the
     slice's state and never changes the map.
 
     `known_generation` is the map generation the caller holds. When it equals the generation of the map this
@@ -1342,11 +1343,15 @@ def _activation_packet(
 
 @dataclass(frozen=True, slots=True)
 class Lead:
-    """One page, anchor or collection that the turn's words reached, as the guarded compile named it."""
+    """One page, anchor or collection that the turn or its conversation reached, as the guarded compile named it.
+
+    `origin` is where the compile found the cue: the turn's own words, the agent's focus, or the conversation.
+    """
 
     ref: str
     match: str
     evidence: tuple[str, ...]
+    origin: str = working_set_conversation.ORIGIN_TURN
 
 
 @dataclass(frozen=True, slots=True)
@@ -1354,12 +1359,14 @@ class TurnLeads:
     """What the turn reached: `READY` with its leads, `SLICE_EMPTY` with none, or why there is no answer.
 
     `evidence` holds the compile's own evidence states (`lexical_evidence`, `semantic_evidence`) as its
-    packet reported them, so a slice that is empty because a lane was warming says so.
+    packet reported them, so a slice that is empty because a lane was warming says so. `conversation` is
+    the state the compile computed for the request's conversation, which the maps packet reports.
     """
 
     state: str
     leads: tuple[Lead, ...] = ()
     evidence: tuple[tuple[str, str], ...] = ()
+    conversation: str = working_set_conversation.ABSENT
 
 
 def _lead_ref(item: Mapping[str, Any]) -> str:
@@ -1395,9 +1402,13 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
         for name in ("lexical_evidence", "semantic_evidence")  # nosemgrep: ep-word-set -- The packet's two evidence-state fields.
         if isinstance(generation, Mapping) and generation.get(name)
     )
+    # The state the compile computed for the request's conversation; `absent` where its packet names none.
+    conversation = str(
+        (generation.get("conversation") if isinstance(generation, Mapping) else None) or working_set_conversation.ABSENT
+    )
     abstention = packet.get("abstention")
     if packet.get("abstained") and (not isinstance(abstention, Mapping) or abstention.get("reason") not in _TURN_ANSWERS):
-        return TurnLeads(SLICE_SKIPPED if "request_budget" in packet else UNAVAILABLE, (), evidence)
+        return TurnLeads(SLICE_SKIPPED if "request_budget" in packet else UNAVAILABLE, (), evidence, conversation)
     senses = {
         _lead_ref(item) for item in packet.get("ambiguity") or () if isinstance(item, Mapping)
     }
@@ -1406,7 +1417,7 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
     def add(item: Mapping[str, Any], match: str | None) -> None:
         ref = _lead_ref(item)
         if ref and match is not None and ref not in found:
-            found[ref] = Lead(ref, match, _lead_evidence(item))
+            found[ref] = Lead(ref, match, _lead_evidence(item), str(item.get("origin") or working_set_conversation.ORIGIN_TURN))
 
     for item in packet.get("anchors") or ():
         if isinstance(item, Mapping):
@@ -1418,7 +1429,7 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
         if isinstance(item, Mapping):
             add(item, "related")
     leads = tuple(sorted(found.values(), key=lambda lead: MATCHES.index(lead.match)))
-    return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence)
+    return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence, conversation)
 
 
 def slice_item_line(item: Mapping[str, Any]) -> str:
@@ -1528,6 +1539,9 @@ def _slice_rows(
         if row is not None and row.entry_id not in extras:
             rows.append(row)
             extras[row.entry_id] = {"match": lead.match, "evidence": list(lead.evidence)}
+            if lead.origin != working_set_conversation.ORIGIN_TURN:
+                # A cue the user did not speak says so, as an anchors packet's `origin` does.
+                extras[row.entry_id]["origin"] = lead.origin
     return tuple(rows), extras
 
 
