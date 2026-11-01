@@ -4,7 +4,7 @@
 
 For a restricted caller, as "Restricted direct-read refusals complete at a fixed floor" defines one, every refusal of `browse_memory`, `compile_source`, `connect_memory` and `query_dataset` SHALL complete no sooner than the same floor F, under the same rules for surfaces, overruns, owners and successes. Each of these doors SHALL decide that a named path is withheld before work that a missing path would skip, and SHALL then refuse with the missing-path response.
 
-`list_inbound_links` answers a missing target with an empty success. For a restricted caller it SHALL answer a withheld target with the same bytes, SHALL omit the echoed `target` on every outcome, and SHALL complete both no sooner than F. A target that the caller may see is not padded.
+On a governed vault, `list_inbound_links` SHALL give a restricted caller the same empty success for every target that the caller may not see, withheld or missing, whatever pages the caller may see link to it. It SHALL omit the echoed `target` on every outcome for a restricted caller, and SHALL complete each empty answer no sooner than F. A target that the caller may see is not padded.
 
 #### Scenario: A withheld dataset and a missing dataset refuse alike, at the floor
 
@@ -19,6 +19,7 @@ For a restricted caller, as "Restricted direct-read refusals complete at a fixed
 
 #### Scenario: Inbound links of a withheld target match a missing target
 
-- **WHEN** a restricted caller lists inbound links of a withheld page and of a missing page
-- **THEN** both responses are byte-identical and carry no `target`
+- **WHEN** a page that a restricted caller may see links a withheld page and a missing page
+- **AND** the caller lists inbound links of each
+- **THEN** both responses are byte-identical empty successes and carry no `target`
 - **AND** each completes no sooner than F

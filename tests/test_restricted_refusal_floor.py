@@ -237,6 +237,36 @@ def test_an_empty_inbound_answer_to_a_restricted_caller_completes_at_the_floor(
     assert elapsed < 1.5
 
 
+def test_a_withheld_and_a_missing_target_that_a_visible_page_links_answer_alike(
+    vault: Path,
+) -> None:
+    """The caller reads both links verbatim in the visible page, so only this answer could tell them apart.
+
+    The dangling link to a missing target was listed while the link to a
+    withheld target was dropped, so the count said which of the two exists.
+    """
+    withheld = "Knowledge Base/Notes/Hidden/withheld-example.md"
+    missing = "Knowledge Base/Notes/Hidden/ghost-example.md"
+    _write_page(vault, withheld, memory_refs.new_id())
+    source = vault / "Knowledge Base/Notes/Open/links-out.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntype: insight\n---\n\nSee [[Knowledge Base/Notes/Hidden/withheld-example]]"
+        " and [[Knowledge Base/Notes/Hidden/ghost-example]].\n",
+        encoding="utf-8",
+    )
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    connect = next(item for item in commands.PRODUCT_COMMANDS if item.name == "connect_memory")
+
+    with request_scope(EXTERNAL):
+        shown, absent = (
+            writer_lease.invoke_command(connect, vault, operation="inbound-links", target=target)
+            for target in (withheld, missing)
+        )
+    assert json.dumps(shown, sort_keys=True) == json.dumps(absent, sort_keys=True)
+    assert absent["count"] == 0
+
+
 def test_a_write_through_a_floored_command_decides_on_the_policy_it_finds(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

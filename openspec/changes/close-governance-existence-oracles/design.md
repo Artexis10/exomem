@@ -10,7 +10,7 @@ The four doors take the existing attribute; the dispatcher and the surfaces need
 
 ### D2. Inbound links pad their empty outcome
 
-`list_inbound_links` deliberately answers a missing target with an empty success, and answers a withheld target the same way. Deciding a withheld target reads the page, so its work depends on existence and on page size, and it cannot be made equal to a missing target's work without weakening the decision. For a restricted caller, the door therefore completes the empty outcome of a withheld or a missing target no sooner than F, through the same deferred wait that the surfaces apply to refusals. A visible target is not padded, because the caller already knows that it exists. A restricted caller never receives the echoed `target`, which the terminal filter would strip only for a withheld target.
+On a governed vault, `list_inbound_links` gives a restricted caller the same empty success for every target that it may not see, withheld or missing, even when a page that it may see links to the target. Deciding a withheld target reads the page, so its work depends on existence and on page size, and it cannot be made equal to a missing target's work without weakening the decision. For a restricted caller, the door therefore completes the empty outcome of a withheld or a missing target no sooner than F, through the same deferred wait that the surfaces apply to refusals. A visible target is not padded, because the caller already knows that it exists. A restricted caller never receives the echoed `target`, which the terminal filter would strip only for a withheld target.
 
 ### D3. Empty-outcome receipts only where governance applies
 

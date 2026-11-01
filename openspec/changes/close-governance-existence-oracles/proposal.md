@@ -10,7 +10,7 @@ Non-owners can also read governance metadata that only the owner needs: every ru
 
 ## What Changes
 
-- The restricted refusal floor F extends to `browse_memory`, `compile_source`, `connect_memory` and `query_dataset`, marked through the existing `restricted_refusal_floor` registry attribute. `list_inbound_links` answers a withheld target as a success, so it does the same work for a withheld target as for a missing one instead.
+- The restricted refusal floor F extends to `browse_memory`, `compile_source`, `connect_memory` and `query_dataset`, marked through the existing `restricted_refusal_floor` registry attribute. `list_inbound_links` gives a restricted caller the same empty success for a withheld and a missing target, even when a page it may see links to them, and completes that answer no sooner than F.
 - A governed boundary with no disclosure outcome appends a receipt with an empty outcome list when the caller is restricted. An unrestricted owner keeps the receipt-free path.
 - Chain verification reports, for each instance, whether a local anchor covers it, and counts the unanchored instances. `valid` keeps its meaning. The audit category reports each unanchored instance as a warning. Restore admission keeps its stricter anchored-only rule.
 - `govern_memory list` returns rule and grant ids to the owner only. `coordination_status` returns mutation-lock contention to the owner only.

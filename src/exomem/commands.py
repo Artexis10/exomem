@@ -6329,9 +6329,22 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # the only floor, and a protected target lists the same links its absent
     # twin does, since an inbound link resolves by name whether or not its
     # target exists. So the target's pages are found and decided only under a policy.
+    #
+    # A restricted caller hears the same empty answer for every target it cannot
+    # see. A missing target still collects the dangling links that visible pages
+    # hold, so listing them would tell it apart from a withheld target, whose
+    # links the release gate drops; the caller reads those links verbatim
+    # elsewhere, so only this answer could disclose which of the two exists.
     governed = not egress_module.gate_state(Path(vault_root))[0].empty
     pages = _link_target_pages(vault_root, target) if governed else []
-    if governed and not all(_link_target_released(vault_root, page) for page in pages):
+    unseen = (
+        governed
+        and visible is not None
+        and (not pages or not all(visible(page) for page in pages))
+    )
+    if unseen or (
+        governed and not all(_link_target_released(vault_root, page) for page in pages)
+    ):
         payload["inbound"] = []
         payload["count"] = 0
     elif visible is not None:
@@ -6352,7 +6365,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         # than a missing target's, and later still for a larger page. Both
         # complete at the refusal floor. A target the caller sees is its own
         # knowledge, so it is not held.
-        if governed and (not pages or not all(visible(page) for page in pages)):
+        if unseen:
             projection_timing_module.floor_restricted_outcome()
     return payload
 

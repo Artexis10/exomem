@@ -1866,6 +1866,9 @@ def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
         ("list_inbound_links", "target", ERROR_WITHHELD),
         ("ask_memory", "relation_of", ERROR_WITHHELD),
         ("recover_from_trash", "restore_path", ERROR_WITHHELD),
+        # Declared for error echo only, outside reserved preflight.
+        ("link", "ref", ERROR_WITHHELD),
+        ("adoption_studio", "include", [{"path": ERROR_WITHHELD, "domain": "example"}]),
     ],
 )
 def test_a_reference_the_command_declares_is_echoed_in_an_error(
@@ -1885,15 +1888,19 @@ def test_a_reference_the_command_declares_is_echoed_in_an_error(
 
 
 @pytest.mark.parametrize(
-    ("command_name", "parameter"),
+    ("command_name", "parameter", "value"),
     [
         # `target` names a page for `connect_memory`, but not for this command.
-        ("compile_source", "target"),
-        ("connect_memory", "why_in_kb"),
+        ("compile_source", "target", ERROR_WITHHELD),
+        ("connect_memory", "why_in_kb", ERROR_WITHHELD),
+        # A collection name here is free text; for `maintain_memory` it names a collection.
+        ("adoption_studio", "collection", ERROR_WITHHELD),
+        # Only the rule's `path` is a path; its other fields are free text.
+        ("adoption_studio", "include", [{"path": "Sources/example", "domain": ERROR_WITHHELD}]),
     ],
 )
-def test_a_path_in_an_argument_the_command_does_not_declare_stays_redacted(
-    vault: Path, command_name: str, parameter: str
+def test_a_path_the_command_does_not_declare_as_a_reference_stays_redacted(
+    vault: Path, command_name: str, parameter: str, value: object
 ) -> None:
     """A withheld path the caller puts in any other field does not unlock the error.
 
@@ -1903,9 +1910,7 @@ def test_a_path_in_an_argument_the_command_does_not_declare_stays_redacted(
     _govern_patterns_shut(vault)
     error = ValueError(f"AMBIGUOUS_REFERENCE: [{ERROR_WITHHELD!r}]")
     with _external_scope():
-        egress.postfilter_error(
-            command_name, error, vault, request_kwargs={parameter: ERROR_WITHHELD}
-        )
+        egress.postfilter_error(command_name, error, vault, request_kwargs={parameter: value})
     assert ERROR_WITHHELD not in str(error)
     assert egress.WITHHELD_REFERENCE in str(error)
 

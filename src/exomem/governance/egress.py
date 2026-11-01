@@ -5955,27 +5955,15 @@ def _rewrite_error_attribute(error: BaseException, name: str, value: Any) -> Non
             pass
 
 
-# Temporary second copy of reference-argument knowledge. Some commands take a
-# reference that `reserved_paths._COMMAND_PATH_ROLES` does not declare yet
-# (`link.ref`, `maintain_memory.paths`/`refs`/`collection`,
-# `adoption_studio.paths`, `triage_memory.source_path`). Without these names a
-# withheld reference in their errors would read `[withheld]` while a missing one
-# is echoed. Declaring those roles also adds reserved preflight to write doors,
-# so it belongs to the write-destination admission work. Delete this set when
-# those roles are declared there.
-_UNDECLARED_REFERENCE_ARGUMENTS = frozenset(
-    {"paths", "ref", "refs", "collection", "source_path"}
-)
-
-
 def _caller_supplied_references(
     command_name: str, kwargs: Mapping[str, Any] | None
 ) -> frozenset[str]:
     """Canonical keys for every reference the CALLER put in the request.
 
     See `postfilter_error` for why these must survive filtering verbatim. Only
-    the arguments that the dispatched command declares as naming vault state
-    (`reserved_paths.path_roles_for_command`) seed the set, never every kwarg.
+    the paths and refs inside the arguments that the dispatched command declares
+    as path roles (`reserved_paths.path_roles_for_command`) seed the set, never
+    every kwarg and never a free-text field of a declared argument.
 
     Walking all kwargs looks harmless — each value is caller-supplied, which is
     the whole safety argument — but it hands the caller a de-anonymisation
@@ -5988,15 +5976,11 @@ def _caller_supplied_references(
     """
     if not kwargs:
         return frozenset()
-    named = {
-        role.argument
-        for role in reserved_paths.path_roles_for_command(command_name)
-        if role.names_state
-    } | _UNDECLARED_REFERENCE_ARGUMENTS
     out: set[str] = set()
-
-    def _walk(value: Any) -> None:
-        if isinstance(value, str):
+    for role in reserved_paths.path_roles_for_command(command_name):
+        if role.argument not in kwargs:
+            continue
+        for value in reserved_paths.reference_values(role, kwargs[role.argument]):
             canonical = _canonical_reference(value)
             if canonical is not None:
                 out.add(canonical[0])
@@ -6005,14 +5989,6 @@ def _caller_supplied_references(
                 stripped = _kb_stripped(canonical[0])
                 if stripped:
                     out.add(stripped)
-        elif isinstance(value, Mapping):
-            for item in value.values():
-                _walk(item)
-        elif isinstance(value, (list, tuple, set, frozenset)):
-            for item in value:
-                _walk(item)
-
-    _walk([value for key, value in kwargs.items() if key in named])
     return frozenset(out)
 
 
