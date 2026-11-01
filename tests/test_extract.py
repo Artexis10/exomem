@@ -264,9 +264,16 @@ def test_extract_textfile_reads_the_codec_a_byte_order_mark_names(tmp_path, bom,
     assert r.engine == engine
 
 
-def test_extract_textfile_decodes_latin1_accents(tmp_path) -> None:
-    # A short French note: the detector's own ranking reads it as Mac Latin-2 ("cafť ťtait fermť").
-    body = "Le café était fermé, alors nous sommes allés à la gare."
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The detector's own ranking reads this short French note as Mac Latin-2 ("cafť ťtait fermť").
+        "Le café était fermé, alors nous sommes allés à la gare.",
+        # The detector names Code Page 775 for this German note and lists Windows-1252 only in its group.
+        "Der Bürgermeister öffnet die Tür über dem Fluß.",
+    ],
+)
+def test_extract_textfile_decodes_latin1_accents(tmp_path, body) -> None:
     f = tmp_path / "notes.txt"
     f.write_bytes(f"{body}\n".encode("latin-1"))
     r = extract.extract_text(f)

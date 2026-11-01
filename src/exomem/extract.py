@@ -34,6 +34,7 @@ Two OPTIONAL deepen-the-moat transducers ship here, both DEFAULT-OFF + soft-fail
 from __future__ import annotations
 
 import codecs
+import functools
 import itertools
 import json
 import logging
@@ -1648,10 +1649,26 @@ def _confident_guess(data: bytes) -> str | None:
     from charset_normalizer import from_bytes
 
     matches = from_bytes(_detection_window(data), cp_exclusion=_UNMARKED_EXCLUDED)
-    accepted = [m.encoding for m in matches if 1.0 - m.chaos >= _DETECTION_CONFIDENCE]
-    if _LEGACY_WESTERN_ENCODING in accepted:
+    accepted = [
+        m for m in matches
+        if 1.0 - m.chaos >= _DETECTION_CONFIDENCE and _keeps_ascii(m.encoding)
+    ]
+    # The library groups codecs that read the sample to the same text and names only the first
+    # of them, so Windows-1252 can stand behind Code Page 775 for German text.
+    if any(_LEGACY_WESTERN_ENCODING in (m.encoding, *m.could_be_from_charset) for m in accepted):
         return _LEGACY_WESTERN_ENCODING
-    return accepted[0] if accepted else None
+    return accepted[0].encoding if accepted else None
+
+
+@functools.cache
+def _keeps_ascii(codec: str) -> bool:
+    """Whether `codec` reads printable ASCII as itself. A file that is not UTF-8 is still mostly
+    ASCII words; a probe read a short Latin-1 note as EBCDIC and lost every one of them."""
+    printable = bytes(range(0x20, 0x7F))
+    try:
+        return printable.decode(codec) == printable.decode("ascii")
+    except (UnicodeDecodeError, LookupError):
+        return False
 
 
 def _detection_window(data: bytes) -> bytes:
