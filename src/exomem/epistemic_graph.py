@@ -3542,34 +3542,26 @@ class EpistemicGraphIndex:
         there with both memberships as walked now and whether the policy
         identity moved, and the answer is False when anything moved.
         """
-        if movement_out is None:
-            for guard in seal.guards:
-                if interrupt is not None:
-                    interrupt()
-                guard.recheck(self.vault_root)
-            return (
-                self._recall_membership(interrupt=interrupt) == seal.resolver_membership
-                and self._indexed_recall_membership(interrupt=interrupt)
-                == seal.indexed_membership
-                and recall_policy.recall_policy_identity(self.vault_root) == seal.policy_identity
-            )
+        movement = _SealMovement() if movement_out is None else movement_out
         for guard in seal.guards:
             if interrupt is not None:
                 interrupt()
             try:
                 guard.recheck(self.vault_root)
             except vault_module.PathGuardError as error:
-                movement_out.failed.append((guard.target, error))
-        movement_out.resolver_membership = self._recall_membership(interrupt=interrupt)
-        movement_out.indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
-        movement_out.policy_moved = (
+                if movement_out is None:
+                    raise
+                movement.failed.append((guard.target, error))
+        movement.resolver_membership = self._recall_membership(interrupt=interrupt)
+        movement.indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
+        movement.policy_moved = (
             recall_policy.recall_policy_identity(self.vault_root) != seal.policy_identity
         )
         return (
-            not movement_out.failed
-            and movement_out.resolver_membership == seal.resolver_membership
-            and movement_out.indexed_membership == seal.indexed_membership
-            and not movement_out.policy_moved
+            not movement.failed
+            and movement.resolver_membership == seal.resolver_membership
+            and movement.indexed_membership == seal.indexed_membership
+            and not movement.policy_moved
         )
 
     def _drain_owns_topology(
