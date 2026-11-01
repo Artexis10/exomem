@@ -91,9 +91,6 @@ MAX_PRUNE_CATALOG_ENTRIES = 512
 #: that manifest's temporary file, which is released before the session
 #: directory takes its slot.
 NEW_SESSION_CATALOG_SLOTS = 2
-#: Most sessions one new session tries to evict, so a catalog that holds
-#: entries no eviction can remove costs bounded work before the refusal.
-MAX_CATALOG_EVICTIONS = 8
 
 
 def _over_budget(deadline: float, inspected: int) -> bool:
@@ -3550,27 +3547,38 @@ def _tombstone_expired_candidate(
         tombstone = f".tombstone-{name}-{secrets.token_hex(8)}"
         if evict:
             # A full catalog has no slot for the tombstone, so hand it the
-            # session's own. A crash before the rename leaves the session
-            # unlisted: the Linux directory scan still finds it, but elsewhere
-            # prune skips it until its next write lists it again (`_session_lock`).
+            # session's own, and give it back below if the rename fails. Only
+            # a crash before the rename leaves the session unlisted: the Linux
+            # directory scan still finds it, but elsewhere prune skips it until
+            # its next write lists it again (`_session_lock`).
             _unregister_prune_catalog_entry(root_handle, root_lock, name)
-        _register_prune_catalog_entry(root_handle, root_lock, tombstone)
-        if force_fallback:
-            lock.__exit__(None, None, None)
-            locked = False
-            state_context.__exit__(None, None, None)
-            state_open = False
         try:
-            _rename_directory_at(root_handle, name, tombstone)
-        except PermissionError:
-            if locked:
+            _register_prune_catalog_entry(root_handle, root_lock, tombstone)
+            if force_fallback:
                 lock.__exit__(None, None, None)
                 locked = False
-            if state_open:
                 state_context.__exit__(None, None, None)
                 state_open = False
-            _rename_directory_at(root_handle, name, tombstone)
-        _unregister_prune_catalog_entry(root_handle, root_lock, name)
+            try:
+                _rename_directory_at(root_handle, name, tombstone)
+            except PermissionError:
+                if locked:
+                    lock.__exit__(None, None, None)
+                    locked = False
+                if state_open:
+                    state_context.__exit__(None, None, None)
+                    state_open = False
+                _rename_directory_at(root_handle, name, tombstone)
+        except BaseException:
+            if evict and _existing_kind(root_handle, name) is not None:
+                try:
+                    _unregister_prune_catalog_entry(root_handle, root_lock, tombstone)
+                    _register_prune_catalog_entry(root_handle, root_lock, name)
+                except OSError:
+                    pass
+            raise
+        if not evict:
+            _unregister_prune_catalog_entry(root_handle, root_lock, name)
         if _directory_entry_identity(root_handle, tombstone) != state_identity:
             if _existing_kind(root_handle, name) is None:
                 try:
@@ -3820,26 +3828,35 @@ def _ensure_prune_catalog_room(
     except FileNotFoundError:
         return
     live: list[str] = []
+    unreadable = 0
     try:
         for slot in range(MAX_PRUNE_CATALOG_ENTRIES):
-            status_value, name = _read_prune_catalog_slot(fd, slot)
+            try:
+                status_value, name = _read_prune_catalog_slot(fd, slot)
+            except OSError:
+                # A torn record is not free; skip it rather than refuse the session.
+                unreadable += 1
+                continue
             if status_value == "live" and name is not None:
                 live.append(name)
     finally:
         os.close(fd)
-    free = MAX_PRUNE_CATALOG_ENTRIES - len(live)
+    free = MAX_PRUNE_CATALOG_ENTRIES - len(live) - unreadable
     if free >= NEW_SESSION_CATALOG_SLOTS:
         return
     sessions: list[tuple[int, str]] = []
     for name in live:
         info = _entry_stat(root, name)
         if info is None:
-            _unregister_prune_catalog_entry(root, root_lock, name)
+            try:
+                _unregister_prune_catalog_entry(root, root_lock, name)
+            except OSError:
+                continue
             free += 1
         elif stat.S_ISDIR(info.st_mode) and not name.startswith(".") and name != keep:
             sessions.append((info.st_mtime_ns, name))
     now = time.time_ns()
-    for _changed_ns, name in sorted(sessions)[:MAX_CATALOG_EVICTIONS]:
+    for _changed_ns, name in sorted(sessions):
         if free >= NEW_SESSION_CATALOG_SLOTS:
             return
         try:

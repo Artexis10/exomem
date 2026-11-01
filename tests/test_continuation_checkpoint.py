@@ -3552,6 +3552,32 @@ def test_a_full_catalog_evicts_the_oldest_session_for_a_new_one(
     assert not list(root.glob(".tombstone-*"))
 
 
+def test_a_failed_eviction_keeps_the_session_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Windows sharing violation makes the tombstone rename fail. An unlisted
+    # session is never pruned again where prune scans the catalog.
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_CATALOG_ENTRIES", 8)
+    home = tmp_path / "home"
+    for number in range(7):
+        checkpoint.write_checkpoint(_event(session_id=f"old-{number}"), home)
+
+    def sharing_violation(*_args, **_kwargs):
+        raise PermissionError("the directory is in use")
+
+    monkeypatch.setattr(checkpoint, "_rename_directory_at", sharing_violation)
+    with pytest.raises(OSError):
+        checkpoint.write_checkpoint(_event(session_id="new"), home)
+
+    root_path = checkpoint.client_state_root(home, "claude")
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        for number in range(7):
+            name = checkpoint.session_state_dir(home, "claude", f"old-{number}").name
+            assert (root_path / name).is_dir()
+            assert checkpoint._prune_catalog_contains(root, name)
+
+
 def test_catalog_entries_without_a_directory_are_dropped_to_make_room(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
