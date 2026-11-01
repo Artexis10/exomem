@@ -7191,8 +7191,9 @@ class LeaseManager:
 
         The store thread makes each attempt once and hands back a refusal raised before anything
         committed (`_run_store_attempt`), so it never parks while this write waits its turn.
-        Routing proves ownership under the boundary and changes nothing, so its busy is waited out too.
-        `routed` is the first routing's store server, or the busy refusal it raised.
+        Routing reads ownership without the boundary (`ReadScope.proof`), so it never refuses as busy;
+        the guard is first met on the store thread, where the queue wait absorbs it.
+        `routed` is the first routing's store server.
         """
         from .collection_store import runtime as store_runtime
 
@@ -7202,7 +7203,7 @@ class LeaseManager:
         wait = _ContentionWait(
             self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
         )
-        routing = received = False
+        received = False
         current: _StoreAttempt | None = None
         refusal_journal: list[Callable[[], None]] = []
 
@@ -7219,21 +7220,13 @@ class LeaseManager:
             return func(command, *injected, **call_kwargs)
 
         def attempt() -> Any:
-            nonlocal routing, received, current
+            nonlocal received, current
             current = _StoreAttempt(
                 holds_ticket=wait.ticket is not None,
                 resubmission=received,
                 deadline=wait.deadline,
             )
-            routing = True
-            if wait.absorbed:
-                with mutation_lock.absorbing_busy():
-                    server = store_runtime.route(command.name, injected[0], kwargs)
-            elif isinstance(routed, OpError):
-                raise routed
-            else:
-                server = routed
-            routing = False
+            server = store_runtime.route(command.name, injected[0], kwargs) if wait.absorbed else routed
             token = _ACTIVE_STORE_ATTEMPT.set(current)
             try:
                 if server is None:
@@ -7251,13 +7244,6 @@ class LeaseManager:
                 received = received or current.received
 
         def absorbable(error: OpError) -> bool:
-            if routing:
-                if error.code != "MUTATION_BUSY":
-                    return False
-                # Routing refuses before `invoke` runs, so this seam journals the refusal the caller finally sees.
-                refusal_journal[:] = [lambda: _record_store_queue_refusal(
-                    command, call_kwargs, injected[0], error, wait.waited_ms() / 1000)]
-                return True
             if current is None or error is not current.handed_off:
                 return False
             # The journal row, if any, of the refusal the caller would see now.
@@ -8368,14 +8354,7 @@ def _collection_store_thread(func):
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
                 if not (read_only or import_status) and _writes_absorb_contention():
-                    try:
-                        with mutation_lock.absorbing_busy():
-                            routed = store_runtime.route(command.name, injected[0], kwargs)
-                    except OpError as error:
-                        # Routing proves ownership under the boundary and changes nothing.
-                        if error.code != "MUTATION_BUSY":
-                            raise
-                        routed = error
+                    routed = store_runtime.route(command.name, injected[0], kwargs)
                     if routed is not None:
                         return get_manager()._attempt_store_write(func, command, injected, kwargs, routed)
                     return func(command, *injected, **kwargs)

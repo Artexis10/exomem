@@ -1948,15 +1948,15 @@ def test_a_keyed_write_waiting_its_turn_leaves_the_store_thread_free(service, mo
     assert titles(service.root, CID) == ["Canonical", "Waited"]
 
 
-@pytest.mark.parametrize("held", ["at_routing", "after_routing"])
-def test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread(service, monkeypatch, held):
-    """Routing proves ownership under the boundary, so a hold met there reached the caller as
-    MUTATION_BUSY. A hold met after routing was waited out on the store thread. Both now wait on
-    the request thread, and the write commits once."""
+def test_a_keyed_write_waits_out_a_held_boundary_on_the_store_thread_and_commits_once(service, monkeypatch):
+    """Routing reads ownership without the boundary, so an unrelated hold does not refuse it. The write
+    first meets the hold on the store thread, waits it out there, and commits once after it is released."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from exomem import mutation_lock
 
     appends = counted_appends(monkeypatch)
-    holding, refusals = threading.Event(), []
+    holding, release, refusals = threading.Event(), threading.Event(), []
     refused = mutation_lock.VaultMutationCoordinator._refused
 
     def noted(coordinator, wait_start):
@@ -1968,44 +1968,36 @@ def test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread(service, 
     def hold():
         with service.manager.consistency_guard(service.root, operation="test hold"):
             holding.set()
-            time.sleep(1.0)
+            assert release.wait(20)
 
     holder = threading.Thread(target=hold)
-    if held == "at_routing":
-        holder.start()
-        assert holding.wait(5)
-    else:
-        route = runtime.route
-
-        def route_then_hold(*args):
-            server = route(*args)
-            if server is not None and not holding.is_set():
-                holder.start()
-                assert holding.wait(5)
-            return server
-
-        monkeypatch.setattr(runtime, "route", route_then_hold)
+    holder.start()
+    assert holding.wait(5)
     try:
-        # A short guard bound, so the write meets the hold several times; the service stops with the default.
-        with monkeypatch.context() as short:
+        assert runtime.route("record_memory", service.root, {"collection": CID, "action": "append"}) is not None
+        assert not refusals, "routing met the held boundary"
+        # A short guard bound, so the write refuses at the hold and waits; the service stops with the default.
+        with monkeypatch.context() as short, ThreadPoolExecutor(1) as pool:
             short.setattr(service.manager, "_mutation_timeout_seconds", 0.2)
-            result = call(service.root, "record_memory", action="append", collection=CID,
-                          item={"title": "Waited"}, item_key=LATER, why="held boundary",
-                          idempotency_key="held-boundary")
+            write = pool.submit(call, service.root, "record_memory", action="append", collection=CID,
+                                item={"title": "Waited"}, item_key=LATER, why="held boundary",
+                                idempotency_key="held-boundary")
+            _until(lambda: refusals)
+            assert not write.done()
+            release.set()
+            result = write.result(timeout=20)
     finally:
+        release.set()
         holder.join(10)
     assert result["outcome"] == "committed"
-    assert refusals, "the write never met the held boundary"
     assert appends == [LATER]
     assert titles(service.root, CID) == ["Canonical", "Waited"]
 
 
-@pytest.mark.parametrize("held", ["at_routing", "after_routing"])
 def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counted_once(
-        service, monkeypatch, tmp_path, held):
+        service, monkeypatch, tmp_path):
     """The request thread waits out the boundary's busy and finally refuses; the caller sees one
-    MUTATION_BUSY, so the journal gets one row and the counter one count. Routing refuses before
-    `invoke` runs, and a hold met after routing is refused inside it: each path owes its own row."""
+    MUTATION_BUSY, so the journal gets one row and the counter one count."""
     monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
     holding, release = threading.Event(), threading.Event()
@@ -2016,20 +2008,16 @@ def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counte
             assert release.wait(10)
 
     holder = threading.Thread(target=hold)
-    if held == "at_routing":
-        holder.start()
-        assert holding.wait(5)
-    else:
-        route = runtime.route
+    route = runtime.route
 
-        def route_then_hold(*args):
-            server = route(*args)
-            if server is not None and not holding.is_set():
-                holder.start()
-                assert holding.wait(5)
-            return server
+    def route_then_hold(*args):
+        server = route(*args)
+        if server is not None and not holding.is_set():
+            holder.start()
+            assert holding.wait(5)
+        return server
 
-        monkeypatch.setattr(runtime, "route", route_then_hold)
+    monkeypatch.setattr(runtime, "route", route_then_hold)
     busy_before = busy_total()
     try:
         with monkeypatch.context() as short, pytest.raises(OpError) as refused:
