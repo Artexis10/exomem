@@ -43,6 +43,9 @@ from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
+    COORDINATOR_IDENTITY_DOMAIN,
+    COORDINATOR_IDENTITY_GATE,
+    COORDINATOR_VAULT_BOUNDARY,
     VaultMutationCoordinator,
     _mutation_busy,
     canonical_mutation_identity,
@@ -4798,14 +4801,24 @@ class LeaseManager:
             pass
 
     def _mutation_coordinator_for(
-        self, vault_root: os.PathLike[str] | str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        kind: str = COORDINATOR_VAULT_BOUNDARY,
+        name: str | None = None,
     ) -> VaultMutationCoordinator:
-        """Construct this manager's canonical boundary for one vault."""
+        """Construct this manager's canonical boundary for one vault.
+
+        `kind` and `name` say which lock a refusal came from; a synthetic reserved-identity
+        lock passes its own.
+        """
         return VaultMutationCoordinator(
             self.config.state_dir,
             vault_root,
             timeout_seconds=self._mutation_timeout_seconds,
             poll_interval_seconds=self._mutation_poll_interval_seconds,
+            kind=kind,
+            name=name,
         )
 
     @contextmanager
@@ -5180,54 +5193,84 @@ class LeaseManager:
         vault_identity = canonical_mutation_identity(vault_root)
         manager_deadline = time.monotonic() + self._mutation_timeout_seconds
         deadline = manager_deadline if deadline is None else min(deadline, manager_deadline)
-        gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
+        gate = self._mutation_coordinator_for(
+            f"reserved-identity-v1:gate:{vault_identity}", kind=COORDINATOR_IDENTITY_GATE
+        )
+        domain_locks = [
+            (
+                domain,
+                self._mutation_coordinator_for(
+                    f"reserved-identity-v1:{domain}:{vault_identity}",
+                    kind=COORDINATOR_IDENTITY_DOMAIN,
+                    name=domain,
+                ),
+            )
+            for domain in ordered_domains
+        ]
 
-        def enter(
-            stack: ExitStack,
-            mutation: VaultMutationCoordinator,
-            *,
-            operation_label: str | None = operation,
-        ) -> None:
+        def hold_args(label: str) -> dict[str, Any]:
+            return {
+                "request_id": request_id,
+                "operation": f"{operation}:{label}" if operation is not None else label,
+                "holder_kind": holder_kind,
+                "publish_holder_metadata": False,
+            }
+
+        def enter(stack: ExitStack, mutation: VaultMutationCoordinator, label: str) -> None:
             stack.enter_context(
                 mutation.hold(
-                    timeout_seconds=max(0.0, deadline - time.monotonic()),
-                    request_id=request_id,
-                    operation=operation_label,
-                    holder_kind=holder_kind,
-                    publish_holder_metadata=False,
+                    timeout_seconds=max(0.0, deadline - time.monotonic()), **hold_args(label)
                 )
             )
 
-        def enter_domains(stack: ExitStack) -> None:
-            for domain in ordered_domains:
-                identity = f"reserved-identity-v1:{domain}:{vault_identity}"
-                mutation = self._mutation_coordinator_for(identity)
-                label = f"{operation}:{domain}" if operation is not None else domain
-                enter(stack, mutation, operation_label=label)
+        def enter_free_domains(stack: ExitStack) -> VaultMutationCoordinator | None:
+            """Hold every domain in order unless one is busy; return the busy one, holding none."""
+            for domain, mutation in domain_locks:
+                held = stack.enter_context(mutation.try_hold(**hold_args(domain)))
+                if not held:
+                    stack.close()
+                    return mutation
+            return None
 
         if exclusive:
             with ExitStack() as gate_stack:
-                gate_label = f"{operation}:gate" if operation is not None else "gate"
-                enter(gate_stack, gate, operation_label=gate_label)
+                enter(gate_stack, gate, "gate")
                 with ExitStack() as domains_stack:
-                    enter_domains(domains_stack)
+                    for domain, mutation in domain_locks:
+                        enter(domains_stack, mutation, domain)
                     yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
             return
 
+        if not advance_generation:
+            # No gate: this owner changes no identity, so no scanner needs ordering against it,
+            # and it holds only its own domains. It never asks for the gate while it holds them
+            # (reserved_paths forbids widening), so no domain-then-gate wait exists to invert the
+            # exclusive scanner's gate-then-domains order.
+            with ExitStack() as domains_stack:
+                for domain, mutation in domain_locks:
+                    enter(domains_stack, mutation, domain)
+                yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
+            return
+
         with ExitStack() as domains_stack:
-            with ExitStack() as gate_stack:
-                gate_label = f"{operation}:gate" if operation is not None else "gate"
-                enter(gate_stack, gate, operation_label=gate_label)
-                # Admission order matches the exclusive scanner: gate first,
-                # then domains.  The domain stack outlives the gate so exact
-                # owners still release admission before doing their work,
-                # without the gate/domain inversion that can deadlock a scan.
-                enter_domains(domains_stack)
-                generation = (
-                    _bump_reserved_identity_generation(self.config.state_dir, vault_root)
-                    if advance_generation
-                    else _read_reserved_identity_generation(self.config.state_dir, vault_root)
-                )
+            while True:
+                with ExitStack() as gate_stack:
+                    # Admission order matches the exclusive scanner: gate first, then domains.
+                    # The domain stack outlives the gate so exact owners still release admission
+                    # before doing their work. The gate is never held across a wait: a busy
+                    # domain is tried, not waited for, so a scanner never waits behind an owner
+                    # that waits, and owners of free domains pass through.
+                    enter(gate_stack, gate, "gate")
+                    busy = enter_free_domains(domains_stack)
+                    if busy is None:
+                        generation = _bump_reserved_identity_generation(
+                            self.config.state_dir, vault_root
+                        )
+                        break
+                # Gate released and no domain held: wait for the busy domain alone, then retry
+                # the whole admission in order. A wait past the deadline names that domain.
+                with ExitStack() as wait_stack:
+                    enter(wait_stack, busy, str(busy.name))
             yield generation
 
     @contextmanager
@@ -6598,10 +6641,12 @@ class LeaseManager:
                         with guard:
                             yield
                     finally:
-                        if not narrow_boundary:
-                            # Post-terminal housekeeping takes later, shorter holds that
-                            # would overwrite this one before the journal row is written.
-                            wide_hold["timing"] = last_mutation_timing()
+                        # The vault boundary's own hold: later holds of other coordinators
+                        # (identity gate, domains, review state) do not replace it, and
+                        # post-terminal housekeeping's later vault holds are not yet taken.
+                        wide_hold["timing"] = last_mutation_timing(
+                            self._mutation_coordinator_for(mutation_subject)
+                        )
                 finally:
                     _ACTIVE_FAST_ACK_SESSION.reset(token)
 

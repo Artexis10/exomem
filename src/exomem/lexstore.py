@@ -4897,6 +4897,22 @@ class LexicalStore:
         # identity work; a catalogue read opens two of these.
         with call_spans.span("lexical.connect"):
             with reserved_paths._subsystem_authority_scope("lexstore"):
+                if descriptor_id == "lexical-store":
+                    # An open of the live store that is already there changes no identity, so
+                    # it skips the identity gate and the generation bump: a read must not
+                    # queue behind a writer. A missing store is created under the full guard.
+                    try:
+                        with call_spans.entered(
+                            "lexical.connect.guard",
+                            reserved_paths._identity_coordination_scope(
+                                self.vault_root,
+                                descriptor_ids=descriptor_ids,
+                                identity_may_change=False,
+                            ),
+                        ):
+                            return self._connect_owned(path, create=False)
+                    except FileNotFoundError:
+                        pass
                 with call_spans.entered(
                     "lexical.connect.guard",
                     reserved_paths._identity_coordination_scope(
@@ -4911,6 +4927,7 @@ class LexicalStore:
         path: Path | None = None,
         *,
         publish: bool = True,
+        create: bool = True,
     ) -> sqlite3.Connection:
         target = path if path is not None else self.path
         descriptor_id = reserved_paths.state_target_descriptor_id(
@@ -4925,7 +4942,7 @@ class LexicalStore:
                 self.vault_root,
                 target,
                 descriptor_id,
-                create=True,
+                create=create,
             ) as retained_target:
                 return self._connect_retained(
                     retained_target,
