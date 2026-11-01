@@ -40,6 +40,7 @@ Building the normal-table catalog needs no FTS5, so these run everywhere.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import threading
@@ -51,8 +52,8 @@ from typing import Any
 
 import pytest
 
+from exomem import file_watcher, find_types, freshness, lexstore, reserved_paths, writer_lease
 from exomem import find as find_module
-from exomem import find_types, freshness, lexstore, reserved_paths, writer_lease
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -449,6 +450,77 @@ def test_a_replay_waits_for_a_rewrite_whose_event_is_still_on_its_way(
         contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
     assert "psecond" in contents
     assert "pbefore" not in contents and "pfirst" not in contents
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+@pytest.mark.parametrize(
+    ("reserved_page", "published", "cause"),
+    [
+        pytest.param("p.md", True, None, id="the_page_is_still_publishing"),
+        pytest.param(
+            "other.md", False, lexstore.DeclineCause.UNOBSERVED_DRIFT, id="another_page_is_publishing"
+        ),
+    ],
+)
+def test_a_replay_waits_for_the_event_of_a_write_that_already_released_the_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reserved_page: str,
+    published: bool,
+    cause: lexstore.DeclineCause | None,
+) -> None:
+    """An import batch releases the mutation boundary and publishes its pages
+    up to a second later. Its publication intent for a page stays open until the
+    registry holds the event. A replay that meets such a page must wait for the
+    event, though no boundary is held. A replay that meets a page that no open
+    intent covers still refuses at once.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    other = _kb_file(tmp_path, "other.md", "plain body text")
+    _seed(tmp_path, [p, other])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_materialize = store._materialize_catalog
+    late_events: list[threading.Timer] = []
+    reserved = tmp_path / "Knowledge Base" / reserved_page
+    content = reserved.read_bytes()
+    descriptor = os.open(reserved, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            tmp_path, [(reserved, descriptor, hashlib.sha256(content).hexdigest())]
+        )
+    finally:
+        os.close(descriptor)
+
+    def publish_and_close() -> None:
+        freshness.on_files_changed(tmp_path, changed=[p])
+        file_watcher.finalize_publication_intents((intent,))
+
+    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
+        built = real_materialize(*args, **kwargs)
+        p.write_text(_page_text("p", "- [config] pafter ^u1"), encoding="utf-8")
+        _touch_future(p)
+        if published:
+            late = threading.Timer(0.3, publish_and_close)
+            late_events.append(late)
+            late.start()
+        return built
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    try:
+        result = store.rebuild_atomic()
+    finally:
+        for late in late_events:
+            late.join()
+        file_watcher.clear_self_write_registry()
+    assert result is published
+    if cause is not None:
+        assert store._last_decline_cause == cause
+        return
+    with sqlite3.connect(store.path) as live:
+        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+    assert "pafter" in contents and "pbefore" not in contents
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
 

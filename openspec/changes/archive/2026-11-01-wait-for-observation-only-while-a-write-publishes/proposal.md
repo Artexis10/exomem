@@ -10,8 +10,11 @@ under 5 s before the wait existed. A cell pays the same delay for such drift.
 ## What Changes
 
 - The wait for the registry's observation continues only while a write in the
-  process holds a mutation boundary. One poll after the last write released, it
-  ends, and the replay or the census refuses at once, as it did before the wait.
+  process holds a mutation boundary, or has a publication intent still open for
+  one of the unproven pages. An import batch releases the boundary and publishes
+  its pages up to about a second later, and its intents stay open until the
+  registry holds the events. One poll after neither applies, the wait ends, and
+  the replay or the census refuses at once, as it did before the wait.
 - The 30 s stays as the outer bound. One deadline now covers every path of a
   round, so a replay call waits at most 90 s, and the census waits once more,
   up to 30 s, before each of its replays.
@@ -29,6 +32,7 @@ under 5 s before the wait existed. A cell pays the same delay for such drift.
 ## Impact
 
 - `src/exomem/lexstore.py`: the wait, the census wait and the new field.
-- A write in another process holds no boundary that this process sees. A path it
+- `src/exomem/file_watcher.py`: `publication_in_flight`, a read of the open intents.
+- A write in another process holds no boundary or intent that this process sees. A path it
   changes reaches the registry only as an event, so a replay that meets it
   refuses at once instead of waiting.

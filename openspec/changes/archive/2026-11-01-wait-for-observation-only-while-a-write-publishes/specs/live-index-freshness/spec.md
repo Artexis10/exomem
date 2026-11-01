@@ -147,8 +147,9 @@ validation.
 - **AND** the detached replay runs off the publication barrier
 - **THEN** the replay waits for the registry to observe the newer state of
   that page, and then replays the newer delta
-- **AND** waits only while a write in the process holds a mutation boundary,
-  and for at most a bounded time shared by every path of one round
+- **AND** waits only while a write in the process holds a mutation boundary or
+  has a publication intent still open for one of the pages, and for at most a
+  bounded time shared by every path of one round
 - **AND** retargets at most a bounded number of times in one replay
 - **AND** declines the pass as `source_changed` when the registry does not
   observe the newer state in time, when no write is in flight and the page
@@ -164,8 +165,9 @@ validation.
 - **WHEN** the final census walk sees a page that a governed write changed,
   created or deleted before its event reached the registry
 - **THEN** the census waits, while a write in the process holds a mutation
-  boundary and for a bounded time, for the registry to observe each path where
-  the walk and the registry disagree
+  boundary or has a publication intent still open for the path, and for a
+  bounded time, for the registry to observe each path where the walk and the
+  registry disagree
 - **AND** replays and re-proves those paths before the census judges the walk
 - **AND** declines the pass as `source_changed` at the census when the registry
   does not observe such a path in time, or when no write is in flight

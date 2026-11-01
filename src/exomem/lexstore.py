@@ -909,14 +909,22 @@ _REPLAY_OBSERVATION_WAIT_SECONDS = 30.0
 _REPLAY_OBSERVATION_POLL_SECONDS = 0.05
 
 
-def _a_write_may_be_publishing() -> bool:
-    """Whether a governed write or import batch in this process holds a mutation boundary.
+def _a_write_may_be_publishing(vault_root: Path, paths: Iterable[str]) -> bool:
+    """Whether a write in this process can still be publishing one of `paths`.
 
-    A write changes a page on disk and publishes its event inside that hold, so
-    the registry can still be behind the disk only while one is held. A write in
-    another process reaches the registry only as an event, and is not seen here.
+    A write changes a page on disk before its event reaches the registry. That
+    gap lasts while the write holds a mutation boundary, and after it releases
+    the boundary, until its publication intent for the page closes: the
+    publication runs behind the release, up to about a second later in an
+    import (attributed 2026-11-01, 7 of 7 declines). A write in another
+    process reaches the registry only as an event, and is not seen here.
     """
-    return mutation_lock.active_mutation_snapshot()["state"] == "held"
+    if mutation_lock.active_mutation_snapshot()["state"] == "held":
+        return True
+    from . import file_watcher
+
+    return file_watcher.publication_in_flight(vault_root, paths)
+
 
 _PROBE_RESULT: bool | None = None
 _PROBE_LOCK = threading.Lock()
@@ -8810,7 +8818,7 @@ class LexicalStore:
         not observed every path by `deadline` or while a write could still be
         publishing it (`source_changed`, with the cause). A path that differs
         with no write in flight is drift that no event will report, so the wait
-        ends one poll after the last write released.
+        ends one poll after the last write finished publishing.
         """
         from . import freshness as freshness_module
 
@@ -8831,7 +8839,7 @@ class LexicalStore:
                 if not self._uncovered_paths(unproven, newer):
                     return fresh, newer
             now = time.monotonic()
-            if _a_write_may_be_publishing():
+            if _a_write_may_be_publishing(self.vault_root, unproven):
                 quiet_since = None
             elif quiet_since is None:
                 quiet_since = now
