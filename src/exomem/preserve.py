@@ -37,7 +37,7 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, BinaryIO
+from typing import IO, TYPE_CHECKING, BinaryIO
 
 from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
@@ -48,6 +48,7 @@ from .vault import (
     ContentHashMismatchError,
     DeferredGraphCompletion,
     FrontmatterError,
+    PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
     _is_reparse,
@@ -64,6 +65,9 @@ from .vault import (
     yaml_scalar,
 )
 
+if TYPE_CHECKING:
+    from .extraction_parts import Plan
+
 log = logging.getLogger(__name__)
 
 
@@ -72,32 +76,18 @@ def _extract_module():
 
     return extract
 
-# Cap extracted text written into a sidecar. `find` rebuilds BM25 over the whole
-# corpus per query, so one oversized document (e.g. a 7 MB HTML export rendered to
-# markdown) re-tokenizes on every search and degrades ALL lookups. 512 KB sits well
-# above any real document yet kills pathological machine-dumps. The original binary
-# is always preserved — pull the full content via /download. Env-overridable.
+# One page holds at most this much extracted text. `find` rebuilds BM25 over a page when it
+# changes, so one oversized page (a 7 MB HTML export rendered to markdown) re-tokenizes on
+# every search and degrades ALL lookups. Longer text continues on hidden part pages of the
+# same size (`extraction_parts`), so no text is dropped. Env-overridable.
 _MAX_EXTRACT_BYTES = int(os.environ.get("EXOMEM_MAX_EXTRACT_BYTES", 512 * 1024))
 
 
-def _cap_extracted_text(text: str) -> str:
-    """Truncate extracted text to `_MAX_EXTRACT_BYTES` (UTF-8), keeping the start.
+def _parts_module():
+    from . import extraction_parts
 
-    No-op for normal documents. A truncated doc stays findable by its start + title;
-    only content past the cap isn't text-indexed (the binary still holds it all).
-    """
-    raw = text.encode("utf-8")
-    if len(raw) <= _MAX_EXTRACT_BYTES:
-        return text
-    kept = raw[:_MAX_EXTRACT_BYTES].decode("utf-8", errors="ignore").rstrip()
-    log.warning(
-        "extracted text %d bytes exceeds cap %d — truncated; full content stays in the binary",
-        len(raw), _MAX_EXTRACT_BYTES,
-    )
-    return (
-        f"{kept}\n\n[... truncated: kept first {_MAX_EXTRACT_BYTES // 1024} KB of "
-        f"{len(raw) // 1024} KB; full content is in the original binary — pull it via /download ...]"
-    )
+    return extraction_parts
+
 
 MAX_DECODED_BYTES = 5 * 1024 * 1024  # 5 MB — base64-via-model path (tokens cost real money)
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB — HTTP /upload path (raw bytes, no token cost).
@@ -777,13 +767,16 @@ def preserve(
                 if adoption_seed is not None
                 else None
             )
+            parts = _parts_module()
+            pieces = parts.split(text_clean) if text_clean else []
             sidecar_md = _render_sidecar(
                 artifact_name=filename_safe,
                 scope=scope_safe,
                 category=category_safe,
                 date_iso=stamp_iso,
                 description=desc_clean,
-                text=text_clean,
+                text=pieces[0] if pieces else None,
+                parts=parts.links(vault_root, sidecar_path, len(pieces)),
                 media_type=media_type,
                 evidence_file=rel_artifact if media_type else None,
                 extracted_by=extracted_by,
@@ -819,6 +812,16 @@ def preserve(
                     expected_hash=MISSING_CONTENT_HASH,
                 )
             )
+            if len(pieces) > 1:
+                writes.extend(
+                    parts.plan(
+                        vault_root,
+                        sidecar_path,
+                        pieces,
+                        inherited=parse_frontmatter(sidecar_md)[0],
+                        date_iso=stamp_iso,
+                    ).writes
+                )
 
         # Index + log updates.
         rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
@@ -1211,6 +1214,7 @@ def _render_sidecar(
     adoption_receipt: Mapping[str, object] | None = None,
     inspection: Inspection | None = None,
     transcription_of: Mapping[str, object] | None = None,
+    parts: tuple[str, ...] = (),
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -1228,6 +1232,9 @@ def _render_sidecar(
     original), and `extracted_by` (`pending` until the extraction worker fills
     the text, then the engine string; `upload` when the uploader supplied it).
     These make the binary a first-class `find()` result that points at the file.
+
+    `text` is the first part of the extraction; `parts` lists the links of the part pages
+    that hold the rest (`extraction_parts`).
 
     `parent_media` + `frame_ts` mark a derived artifact — a scene frame extracted
     from a video at `frame_ts` seconds. `find` groups such children under the
@@ -1258,6 +1265,8 @@ def _render_sidecar(
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
+    if parts:
+        lines.extend(_part_field_lines(parts))
     # Upload supplies byte identity, not a reviewed semantic classification.
     # Dataset backfill can add the descriptor after an owner review. Retaining
     # unresolved semantics prevents new raw releases under semantic policies.
@@ -1369,7 +1378,7 @@ def _render_sidecar(
         lines.append("## Extracted text")
         lines.append("")
         if text:
-            lines.append(_cap_extracted_text(text))
+            lines.append(text)
             lines.append("")
     # A page with no caption, no extracted text, and no media stub would
     # otherwise have an empty body, which `schema.validate_source` treats as an
@@ -1599,27 +1608,77 @@ def update_sidecar_extraction(
     existing call site is unaffected.
     """
     before, guard = read_guarded_text(vault_root, sidecar_path)
-    content = render_sidecar_extraction(
+    plan, write = sidecar_extraction_writes(
+        vault_root,
+        sidecar_path,
         before,
+        guard,
         text=text,
         engine=engine,
         speakers=speakers,
         speaker_verification=speaker_verification,
         attempts=attempts,
     )
-    return commit_media_sidecar_writes(
+    result = commit_media_sidecar_writes(
         vault_root,
-        (
-            PlannedWrite(
-                path=sidecar_path,
-                content=content,
-                expected_hash=content_hash(before),
-                guard=guard,
-            ),
-        ),
+        (write, *plan.writes),
         post_commit_fanout=not defer_index_fanout,
         defer_graph_completion=defer_graph_completion,
     )
+    _parts_module().retire(vault_root, plan.surplus)
+    return result
+
+
+def sidecar_extraction_writes(
+    vault_root: Path,
+    sidecar_path: Path,
+    before: str,
+    guard: PathGuard,
+    *,
+    text: str,
+    **fields: object,
+) -> tuple[Plan, PlannedWrite]:
+    """The plan for the part pages of `text`, and the sidecar write that holds its first part.
+
+    `fields` are the arguments of `render_sidecar_extraction` other than the text. A caller
+    commits the sidecar write with the plan's `writes`, then retires the plan's `surplus`.
+    """
+    parts = _parts_module()
+    pieces = parts.split(text)
+    plan = parts.plan(
+        vault_root,
+        sidecar_path,
+        pieces,
+        inherited=parse_frontmatter(before)[0],
+        date_iso=temporal.stamp(temporal.now()),
+    )
+    content = render_sidecar_extraction(
+        before,
+        text=pieces[0],
+        parts=parts.links(vault_root, sidecar_path, len(pieces)),
+        **fields,
+    )
+    write = PlannedWrite(
+        path=sidecar_path,
+        content=content,
+        expected_hash=content_hash(before),
+        guard=guard,
+    )
+    return plan, write
+
+
+def _part_fields(parts: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    """The Source page's front matter for the part pages that hold the rest of its extraction."""
+    if not parts:
+        return ()
+    return (
+        ("extraction_parts", str(len(parts) + 1)),
+        ("next_part", yaml_scalar(f"[[{parts[0]}]]")),
+    )
+
+
+def _part_field_lines(parts: tuple[str, ...]) -> list[str]:
+    return [f"{field}: {value}" for field, value in _part_fields(parts)]
 
 
 #: Frontmatter that describes one extraction rather than the recording. A reprocess moves these
@@ -1648,8 +1707,12 @@ def render_sidecar_extraction(
     asr: AsrFacts | None = None,
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
+    parts: tuple[str, ...] = (),
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
+
+    `text` is the part of the extraction that stays on the page, and `parts` the links of the
+    part pages that hold the rest, as `extraction_parts.plan` gives them.
 
     `asr` records what the speech engine decided; facts of an earlier extraction never
     survive into the new one. `prior_extractions` lists, in order, the vault-relative
@@ -1694,7 +1757,10 @@ def render_sidecar_extraction(
     if prior_extractions:
         links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
         content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
-    content = _set_extracted_text(content, _cap_extracted_text(text))
+    content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
+    for field, value in _part_fields(parts):
+        content = _set_frontmatter_field(content, field, value)
+    content = _set_extracted_text(content, text)
     return with_newline(content, newline)
 
 

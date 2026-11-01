@@ -12,6 +12,7 @@ import pytest
 from exomem import (
     commands,
     extract,
+    extraction_parts,
     media_jobs,
     media_processing,
     media_worker,
@@ -138,7 +139,7 @@ def test_reprocess_replaces_a_completed_transcript_and_keeps_the_old_one(
     assert WRONG in kept and "faster-whisper:test+timed" in kept
     marker = _frontmatter(prior)
     assert marker["status"] == "superseded"
-    assert marker["superseded_by"] == [f"[[{prior_extraction.link_to(vault, sidecar)}]]"]
+    assert marker["superseded_by"] == [f"[[{extraction_parts.link_to(vault, sidecar)}]]"]
     # It is a page about the old extraction, never an item to process.
     assert "media_type" not in marker and "evidence_file" not in marker
 

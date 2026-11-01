@@ -24,11 +24,6 @@ def extraction_digest(content: str) -> str:
     return hashlib.sha256(f"{engine}\n{preserve.extracted_text(content)}".encode()).hexdigest()
 
 
-def link_to(vault_root: Path, page: Path) -> str:
-    """The wikilink target of a page: its vault-relative path without the extension."""
-    return page.relative_to(vault_root).as_posix().removesuffix(".md")
-
-
 def links_of(sidecar_content: str) -> tuple[str, ...]:
     listed = parse_frontmatter(sidecar_content)[0].get("prior_extractions")
     if not isinstance(listed, list):
@@ -58,11 +53,21 @@ def next_page(sidecar: Path, listed: Iterable[str] = ()) -> tuple[Path, int]:
     return sidecar.with_name(f"{prefix}{ordinal}.md"), ordinal
 
 
-def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, date_iso: str) -> str:
+def render(
+    before: str,
+    *,
+    artifact_name: str,
+    sidecar_link: str,
+    ordinal: int,
+    date_iso: str,
+    text: str,
+    parts: tuple[str, ...] = (),
+) -> str:
     """The page that keeps the extraction `before` holds, marked as superseded by the sidecar.
 
     The page is a former extraction of the same source, so it takes the sidecar's own
-    `type`, `source_type` and `tags`.
+    `type`, `source_type` and `tags`. `text` is the first part of that extraction and `parts`
+    the links of the part pages that hold the rest, as `extraction_parts` gives them.
     """
     before = with_newline(before, "\n")
     frontmatter = parse_frontmatter(before)[0]
@@ -91,6 +96,7 @@ def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, 
         f'  - "[[{sidecar_link}]]"',
         f"updated: {date_iso}",
         *extraction,
+        *preserve._part_field_lines(parts),
         "tags: [" + ", ".join(yaml_scalar(tag) for tag in tags) + "]",
         "ingested_into: []",
         "---",
@@ -102,7 +108,7 @@ def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, 
         "",
         preserve._EXTRACTED_HEADING,
         "",
-        preserve._cap_extracted_text(preserve.extracted_text(before)),
+        text,
         "",
     ]
     return "\n".join(lines)
