@@ -12,4 +12,4 @@
 ## 3. Proof
 - [x] 3.1 Prove that store-path findings equal full-sweep findings for the owner and a restricted audience across edits, deletes, renames, Entity and alias changes, Source sharing, out-of-band rewrites, and cue edits.
 - [x] 3.2 Guard that a warm repeat sweep extracts no page again.
-- [ ] 3.3 Compare the store path with the full sweep on a real vault, read-only, and record counts and timings.
+- [x] 3.3 Compare the store path with the full sweep on a real vault, read-only, and record counts and timings.
