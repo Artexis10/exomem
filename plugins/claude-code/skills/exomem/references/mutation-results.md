@@ -69,6 +69,14 @@ back as `already_stored` rather than being stored a second time. `scope` and
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
 
+A file of a multi-file batch can end `failed` with `MUTATION_BUSY` when the
+boundary stayed busy past the wait before that file began; files stored before
+it keep their outcome. Once any file in a batch commits, the batch's identity is
+settled, so repeating the identical call replays the batch and never retries the
+failed file. Retry the failed files in a new call that names only them, under a
+new identity. This differs from a call-level `MUTATION_BUSY` error, where nothing
+committed and the same identity and payload are retried.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
