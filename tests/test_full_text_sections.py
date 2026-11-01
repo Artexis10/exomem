@@ -83,6 +83,7 @@ def test_a_five_mebibyte_document_is_one_findable_document_read_in_windows(vault
         window = commands.op_read_memory(vault, path=stub.sidecar_path, offset=offset)
         assert window["window"]["offset"] == offset
         assert len(window["body"]) <= 48 * 1024
+        assert window["body_truncated"] and "content_hash" not in window  # a window cannot guard a write
         walked.append(window["body"])
         offset = window["window"]["next_offset"]
     assert "".join(walked) == text
@@ -121,11 +122,41 @@ def test_reading_a_part_page_returns_its_source_as_one_document(vault, monkeypat
     assert from_part["body"] == from_source["body"]
 
 
-def test_an_offset_outside_the_text_is_refused(vault, monkeypatch) -> None:
+@pytest.mark.parametrize("past_end", [True, False], ids=["past-the-end", "not-a-number"])
+def test_an_offset_outside_the_text_is_refused(vault, monkeypatch, past_end) -> None:
     stub, text = _small_parted_source(vault, monkeypatch)
 
     with pytest.raises(ValueError, match="INVALID_OFFSET"):
-        commands.op_read_memory(vault, path=stub.sidecar_path, offset=len(text))
+        commands.op_read_memory(vault, path=stub.sidecar_path, offset=len(text) if past_end else True)
+
+
+def test_a_walk_after_an_edit_reads_the_text_as_it_is_now(vault, monkeypatch) -> None:
+    page_rel, _text = _adopted_parted_source(vault, monkeypatch)
+    page = vault / page_rel
+    commands.op_edit(
+        vault, page_rel, "shorten the first paragraph",
+        old_string="paragraph 0 " + "alpha beta gamma " * 20, new_string="paragraph 0 ",
+    )
+    walked: list[str] = []
+    offset: int | None = 0
+    while offset is not None and len(walked) < 100:
+        read = commands.op_read_memory(vault, path=page_rel, offset=offset)
+        assert read["window"]["next_offset"] is None or read["window"]["next_offset"] > offset
+        walked.append(read["body"])
+        offset = read["window"]["next_offset"]
+
+    assert "".join(walked) == extraction_parts.whole_text(vault, page, page.read_text(encoding="utf-8"))
+
+
+def test_a_whitespace_run_longer_than_a_page_splits_into_pages_at_least_half_full(monkeypatch) -> None:
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
+    text = "a" * 3000 + " " * 20_000 + "\n\n\n" + "b" * 9000
+
+    pieces = extraction_parts.split(text)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.encode("utf-8")) <= 4000 for piece in pieces)
+    assert all(len(piece) >= 2000 for piece in pieces[1:-1])
 
 
 def test_a_shorter_extraction_leaves_no_stale_part(vault, monkeypatch) -> None:
