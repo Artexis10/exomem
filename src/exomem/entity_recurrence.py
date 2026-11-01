@@ -1466,8 +1466,35 @@ def page_head(page: Any) -> PageEvidence:
     )
 
 
-def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
-    """Everything one sweep reads from one page's own bytes (see `PageEvidence`)."""
+def _wanted_excerpts(
+    frames: Iterable[EvidenceContext], relation_clauses: Iterable[str]
+) -> set[str]:
+    """Every excerpt `_connected` can be asked about: a stored frame's, or a relation
+    clause's, which an anchor frame may later use."""
+    wanted = {_wanted_excerpt(row.excerpt) for row in frames}
+    wanted.update(_wanted_excerpt(_excerpt_text(clause)) for clause in relation_clauses)
+    return wanted
+
+
+def connection_keys(page: Any, evidence: PageEvidence) -> PageEvidence:
+    """`evidence` with the keys `_connected` reads, from the same page's body."""
+    from . import provenance
+
+    body = provenance.withheld_prose(page.body, owner_path=evidence.path)
+    wanted = _wanted_excerpts(evidence.frames, evidence.relation_clauses)
+    return replace(
+        evidence,
+        relation_keys=_relation_target_keys(body),
+        excerpt_keys=_excerpt_link_keys(body, wanted),
+    )
+
+
+def page_evidence(page: Any, *, cues: CueGrammar, keys: bool = True) -> PageEvidence:
+    """Everything one sweep reads from one page's own bytes (see `PageEvidence`).
+
+    `keys=False` leaves the connection keys empty for a caller that adds them with
+    `connection_keys` only to the few pages that reach the connection check.
+    """
     from . import provenance
 
     head = page_head(page)
@@ -1496,20 +1523,15 @@ def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
             identity = identity_key(link.name)
             if identity and identity not in self_identities:
                 links[link] = None
-    # Every excerpt `_connected` can be asked about: a stored frame's, or a
-    # relation clause's, which an anchor frame may later use.
-    wanted = {_wanted_excerpt(row.excerpt) for row in frames}
-    wanted.update(_wanted_excerpt(_excerpt_text(clause)) for clause in relation_clauses)
-    return replace(
+    evidence = replace(
         head,
         links=tuple(links),
         source_refs=tuple(sorted(_source_refs(page))),
         origin_ref=_origin_ref(page),
-        relation_keys=_relation_target_keys(body),
-        excerpt_keys=_excerpt_link_keys(body, wanted),
         relation_clauses=relation_clauses,
         frames=frames,
     )
+    return connection_keys(page, evidence) if keys else evidence
 
 
 def collect_evidence(
@@ -1524,6 +1546,7 @@ def collect_evidence(
     complete: Callable[[PageEvidence], PageEvidence],
     attachment_probe: Callable[[str], bool],
     registry: RegistryIndex | None = None,
+    connection: Callable[[PageEvidence], PageEvidence] | None = None,
 ) -> list[Candidate]:
     """The cross-page half of every sweep, from the evidence of the pages an audience sees.
 
@@ -1535,6 +1558,7 @@ def collect_evidence(
     receives each one's `(path, title)`. `complete` returns the whole `PageEvidence` of one
     eligible head, so the body of an ineligible page is never read. `registry` is for a
     caller that already holds it; otherwise it is built from the heads' registry facts.
+    `connection` is for a caller whose evidence lacks the connection keys; see `aggregate`.
     """
     pages = list(heads)
     if not pages:
@@ -1574,6 +1598,7 @@ def collect_evidence(
         entity_types=entity_types,
         attachment_probe=attachment_probe,
         grammar=frame_grammar(entity_types, registry, cues=cues),
+        connection=connection,
     )
 
 
@@ -1599,9 +1624,11 @@ def collect_pages(
         status_basis=status_basis,
         indexable=indexable,
         make_resolver=make_resolver,
-        complete=lambda head: page_evidence(by_path[head.path], cues=cues),
+        # The connection check reaches few pages, so only those read their link keys.
+        complete=lambda head: page_evidence(by_path[head.path], cues=cues, keys=False),
         attachment_probe=attachment_probe,
         registry=registry,
+        connection=lambda evidence: connection_keys(by_path[evidence.path], evidence),
     )
 
 
@@ -1643,10 +1670,13 @@ def aggregate(
     entity_types: EntityTypeRegistry,
     attachment_probe: Callable[[str], bool],
     grammar: FrameGrammar | None,
+    connection: Callable[[PageEvidence], PageEvidence] | None = None,
 ) -> list[Candidate]:
     """The cross-page half of a sweep, over the evidence of the eligible pages.
 
     `grammar` is None when no cue and no anchor exists, and then no page yields a frame.
+    `connection` completes a page's evidence with the keys the connection check reads,
+    when only the pages that reach that check should pay for them.
     """
     from . import provenance
 
@@ -1655,7 +1685,15 @@ def aggregate(
     suffixed: dict[str, set[str]] = {}
     ordinary: dict[str, list[EvidenceContext]] = {}
     evidence_by_path: dict[str, PageEvidence] = {}
+    connected_by_path: dict[str, PageEvidence] = {}
     exists: dict[str, bool] = {}
+
+    def connected_evidence(path: str) -> PageEvidence:
+        if connection is None:
+            return evidence_by_path[path]
+        if path not in connected_by_path:
+            connected_by_path[path] = connection(evidence_by_path[path])
+        return connected_by_path[path]
 
     def known(target: str) -> bool:
         # One answer per target per sweep: the resolver is fixed for the sweep.
@@ -1758,7 +1796,7 @@ def aggregate(
             disconnected = tuple(
                 row
                 for row in rows
-                if not _connected(row, evidence_by_path[row.path], resolved_target)
+                if not _connected(row, connected_evidence(row.path), resolved_target)
             )
             if not disconnected:
                 continue
