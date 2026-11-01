@@ -47,7 +47,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 from . import markdown_relations
@@ -557,16 +557,33 @@ def registry_index(
 ) -> RegistryIndex:
     """Build the registry's resolution surface from already-parsed pages.
 
-    Mirrors `resolve_entity_candidate`'s predicate — active entity pages sitting
-    directly in a registered kind's folder — but reads the bodies the audit
-    already holds instead of re-globbing `Entities/` from disk. One sweep must
-    not pay a directory walk per candidate.
+    Reads the bodies the audit already holds instead of re-globbing `Entities/` from
+    disk. One sweep must not pay a directory walk per candidate. `_registry_facts`
+    names the frontmatter it reads, here and for `collect_evidence`.
+    """
+    prefix = entities_prefix()
+    return registry_from_facts(
+        (
+            (str(page.rel_path), _registry_facts(page.frontmatter))
+            for page in pages
+            if str(page.rel_path).startswith(prefix)
+        ),
+        entity_types=entity_types,
+    )
+
+
+def registry_from_facts(
+    facts: Iterable[tuple[str, Mapping[str, Any]]], *, entity_types: EntityTypeRegistry
+) -> RegistryIndex:
+    """Build the registry's resolution surface from `(path, _registry_facts)` pairs.
+
+    Mirrors `resolve_entity_candidate`'s predicate: active entity pages sitting
+    directly in a registered kind's folder.
     """
     folders = {definition.folder for definition in entity_types.active_definitions}
     prefix = entities_prefix()
     entries: list[RegistryEntry] = []
-    for page in pages:
-        rel_path = str(page.rel_path)
+    for rel_path, fields in facts:
         if not rel_path.startswith(prefix):
             continue
         remainder = rel_path[len(prefix) :]
@@ -575,16 +592,15 @@ def registry_index(
             continue
         if name.casefold() == "index.md":
             continue
-        frontmatter = page.frontmatter
-        if str(frontmatter.get("type") or "").casefold() != "entity":
+        if fields["type"].casefold() != "entity":
             continue
-        if str(frontmatter.get("status") or "").casefold() != "active":
+        if fields["status"].casefold() != "active":
             continue
-        definition = entity_types.resolve(str(frontmatter.get("entity_type") or ""))
+        definition = entity_types.resolve(fields["entity_type"])
         if definition is None:
             continue
-        title = str(frontmatter.get("title") or Path(rel_path).stem).strip()
-        names = (title, *alias_values(frontmatter.get("aliases")))
+        title = (fields["title"] or Path(rel_path).stem).strip()
+        names = (title, *fields["aliases"])
         identities = frozenset(key for name_ in names if (key := identity_key(name_)))
         if not identities:
             continue
@@ -1420,9 +1436,14 @@ def _registry_facts(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
-    """Everything one sweep reads from one page's own bytes (see `PageEvidence`)."""
-    from . import lifecycle_statuses, provenance
+def page_head(page: Any) -> PageEvidence:
+    """What the cross-page work reads about a page before it knows the page counts.
+
+    The title and registry facts feed the resolver and the registry. The status, and
+    the whole frontmatter when only the page's own registry instance can classify
+    the label, feed eligibility. Reading the body is `page_evidence`'s work.
+    """
+    from . import lifecycle_statuses
 
     rel_path = str(page.rel_path)
     raw_status = page.frontmatter.get("status")
@@ -1435,6 +1456,24 @@ def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
             status=status,
             registry_facts=_registry_facts(page.frontmatter),
         )
+    return PageEvidence(
+        path=rel_path,
+        title=page.title,
+        status=status,
+        frontmatter=(
+            page.frontmatter if lifecycle_statuses.canonical_class(status) is None else None
+        ),
+    )
+
+
+def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
+    """Everything one sweep reads from one page's own bytes (see `PageEvidence`)."""
+    from . import provenance
+
+    head = page_head(page)
+    rel_path = head.path
+    if head.registry_facts is not None:
+        return head
     # An origin carrier is attribution, not prose or a link: its payload never
     # becomes a mention, a context excerpt or a page reaching for a name.
     body = provenance.withheld_prose(page.body, owner_path=rel_path)
@@ -1461,13 +1500,8 @@ def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
     # relation clause's, which an anchor frame may later use.
     wanted = {_wanted_excerpt(row.excerpt) for row in frames}
     wanted.update(_wanted_excerpt(_excerpt_text(clause)) for clause in relation_clauses)
-    return PageEvidence(
-        path=rel_path,
-        title=page.title,
-        status=status,
-        frontmatter=(
-            page.frontmatter if lifecycle_statuses.canonical_class(status) is None else None
-        ),
+    return replace(
+        head,
         links=tuple(links),
         source_refs=tuple(sorted(_source_refs(page))),
         origin_ref=_origin_ref(page),
@@ -1475,6 +1509,99 @@ def page_evidence(page: Any, *, cues: CueGrammar) -> PageEvidence:
         excerpt_keys=_excerpt_link_keys(body, wanted),
         relation_clauses=relation_clauses,
         frames=frames,
+    )
+
+
+def collect_evidence(
+    heads: Iterable[PageEvidence],
+    *,
+    vault_root: Path,
+    entity_types: EntityTypeRegistry,
+    cues: CueGrammar,
+    status_basis: Any,
+    indexable: Callable[[str], bool],
+    make_resolver: Callable[[Iterable[tuple[str, str]]], WikilinkResolver],
+    complete: Callable[[PageEvidence], PageEvidence],
+    attachment_probe: Callable[[str], bool],
+    registry: RegistryIndex | None = None,
+) -> list[Candidate]:
+    """The cross-page half of every sweep, from the evidence of the pages an audience sees.
+
+    The one entry point for the full sweep (`collect_pages`) and the persisted one
+    (`entity_evidence.sweep`). It owns eligibility, the registry, the resolver and the
+    call into `aggregate`, so the two cannot drift.
+
+    `heads` are `page_head` of every visible page, Entities pages included, and `make_resolver`
+    receives each one's `(path, title)`. `complete` returns the whole `PageEvidence` of one
+    eligible head, so the body of an ineligible page is never read. `registry` is for a
+    caller that already holds it; otherwise it is built from the heads' registry facts.
+    """
+    pages = list(heads)
+    if not pages:
+        return []
+    resolver = make_resolver((head.path, head.title) for head in pages)
+    if registry is None:
+        registry = registry_from_facts(
+            (
+                (head.path, head.registry_facts)
+                for head in pages
+                if head.registry_facts is not None
+            ),
+            entity_types=entity_types,
+        )
+    entities = entities_prefix()
+    eligible = [
+        head
+        for head in sorted(pages, key=lambda head: head.path)
+        if not head.path.startswith(entities)
+        and counts_as_evidence(
+            # A stored head holds the whole frontmatter only where the label needs it.
+            SimpleNamespace(
+                rel_path=head.path,
+                frontmatter=head.frontmatter
+                if head.frontmatter is not None
+                else {"status": head.status},
+            ),
+            indexable=indexable(head.path),
+            status_basis=status_basis,
+        )
+    ]
+    return aggregate(
+        [complete(head) for head in eligible],
+        vault_root=vault_root,
+        resolver=resolver,
+        registry=registry,
+        entity_types=entity_types,
+        attachment_probe=attachment_probe,
+        grammar=frame_grammar(entity_types, registry, cues=cues),
+    )
+
+
+def collect_pages(
+    pages: Iterable[Any],
+    *,
+    vault_root: Path,
+    entity_types: EntityTypeRegistry,
+    indexable: Callable[[str], bool],
+    make_resolver: Callable[[Iterable[tuple[str, str]]], WikilinkResolver],
+    attachment_probe: Callable[[str], bool],
+    status_basis: Any,
+    registry: RegistryIndex | None = None,
+) -> list[Candidate]:
+    """The full sweep: `collect_evidence` over pages the caller has already parsed."""
+    cues = cue_grammar(entity_types)
+    by_path = {str(page.rel_path): page for page in pages}
+    return collect_evidence(
+        [page_head(page) for page in by_path.values()],
+        vault_root=vault_root,
+        entity_types=entity_types,
+        cues=cues,
+        status_basis=status_basis,
+        indexable=indexable,
+        make_resolver=make_resolver,
+        complete=lambda head: page_evidence(by_path[head.path], cues=cues),
+        attachment_probe=attachment_probe,
+        registry=registry,
     )
 
 
@@ -1491,32 +1618,19 @@ def collect(
 ) -> list[Candidate]:
     """Collect legacy links and closed-frame evidence into one lifecycle row.
 
-    The composition of `page_evidence` over the eligible pages and `aggregate`;
-    a persisted sweep composes the same two with stored evidence.
+    `collect_pages` for a caller that already holds the resolver and the registry.
     """
     from . import lifecycle_statuses
 
-    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    entities = entities_prefix()
-    cues = cue_grammar(entity_types)
-    evidence = [
-        page_evidence(page, cues=cues)
-        for page in sorted(pages, key=lambda page: str(page.rel_path))
-        if not str(page.rel_path).startswith(entities)
-        and counts_as_evidence(
-            page,
-            indexable=indexable(str(page.rel_path)),
-            status_basis=status_basis,
-        )
-    ]
-    return aggregate(
-        evidence,
+    return collect_pages(
+        pages,
         vault_root=vault_root,
-        resolver=resolver,
-        registry=registry,
         entity_types=entity_types,
+        indexable=indexable,
+        make_resolver=lambda _titles: resolver,
         attachment_probe=attachment_probe,
-        grammar=frame_grammar(entity_types, registry, cues=cues),
+        status_basis=status_basis or lifecycle_statuses.Basis(vault_root),
+        registry=registry,
     )
 
 
