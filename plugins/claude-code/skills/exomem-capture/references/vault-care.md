@@ -158,13 +158,13 @@ Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontma
 
 ### Remote maintenance jobs
 
-A remote `fix`, `backfill-ids` or `reconcile` write is a background job, not one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
+A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview and write alike, not as one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
 
-1. Preview with `check_memory`, `dry_run=true`. The result carries a `plan_id`.
+1. Preview with `check_memory`, `dry_run=true`. The owner gets a `run_id` and `preview: true` at once: a preview of a large vault outlasts one request, so it runs as a read-only job. When it is `completed`, its receipt's `result` carries the `plan_id`. A caller other than the owner, and the local CLI, get the report in one call.
 2. Start with `repair_memory`: the same mode and flags, `dry_run=false`, that `plan_id` and a one-line `why`. It returns a `run_id` at once. Without both it returns `MAINTENANCE_PLAN_REQUIRED` and starts nothing.
 3. Follow with `check_memory` and `operation.kind="maintenance-job"` plus the `run_id`, until the state is `completed`, `failed`, `cancelled` or `interrupted`. Without a `run_id` it lists recent jobs.
 4. Stop one early with `repair_memory` and `operation.kind="maintenance-job-cancel"` (`run_id`, `why`). The job stops at its next checkpoint.
-5. Read the receipt. A finished job's status holds the totals: pages `committed`, `skipped_changed` (the page changed after the preview) and `outcome_unknown`. The page list is long, so read it page by page: pass the receipt's `next_cursor` as `cursor` to the same call, and repeat with each returned `next_cursor` until it is `null`. Each entry names a path, its kind and, for `backfill-ids`, the minted ID.
+5. Read the receipt. A finished job's status holds the totals: pages `committed`, `skipped_changed` (the page changed after the preview) and `outcome_unknown`. The page list is long, so read it page by page: pass the receipt's `next_cursor` as `cursor` to the same call, and repeat with each returned `next_cursor` until it is `null`. Each entry names a path, its kind and, for `backfill-ids`, the minted ID. A preview's entries are kind `planned`: the pages its `plan_id` covers.
 
 If the vault changed after the preview, the job returns `STALE_MAINTENANCE_PLAN`, writes nothing and gives a fresh `plan_id`: preview again. Another start while a job runs returns `MAINTENANCE_JOB_ACTIVE` with the running `run_id`. `fix` and `backfill-ids` write in short chunks that let other writes through. `reconcile` holds writes for its whole run, and a `MUTATION_BUSY` refusal during it names the job's `run_id`. Applying `collections-store-export` is host work: run it with the service stopped.
 
