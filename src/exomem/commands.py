@@ -10745,6 +10745,9 @@ def op_adoption_studio(
                 initialize_kb=initialize_kb, collection=collection, after=after, consume=consume,
             )
         if action == "status":
+            if run_id and (after is not None or series_id is not None or next_window_bytes is not None):
+                raise adoption_run_module.AdoptionRunError(
+                    "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
             listing = adoption_run_module.status(vault_root, run_id=run_id, path=path)
             if run_id:
                 return listing

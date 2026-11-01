@@ -13,6 +13,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import (
@@ -34,6 +35,8 @@ LANDED, DISCARDED, UNREADABLE = "landed", "discarded", "unreadable"
 DISCARDED_NOT_FILED = "discarded, not filed"
 # The longest series ID a demand lease accepts; the sender's IDs are short, and the lease is a row per series.
 MAX_SERIES_ID = 128
+# What reading a policy value or the media ledger can raise: a value that is no number, an unreadable file or table.
+_UNREAD = (OSError, sqlite3.Error, ValueError, TypeError)
 
 # One acknowledgement at a time, so two calls never rewrite the same record from a stale read.
 _ACKNOWLEDGE_LOCK = threading.Lock()
@@ -74,24 +77,19 @@ def _figure(compute: Callable[[], int]) -> dict:
 class Window:
     """One import window that the cell holds a receipt or a walk file for.
 
-    A landed window lists the manifest members that no run filed. A discarded one lists its residual record.
-    An unreadable one has a stage and no record that can be read, so nothing about its members is known.
+    A landed window lists the manifest members that no run filed. A discarded one lists its residual record,
+    and the members that the person acknowledged. An unreadable one has a record that cannot be used, or a
+    stage and no record, so nothing about its members is known; `staged` says whether its stage still holds files.
+    `renames_pending` names the Knowledge Base paths that a refused discard found renamed and not committed.
     """
 
     import_id: str
     state: str
     members: tuple[dict, ...] = ()
+    acknowledged: tuple[dict, ...] = ()
     problem: str | None = None
-
-
-def _record_members(record: list[dict]) -> tuple[dict, ...] | None:
-    """The members of a residual record, or None when an entry is not a path, a byte count and a code."""
-    members = []
-    for entry in record:
-        if not (isinstance(entry.get("path"), str) and type(entry.get("bytes")) is int and isinstance(entry.get("code"), str)):
-            return None
-        members.append({"path": entry["path"], "bytes": entry["bytes"], "code": entry["code"]})
-    return tuple(members)
+    staged: bool = False
+    renames_pending: tuple[str, ...] = ()
 
 
 def census(root: Path) -> list[Window]:
@@ -99,52 +97,61 @@ def census(root: Path) -> list[Window]:
     runs = adoption_run.AdoptionRunStore(root).runs_by_stage()
     windows = []
     for import_id in import_stage.window_ids(root):
-        stage = import_stage.read(root, import_id)
-        if stage is not None and stage.proof == import_stage.CLOUD_PROOF:
+        record = import_stage.window_record(root, import_id)
+        if record is None:
+            continue  # A window with no stage and no record has nothing left to report.
+        common = {"staged": record.staged, "renames_pending": record.renames_pending}
+        if record.kind == import_stage.WINDOW_LANDED:
             staged = {path for path, _size in import_stage.staged_files(root, import_id)}
             unfiled = adoption_run.unfiled_members(root, import_id, runs.get(import_id, ()))
-            windows.append(Window(import_id, LANDED, tuple({**member, "staged": member["path"] in staged} for member in unfiled)))
-            continue
-        record = import_stage.read_residual(root, import_id)
-        if record is None:
-            if (root / import_stage.STAGE_DIR / import_id).exists():
-                windows.append(Window(import_id, UNREADABLE, problem="the receipt of this window cannot be read"))
-            continue  # A window with no stage and no record has nothing left to report.
-        members = _record_members(record)
-        windows.append(Window(import_id, DISCARDED, members or (), None if members is not None else "its residual record is damaged"))
+            members = tuple({**member, "staged": member["path"] in staged} for member in unfiled)
+            windows.append(Window(import_id, LANDED, members, **common))
+        elif record.kind == import_stage.WINDOW_RESIDUAL:
+            windows.append(Window(import_id, DISCARDED, record.members, record.acknowledged, **common))
+        else:
+            windows.append(Window(import_id, UNREADABLE, problem=record.problem, **common))
     return windows
 
 
-def _page(windows: list[Window], after: str | None) -> tuple[dict[str, list[dict]], str | None]:
+def _page(windows: list[Window], after: str | None) -> tuple[dict[str, dict[bool, list[dict]]], str | None]:
     """One page of members across the windows, ordered by import ID then path, from the member after `after`.
 
     A cursor is `<import ID>/<path>`; an import ID has a fixed length, so string order is the order of the pair.
+    The acknowledged members page with the others, and a window's record lists a path once (`import_stage` reads a
+    record that lists it twice as damaged), so no two keys are equal. A listed member is filed under whether it is acknowledged.
     """
     keyed = sorted(
-        (f"{window.import_id}/{member['path']}", window.import_id, member)
-        for window in windows for member in window.members
+        (f"{window.import_id}/{member['path']}", window.import_id, acknowledged, member)
+        for window in windows
+        for acknowledged, members in ((False, window.members), (True, window.acknowledged)) for member in members
     )
     rest = [item for item in keyed if after is None or item[0] > after]
     page, more = rest[:PAGE_MEMBERS], len(rest) > PAGE_MEMBERS
-    listed: dict[str, list[dict]] = {}
-    for _key, import_id, member in page:
-        listed.setdefault(import_id, []).append(member)
+    listed: dict[str, dict[bool, list[dict]]] = {}
+    for _key, import_id, acknowledged, member in page:
+        listed.setdefault(import_id, {False: [], True: []})[acknowledged].append(member)
     return listed, (page[-1][0] if more else None)
 
 
-def _window_entry(window: Window, listed: list[dict]) -> dict:
+def _window_entry(window: Window, listed: dict[bool, list[dict]]) -> dict:
     total = sum(member["bytes"] for member in window.members)
     entry: dict = {"import_id": window.import_id, "state": window.state}
     if window.problem is not None:
         entry["problem"] = window.problem
+    if window.renames_pending:
+        entry["renames_pending"] = list(window.renames_pending)
     if window.state == LANDED:
         staged = [member for member in window.members if member["staged"]]
         entry["unfiled"] = {"count": len(window.members), "bytes": total}
-        entry["residual"] = {"count": len(staged), "bytes": sum(member["bytes"] for member in staged)}
-        entry["members"] = [{**member, "state": "unfiled"} for member in listed]
+        entry["unfiled_staged"] = {"count": len(staged), "bytes": sum(member["bytes"] for member in staged)}
+        entry["members"] = [{**member, "state": "unfiled"} for member in listed[False]]
     elif window.state == DISCARDED:
         entry["residual"] = {"count": len(window.members), "bytes": total}
-        entry["members"] = [{**member, "state": DISCARDED_NOT_FILED} for member in listed]
+        entry["members"] = [{**member, "state": DISCARDED_NOT_FILED} for member in listed[False]]
+        entry["acknowledged"] = {
+            "count": len(window.acknowledged), "bytes": sum(member["bytes"] for member in window.acknowledged),
+            "members": listed[True],
+        }
     return entry
 
 
@@ -152,7 +159,7 @@ def _keep_source(windows: list[Window]) -> dict:
     """Whether the person still needs the source folder; a window that cannot be read counts, because it may hold a member."""
     unfiled = sum(len(w.members) for w in windows if w.state == LANDED)
     discarded = sum(len(w.members) for w in windows if w.state == DISCARDED)
-    unread = sum(w.state == UNREADABLE or w.problem is not None for w in windows)
+    unread = sum(w.state == UNREADABLE for w in windows)
     if not (unfiled or discarded or unread):
         return {"keep": False, "message": None}
     parts = [f"{unfiled} unfiled member(s) in landed windows"] if unfiled else []
@@ -163,11 +170,11 @@ def _keep_source(windows: list[Window]) -> dict:
 
 def _windows_section(windows: list[Window], after: str | None) -> dict:
     listed, next_after = _page(windows, after)
-    reported = [w for w in windows if w.state == LANDED or w.members or w.problem is not None]
+    reported = [w for w in windows if w.state != DISCARDED or w.members or w.acknowledged or w.renames_pending]
     counts = {state: sum(w.state == state for w in windows) for state in (LANDED, DISCARDED, UNREADABLE)}
     return {
         "counts": counts,
-        "windows": [_window_entry(window, listed.get(window.import_id, [])) for window in reported],
+        "windows": [_window_entry(window, listed.get(window.import_id, {False: [], True: []})) for window in reported],
         "keep_source": _keep_source(windows),
         "next_after": next_after,
     }
@@ -199,8 +206,8 @@ def _bounds(config: dict, root: Path) -> media_capacity.Bounds:
     _limits(config)
     try:
         bounds = media_capacity.bounds_for(config, root)
-    except OSError as error:
-        raise _Unknown(f"the volume's size cannot be read: {error}") from error
+    except _UNREAD as error:
+        raise _Unknown(f"the media store policy's bounds or the volume's size cannot be read: {error}") from error
     assert bounds is not None  # `_limits` found the capacity that `bounds_for` reads.
     return bounds
 
@@ -218,7 +225,7 @@ def _eviction_idle(config: dict) -> float | None:
 def _occupancy(root: Path, bounds: _Reading, idle: _Reading) -> media_store.Occupancy:
     try:
         return media_store.occupancy(root, bounds.need(), eviction_idle_seconds=idle.need())
-    except media_store.MediaStoreError as error:
+    except (media_store.MediaStoreError, *_UNREAD) as error:
         raise _Unknown(str(error)) from error
 
 
@@ -227,7 +234,7 @@ def _unfiled(windows: _Reading, bounds: _Reading) -> dict[str, int]:
     rule = bounds.need()
     totals = {media_capacity.TEXT: 0, media_capacity.OFFLOADABLE: 0, media_capacity.RESIDENT: 0}
     for window in windows.need():
-        if window.state == UNREADABLE:
+        if window.state == UNREADABLE and window.staged:  # With no stage left, no byte of the window is on the volume.
             raise _Unknown(f"window {window.import_id} cannot be read, so its unfiled members are unknown")
         if window.state == LANDED:
             for member in window.members:
@@ -236,14 +243,30 @@ def _unfiled(windows: _Reading, bounds: _Reading) -> dict[str, int]:
     return totals
 
 
-def _allowance(root: Path, config: dict) -> dict:
+def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
+    """The allowance and the owner census that it was measured by, with the census's time.
+
+    A census walks every note under the mutation boundary, which blocks filing for as long as the vault is large,
+    so a plain status reads the latest census that offload recorded. It counts afresh only when the call carries
+    a demand (`may_count`) and nothing is recorded. Otherwise the use is unknown, never 0.
+    """
     allowance = config.get("allowance_bytes")
     if type(allowance) is not int or allowance < 0:
         return {"unknown": "the media store policy sets no allowance"}
-    used = media_allowance.reference_usage(root).used_bytes
-    if used is None:
-        return {"allowance_bytes": allowance, "unknown": "the stored versions cannot be counted"}
-    return {"allowance_bytes": allowance, "used_bytes": used, "remaining_bytes": max(0, allowance - used)}
+    try:
+        counted = media_store.recorded_census(root)
+    except media_store.MediaStoreError as error:
+        return {"allowance_bytes": allowance, "unknown": str(error)}
+    if counted is None and may_count:
+        usage = media_allowance.reference_usage(root)
+        counted = None if usage.used_bytes is None else (usage.used_bytes, usage.observed_at)
+        if counted is None:
+            return {"allowance_bytes": allowance, "unknown": "the stored versions cannot be counted"}
+    if counted is None:
+        return {"allowance_bytes": allowance, "unknown": "no owner census is recorded yet; the next offload records one"}
+    used, observed_at = counted
+    return {"allowance_bytes": allowance, "used_bytes": used, "remaining_bytes": max(0, allowance - used),
+            "observed_at": observed_at}
 
 
 def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[str, int] | None) -> dict:
@@ -268,10 +291,14 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         if idle.need() is None:
             return window_budget()
         held = occupancy.need()
+        # `evictable_bytes` is a sum over ledger rows, so it can exceed what eviction frees: `evict` verifies each
+        # candidate again and skips an original that changed. The reachable budget is therefore an upper bound.
         return window_budget() + held.evictable_bytes + held.pending_offload_bytes + unfiled.need()[media_capacity.OFFLOADABLE]
 
     def effective() -> int:
-        return max(0, min(largest(), reachable() + occupancy.need().pinned_bytes))
+        # Pinned bytes return to the volume when their jobs end, which only eviction turns into room.
+        pinned = 0 if idle.need() is None else occupancy.need().pinned_bytes
+        return max(0, min(largest(), reachable() + pinned))
 
     budget, reach = _figure(window_budget), _figure(reachable)
     section: dict = {
@@ -280,7 +307,7 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         "job_pinned": _figure(lambda: occupancy.need().pinned_bytes),
         "effective_file_limit": _figure(effective),
         "classification": _classification(bounds),
-        "media_allowance": _allowance(root, config),
+        "media_allowance": _allowance(root, config, may_count=series is not None),
         "drain": _drain(unfiled, occupancy, idle),
     }
     if series is not None:
@@ -328,7 +355,7 @@ def _demand(root: Path, series: tuple[str, int], budget: dict, reachable: dict) 
     try:
         recorded = media_store.record_demand(
             root, series_id, window_bytes, budget=budget["bytes"], reachable_budget=reachable["bytes"])
-    except (OSError, sqlite3.Error) as error:
+    except _UNREAD as error:
         return {**outcome, "reason": f"the media ledger cannot record it: {error}"}
     if not recorded:
         return {**outcome, "reason": "the window is above the reachable budget"}
@@ -380,25 +407,26 @@ def _census_or_unknown(root: Path) -> list[Window]:
         raise _Unknown(f"the import records cannot be listed: {error}") from error
 
 
-def acknowledge(root: Path, import_id: str | None, paths: list[str] | None) -> dict:
-    """Clear the named paths from one discarded window's residual record; the person decides, never the caller.
+def acknowledge(root: Path, import_id: str | None, paths: object, *, at: str | None = None) -> dict:
+    """Move the named paths of one discarded window's residual record under `acknowledged`; the person decides, never the caller.
 
-    The call refuses without paths, so no call clears a whole record by accident. A path that the record
-    does not list changes nothing and is reported.
+    The call refuses without a list of paths, so no call clears a whole record by accident. A path that the
+    record does not list changes nothing and is reported. The entries stay in the record with the time (`at`,
+    now by default), so the status lists them and a mistaken acknowledgement can be undone by hand.
     """
     root = Path(root)
-    named = {path for path in paths or [] if isinstance(path, str) and path}
     if not vault.is_import_id(import_id):
         raise adoption_run.AdoptionRunError("IMPORT_REQUEST_INVALID", "acknowledge takes the import ID of a discarded window")
+    named = {path for path in paths if isinstance(path, str) and path} if isinstance(paths, list) else set()
     if not named:
         raise adoption_run.AdoptionRunError(
-            "IMPORT_REQUEST_INVALID", "acknowledge takes the paths to clear and never clears a whole record")
+            "IMPORT_REQUEST_INVALID", "acknowledge takes a list of the paths to clear and never clears a whole record")
     assert import_id is not None
     with _ACKNOWLEDGE_LOCK:
         try:
-            cleared = import_stage.clear_residual(root, import_id, named)
+            cleared = import_stage.clear_residual(root, import_id, named, at or datetime.now(UTC).isoformat(timespec="seconds"))
         except (OSError, ValueError) as error:
-            raise adoption_run.AdoptionRunError("IMPORT_RESIDUAL_UNWRITABLE", f"the record cannot be written: {error}") from error
+            raise adoption_run.AdoptionRunError("IMPORT_RESIDUAL_UNWRITABLE", f"the record cannot be used: {error}") from error
         remaining = import_stage.read_residual(root, import_id)
     if cleared is None:
         raise adoption_run.AdoptionRunError("IMPORT_NO_RESIDUAL", "that window has no residual record to clear")

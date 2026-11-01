@@ -39,6 +39,11 @@ WALK_RECORDS = "cloud-import-walks"
 UNREADABLE_CODE = "receipt_unreadable"
 # The file at a window's stage root that lists the whole series; it is never a member to file.
 SERIES_FILE = ".exomem-series.json"
+# Members that the person cleared from a residual record (D12): the same entry plus the time, kept beside `members`.
+ACKNOWLEDGED_KEY = "acknowledged"
+# What `window_record` finds, and which file holds a residual record; the status protocol's words.
+WINDOW_LANDED, WINDOW_RESIDUAL, WINDOW_UNREADABLE = "landed", "residual", "unreadable"
+RECEIPT_SOURCE, WALK_SOURCE = "receipt", "walk"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,12 +133,19 @@ def _read_members(entries: object) -> tuple[dict[str, tuple[int, str]], dict[str
     return members, identities
 
 
-def _load(path: Path) -> dict | None:
+def _read_json(path: Path) -> tuple[dict | None, bool]:
+    """The JSON object in `path`, and whether the file exists but cannot be used (unreadable, not JSON, not an object)."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, False
     except (OSError, ValueError):
-        return None
-    return document if isinstance(document, dict) else None
+        return None, True
+    return (document, False) if isinstance(document, dict) else (None, True)
+
+
+def _load(path: Path) -> dict | None:
+    return _read_json(path)[0]
 
 
 def receipt_path(vault_root: Path, import_id: str) -> Path:
@@ -150,6 +162,14 @@ def read_receipt(vault_root: Path, import_id: str) -> dict | None:
     return receipt if receipt is not None and isinstance(receipt.get("request"), dict) else None
 
 
+def _cloud_stage(import_id: str, receipt: dict) -> Stage | None:
+    """The stage that an `adopt` receipt's manifest vouches for, or None when it has no trustworthy manifest."""
+    if receipt["request"].get("kind") != "adopt":
+        return None
+    manifest = _read_members(receipt.get(MEMBERS_KEY))
+    return Stage(import_id, CLOUD_PROOF, *manifest) if manifest is not None else None
+
+
 def read(vault_root: Path, import_id: str) -> Stage | None:
     """The stage's manifest and what vouches for it, or None when it has none.
 
@@ -159,10 +179,8 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
     if not vault.is_import_id(import_id):
         return None
     receipt = read_receipt(vault_root, import_id)
-    if receipt is not None and receipt["request"].get("kind") == "adopt":
-        manifest = _read_members(receipt.get(MEMBERS_KEY))
-        if manifest is not None:
-            return Stage(import_id, CLOUD_PROOF, *manifest)
+    if receipt is not None and (stage := _cloud_stage(import_id, receipt)) is not None:
+        return stage
     try:
         record = _load(state_paths.vault_state_dir(vault_root) / LOCAL_RECORDS / f"{import_id}.json")
     except ValueError:
@@ -243,7 +261,10 @@ def read_walk(vault_root: Path, import_id: str) -> dict | None:
 
 
 def _members_of(record: object) -> list[dict] | None:
-    """The member list of a residual record, or None for anything else: another version, a damaged list, no list."""
+    """The member list of a record that holds one, or None: another version, no list, or entries that are not objects.
+
+    This answers whether a walk file holds the members of a walk, which the Job asks. A reader asks `_record_of`.
+    """
     entries = record.get(MEMBERS_KEY) if isinstance(record, dict) and record.get("version") == RESIDUAL_VERSION else None
     return entries if isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries) else None
 
@@ -253,16 +274,107 @@ def read_walk_members(vault_root: Path, import_id: str) -> list[dict] | None:
     return _members_of(read_walk(vault_root, import_id))
 
 
-def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
-    """The members of a discarded window's residual record, or None when the window has none.
+def _well_formed(entries: list[dict], *, timed: bool) -> bool:
+    """Whether every entry of a residual list is `{path, bytes, code}`, and has a time when `timed`."""
+    return all(
+        isinstance(entry.get("path"), str) and type(entry.get("bytes")) is int and entry["bytes"] >= 0
+        and isinstance(entry.get("code"), str) and (not timed or isinstance(entry.get("at"), str))
+        for entry in entries
+    )
 
-    The receipt's record wins; a stage walk's record stands in for a receipt that could not be read.
-    A record of another version, or a damaged one, is none: the caller never reads a wrong list.
+
+def _record_of(document: dict | None) -> tuple[list[dict], list[dict]] | None:
+    """The unfiled and the acknowledged members of a residual record, or None when the record is damaged.
+
+    Damaged is another version, an entry that is not `{path, bytes, code}`, or a path that the record lists
+    twice, because a listing would then sort or page one member into two.
+    """
+    members = _members_of(document)
+    if members is None or document is None:
+        return None
+    acknowledged = document.get(ACKNOWLEDGED_KEY, [])
+    if not (isinstance(acknowledged, list) and all(isinstance(entry, dict) for entry in acknowledged)):
+        return None
+    if not (_well_formed(members, timed=False) and _well_formed(acknowledged, timed=True)):
+        return None
+    paths = [entry["path"] for entry in members + acknowledged]
+    return (members, acknowledged) if len(set(paths)) == len(paths) else None
+
+
+def _paths_of(value: object) -> tuple[str, ...]:
+    """The strings of a list; a pending list is a hint for the status, so a damaged one reports none."""
+    return tuple(value) if isinstance(value, list) and all(isinstance(item, str) for item in value) else ()
+
+
+@dataclass(frozen=True, slots=True)
+class WindowRecord:
+    """What the cell holds for one window, as `window_record` decides it; the three kinds are the status protocol's words.
+
+    `landed` has a stage with a manifest. `residual` has the unfiled and acknowledged members of a discarded
+    window, read from `source`. `unreadable` has a record that cannot be used, or a stage and no record, so
+    nothing about its members is known; `staged` says whether the stage folder still holds files.
+    """
+
+    kind: str
+    stage: Stage | None = None
+    members: tuple[dict, ...] = ()
+    acknowledged: tuple[dict, ...] = ()
+    source: str | None = None
+    problem: str | None = None
+    staged: bool = False
+    renames_pending: tuple[str, ...] = ()
+
+
+def window_record(vault_root: Path, import_id: str) -> WindowRecord | None:
+    """The one record that stands for a window, or None when it has nothing left to report.
+
+    The status, the acknowledgement and `read_residual` all read a window through here, so the order
+    lives once. A residual record in the receipt comes first, because a discard writes it in the same write
+    that drops the manifest. A stage walk's record with members comes next: it stands in for a receipt that
+    could not be read, and it outranks a manifest that is readable again, because the walk found files that
+    the manifest did not list. Then a manifest makes the window landed. A record that exists and cannot
+    be used makes it unreadable, as does a stage with no record at all.
     """
     if not vault.is_import_id(import_id):
         return None
-    receipt_members = _members_of((read_receipt(vault_root, import_id) or {}).get(RESIDUAL_KEY))
-    return receipt_members if receipt_members is not None else read_walk_members(vault_root, import_id)
+    try:
+        receipt, receipt_damaged = _read_json(receipt_path(vault_root, import_id))
+        walk, walk_damaged = _read_json(state_paths.vault_state_dir(vault_root) / WALK_RECORDS / f"{import_id}.json")
+    except ValueError:
+        return None  # A vault with no state placement has no receipt and no walk file.
+    if receipt is not None and not isinstance(receipt.get("request"), dict):
+        receipt, receipt_damaged = None, True
+    pending = _paths_of((receipt if receipt is not None else walk or {}).get(RENAMES_PENDING_KEY))
+    stage = _cloud_stage(import_id, receipt) if receipt is not None else None
+    staged = (vault_root / STAGE_DIR / import_id).exists()
+    problems = ["the receipt of this window cannot be read"] if receipt_damaged else []
+    if receipt is not None and RESIDUAL_KEY in receipt:
+        if (kept := _record_of(receipt[RESIDUAL_KEY])) is not None:
+            return WindowRecord(WINDOW_RESIDUAL, None, tuple(kept[0]), tuple(kept[1]), RECEIPT_SOURCE, renames_pending=pending)
+        problems.append("its residual record in the receipt is damaged")
+    if receipt is not None and MEMBERS_KEY in receipt and stage is None and receipt["request"].get("kind") == "adopt":
+        problems.append("its manifest is damaged")
+    walked = _record_of(walk)
+    if walk_damaged or (walk is not None and MEMBERS_KEY in walk and walked is None):
+        problems.append("its walk record cannot be read")
+    if walked is not None and (walked[0] or walked[1] or stage is None):
+        return WindowRecord(WINDOW_RESIDUAL, None, tuple(walked[0]), tuple(walked[1]), WALK_SOURCE, renames_pending=pending)
+    if stage is not None and not problems:
+        return WindowRecord(WINDOW_LANDED, stage, staged=staged, renames_pending=pending)
+    if problems or staged:
+        return WindowRecord(WINDOW_UNREADABLE, problem="; ".join(problems) or "the receipt of this window cannot be read",
+                            staged=staged, renames_pending=pending)
+    return None
+
+
+def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
+    """The unfiled members of a discarded window's residual record, or None when the window has none to read.
+
+    None covers a window with no record, a landed window, and a record that cannot be used; `window_record`
+    tells the three apart.
+    """
+    record = window_record(vault_root, import_id)
+    return list(record.members) if record is not None and record.kind == WINDOW_RESIDUAL else None
 
 
 def _stems(directory: Path) -> set[str]:
@@ -283,36 +395,39 @@ def window_ids(vault_root: Path) -> list[str]:
     return sorted(_stems(state / CLOUD_RECEIPTS) | _stems(state / WALK_RECORDS))
 
 
-def clear_residual(vault_root: Path, import_id: str, paths: set[str]) -> list[str] | None:
-    """Drop the named members from the window's residual record, and return the paths it dropped.
+def clear_residual(vault_root: Path, import_id: str, paths: set[str], at: str) -> list[str] | None:
+    """Move the named members of a window's residual record under `acknowledged`, stamped `at`; return their paths.
 
-    None means the window has no record to clear. The record is written where `read_residual` reads it,
-    so the receipt's record outranks a walk's. A path that the record does not list changes nothing.
+    None means the window has no residual record. A record that cannot be read raises ValueError. The record
+    is written where `window_record` read it, in one write, so the status and the acknowledgement act on the
+    same record. A path that the record does not list changes nothing.
     """
-    receipt = read_receipt(vault_root, import_id)
-    record = receipt.get(RESIDUAL_KEY) if receipt is not None else None
-    if _members_of(record) is not None:
-        assert receipt is not None
-        dropped = _drop(record, paths)
-        if dropped:
-            _store_record(vault_root, CLOUD_RECEIPTS, import_id, receipt)
-        return dropped
-    walk = read_walk(vault_root, import_id)
-    if _members_of(walk) is None:
+    record = window_record(vault_root, import_id)
+    if record is None or record.kind == WINDOW_LANDED:
         return None
-    assert walk is not None
-    dropped = _drop(walk, paths)
-    if dropped:
-        _store_record(vault_root, WALK_RECORDS, import_id, walk)
-    return dropped
+    if record.kind == WINDOW_UNREADABLE:
+        raise ValueError(record.problem)
+    if record.source == RECEIPT_SOURCE:
+        document = read_receipt(vault_root, import_id)
+        assert document is not None
+        held, dirname = document[RESIDUAL_KEY], CLOUD_RECEIPTS
+    else:
+        document = held = read_walk(vault_root, import_id)
+        assert document is not None
+        dirname = WALK_RECORDS
+    moved = _acknowledge(held, paths, at)
+    if moved:
+        _store_record(vault_root, dirname, import_id, document)
+    return moved
 
 
-def _drop(record: dict, paths: set[str]) -> list[str]:
-    """Remove the members whose path is in `paths` from `record`, in place; return the paths it removed."""
-    kept = [entry for entry in record[MEMBERS_KEY] if entry.get("path") not in paths]
-    dropped = [entry["path"] for entry in record[MEMBERS_KEY] if entry.get("path") in paths]
+def _acknowledge(record: dict, paths: set[str], at: str) -> list[str]:
+    """Move the members whose path is in `paths` from `record` to its `acknowledged` list, in place; return their paths."""
+    kept = [entry for entry in record[MEMBERS_KEY] if entry["path"] not in paths]
+    moved = [{**entry, "at": at} for entry in record[MEMBERS_KEY] if entry["path"] in paths]
     record[MEMBERS_KEY] = kept
-    return dropped
+    record[ACKNOWLEDGED_KEY] = [*record.get(ACKNOWLEDGED_KEY, []), *moved]
+    return [entry["path"] for entry in moved]
 
 
 def _store_record(vault_root: Path, dirname: str, import_id: str, record: dict) -> None:

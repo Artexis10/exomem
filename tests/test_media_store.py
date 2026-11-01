@@ -7,6 +7,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -2592,6 +2593,26 @@ def test_the_effective_file_limit_is_the_reachable_budget_plus_the_job_pinned_by
     assert figures["effective_file_limit"] == {"bytes": effective}
 
 
+def test_with_eviction_off_the_effective_file_limit_adds_no_pinned_bytes(vault: Path, selected_store, monkeypatch):
+    """Catches a limit that promises the bytes of a claimed job when eviction is off: nothing turns them into room."""
+    from exomem import media_jobs
+
+    _window_policy(selected_store, monkeypatch)
+    _configure(selected_store, vault, growth_threshold=0.8, volume_fraction=0.005, minimum_idle_seconds=3600,
+               eviction_enabled=False)
+    pinned = _stored(vault, "pinned", 500_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(pinned, pinned.with_name(pinned.name + ".md"), "text"))
+    ledger.claim_next()
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 776_500_000, pinned))
+
+    figures = _window_status(vault)
+
+    assert figures["reachable_budget"] == {"bytes": 2_000_000}
+    assert figures["job_pinned"] == {"bytes": 500_000}
+    assert figures["effective_file_limit"] == {"bytes": 2_000_000}
+
+
 def test_the_reachable_budget_adds_what_eviction_filing_and_a_pending_offload_free_but_not_a_recent_owner_read(
         vault: Path, selected_store, monkeypatch):
     """Catches a reachable budget that counts an original the owner just read, or leaves out a term that frees room."""
@@ -2654,13 +2675,49 @@ def test_a_status_call_records_and_renews_a_demand_for_each_series_and_ignores_o
     assert set(leases()) == {"series-a", "series-b"}
 
 
-def test_the_status_reports_the_remaining_media_allowance(vault: Path, selected_store):
-    """Catches an allowance figure that reports the setting alone, so a series larger than the room starts anyway."""
-    path = _stored(vault, "recording", 300)
+def _recorded_by_a_batch(vault: Path) -> int:
+    """Offload one original through a batch, which records its owner census; returns the bytes that the census counts."""
+    from exomem import media_store
+
+    path = _filed(vault, 1, category="recorded")[0]
+    media_store.offload(vault, path, batch=media_store.OffloadBatch(vault))
+    return path.stat().st_size
+
+
+def test_the_status_reports_the_remaining_allowance_from_the_census_that_offload_recorded(
+        vault: Path, selected_store, monkeypatch):
+    """Catches an allowance figure that reports the setting alone, or a status that walks every note to measure it."""
+    used = _recorded_by_a_batch(vault)
+    censuses = _count_censuses(monkeypatch)
 
     allowance = _window_status(vault)["media_allowance"]
 
-    assert allowance == {"allowance_bytes": 10_000_000, "used_bytes": path.stat().st_size, "remaining_bytes": 10_000_000 - path.stat().st_size}
+    assert censuses == []
+    assert {key: allowance[key] for key in ("allowance_bytes", "used_bytes", "remaining_bytes")} == {
+        "allowance_bytes": 10_000_000, "used_bytes": used, "remaining_bytes": 10_000_000 - used}
+    assert datetime.fromisoformat(allowance["observed_at"]).tzinfo is not None
+
+
+def test_a_plain_status_with_no_recorded_census_reports_the_use_as_unknown_and_takes_none(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a status that reads 0 bytes in use before any offload ran, or that walks the vault to find out."""
+    censuses = _count_censuses(monkeypatch)
+
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert censuses == []
+    assert allowance["allowance_bytes"] == 10_000_000 and "used_bytes" not in allowance and allowance["unknown"]
+
+
+def test_a_status_that_carries_a_demand_takes_one_census_when_none_is_recorded(vault: Path, selected_store, monkeypatch):
+    """Catches a series that starts with no figure for the room it needs, because only offload ever recorded one."""
+    path = _stored(vault, "recording", 300)  # A stored original; its offload was not a batch, so no census is recorded.
+    censuses = _count_censuses(monkeypatch)
+
+    allowance = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
+
+    assert len(censuses) == 1
+    assert allowance["used_bytes"] == path.stat().st_size and allowance["observed_at"]
 
 
 def _filed(vault: Path, count: int, *, category: str = "batch") -> list[Path]:

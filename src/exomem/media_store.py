@@ -538,16 +538,53 @@ class OffloadBatch:
         self._vault = Path(vault).resolve()
         self._usage: media_allowance.ReferenceUsage | None = None
 
-    def usage(self) -> media_allowance.ReferenceUsage:
+    def usage(self, ledger: MediaJobStore) -> media_allowance.ReferenceUsage:
         if self._usage is None:
             self._usage = media_allowance.reference_usage(self._vault)
+            _record_census(ledger, self._usage)
         return self._usage
 
-    def charge(self, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
-        self._usage = self.usage().charged(_binding_of(self._vault, snapshot), reference)
+    def charge(self, ledger: MediaJobStore, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
+        self._usage = self.usage(ledger).charged(_binding_of(self._vault, snapshot), reference)
+        _record_census(ledger, self._usage)
 
     def end(self) -> None:
         self._usage = None
+
+
+def _record_census(ledger: MediaJobStore, usage: media_allowance.ReferenceUsage) -> None:
+    """Keep the latest owner census for the window status, so that a status call never walks the vault (D12).
+
+    An unknown census is not kept. A failed write is dropped, because it costs the status only a fresher figure
+    and must not stop an offload.
+    """
+    used = usage.used_bytes
+    if used is None:
+        return
+    with suppress(sqlite3.Error, OSError), closing(ledger._connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO media_owner_census(singleton, used_bytes, observed_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, observed_at=excluded.observed_at",
+            (used, usage.observed_at),
+        )
+
+
+def recorded_census(vault: Path) -> tuple[int, str] | None:
+    """The used bytes and the time of the latest census that offload recorded, or None when it recorded none.
+
+    Raises `MediaStoreError` when the ledger cannot be read. A ledger from before the record has no table: none.
+    """
+    ledger = MediaJobStore(Path(vault).resolve(), create=False)
+    if not ledger.path.exists():
+        return None
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_owner_census'").fetchone() is None:
+                return None
+            row = conn.execute("SELECT used_bytes, observed_at FROM media_owner_census").fetchone()
+    except (sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
+    return None if row is None else (int(row["used_bytes"]), str(row["observed_at"]))
 
 
 def _offload_admission(
@@ -804,12 +841,12 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> St
 
 
 def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> StoredObject | None:
-    census = batch.usage if batch is not None else _no_census
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
     backend = store_for(vault)
     ledger = MediaJobStore(vault)
+    census = (lambda: batch.usage(ledger)) if batch is not None else _no_census
     with _pin(vault, path) as (_ledger, token), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
@@ -917,7 +954,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 _require_allowance(ledger, snapshot, decision.code)
                 if batch is not None:
                     # Charged before the write: a failed write leaves the batch over-counting, never under.
-                    batch.charge(snapshot, reference)
+                    batch.charge(ledger, snapshot, reference)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
         return reference
