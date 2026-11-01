@@ -583,8 +583,8 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
     earlier_key = json.loads(earlier_key_path.read_text(encoding="utf-8"))
     out["key"] = {"profile": key["profile"], "seed": key["seed"], "fixture_tree_sha256": key["fixture_tree_sha256"],
                   "summary": key["summary"]}
-    out["scoring"] = {"cloud_media_engines": SCORER_ENV["EXOMEM_MEDIA_ENGINES"] or "none, as the cell runs",
-                      "local_media_engines": "all (personal profile)",
+    out["scoring"] = {"scorer_engines_for_cloud_copies": SCORER_ENV["EXOMEM_MEDIA_ENGINES"] or "none",
+                      "scorer_engines_for_the_local_arm": "all (personal profile)",
                       "note": "media recall rows compare unlike engine sets; the item groups and the verdict do not use them"}
     record = StepRecord(0, "raw_import")
     from .scenarios import first_session

@@ -23,9 +23,13 @@ def _cellctl_constants(*names: str) -> tuple[str, ...]:
 
     cellctl reads the Job's owner mark by these names, so a rename on either side fails the tests that use them."""
     path = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "imports.py"
-    found = {node.targets[0].id: node.value.value for node in ast.parse(path.read_text(encoding="utf-8")).body
-             if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
-             and isinstance(node.value, ast.Constant)}
+    found = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        target = node.targets[0] if isinstance(node, ast.Assign) else getattr(node, "target", None)
+        if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant):
+            found[target.id] = node.value.value
+    missing = [name for name in names if name not in found]
+    assert not missing, f"cellctl's imports.py no longer assigns {missing} a constant"
     return tuple(found[name] for name in names)
 
 
