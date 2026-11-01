@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from exomem import cloud_export_client, cloud_import_client
+from exomem import cloud_export_client, cloud_import_client, cloud_import_windows
 from exomem.cli_progress import Progress
 from exomem.cloud_import import DEFAULT_RESERVE_BYTES
 from exomem.cloud_import_client import (
@@ -416,11 +416,23 @@ def test_failed_import_reports_phase_code_import_id_and_the_copy_it_still_holds(
 def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfig:
     seen = []
 
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
     async def capture(source, config, checkpoint, **kwargs):
         seen.append(config)
-        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "observed_state": "done"}
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "windows": 1}
 
-    monkeypatch.setattr(cloud_import_client, "import_source", capture)
+    # A folder goes by windows, through the cell's tools; this test only reads which endpoints the command takes.
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
     assert cloud_import_client.main(["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp"), *arguments]) == 0
     return seen[0]
 

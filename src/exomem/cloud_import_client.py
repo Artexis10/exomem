@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -21,7 +22,7 @@ import httpx2
 from fastmcp.client.auth import OAuth
 from platformdirs import user_state_dir
 
-from . import cloud_import_envelope, import_selection
+from . import cloud_import_envelope, import_selection, import_stage
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import ARCHIVE_TOO_LARGE, DEFAULT_MAX_MEMBERS, DEFAULT_RESERVE_BYTES
@@ -94,12 +95,16 @@ def server_code(response: httpx2.Response) -> str:
     return safe_code(code) or f"HTTP_{response.status_code}"
 
 
-def authorized_api_client(config: CloudImportClientConfig) -> httpx2.AsyncClient:
-    """The Cloud API client that signs in through a local browser; the one OAuth setup for every `exomem cloud` command."""
-    oauth = OAuth(mcp_url=config.mcp_url, client_id=config.oauth_client_id,
-                  client_name="Exomem CLI", scopes=["exomem.read", "exomem.write", "offline_access"],
-                  callback_host="127.0.0.1", callback_port=None)
-    return httpx2.AsyncClient(auth=oauth, timeout=60)
+def cloud_oauth(config: CloudImportClientConfig) -> OAuth:
+    """The one OAuth setup for every `exomem cloud` command; share it so that a run signs in once."""
+    return OAuth(mcp_url=config.mcp_url, client_id=config.oauth_client_id,
+                 client_name="Exomem CLI", scopes=["exomem.read", "exomem.write", "offline_access"],
+                 callback_host="127.0.0.1", callback_port=None)
+
+
+def authorized_api_client(config: CloudImportClientConfig, oauth: OAuth | None = None) -> httpx2.AsyncClient:
+    """The Cloud API client that signs in through a local browser."""
+    return httpx2.AsyncClient(auth=oauth or cloud_oauth(config), timeout=60)
 
 
 def add_endpoint_arguments(command: argparse.ArgumentParser) -> None:
@@ -117,6 +122,14 @@ class _Where:
 
     phase: str = PREFLIGHT
     import_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Window:
+    """One window of a series: the members to send and the series file that every window carries."""
+
+    selection: import_selection.Selection
+    series_file: bytes
 
 
 @dataclass(frozen=True)
@@ -164,7 +177,14 @@ def _inventory(source: Path, envelope, *, include_hidden: bool, use_gitignore: b
     if not selection.kept:
         raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT",
                                "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+    return _adopt_plan(selection, None, max_members)
+
+
+def _adopt_plan(selection: import_selection.Selection, series_file: bytes | None, max_members: int | None) -> _Plan:
+    """The plan of an `adopt` archive: the selected files, and the series file when the window carries one."""
     members = [(item.rel, item.size) for item in selection.kept]
+    if series_file is not None:
+        members.append((import_stage.SERIES_FILE, len(series_file)))
     # The archive also holds one entry per folder that leads to a selected file.
     folders: set[str] = set()
     for rel, _ in members:
@@ -214,8 +234,18 @@ class _CountingWriter:
         self._stream.flush()
 
 
-def _add_selected(archive: tarfile.TarFile, root: Path, selection: import_selection.Selection) -> None:
+def _add_series_file(archive: tarfile.TarFile, series_file: bytes) -> None:
+    """Add the reserved series file at the archive root; the Job stages it like any member."""
+    info = tarfile.TarInfo(import_stage.SERIES_FILE)
+    info.size, info.mode, info.mtime = len(series_file), 0o600, int(time.time())
+    archive.addfile(info, io.BytesIO(series_file))
+
+
+def _add_selected(archive: tarfile.TarFile, root: Path, selection: import_selection.Selection,
+                  series_file: bytes | None = None) -> None:
     """Add the selected files, each opened without following a link and checked against the walk and while it is read."""
+    if series_file is not None:
+        _add_series_file(archive, series_file)
     made: set[str] = set()
     for item in selection.kept:
         parts = item.rel.split("/")[:-1]
@@ -253,7 +283,8 @@ def _changed_since(descriptor: int, before: os.stat_result) -> bool:
     return (now.st_size, now.st_mtime_ns) != (before.st_size, before.st_mtime_ns)
 
 
-def _ciphertext(source: Path, target: Path, recipient: str, envelope, plan: _Plan, progress: Progress) -> None:
+def _ciphertext(source: Path, target: Path, recipient: str, envelope, plan: _Plan, progress: Progress,
+                series_file: bytes | None = None) -> None:
     pending = target.with_suffix(".pending")
     pending.unlink(missing_ok=True)
     descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -272,7 +303,7 @@ def _ciphertext(source: Path, target: Path, recipient: str, envelope, plan: _Pla
                         else:
                             # dereference: a hard-linked file is added as a regular file, not as a link member.
                             with tarfile.open(fileobj=sink, mode="w|", dereference=True) as archive:
-                                _add_selected(archive, source, plan.selection)
+                                _add_selected(archive, source, plan.selection, series_file)
                 except BrokenPipeError:
                     raise CloudImportError(ARCHIVE, "ENCRYPTION_FAILED", "the age process stopped early") from None
                 # This CLI encryption process owns the archive lifetime, outside request serving.
@@ -343,8 +374,11 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
                         include_hidden: bool = False, use_gitignore: bool = True,
                         api=None, uploads=None, poll_seconds: float = 2,
                         progress: Progress | None = None,
-                        free_bytes: Callable[[Path], int] = _free_bytes) -> dict:
+                        free_bytes: Callable[[Path], int] = _free_bytes,
+                        window: Window | None = None) -> dict:
     """Reauthorize on restart and reuse the same private ciphertext and part receipts.
+
+    A `window` sends only its members, with the series file; the source's other files stay behind.
 
     Every failure leaves as a `CloudImportError` that names its phase, a content-free code and the import id.
     """
@@ -353,7 +387,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
         return await _import(source, config, checkpoint, where, scope=scope, category=category,
                              include_hidden=include_hidden, use_gitignore=use_gitignore, api=api,
                              uploads=uploads, poll_seconds=poll_seconds, progress=progress or Progress(),
-                             free_bytes=free_bytes)
+                             free_bytes=free_bytes, window=window)
     except CloudImportError as error:
         error.import_id = error.import_id or where.import_id
         raise
@@ -363,7 +397,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
 
 async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Path, where: _Where, *,
                   scope, category, include_hidden, use_gitignore, api, uploads, poll_seconds,
-                  progress: Progress, free_bytes) -> dict:
+                  progress: Progress, free_bytes, window: Window | None = None) -> dict:
     source = source.resolve()
     checkpoint = checkpoint.resolve()
     if source.is_dir() and checkpoint.is_relative_to(source):
@@ -412,7 +446,9 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
                 envelope = None
             else:
                 raise CloudImportError(PREFLIGHT, "SOURCE_NOT_FOUND", "the source must be a folder or a ZIP file")
-            plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore, progress=progress, max_members=max_members)
+            plan = (_adopt_plan(window.selection, window.series_file, max_members) if window else
+                    _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore,
+                               progress=progress, max_members=max_members))
             _check_resources(plan, checkpoint, progress, free_bytes, reserve_bytes)
             state = {"source": str(source), "config": asdict(config), "import_id": str(uuid.uuid4()),
                      "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
@@ -478,15 +514,17 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             envelope = cloud_import_envelope.Envelope.model_validate(state["envelope"]) if state["envelope"] else None
             if plan is None:
                 # A restart after the import was declared but before the archive was built: walk the source again.
-                plan = _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore,
-                                  progress=progress, max_members=max_members)
+                plan = (_adopt_plan(window.selection, window.series_file, max_members) if window else
+                        _inventory(source, envelope, include_hidden=include_hidden, use_gitignore=use_gitignore,
+                                   progress=progress, max_members=max_members))
                 if (plan.files, plan.bytes) != (state["declared_files"], state["declared_bytes"]):
                     raise _abandoned(record, ciphertext, state["import_id"], "SOURCE_CHANGED",
                                      "the source changed since this import was declared")
                 _check_resources(plan, checkpoint, progress, free_bytes, reserve_bytes)
             progress.say("Archiving and encrypting.")
             try:
-                await asyncio.to_thread(_ciphertext, source, ciphertext, item["recipient"], envelope, plan, progress)
+                await asyncio.to_thread(_ciphertext, source, ciphertext, item["recipient"], envelope, plan, progress,
+                                       window.series_file if window else None)
             except _SourceChanged:
                 raise _abandoned(record, ciphertext, state["import_id"], "SOURCE_CHANGED",
                                  "the source changed while it was archived") from None
@@ -568,6 +606,27 @@ def _report_failure(error: CloudImportError, checkpoint: Path, progress: Progres
     return size
 
 
+async def _run(args, config: CloudImportClientConfig, checkpoint: Path, progress: Progress) -> dict:
+    """A folder goes by windows (one import on a cell without a window budget); a ZIP file goes as one import."""
+    if not args.source.is_dir():
+        if args.resend_residual:
+            raise CloudImportError(PREFLIGHT, "NO_SERIES", "only a folder import has a residual to resend", resume=False)
+        return await import_source(args.source, config, checkpoint, scope=args.scope, category=args.category,
+                                   include_hidden=args.include_hidden, use_gitignore=not args.no_gitignore, progress=progress)
+    from .cloud_import_windows import McpCell, import_folder
+
+    oauth = cloud_oauth(config)
+    api, uploads = authorized_api_client(config, oauth), httpx2.AsyncClient(timeout=120)
+    try:
+        async with McpCell(config, oauth) as cell:
+            return await import_folder(
+                args.source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=args.include_hidden,
+                use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual)
+    finally:
+        await api.aclose()
+        await uploads.aclose()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem cloud", epilog="To download an owner export, run: exomem cloud export --help")
@@ -579,6 +638,8 @@ def main(argv=None) -> int:
     command.add_argument("--scope")
     command.add_argument("--category")
     command.add_argument("--checkpoint", type=Path)
+    command.add_argument("--resend-residual", action="store_true",
+                         help="send the members that discarded windows did not file, as a new series")
     args = parser.parse_args(argv)
     progress = Progress()
     checkpoint = args.checkpoint
@@ -589,9 +650,7 @@ def main(argv=None) -> int:
             raise CloudImportError(PREFLIGHT, "ENDPOINT_NOT_HTTPS", "the Cloud URLs must use HTTPS") from None
         key = hashlib.sha256((str(args.source.resolve()) + config.api_base_url).encode()).hexdigest()
         checkpoint = args.checkpoint or Path(user_state_dir("exomem")) / "cloud-imports" / key
-        result = asyncio.run(import_source(
-            args.source, config, checkpoint, scope=args.scope, category=args.category,
-            include_hidden=args.include_hidden, use_gitignore=not args.no_gitignore, progress=progress))
+        result = asyncio.run(_run(args, config, checkpoint, progress))
     except CloudImportError as error:
         held = _report_failure(error, checkpoint, progress) if checkpoint is not None else None
         failure = {"ok": False, "error": type(error).__name__, "phase": error.phase, "code": error.code,
@@ -603,6 +662,9 @@ def main(argv=None) -> int:
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
         print(json.dumps({"ok": False, "error": type(error).__name__}))
         return 1
+    if "windows" in result:
+        print(json.dumps({"ok": True, **result}))
+        return 0
     print(json.dumps({"ok": True, "import_id": result["import_id"], "state": result["observed_state"],
                       **{key: result[key] for key in ("staged_files", "staged_bytes") if result.get(key) is not None}}))
     return 0
