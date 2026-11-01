@@ -1256,14 +1256,14 @@ def test_captured_source_original_reconciles_and_recovers_without_metadata_rewri
             unrelated = add.add(vault, source_schema, title="Captured original notes", content="Unrelated canonical Source.", source_type="session")
             assert vault / unrelated.path == preserve._sidecar_paths(path, protected=False, source=True)[0]
     elif layout == "opaque":
-        assert path.name.endswith(".md.bin")
+        assert path.name.endswith(".md.txt")
     metadata, _, _ = vault_module.parse_frontmatter(page.read_text())
     assert metadata["exomem_id"] != raw_identity
     assert metadata["original_filename"] == filename and metadata["original_content_type"] == mime
     classified = source_capture.canonical_pages(vault)
     assert page.relative_to(vault).as_posix() in classified.canonical
     assert path.relative_to(vault).as_posix() not in classified.canonical
-    if layout == "native":
+    if layout in {"native", "opaque"}:
         assert path.name != filename
         media_processing.reconcile_media(vault, path, explicit=False)
         pending, _, _ = vault_module.parse_frontmatter(page.read_text())

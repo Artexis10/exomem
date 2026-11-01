@@ -103,17 +103,19 @@ KEY_SCHEMA = {
 }
 #: The fields a key must carry for every rule.
 KEY_REQUIRED = ("id", "case_sha256", "category", "variant", "client_shape", "state_success")
-#: The false-precision field each variant's protocol.yaml rule reads. Variants are
-#: SCHEMA.md's closed tokens; without its field a key would score no false precision.
-FALSE_PRECISION_FIELD = {
-    "specific_fits": "false_precision.pairs",
-    "generic_or_none": "false_precision.pairs",
-    "positive": "false_precision.wrong_core_types",
-    "durability_twin": "false_precision.twin_promoted",
-    "under_expected_home": "false_precision.wrong_homes",
-    "outside_unrelated_homes": "false_precision.wrong_homes",
-    "promoted_entity_type": "false_precision.wrong_core_types",
-    "promoted_relation": "false_precision.pairs",
+#: The false-precision fields each variant's protocol.yaml rule reads. Variants are
+#: SCHEMA.md's closed tokens; without a field a key would score part of its false
+#: precision as absent. The two referent rules read a wrong type or an unsupported
+#: edge to the anchor, so they need both fields.
+FALSE_PRECISION_FIELDS = {
+    "specific_fits": ("false_precision.pairs",),
+    "generic_or_none": ("false_precision.pairs",),
+    "positive": ("false_precision.wrong_core_types", "false_precision.pairs"),
+    "durability_twin": ("false_precision.twin_promoted",),
+    "under_expected_home": ("false_precision.wrong_homes",),
+    "outside_unrelated_homes": ("false_precision.wrong_homes",),
+    "promoted_entity_type": ("false_precision.wrong_core_types", "false_precision.pairs"),
+    "promoted_relation": ("false_precision.pairs",),
 }
 
 
@@ -783,9 +785,9 @@ def missing_fields(key: Mapping) -> list[str]:
     if rule not in RULES:
         return [f"state_success.rule (no implemented rule {rule!r})"]
     variant = key.get("variant")
-    if variant not in FALSE_PRECISION_FIELD:
+    if variant not in FALSE_PRECISION_FIELDS:
         return [f"variant (no known variant {variant!r})"]
-    needed = [*KEY_REQUIRED, *RULES[rule][1], FALSE_PRECISION_FIELD[variant]]
+    needed = [*KEY_REQUIRED, *RULES[rule][1], *FALSE_PRECISION_FIELDS[variant]]
     needed += [f"{view}.{name}" for view in ("answer", "judge_reference_view") for name in _ANSWER]
     missing = [path for path in needed if not _has(key, path)]
     pairs = (key.get("false_precision") or {}).get("pairs") or []
@@ -864,7 +866,7 @@ def _read_runs(out: Path, situation_id: str, arms: Sequence[str]) -> dict[str, d
         path = out / situation_id / arm / "run.json"
         if not path.is_file():
             continue
-        run = _read_json(path)
+        run = read_json(path)
         if not isinstance(run, dict):
             raise ScoreRefused(f"{path} is not a run file")
         if (run.get("situation_id"), run.get("arm")) != (situation_id, arm):
@@ -873,7 +875,9 @@ def _read_runs(out: Path, situation_id: str, arms: Sequence[str]) -> dict[str, d
     return runs
 
 
-def _read_json(path: Path) -> object:
+def read_json(path: Path) -> object:
+    """The JSON value of one input file; an unreadable file is a :class:`ScoreRefused`."""
+
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -892,13 +896,15 @@ def arm_roles(out: Path) -> dict[str, dict]:
     by_capability = {capable: role for role, capable in REASON_CAPABLE.items()}
     roles: dict[str, dict] = {}
     for path in sorted(out.glob("binding-*.json")):
-        binding = _read_json(path)
+        binding = read_json(path)
         if not isinstance(binding, dict) or not all(
             isinstance(binding.get(name), str)
             for name in ("arm", "binding_ref", "revision", "base_revision")
         ):
             raise ScoreRefused(f"{path.name} is not a binding record")
-        role = by_capability.get(binding.get("reason_capable"))
+        capable = binding.get("reason_capable")
+        # A strict bool: 1 and 0 would otherwise look up the True and False roles.
+        role = by_capability.get(capable) if isinstance(capable, bool) else None
         if role is None or path.name != f"binding-{binding['arm']}.json":
             raise ScoreRefused(f"{path.name} names no role or another arm")
         if (role == "candidate") == (binding["revision"] == binding["base_revision"]):

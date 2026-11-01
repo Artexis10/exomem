@@ -826,10 +826,11 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.154.0" # x-release-please-version
+version = "0.155.0" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "charset-normalizer" },
     { name = "fastmcp" },
     { name = "filelock" },
     { name = "fsspec", extra = ["http"] },
@@ -944,6 +945,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.20,<2" },
     { name = "av", marker = "extra == 'media'", specifier = ">=11,<19" },
     { name = "av", marker = "extra == 'media-cpu'", specifier = ">=11,<19" },
+    { name = "charset-normalizer", specifier = ">=3.4,<4" },
     { name = "ctranslate2", marker = "extra == 'media'", specifier = ">=4.6.3,<5" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'embeddings'" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'media-cpu'" },

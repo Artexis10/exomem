@@ -65,7 +65,14 @@ reviewed instant, differs from the sealed postcondition. Proposal SHALL refuse
 with `RELATION_REVIEW_NOT_APPLICABLE` a step that gives a relation disposition
 when its leaf's validation reports a fully governed page that needs none,
 because the leaf refuses that review at commit; it ignores a review on any
-other page.
+other page. Proposal SHALL also refuse with `SEMANTIC_CONTRACT_BLOCKED` a step
+whose leaf validation reports a blocking finding that the step does not answer,
+because the leaf refuses that step at commit. This covers create, supersede
+and edit steps. The step's own relation review answers a relation-disposition
+finding. When the step writes a link to a page that an earlier step of the plan
+creates, the relation-disposition judgement moves to execution, because the leaf
+can judge that link only once the page exists; if the link does not qualify, the
+leaf still refuses the step there.
 
 #### Scenario: Plan requests an arbitrary command
 
@@ -86,6 +93,13 @@ other page.
   not require it, such as a page that already links to an existing page
 - **THEN** proposal refuses with `RELATION_REVIEW_NOT_APPLICABLE` and stores no
   plan
+
+#### Scenario: Plan omits a review the page needs
+
+- **WHEN** a create step has no qualifying relation and no review, or an edit
+  step changes a page so that its saved relation review is no longer current
+  and gives no new review
+- **THEN** proposal refuses with `SEMANTIC_CONTRACT_BLOCKED` and stores no plan
 
 #### Scenario: Edit approved days after proposal
 

@@ -13,6 +13,11 @@ output "durability_workspace_id" {
   value       = tfe_workspace.durability.id
 }
 
+output "cell_data_workspace_id" {
+  description = "HCP workspace ID for the cell-data root."
+  value       = tfe_workspace.cell_data.id
+}
+
 output "backend_proof_workspace_id" {
   description = "HCP workspace ID for disposable locking and rollback proof."
   value       = tfe_workspace.backend_proof.id
