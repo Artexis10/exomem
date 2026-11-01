@@ -154,6 +154,14 @@ class CellRow:
 
         return max(self.storage_gib, self.grown_storage_gib or 0)
 
+    @property
+    def has_stored_object_store_key(self) -> bool:
+        """An old cell: cellctl holds the per-cell key it stored, and the cell backs up to the
+        founder-account bucket. Rendering, the backup store and deletion all route on this one
+        test, so a row with half a key is a new cell for each of them alike."""
+
+        return self.b2_key_id is not None and self.b2_key_wrapped is not None
+
     def is_dirty(self, *, refusal_parked: bool = False) -> bool:
         # D4: a refused row (MANIFEST_IMMUTABLE) is dirty unless cellctl holds
         # it parked in memory, so a restarted cellctl retries it once.
@@ -302,6 +310,9 @@ class ClusterObservation:
     # An old cell's backup objects, all deleted. A new cell's sit under a lock nothing deletes,
     # so this stays False for it and no deletion step waits on it.
     backup_objects_absent_confirmed: bool = False
+    # Every export and import object of the cell in the staging bucket: all versions, hidden ones
+    # and unfinished uploads included. It holds for every cell, old or new.
+    staging_objects_absent_confirmed: bool = False
 
 
 @dataclass
@@ -329,6 +340,7 @@ class Decision:
 
     delete_namespace: bool = False
     delete_backup_objects: bool = False
+    delete_staging_objects: bool = False
     # D4/D8: a BACKUP_FAILED hold exit deletes this hold's backup Job before
     # the cell restarts, so the ResourceQuota does not hold the restart back.
     delete_backup_job: bool = False

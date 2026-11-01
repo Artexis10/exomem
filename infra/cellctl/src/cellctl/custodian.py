@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from kubernetes import client as k8s
@@ -85,8 +86,10 @@ def ensure_cell_key(core: k8s.CoreV1Api, key_store: PrefixKeyStore, namespace: k
     return True
 
 
-def _ensure_each(core: k8s.CoreV1Api, key_store: PrefixKeyStore, namespaces) -> None:
-    """One namespace's failure never stops the others: the next sweep tries it again."""
+def _ensure_each(core: k8s.CoreV1Api, key_store: PrefixKeyStore, namespaces, beat: Callable[[], None]) -> None:
+    """One namespace's failure never stops the others: the next sweep tries it again. `beat` runs
+    after every attempt, so a provider outage that fails each namespace in turn never ages the
+    heartbeat; only a call that hangs past its own timeout does."""
 
     for namespace in namespaces:
         try:
@@ -94,24 +97,28 @@ def _ensure_each(core: k8s.CoreV1Api, key_store: PrefixKeyStore, namespaces) -> 
         except Exception as error:  # noqa: BLE001 - a provider or API error is retried by the next sweep
             logger.error("key custodian: cell namespace %s not served: %s",
                          namespace.metadata.name, describe_error(error))
+        beat()
 
 
 def serve(core: k8s.CoreV1Api, key_store: PrefixKeyStore, heartbeat_path: str, *, stop=lambda: False) -> None:
     """Sweeps every namespace, then watches for new ones until the window ends, forever."""
 
+    def beat() -> None:
+        Path(heartbeat_path).touch()
+
     while not stop():
         try:
             listing = core.list_namespace()
-            Path(heartbeat_path).touch()
-            _ensure_each(core, key_store, listing.items)
+            beat()
+            _ensure_each(core, key_store, listing.items, beat)
             for event in watch.Watch().stream(
                 core.list_namespace,
                 resource_version=listing.metadata.resource_version,
                 timeout_seconds=WATCH_SECONDS,
             ):
-                Path(heartbeat_path).touch()
+                beat()
                 if event["type"] == "ADDED":
-                    _ensure_each(core, key_store, [event["object"]])
+                    _ensure_each(core, key_store, [event["object"]], beat)
         except Exception as error:  # noqa: BLE001 - a lost watch or API outage restarts the sweep
             logger.error("key custodian: sweep failed, retrying: %s", describe_error(error))
             time.sleep(RETRY_SECONDS)

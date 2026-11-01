@@ -21,14 +21,18 @@ Confirm completion in this order:
 3. Confirm that the cell namespace is absent.
 4. No PersistentVolume claims that namespace, and the recorded Hetzner volume
    is absent. Namespace deletion alone is not proof of volume deletion.
-5. For a cell with a stored B2 key ID (made before the cell-data account), every B2 object
+5. The staging bucket holds no version, delete marker or unfinished upload under the exact
+   `cells/<cell_id>/` prefix. `cellctl` lists that prefix with its staging key, deletes what it
+   finds, and lists it again before it goes on.
+6. For a cell with a stored B2 key ID (made before the cell-data account), every B2 object
    version under the exact `cells/<cell_id>/` prefix is absent, including hidden versions.
    An empty current-object listing is insufficient. A newer cell's backups sit in the locked
    cell-data bucket: `cellctl` deletes nothing there and only lists them.
-6. The row reports `observed_state = deleted`, with any stored B2 key ID and wrapped
+7. The row reports `observed_state = deleted`, with any stored B2 key ID and wrapped
    B2 and backup key material cleared.
-7. `cellctl` raises the platform alert `cell-storage-cleanup-pending-<cell_id>`. It holds no
-   credential that deletes keys, so the operator deletes the cell's object-store key. Follow
+8. `cellctl` raises the platform alert `cell-storage-cleanup-pending-<cell_id>`. It holds no
+   credential that deletes keys, so the operator deletes the cell's object-store key and
+   hides its backup files, in both accounts. Follow
    [Cloud key custody](cloud-key-custody.md#clean-up-after-a-cell-deletion).
 
 The controller retries incomplete steps. A failed provider observation is not

@@ -1695,11 +1695,28 @@ def test_deletion_then_checks_pv_absence() -> None:
     assert decision.row_updates["observed_state"] == "deleting"
 
 
+def test_deletion_sweeps_the_cells_staged_exports_and_imports_before_anything_else_of_its_storage() -> None:
+    # An old cell's backup objects wait too: nothing stored for the cell may outlive its proof.
+    for stored_key in ({}, {"b2_key_id": "key-1", "b2_key_wrapped": b"wrapped"}):
+        decision = decide(
+            row(desired_state="deleted", **stored_key),
+            rollout(),
+            obs(namespace_absent_confirmed=True, pv_absent_confirmed=True),
+            now=NOW,
+            cell_image=IMAGE_A,
+            start_upgrade=False,
+            config=CONFIG,
+        )
+        assert decision.delete_staging_objects is True
+        assert decision.delete_backup_objects is False
+        assert decision.row_updates["observed_state"] == "deleting"
+
+
 def test_an_old_cell_deletion_deletes_its_backup_objects_with_cellctls_own_key() -> None:
     decision = decide(
-        row(desired_state="deleted", b2_key_id="key-1"),
+        row(desired_state="deleted", b2_key_id="key-1", b2_key_wrapped=b"wrapped"),
         rollout(),
-        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True),
+        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, staging_objects_absent_confirmed=True),
         now=NOW,
         cell_image=IMAGE_A,
         start_upgrade=False,
@@ -1711,9 +1728,10 @@ def test_an_old_cell_deletion_deletes_its_backup_objects_with_cellctls_own_key()
 
 def test_an_old_cell_deletion_completes_without_waiting_for_its_key_to_vanish() -> None:
     decision = decide(
-        row(desired_state="deleted", b2_key_id="key-1", generation=3),
+        row(desired_state="deleted", b2_key_id="key-1", b2_key_wrapped=b"wrapped", generation=3),
         rollout(),
-        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, backup_objects_absent_confirmed=True),
+        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, staging_objects_absent_confirmed=True,
+            backup_objects_absent_confirmed=True),
         now=NOW,
         cell_image=IMAGE_A,
         start_upgrade=False,
@@ -1730,7 +1748,7 @@ def test_a_new_cells_deletion_never_waits_on_or_deletes_its_locked_backups() -> 
     decision = decide(
         row(desired_state="deleted", b2_key_id=None),
         rollout(),
-        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True),
+        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, staging_objects_absent_confirmed=True),
         now=NOW,
         cell_image=IMAGE_A,
         start_upgrade=False,
@@ -1739,6 +1757,22 @@ def test_a_new_cells_deletion_never_waits_on_or_deletes_its_locked_backups() -> 
     assert decision.delete_backup_objects is False
     assert decision.row_updates["observed_state"] == "deleted"
     assert decision.storage_cleanup_pending is True
+
+
+def test_a_row_with_half_a_stored_key_is_a_new_cell_for_its_deletion_as_it_is_for_its_render() -> None:
+    # Rendering reads a stored key only when both columns are set; deletion routes on the same test,
+    # so it does not wait for backup objects that no key of the row could ever have emptied.
+    decision = decide(
+        row(desired_state="deleted", b2_key_id="key-1", b2_key_wrapped=None),
+        rollout(),
+        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, staging_objects_absent_confirmed=True),
+        now=NOW,
+        cell_image=IMAGE_A,
+        start_upgrade=False,
+        config=CONFIG,
+    )
+    assert decision.delete_backup_objects is False
+    assert decision.row_updates["observed_state"] == "deleted"
 
 
 # --- Same-pass convergence (D4 write-back) -----------------------------------

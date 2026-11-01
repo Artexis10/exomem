@@ -318,23 +318,55 @@ class ImportStorage:
         remove_object(self.client, self.bucket, item.key)
 
 
+def _uploads(client, bucket: str, prefix: str) -> list[tuple[str, str]]:
+    """Every unfinished multipart upload whose key starts with `prefix`, as (key, upload id)."""
+    return [(upload["Key"], upload["UploadId"]) for page in client.get_paginator("list_multipart_uploads").paginate(
+        Bucket=bucket, Prefix=prefix) for upload in page.get("Uploads", [])]
+
+
+def _versions(client, bucket: str, prefix: str) -> list[tuple[str, str]]:
+    """Every version and delete marker whose key starts with `prefix`, as (key, version id)."""
+    return [(version["Key"], version["VersionId"]) for page in client.get_paginator("list_object_versions").paginate(
+        Bucket=bucket, Prefix=prefix) for version in page.get("Versions", []) + page.get("DeleteMarkers", [])]
+
+
 def open_uploads(client, bucket: str, key: str) -> list[str]:
     """The ids of every unfinished multipart upload of exactly `key`."""
-    return [upload["UploadId"] for page in client.get_paginator("list_multipart_uploads").paginate(
-        Bucket=bucket, Prefix=key) for upload in page.get("Uploads", []) if upload["Key"] == key]
+    return [upload_id for name, upload_id in _uploads(client, bucket, key) if name == key]
 
 
-def _versions(client, bucket: str, key: str) -> list[str]:
-    return [version["VersionId"] for page in client.get_paginator("list_object_versions").paginate(
-        Bucket=bucket, Prefix=key) for version in page.get("Versions", []) + page.get("DeleteMarkers", [])
-        if version["Key"] == key]
+def _remaining(client, bucket: str, prefix: str, selects) -> bool:
+    """Whether any selected upload or version of `prefix` is still there."""
+    return (any(selects(name) for name, _ in _uploads(client, bucket, prefix))
+            or any(selects(name) for name, _ in _versions(client, bucket, prefix)))
+
+
+def _remove(client, bucket: str, prefix: str, selects) -> None:
+    for name, upload_id in _uploads(client, bucket, prefix):
+        if selects(name):
+            client.abort_multipart_upload(Bucket=bucket, Key=name, UploadId=upload_id)
+    for name, version_id in _versions(client, bucket, prefix):
+        if selects(name):
+            client.delete_object(Bucket=bucket, Key=name, VersionId=version_id)
+    if _remaining(client, bucket, prefix, selects):
+        raise RuntimeError("object transport removal remains pending")
 
 
 def remove_object(client, bucket: str, key: str) -> None:
     """Abort every upload of `key` and delete every version of it, then prove both are gone."""
-    for upload_id in open_uploads(client, bucket, key):
-        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
-    for version_id in _versions(client, bucket, key):
-        client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
-    if open_uploads(client, bucket, key) or _versions(client, bucket, key):
-        raise RuntimeError("object transport removal remains pending")
+    _remove(client, bucket, key, lambda name: name == key)
+
+
+class StagedObjects:
+    """cellctl's staging key over one cell's prefix: the deletion proof of a cell's exports and
+    imports, which no row tracks once the cell is gone."""
+
+    def __init__(self, client, bucket: str):
+        self.client, self.bucket = client, bucket
+
+    def absent(self, prefix: str) -> bool:
+        """No version, delete marker or unfinished upload under `prefix`."""
+        return not _remaining(self.client, self.bucket, prefix, lambda name: True)
+
+    def remove(self, prefix: str) -> None:
+        _remove(self.client, self.bucket, prefix, lambda name: True)

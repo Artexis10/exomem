@@ -319,6 +319,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 
 **Residual.**
 - Until phase 1 ships, `cellctl`'s key reaches everything listed above.
+- Until D3 is in force, a compromised `cellctl` can render a Job in a cell namespace that reads `cell-object-store-key` through a Secret reference and leaks it. This adds nothing to today, when `cellctl` unwraps every per-cell key; D3 removes the route.
 - After phase 1, a compromised custodian or node can still create any key in the cell-data account. Such a key can extend locks without bound or remove the default retention. The split does not shrink this, because there is no subset rule. The watcher reports such a key, but it cannot undo an extension.
 - Keys created ahead of time outside the cluster would remove key creation from the cluster. That option stays open (Open Questions).
 

@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""Operator clean-up for one deleted cell's object-store key.
+"""Operator clean-up for one deleted cell's object-store key and backup files.
 
 `contain-cloud-controller-compromise` D9: cellctl holds no credential that deletes keys, so a
 deleted cell leaves the alert `cell-storage-cleanup-pending-<cell id>`. This script answers it.
 
-It lists the account's application keys, deletes each key whose name prefix is exactly
-`cells/<cell id>/`, and, for the cell-data account, hides the cell's current backup files once a
-7-day grace after the cell's deletion has passed. It never deletes a key it did not find in the
-provider's listing, and it never deletes a file version: hiding adds a marker, and the compliance
-lock keeps every version until its retention ends.
+Run it once per account for every deleted cell, `--account founder` and `--account cell-data`:
+the database no longer says which account holds the cell's key. It lists the account's
+application keys and deletes each key whose name prefix is exactly `cells/<cell id>/`. For the
+cell-data account it also counts the cell's current backup files, and hides them once a 7-day
+grace has passed. It never deletes a key it did not find in the provider's listing, and it never
+deletes a file version: hiding adds a marker, and the compliance lock keeps every version until
+its retention ends.
 
-Dry-run by default. `--apply` acts. Output is value-free (account label, counts, a grace date)
-because the terminal may be shared.
+The grace starts at the operator's own first dry run, never at a time that cellctl or the
+database holds: both are inputs that a compromised cellctl controls. The first cell-data dry run
+prints `first_dry_run=<today, UTC>`; keep that date and pass it as `--first-dry-run` on every
+later run. `--apply` for cell-data refuses to run without it. The operator confirms that the
+database row says `desired_state = 'deleted'` before `--apply` (see the runbook).
+
+Dry-run by default. `--apply` acts. Output is value-free (account label, counts, dates) because
+the terminal may be shared. A later dry run that shows `keys_found=0`, and for cell-data
+`files_found=0`, is the proof that the clean-up is complete.
 
 Environment: CELL_CLEANUP_B2_KEY_ID and CELL_CLEANUP_B2_APPLICATION_KEY, the operator's key for
 the chosen account. It needs listKeys and deleteKeys; for cell-data it also needs listFiles and
@@ -32,7 +41,7 @@ import re
 import sys
 import urllib.request
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, TextIO
 
 # The same v4 as the key watcher: the v3 b2_list_keys hides most keys of a live account.
@@ -41,7 +50,7 @@ AUTHORIZE_URL = f"https://api.backblazeb2.com/b2api/{API_VERSION}/b2_authorize_a
 TIMEOUT_SECONDS = 20
 PAGE_SIZE = 1000
 MAX_PAGES = 100
-# How long a deleted cell's backups stay visible before they are hidden.
+# How long a deleted cell's backups stay visible after the operator's first dry run.
 HIDE_GRACE = timedelta(days=7)
 ACCOUNTS = ("founder", "cell-data")
 
@@ -118,9 +127,10 @@ def current_files(session: Session, bucket_id: str, prefix: str) -> list[dict[st
 
 def clean_up(
     session: Session, *, label: str, cell_id: str, apply: bool,
-    backup: tuple[str, datetime] | None, now: datetime, out: TextIO,
+    backup: tuple[str, date] | None, today: date, out: TextIO,
 ) -> None:
-    """`backup` is the locked bucket's ID and the cell's deletion time, set for the cell-data account."""
+    """`backup` is the locked bucket's ID and the date of the operator's first dry run, set for the
+    cell-data account. Files are counted on every run; they are hidden only once the grace is over."""
     prefix = f"cells/{cell_id}/"
     key_ids = prefix_key_ids(session, prefix)
     for key_id in key_ids if apply else []:
@@ -129,15 +139,23 @@ def clean_up(
           f"keys_deleted={len(key_ids) if apply else 0}", file=out)
     if backup is None:
         return
-    bucket_id, deleted_at = backup
-    grace_ends = deleted_at + HIDE_GRACE
-    if now < grace_ends:
-        print(f"hide=waiting grace_ends={grace_ends.date().isoformat()}", file=out)
-        return
+    bucket_id, first_dry_run = backup
+    grace_ends = first_dry_run + HIDE_GRACE
     files = current_files(session, bucket_id, prefix)
-    for file in files if apply else []:
+    due = today >= grace_ends
+    for file in files if apply and due else []:
         session.post("b2_hide_file", {"bucketId": bucket_id, **file})
-    print(f"hide=due files_found={len(files)} files_hidden={len(files) if apply else 0}", file=out)
+    print(f"files_found={len(files)} files_hidden={len(files) if apply and due else 0} "
+          f"hide={'due' if due else 'waiting'} first_dry_run={first_dry_run.isoformat()} "
+          f"grace_ends={grace_ends.isoformat()}", file=out)
+
+
+def _iso_date(text: str) -> date:
+    """A calendar date as YYYY-MM-DD, the only form the runbook records."""
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected a date as YYYY-MM-DD") from None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -145,7 +163,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("cell_id", help="the 16-character cell id")
     parser.add_argument("--account", choices=ACCOUNTS, required=True)
     parser.add_argument("--apply", action="store_true", help="act; the default is a dry run")
-    parser.add_argument("--deleted-at", help="cell-data: when the cell was deleted, ISO 8601 with a UTC offset")
+    parser.add_argument("--first-dry-run", type=_iso_date, metavar="YYYY-MM-DD",
+                        help="cell-data: the UTC date of your own first dry run for this cell; the grace runs from it")
     parser.add_argument("--bucket-id", help="cell-data: the locked backup bucket's ID")
     return parser
 
@@ -160,18 +179,14 @@ def main(
         args = parser.parse_args(argv)
     except SystemExit as exit_request:  # argparse: 0 for --help, 2 for a bad argument
         return exit_request.code if isinstance(exit_request.code, int) else 2
-    deleted_at = None
-    if args.deleted_at:
-        try:
-            deleted_at = datetime.fromisoformat(args.deleted_at)
-        except ValueError:
-            deleted_at = None
+    today = (now or datetime.now(UTC)).date()
     problems = [
         message for failed, message in (
             (not _CELL_ID.fullmatch(args.cell_id), "the cell id is not 16 characters of a-z and 2-7"),
-            (args.account == "cell-data" and (deleted_at is None or deleted_at.tzinfo is None),
-             "cell-data needs --deleted-at as ISO 8601 with a UTC offset"),
             (args.account == "cell-data" and not args.bucket_id, "cell-data needs --bucket-id"),
+            (args.first_dry_run is not None and args.first_dry_run > today, "--first-dry-run is in the future"),
+            (args.account == "cell-data" and args.apply and args.first_dry_run is None,
+             "cell-data --apply needs --first-dry-run, the date your own first dry run printed"),
             (not env.get("CELL_CLEANUP_B2_KEY_ID") or not env.get("CELL_CLEANUP_B2_APPLICATION_KEY"),
              "CELL_CLEANUP_B2_KEY_ID and CELL_CLEANUP_B2_APPLICATION_KEY must be set"),
         ) if failed
@@ -182,9 +197,9 @@ def main(
     try:
         session = Session(opener or urllib.request.build_opener(), env["CELL_CLEANUP_B2_KEY_ID"],
                           env["CELL_CLEANUP_B2_APPLICATION_KEY"])
-        backup = (args.bucket_id, deleted_at) if args.account == "cell-data" else None
+        backup = (args.bucket_id, args.first_dry_run or today) if args.account == "cell-data" else None
         clean_up(session, label=args.account, cell_id=args.cell_id, apply=args.apply, backup=backup,
-                 now=now or datetime.now(UTC), out=out)
+                 today=today, out=out)
     except (OSError, http.client.HTTPException, ValueError, KeyError) as exc:
         # The type only: a provider message could carry an ID.
         print(f"cleanup stopped: {type(exc).__name__}; rerun it, every step is safe to repeat", file=out)

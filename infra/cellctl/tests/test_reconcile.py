@@ -17,6 +17,7 @@ import pytest
 
 from cellctl import alerts, db, reconcile
 from cellctl.capacity import CapacityObservation, LocalCapacityObservation
+from cellctl.imports import StagedObjects
 from cellctl.manifests import STORAGE_CLASS, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
 from cellctl.secrets import wrap_secret
@@ -26,6 +27,7 @@ from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage.interface import VolumeInfo
 
 from .conftest import CellDatabase, insert_tenant, tenant_uuid
+from .fake_s3 import FakeS3
 
 IMAGE_A = "registry.example/cell@sha256:" + "a" * 64
 
@@ -375,8 +377,17 @@ def delivered(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
     return sent
 
 
-async def test_an_old_cells_deletion_empties_its_prefix_then_reports_the_pending_key_cleanup(
-    cell_db: CellDatabase, delivered: list[tuple[str, bool]],
+@pytest.fixture
+def staging(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
+    """The staging bucket at its SDK boundary: empty until a test stages something."""
+
+    store = FakeS3()
+    monkeypatch.setattr(reconcile, "_staging_s3_client", store.client)
+    return store
+
+
+async def test_an_old_cells_deletion_empties_its_staged_exports_and_backup_prefix_then_reports_the_pending_key_cleanup(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3,
 ) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
@@ -393,9 +404,16 @@ async def test_an_old_cells_deletion_empties_its_prefix_then_reports_the_pending
         await _give_an_old_cells_key(connection)
         await passes()
         b2.seed_object("cells/aaaaaaaaaaaaaaaa/snapshot-1")
+        staging.versions["cells/aaaaaaaaaaaaaaaa/exports/archive"] = [("v1", b"ciphertext")]
+        staging.uploads["u1"] = {"key": "cells/aaaaaaaaaaaaaaaa/imports/archive", "parts": {}}
+        staging.versions["cells/bbbbbbbbbbbbbbbb/exports/archive"] = [("v2", b"another cell's")]
         await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
 
-        await passes()  # the namespace is gone: its backup objects go next
+        await passes()  # the namespace is gone: its staged exports and imports go first
+        assert (staging.uploads, list(staging.versions)) == ({}, ["cells/bbbbbbbbbbbbbbbb/exports/archive"])
+        assert len(b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1
+
+        await passes()  # then its backup objects
         assert b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/") == []
         assert delivered == []
 
@@ -408,7 +426,7 @@ async def test_an_old_cells_deletion_empties_its_prefix_then_reports_the_pending
 
 
 async def test_a_new_cells_deletion_settles_without_touching_its_locked_backups(
-    cell_db: CellDatabase, delivered: list[tuple[str, bool]],
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3,
 ) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
@@ -423,15 +441,47 @@ async def test_a_new_cells_deletion_settles_without_touching_its_locked_backups(
         await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=now, memory=memory)
         b2.seed_object("cells/aaaaaaaaaaaaaaaa/legacy-bucket-object")
+        staging.versions["cells/aaaaaaaaaaaaaaaa/exports/archive"] = [("v1", b"ciphertext")]
         await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
 
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), config,
-                                       now=now, memory=memory, backup_listing=locked_listing)
+        for _ in range(2):  # the staged export goes, then nothing stands between the cell and its deletion
+            await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(),
+                                           config, now=now, memory=memory, backup_listing=locked_listing)
 
         row = (await db.select_all_rows(connection))[0]
         assert row.observed_state == "deleted"
+        assert staging.versions == {}
         assert len(locked_listing.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1  # nothing was deleted
         assert len(b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1  # the legacy store is no new cell's
+        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
+    finally:
+        await connection.close()
+
+
+async def test_a_restarted_cellctl_raises_the_cleanup_alert_again_for_a_cell_deleted_before_the_restart(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3,
+) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster, b2, memory = FakeClusterGateway(), FakeB2(), reconcile.LoopMemory()
+    config = dataclasses.replace(_cluster_config(), alert_delivery_secret=("ns", "alerts", "url"))
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    async def passes(memory: reconcile.LoopMemory) -> None:
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=now, memory=memory)
+
+    try:
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
+        await passes(memory)
+        await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
+        await passes(memory)
+        await passes(memory)
+        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
+        delivered.clear()
+
+        await passes(reconcile.LoopMemory())  # the restart: nothing but the database row remembers the cell
+
         assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
     finally:
         await connection.close()
@@ -481,14 +531,16 @@ async def test_namespace_deletion_does_not_wait_for_later_absence_checks(
         await connection.close()
 
 
-@pytest.mark.parametrize("remaining_storage", ["pv", "volume", "objects"])
+@pytest.mark.parametrize("remaining_storage", ["pv", "volume", "staging", "objects"])
 def test_deletion_proofs_stop_at_first_remaining_resource(
     remaining_storage: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cluster = FakeClusterGateway()
     b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
-    row = _row(volume_id="vol-1", b2_key_id="key-1")
+    store = FakeS3()
+    staging = StagedObjects(store.client(None, "staging-key", "secret"), "staging-bucket")
+    row = _row(volume_id="vol-1", b2_key_id="key-1", b2_key_wrapped=b"wrapped")
 
     def unavailable(*args: object) -> bool:
         raise RuntimeError("later deletion service unavailable")
@@ -498,16 +550,19 @@ def test_deletion_proofs_stop_at_first_remaining_resource(
         monkeypatch.setattr(hetzner, "get_volume", unavailable)
     elif remaining_storage == "volume":
         hetzner.add_volume(VolumeInfo(volume_id="vol-1", server_id="node-1", labels={}))
+    elif remaining_storage == "staging":
+        store.versions[f"cells/{row.cell_id}/exports/archive"] = [("v1", b"ciphertext")]
     else:
         b2.seed_object(f"cells/{row.cell_id}/snapshot-1")
     if remaining_storage != "objects":
         monkeypatch.setattr(b2, "list_object_versions", unavailable)
 
     observation = _augment_deletion_observation(
-        ClusterObservation(), row, cluster, b2, hetzner,
+        ClusterObservation(), row, cluster, b2, hetzner, staging=lambda: staging,
     )
     assert observation.namespace_absent_confirmed is True
-    assert observation.pv_absent_confirmed is (remaining_storage == "objects")
+    assert observation.pv_absent_confirmed is (remaining_storage in {"staging", "objects"})
+    assert observation.staging_objects_absent_confirmed is (remaining_storage == "objects")
     assert observation.backup_objects_absent_confirmed is False
 
 
@@ -2101,6 +2156,7 @@ class _CountingHetzner(FakeHetznerVolumeProvider):
         return super().get_volume(volume_id)
 
 
+@pytest.mark.usefixtures("staging")
 @pytest.mark.parametrize("observed_generation", [1, None, 0])
 async def test_a_row_observed_as_deleted_is_not_observed_again(cell_db: CellDatabase, observed_generation: int | None) -> None:
     cell_id = "aaaaaaaaaaaaaaaa"
@@ -2118,6 +2174,7 @@ async def test_a_row_observed_as_deleted_is_not_observed_again(cell_db: CellData
         await connection.close()
 
 
+@pytest.mark.usefixtures("staging")
 async def test_a_deleting_row_asks_hetzner_at_most_once_a_minute(cell_db: CellDatabase) -> None:
     cell_id = "aaaaaaaaaaaaaaaa"
     await _seed_cell(cell_db, cell_id, "tenant-a", desired_state="deleted")
@@ -3047,6 +3104,7 @@ async def test_provider_outage_cannot_preserve_live_content_keys_or_claim_legacy
         await connection.close()
 
 
+@pytest.mark.usefixtures("staging")
 async def test_retention_clock_waits_for_workload_drain_and_records_deployed_source_windows(cell_db):
     """Secret retirement alone cannot start retention while a workload can still hold the child key."""
     import json
@@ -3117,6 +3175,7 @@ def test_invalid_retention_evidence_never_establishes_finite_expiry(invalid):
     assert reconcile._retention_expiry(sources, now) is None
 
 
+@pytest.mark.usefixtures("staging")
 async def test_malformed_retention_is_retained_as_unknown_without_stopping_deletion(cell_db):
     import json
 
@@ -3139,6 +3198,7 @@ async def test_malformed_retention_is_retained_as_unknown_without_stopping_delet
         await connection.close()
 
 
+@pytest.mark.usefixtures("staging")
 @pytest.mark.parametrize("raw", ["[NaN]", "[1e999]"], ids=["nonfinite-constant", "numeric-overflow"])
 async def test_nonfinite_retention_input_preserves_raw_evidence_and_completes_deletion(cell_db, monkeypatch, raw):
     import json

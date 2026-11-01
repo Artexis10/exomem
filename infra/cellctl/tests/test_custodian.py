@@ -103,6 +103,21 @@ def test_one_namespace_failing_does_not_stop_the_next() -> None:
     other = "bbbbbbbbbbbbbbbb"
     core, keys = FakeCore(), FailsOnceKeyStore()
 
-    _ensure_each(core, keys, [_namespace(f"exo-cell-{CELL}"), _namespace(f"exo-cell-{other}")])
+    _ensure_each(core, keys, [_namespace(f"exo-cell-{CELL}"), _namespace(f"exo-cell-{other}")], lambda: None)
 
     assert [key.name_prefix for key in keys.keys.values()] == [f"cells/{other}/"]
+
+
+def test_a_provider_outage_that_fails_every_namespace_still_beats_after_each_attempt() -> None:
+    # The liveness probe reads the heartbeat's age: one beat per sweep would let N slow failures
+    # outlast it and restart a pod that the provider's outage, not the pod, broke.
+    class DownKeyStore(FakeKeyStore):
+        def create_prefix_key(self, cell_id: str):
+            raise RuntimeError("provider unavailable")
+
+    beats: list[None] = []
+    namespaces = [_namespace(f"exo-cell-{cell}") for cell in (CELL, "bbbbbbbbbbbbbbbb", "cccccccccccccccc")]
+
+    _ensure_each(FakeCore(), DownKeyStore(), namespaces, lambda: beats.append(None))
+
+    assert len(beats) == 3

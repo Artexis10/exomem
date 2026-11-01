@@ -44,7 +44,15 @@ import yaml
 from cellctl.storage_config import LocalStorage
 
 from . import images, tls
-from .infra import BACKUP_BUCKET, K3S_POD_CIDR, K3S_SERVICE_CIDR, S3_PORT, Stack, docker_labels
+from .infra import (
+    BACKUP_BUCKET,
+    K3S_POD_CIDR,
+    K3S_SERVICE_CIDR,
+    S3_PORT,
+    STAGING_BUCKET,
+    Stack,
+    docker_labels,
+)
 from .shell import run, wait_for
 
 PLATFORM_CHART = images.REPO_ROOT / "infra/helm/platform"
@@ -113,13 +121,13 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
 
 
 def cell_data_values(stack: Stack) -> dict[str, Any]:
-    """The chart's `cellData` values: the S3 double's one bucket plays both the locked backup
-    bucket and the staging bucket."""
+    """The chart's `cellData` values: the S3 double's two buckets play the locked backup bucket
+    and the staging bucket."""
 
     return {
         "backupBucketName": BACKUP_BUCKET,
         "backupBucketId": "rehearsal-backup-bucket-id",
-        "stagingBucketName": BACKUP_BUCKET,
+        "stagingBucketName": STAGING_BUCKET,
         "endpoint": stack.object_store.endpoint(from_host=False),
     }
 

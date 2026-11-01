@@ -10,7 +10,7 @@ import importlib.util
 import io
 import json
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,8 @@ CELL_ID = "abcdefghijklmnop"
 PREFIX = f"cells/{CELL_ID}/"
 BUCKET_ID = "fixture-locked-bucket"
 ENV = {"CELL_CLEANUP_B2_KEY_ID": "fixture-id", "CELL_CLEANUP_B2_APPLICATION_KEY": "fixture-key"}
-DELETED_AT = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+FIRST_DRY_RUN = date(2026, 11, 1)
+NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 
 
 def _load_script():
@@ -97,7 +98,7 @@ class FakeB2:
         return [(endpoint, body) for endpoint, body in self.posts if endpoint in {"b2_delete_key", "b2_hide_file"}]
 
 
-def _run(argv: list[str], *, now: datetime = DELETED_AT, env: dict[str, str] = ENV) -> tuple[int, str, FakeB2]:
+def _run(argv: list[str], *, now: datetime = NOW, env: dict[str, str] = ENV) -> tuple[int, str, FakeB2]:
     b2, out = FakeB2(), io.StringIO()
     status = cleanup.main(argv, env, opener=b2, now=now, out=out)
     return status, out.getvalue(), b2
@@ -115,27 +116,38 @@ def test_a_dry_run_changes_nothing_and_apply_deletes_only_the_key_listed_for_exa
     assert "keys_found=1 keys_deleted=1" in output
 
 
+def test_a_dry_run_counts_the_backup_files_and_names_the_date_the_grace_runs_from() -> None:
+    """Defect: a count that waits for the grace hides from the operator that files remain."""
+    status, output, b2 = _run([CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID])
+
+    assert (status, b2.changes()) == (0, [])
+    assert "files_found=2 files_hidden=0 hide=waiting first_dry_run=2026-11-01 grace_ends=2026-11-08" in output
+
+
 def test_backups_stay_visible_through_the_grace_and_only_current_files_are_hidden_after_it() -> None:
     """Defect: hiding a deleted cell's backups at once removes the owner's chance to ask for them."""
     argv = [CELL_ID, "--account", "cell-data", "--apply", "--bucket-id", BUCKET_ID,
-            "--deleted-at", DELETED_AT.isoformat()]
-    _, output, b2 = _run(argv, now=DELETED_AT + timedelta(days=6, hours=23))
-    assert "hide=waiting grace_ends=2026-11-08" in output
+            "--first-dry-run", FIRST_DRY_RUN.isoformat()]
+    _, output, b2 = _run(argv, now=NOW + timedelta(days=5, hours=23))
+    assert "files_found=2 files_hidden=0 hide=waiting" in output and "grace_ends=2026-11-08" in output
     assert [endpoint for endpoint, _ in b2.changes()] == ["b2_delete_key"]  # the key goes at once
 
-    _, output, b2 = _run(argv, now=DELETED_AT + timedelta(days=7))
+    _, output, b2 = _run(argv, now=NOW + timedelta(days=6, hours=12))
     assert b2.changes()[1:] == [
         ("b2_hide_file", {"bucketId": BUCKET_ID, "fileName": PREFIX + "pack-1"}),
         ("b2_hide_file", {"bucketId": BUCKET_ID, "fileName": PREFIX + "pack-3"}),
     ]
-    assert "files_found=2 files_hidden=2" in output
+    assert "files_found=2 files_hidden=2 hide=due" in output
 
 
 def test_bad_input_stops_before_any_provider_call() -> None:
+    cell_data = [CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID]
     for argv, env in (
         (["not-a-cell-id", "--account", "founder"], ENV),
-        ([CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID], ENV),
-        ([CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID, "--deleted-at", "2026-11-01T12:00:00"], ENV),
+        ([*cell_data, "--apply"], ENV),  # the grace must start from the operator's own date
+        ([*cell_data, "--first-dry-run", "2026-11-02"], ENV),  # a date after today starts no grace
+        ([*cell_data, "--first-dry-run", "1 November"], ENV),
+        ([CELL_ID, "--account", "cell-data", "--first-dry-run", "2026-11-01"], ENV),
         ([CELL_ID, "--account", "founder"], {}),
     ):
         status, output, b2 = _run(argv, env=env)

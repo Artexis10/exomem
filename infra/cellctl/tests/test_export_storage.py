@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from cellctl.exports import ExportRow, ExportStorage, etag_digest
-from cellctl.reconcile import ClusterConfig, SecretsConfig, _staging_s3_client
+from cellctl.reconcile import ClusterConfig, _staging_s3_client
 
 ENDPOINT = os.environ.get("CELLCTL_TEST_S3_ENDPOINT")
 pytestmark = pytest.mark.skipif(not ENDPOINT, reason="set CELLCTL_TEST_S3_ENDPOINT to a disposable S3 store")
@@ -32,8 +32,8 @@ def storage():
     # The client cellctl itself builds for its staging key.
     client = _staging_s3_client(
         ClusterConfig(object_storage_bucket="unused", cell_data_endpoint=ENDPOINT),
-        SecretsConfig(staging_key_id=os.environ["CELLCTL_TEST_S3_ACCESS_KEY"],
-                      staging_application_key=os.environ["CELLCTL_TEST_S3_SECRET_KEY"]),
+        os.environ["CELLCTL_TEST_S3_ACCESS_KEY"],
+        os.environ["CELLCTL_TEST_S3_SECRET_KEY"],
     )
     bucket = f"export-test-{uuid.uuid4().hex[:12]}"
     client.create_bucket(Bucket=bucket)

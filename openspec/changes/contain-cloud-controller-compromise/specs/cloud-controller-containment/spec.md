@@ -207,6 +207,8 @@ Cell backups SHALL live in a provider account that holds no other data. No in-cl
 
 The custodian SHALL run outside every namespace that the controller can write, on a node that runs no cell. It SHALL create only the per-cell key shape: the pinned bucket, the prefix of the cell ID in the cell's namespace name, and exactly `listBuckets`, `listFiles`, `readFiles`, `writeFiles` and `deleteFiles`. It SHALL write each key only to its own Secret in the cell's namespace, and SHALL read no other Secret. It SHALL hide a cell's prefix only on a deletion record that Substrate signed, after a grace period, and SHALL raise an alert on each hide.
 
+Until Substrate holds the grant key, the custodian SHALL hide and delete nothing. A cell deletion SHALL remove the cell's staged export and import objects and raise a content-free cleanup alert. The operator SHALL delete the cell's keys in both provider accounts, and hide its backup prefix after the grace period, only after confirming that Substrate set the cell's desired state to deleted. The grace period SHALL start from the operator's own first dry run, never from a time the controller wrote.
+
 A key watcher SHALL run outside the cluster, at least hourly, with keys that can only list keys and buckets and read bucket retention, encryption and replication settings. It SHALL match each single-purpose key by its key ID, and each per-cell key by its exact bucket, prefix shape and capability set, with at most one key per prefix. It SHALL raise an alert for every other key, for every backup bucket setting that differs from its pinned value, for every failure to authenticate or list, and for every missed run. Its alerts SHALL use a receiver credential that no in-cluster component holds.
 
 #### Scenario: The controller's keys are searched for key creation
@@ -233,6 +235,11 @@ A key watcher SHALL run outside the cluster, at least hourly, with keys that can
 
 - **WHEN** the controller deletes or recreates a cell's namespace without a signed deletion record
 - **THEN** the custodian hides none of that cell's backups
+
+#### Scenario: The controller raises a false cleanup alert
+
+- **WHEN** the controller raises a cleanup alert for a cell whose desired state Substrate has not set to deleted
+- **THEN** the operator's cleanup deletes no key and hides no file of that cell
 
 #### Scenario: The backup bucket's default retention is removed
 

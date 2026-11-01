@@ -72,7 +72,7 @@ def test_admission_confines_the_custodian_identity_to_creating_that_secret() -> 
     assert policy["spec"]["failurePolicy"] == "Fail"
     assert binding["spec"] == {"policyName": "exomem-key-custodian-scope", "validationActions": ["Deny"]}
     assert policy["spec"]["matchConstraints"]["resourceRules"] == [{
-        "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["CREATE", "UPDATE", "DELETE"],
+        "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["CREATE", "UPDATE", "DELETE", "CONNECT"],
         "resources": ["*/*"], "scope": "*",
     }]
     identity = f"system:serviceaccount:{CUSTODIAN_NAMESPACE}:key-custodian"
@@ -80,6 +80,17 @@ def test_admission_confines_the_custodian_identity_to_creating_that_secret() -> 
     expressions = " ".join(" ".join(v["expression"].split()) for v in policy["spec"]["validations"])
     assert f"object.metadata.name == '{OBJECT_STORE_KEY_SECRET}'" in expressions
     assert "keyId" in expressions and "applicationKey" in expressions
+
+
+def test_admission_reads_the_request_fields_the_api_server_omits_when_empty_as_optional() -> None:
+    """Defect (found live): a bare `request.subResource` on a main-resource request throws, and
+    with failurePolicy Fail that denies every custodian write, the one it exists to allow included."""
+    policy = _find(_helm_template(*CUSTODIAN), "ValidatingAdmissionPolicy", "exomem-key-custodian-scope")
+    expressions = " ".join(" ".join(v["expression"].split()) for v in policy["spec"]["validations"])
+
+    assert "request.?subResource.orValue('') == ''" in expressions
+    assert "request.?namespace.orValue('')" in expressions
+    assert "request.subResource" not in expressions and "request.namespace" not in expressions
 
 
 def test_the_custodian_pod_is_restricted_and_takes_its_credential_from_a_secret_reference() -> None:
@@ -122,3 +133,10 @@ def test_the_custodian_accepts_no_traffic_and_reaches_only_dns_the_api_server_an
 def test_the_custodian_will_not_render_without_the_backup_bucket_id() -> None:
     result = _helm_template_result(*CUSTODIAN, "--set-string", "cellData.backupBucketId=")
     assert result.returncode != 0 and "backupBucketId" in result.stderr
+
+
+def test_the_chart_refuses_a_staging_bucket_that_is_the_locked_backup_bucket() -> None:
+    """Defect: cellctl's staging key lists and deletes, so a shared bucket would aim it at backups."""
+    result = _helm_template_result("--set-string", "cellData.stagingBucketName=exomem-cell-backups")
+
+    assert result.returncode != 0 and "stagingBucketName must differ" in result.stderr

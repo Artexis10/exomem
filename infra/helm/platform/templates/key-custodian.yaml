@@ -5,7 +5,9 @@ object-store keys. It watches cell namespaces and, for each one without the Secr
 cell-object-store-key, mints a key limited to that cell's prefix in the locked backup bucket
 and writes it into the Secret. cellctl cannot create that Secret (its admission policy names
 the only Secrets it may write) and cannot read it back (its ClusterRole has no get on secrets),
-so a compromise of cellctl reaches no key-creating credential and no cell's key.
+so a compromise of cellctl reaches no key-creating credential. Until D3 is in force, cellctl can
+still render a Job that reads cell-object-store-key through secretKeyRef, so it reaches a cell's
+key by that route; D3 removes the route.
 
 It runs the cellctl image with another command, in its own namespace, service account and
 credential. A separate image would add a publish and attestation pipeline without reducing
@@ -16,7 +18,7 @@ what the process can do.
 {{- $name := "key-custodian" }}
 {{- /* namespaces.yaml already refuses an empty edge.apiServerCidrs; the schema pins the image and the bucket id when the custodian is on. */ -}}
 {{- $apiServerCidrs := .Values.edge.apiServerCidrs }}
-{{- /* The custodian touches this file every sweep; the liveness probe reads its age. */ -}}
+{{- /* The custodian touches this file every sweep, watch event and namespace attempt; the liveness probe reads its age. */ -}}
 {{- $heartbeat := "/tmp/key-custodian-heartbeat" }}
 apiVersion: v1
 kind: Namespace
@@ -142,8 +144,9 @@ spec:
                 secretKeyRef:
                   name: {{ $custodian.secretName }}
                   key: applicationKey
-          # A sweep ends within a minute when nothing happens, so a heartbeat older than three
-          # minutes means a hung process. A provider or API outage is retried, never a restart.
+          # The process touches the heartbeat at each sweep, watch event and namespace attempt, failed
+          # ones included, so a provider or API outage that fails every namespace in turn is retried
+          # and never restarted. A heartbeat older than three minutes means a call hung past its timeout.
           livenessProbe:
             exec:
               command:
@@ -229,7 +232,7 @@ spec:
       # "*/*" covers every resource and subresource of every API group.
       - apiGroups: ["*"]
         apiVersions: ["*"]
-        operations: ["CREATE", "UPDATE", "DELETE"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
         resources: ["*/*"]
         scope: "*"
   matchConditions:
@@ -239,11 +242,12 @@ spec:
         'system:serviceaccount:{{ $custodian.namespace }}:{{ $name }}'
   validations:
     - expression: >-
+        {{- /* The API server omits subResource and namespace when empty, so read them as optional. */}}
         request.operation == 'CREATE' && request.resource.group == '' &&
-        request.resource.resource == 'secrets' && request.subResource == ''
+        request.resource.resource == 'secrets' && request.?subResource.orValue('') == ''
       message: the key custodian may only create a Secret.
     - expression: >-
-        request.namespace.matches('{{ include "exomem.cellNamespacePattern" . }}') &&
+        request.?namespace.orValue('').matches('{{ include "exomem.cellNamespacePattern" . }}') &&
         object.metadata.name == 'cell-object-store-key'
       message: the key custodian may create only the Secret cell-object-store-key, in a cell namespace.
     - expression: >-

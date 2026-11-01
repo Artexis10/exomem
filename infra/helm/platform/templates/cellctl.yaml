@@ -20,6 +20,10 @@ int64 keeps Helm from printing a large JSON number as 1.073741824e+09.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* cellctl's staging key lists and deletes. Sharing the locked backup bucket would aim a deletion's staging sweep at backups, and the schema cannot compare two values. */ -}}
+{{- if eq .Values.cellData.stagingBucketName .Values.cellData.backupBucketName }}
+{{- fail "cellData.stagingBucketName must differ from cellData.backupBucketName" }}
+{{- end }}
 apiVersion: v1
 kind: Namespace
 metadata:
