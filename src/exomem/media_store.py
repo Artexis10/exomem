@@ -518,6 +518,38 @@ def _guard(vault: Path, operation: str):
     return get_manager().mutation_guard(vault, operation=operation, holder_kind="background")
 
 
+def _binding_of(vault: Path, snapshot: OriginalSnapshot) -> originals.BinaryBinding:
+    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    return originals.BinaryBinding(snapshot.path.relative_to(vault).as_posix(),
+                                   snapshot.binary_sha256, snapshot.binary_size)
+
+
+class OffloadBatch:
+    """One owner census for a run of offloads, kept across guard releases (D10).
+
+    The batch never holds the mutation boundary, so other writes run between two members. It rests
+    on offload being the only writer that binds a version the census has not seen while the runtime
+    serves (task 5.4.9 lists the others). `charge` adds each version that a member publishes, and
+    `end` drops the census so that the next member reads it again. A stale census can wrongly refuse
+    a member, which the next scan releases, because refusals are read again from a fresh census.
+    """
+
+    def __init__(self, vault: Path) -> None:
+        self._vault = Path(vault).resolve()
+        self._usage: media_allowance.ReferenceUsage | None = None
+
+    def usage(self) -> media_allowance.ReferenceUsage:
+        if self._usage is None:
+            self._usage = media_allowance.reference_usage(self._vault)
+        return self._usage
+
+    def charge(self, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
+        self._usage = self.usage().charged(_binding_of(self._vault, snapshot), reference)
+
+    def end(self) -> None:
+        self._usage = None
+
+
 def _offload_admission(
     vault: Path, snapshot: OriginalSnapshot, *, reference: StoredObject | None = None,
     select_reuse: bool = True, usage: media_allowance.ReferenceUsage | None = None,
@@ -525,12 +557,10 @@ def _offload_admission(
     """Select current live reuse and its quota projection under one read boundary."""
     from .writer_lease import get_manager
 
-    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
-    binary = originals.BinaryBinding(snapshot.path.relative_to(vault).as_posix(),
-                                     snapshot.binary_sha256, snapshot.binary_size)
+    binary = _binding_of(vault, snapshot)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
         config = originals.configuration(vault) or {}
-        # A caller can share one census only while its enclosing consistency guard holds.
+        # A caller shares one census while its enclosing consistency guard holds, or as an `OffloadBatch`.
         if usage is None:
             usage = media_allowance.reference_usage(vault)
         reuse = None
@@ -753,13 +783,28 @@ def _finish_reference(ledger: MediaJobStore, snapshot: OriginalSnapshot, source:
         conn.close()
 
 
-def offload(vault: Path, path: Path) -> StoredObject | None:
+def _no_census() -> None:
+    return None
+
+
+def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
     None means that the original stays local: notes and datasets are never
     offloaded. Quota refusals raise so that the worker retains retryable demand (D10).
+    A `batch` shares its census with this member's checks; without one, each check reads its own.
     """
-    vault = Path(vault).resolve()
+    try:
+        return _offload_member(Path(vault).resolve(), path, batch)
+    except BaseException:
+        if batch is not None:
+            # The failed member may have half-published, which the batch census cannot know.
+            batch.end()
+        raise
+
+
+def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> StoredObject | None:
+    census = batch.usage if batch is not None else _no_census
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
@@ -768,7 +813,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
     with _pin(vault, path) as (_ledger, token), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
-        refusal = _refused(ledger, snapshot, config)
+        refusal = _refused(ledger, snapshot, config, usage=census())
         if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
             _require_allowance(ledger, snapshot, refusal)
         if refusal is not None:
@@ -804,7 +849,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
             _refuse(ledger, snapshot, MediaStoreError(RESIDENT_CODE, "the original stays on the volume"),
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
-        decision, reuse = _offload_admission(vault, snapshot)
+        decision, reuse = _offload_admission(vault, snapshot, usage=census())
         _require_allowance(ledger, snapshot, decision.code)
         name_key = Path(str(config["name_key_path"])).read_bytes()
         if len(name_key) < 32:
@@ -826,6 +871,7 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                     reuse = None
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reuse.reference if reuse is not None else None, select_reuse=False,
+                    usage=census(),
                 )
                 _require_allowance(ledger, snapshot, decision.code)
                 _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
@@ -865,8 +911,13 @@ def offload(vault: Path, path: Path) -> StoredObject | None:
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                decision, _candidate = _offload_admission(vault, snapshot, reference=reference, select_reuse=False)
+                decision, _candidate = _offload_admission(
+                    vault, snapshot, reference=reference, select_reuse=False, usage=census(),
+                )
                 _require_allowance(ledger, snapshot, decision.code)
+                if batch is not None:
+                    # Charged before the write: a failed write leaves the batch over-counting, never under.
+                    batch.charge(snapshot, reference)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
         return reference

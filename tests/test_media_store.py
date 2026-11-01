@@ -2661,3 +2661,108 @@ def test_the_status_reports_the_remaining_media_allowance(vault: Path, selected_
     allowance = _window_status(vault)["media_allowance"]
 
     assert allowance == {"allowance_bytes": 10_000_000, "used_bytes": path.stat().st_size, "remaining_bytes": 10_000_000 - path.stat().st_size}
+
+
+def _filed(vault: Path, count: int, *, category: str = "batch") -> list[Path]:
+    """`count` filed originals of 40 distinct bytes each, so that none reuses another's stored version."""
+    from exomem import preserve
+
+    return [vault / preserve.preserve(vault, scope="Test", category=category, filename=f"member-{number}.txt",
+                                      content=f"{number:040d}").path for number in range(count)]
+
+
+def _count_censuses(monkeypatch) -> list[int]:
+    from exomem import media_allowance
+
+    reads: list[int] = []
+    read = media_allowance.reference_usage
+
+    def counted(*args, **kwargs):
+        reads.append(1)
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(media_allowance, "reference_usage", counted)
+    return reads
+
+
+def test_a_batch_of_offloads_reads_the_owner_census_once(vault: Path, selected_store, monkeypatch):
+    """Catches each offload reading every owner reference up to three times, which makes a long series quadratic."""
+    from exomem import media_store
+
+    members = _filed(vault, 12)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+
+    for path in members:
+        media_store.offload(vault, path, batch=batch)
+
+    assert all(originals.original_state(vault, path).reference is not None for path in members)
+    assert len(reads) == 1
+
+
+def test_other_writes_land_between_two_members_of_a_batch(vault: Path, selected_store, monkeypatch):
+    """Catches a batch that keeps the mutation boundary from its first member to its last."""
+    import threading
+
+    from exomem import media_store, mutation_lock
+
+    first, second = _filed(vault, 2)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, first, batch=batch)
+
+    assert not mutation_lock.current_thread_holds_boundary()
+    landed: list[Path] = []
+    writer = threading.Thread(target=lambda: landed.extend(_filed(vault, 1, category="written-between-members")),
+                              daemon=True)
+    writer.start()
+    writer.join(timeout=15)
+    media_store.offload(vault, second, batch=batch)
+
+    assert not writer.is_alive() and landed and landed[0].exists()
+    assert originals.original_state(vault, second).reference is not None
+    assert len(reads) == 1
+
+
+def test_a_batch_charges_each_version_it_publishes_to_its_census(vault: Path, selected_store, monkeypatch):
+    """Catches a batch census that forgets its own earlier members, so the batch fills the allowance and passes it."""
+    from exomem import media_store
+
+    first, second, third = _filed(vault, 3)
+    _configure(selected_store, vault, allowance_bytes=2 * first.stat().st_size)
+    reads = _count_censuses(monkeypatch)
+    batch = media_store.OffloadBatch(vault)
+
+    media_store.offload(vault, first, batch=batch)
+    media_store.offload(vault, second, batch=batch)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, third, batch=batch)
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert originals.original_state(vault, third).reference is None
+    assert len(reads) == 1
+
+
+def test_a_batch_member_whose_reference_changed_before_publication_is_refused(vault: Path, selected_store, monkeypatch):
+    """Catches a shared census standing in for the publication-time check that the original is unchanged."""
+    from exomem import media_store
+
+    first, second = _filed(vault, 2)
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, first, batch=batch)
+    upload = media_store.FilesystemStore.upload
+    elsewhere: list[object] = []
+
+    def bind_elsewhere(*args, **kwargs):
+        version = upload(*args, **kwargs)
+        if not elsewhere:
+            elsewhere.append(None)  # the competing offload uploads too
+            elsewhere[0] = media_store.offload(vault, second)
+        return version
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", bind_elsewhere)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, second, batch=batch)
+
+    assert refused.value.code == "MEDIA_ORIGINAL_CHANGED"
+    assert originals.original_state(vault, second).reference == elsewhere[0]
