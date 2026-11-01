@@ -55,11 +55,16 @@ Derived query and FTS structures SHALL remain within the vault's single SQLite s
 
 ### Requirement: Existing Python query semantics gate every push-down
 
-Legacy requests and saved views SHALL preserve Python-evaluator behavior for every existing filter, sort, date bound, projection, total, aggregate and truncation shape. This includes `missing`, tolerant numeric coercion, string-identity membership, Unicode lowercase substring/prefix matching and stable tie ordering. Every pushed-down existing operator SHALL first pass P1a.11 parity on invented data, for both built-ins and declared-type fixtures. New operators SHALL have an independent reference oracle before push-down is enabled.
+Legacy requests and saved views SHALL preserve Python-evaluator behavior for every existing filter, sort, date bound, projection, total, aggregate and truncation shape. This includes `missing`, tolerant numeric coercion, string-identity membership, Unicode lowercase substring/prefix matching and stable tie ordering. Tolerant numeric coercion SHALL apply only to fields the collection manifest does not declare as strings: a field declared `type: string` SHALL compare as its whole string value for `eq`, `ne` and the ordered operators, never by a leading number. Every pushed-down existing operator SHALL first pass P1a.11 parity on invented data, for both built-ins and declared-type fixtures. New operators SHALL have an independent reference oracle before push-down is enabled.
 
 #### Scenario: Numeric and Unicode edge cases retain parity
 - **WHEN** the corpus queries numeric prefixes, decimal commas, mixed numeric/text values, missing/null/empty values, membership and non-ASCII prefixes
 - **THEN** SQL and Python return equal authorized rows, order, totals, aggregate values and bounded rendered results
+
+#### Scenario: A declared string field is not compared by its leading number
+- **WHEN** a collection declares `pace: {type: string}`, holds `4:39.4/km` and `4:19.8/km`, and a legacy query filters `pace` with `eq` `4:39.4/km`
+- **THEN** exactly the row whose whole value is `4:39.4/km` matches
+- **AND** an `eq` filter on a field declared as an integer still matches `4` for the operand `4.0`
 
 #### Scenario: An unproved operator cannot push down
 - **WHEN** an operator lacks a passing parity/reference test

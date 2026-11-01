@@ -454,3 +454,18 @@ def test_current_state_neighbourhood_keeps_knowledge_notes_not_stale_collection_
         current = working_set_state.current_state_for(store.root, anchors=[anchor])
     assert len(current) == 1
     assert current[0]["statement"] == "latest active note: Current knowledge"
+
+
+def test_a_declared_string_field_matches_eq_by_the_whole_string(store):
+    """Defect: legacy eq read "4:39.4/km" as the number 4, so every pace that starts with 4 matched it."""
+    text = manifest_text().replace("    count:", "    pace: {type: string}\n    count:")
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    for key, pace in ((KEY, "4:39.4/km"), (OTHER, "4:19.8/km")):
+        store.append_record(CID, item={"title": f"Run {pace}", "pace": pace, "count": 4}, item_key=key, why="observe")
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        by_pace = record_governance.query_collection(
+            store.root, CID, filters=[{"column": "pace", "op": "eq", "value": "4:39.4/km"}])
+        by_count = record_governance.query_collection(
+            store.root, CID, filters=[{"column": "count", "op": "eq", "value": "4.0"}])
+    assert [row["pace"] for row in by_pace.rows] == ["4:39.4/km"]
+    assert by_count.total_matched == 2  # an integer field keeps the tolerant numeric comparison

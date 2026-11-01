@@ -2671,6 +2671,9 @@ def query_collection(
             date_from=date_from,
             date_to=date_to,
             date_column=date_column,
+            string_columns=frozenset(
+                name for name, spec in manifest.schema.fields.items() if spec.type == "string"
+            ),
         )
     if aggregate is None and result.truncated and result.returned == 0:
         raise collections.CollectionError(
