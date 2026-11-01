@@ -1092,7 +1092,7 @@ def _log_repair_finished(
     counts the times the pass's detached replays, the census replay included,
     waited for the registry to observe a newer write; a replay call waits once.
     `deferred` counts the distinct paths that the pass's last replay published
-    behind a newer observed write.
+    behind a newer observed write, and is 0 for a pass that published nothing.
     `parked_s` is the part of `duration_s` that the pass's rebuild waited at its
     yields for foreground work, such as an apply that holds the mutation boundary.
     `declined_for` names the bound that ended a pass that declined for a moving
@@ -1504,6 +1504,14 @@ def checkpoint_state(checkpoint) -> tuple | None:
         checkpoint.policy_version,
         checkpoint.access_policy_fingerprint,
     )
+
+
+def _scope_column(scope: str) -> int:
+    """The position of `scope` in a `_membership` tuple and in `freshness.SCOPES`.
+
+    Two scopes exist and the code implements both, so the position is not data.
+    """
+    return 0 if scope == "kb" else 1
 
 
 CATALOG_RETRY_AFTER_MS = 250
@@ -2783,7 +2791,11 @@ def _schedule_repair(
                     pass_started,
                     excused=len(getattr(store, "_last_census_excused", ())) if full_pass else 0,
                     awaited=getattr(store, "_last_replay_awaits", 0) if full_pass else 0,
-                    deferred=len(getattr(store, "_last_replay_deferred", ())) if full_pass else 0,
+                    deferred=(
+                        len(getattr(store, "_last_replay_deferred", ()))
+                        if full_pass and repaired
+                        else 0
+                    ),
                     parked_s=getattr(store, "_last_parked_seconds", 0.0) if full_pass else 0.0,
                     declined_for=getattr(store, "_last_decline_cause", None) if full_pass else None,
                     promoted=promoted,
@@ -5335,10 +5347,12 @@ class LexicalStore:
         Under steady traffic the watcher blesses the live catalogue between the
         build's start capture and the barrier, while the next event is still
         unblessed, so live rarely equals the rebased target exactly. The temp
-        holds this registry's exact state at `target` (its start capture plus
-        every retained generation replayed up to it, proved by the final
-        census), so it contains any state the same registry and policy attested
-        at or below `target`. Publishing therefore advances live.
+        holds this registry's state at `target` (its start capture plus every
+        retained generation replayed up to it, proved by the final census),
+        except for the pages the registry names after `target`: their rows
+        hold the state at `target` or a newer one (`_defer_unproven`). So it
+        contains any state the same registry and policy attested at or below
+        `target`. Publishing therefore advances live.
         """
         if before is None:
             return False
@@ -8954,7 +8968,7 @@ class LexicalStore:
         digest = freshness_module._digest_path
         needed: dict[str, set[str]] = {}
         for scope, delta in bridged.items():
-            index = 0 if scope == "kb" else 1
+            index = _scope_column(scope)
             named = {digest(path) for path in (*delta.changed, *delta.deleted)}
             wanted = set(unproven.get(scope, ()))
             for path in candidates - wanted:
@@ -8967,6 +8981,9 @@ class LexicalStore:
             if wanted:
                 needed[scope] = wanted
         deadline = time.monotonic() + _REPLAY_OBSERVATION_WAIT_SECONDS
+        # A deferred page that is absent at its target holds no row: the apply
+        # dropped the row of every deleted path and never reinserted it. A row
+        # cannot outlive a deletion behind a checkpoint that readers take as current.
         waited = False
         for scope, wanted in needed.items():
             checkpoint = checkpoints.get(scope) or bridged[scope].from_
@@ -8977,6 +8994,8 @@ class LexicalStore:
                 if self._await_observed_rewrites(
                     scope, checkpoint, bridged[scope], wanted, deadline
                 ) is None:
+                # Both scopes share one row. Co-published registries name a page in
+                # both, so a scope that holds it and does not is behind: fail closed.
                     return None
                 continue
             fresh = freshness_module.recall_delta_since(self.vault_root, scope, checkpoint)
@@ -9337,7 +9356,7 @@ class LexicalStore:
 
         expected = dict(getattr(delta, "target_signatures", ()))
         yield from set(expected) ^ set(delta.changed)
-        scope_index = 0 if scope == "kb" else 1
+        scope_index = _scope_column(scope)
         for sp, signature in expected.items():
             path = Path(sp)
             if (

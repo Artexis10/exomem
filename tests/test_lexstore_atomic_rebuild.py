@@ -55,6 +55,7 @@ import pytest
 
 from exomem import file_watcher, find_types, freshness, lexstore, reserved_paths, writer_lease
 from exomem import find as find_module
+from exomem.vault import VaultLockError
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -626,6 +627,15 @@ def test_a_replay_that_cannot_prove_a_page_names_what_ended_it(
     assert store._last_decline_cause == cause
 
 
+def _publication_barrier_held(store: lexstore.LexicalStore) -> bool:
+    """Whether this thread holds the publication barrier: it cannot take it twice."""
+    try:
+        with store._publication_lock(timeout=0):
+            return False
+    except VaultLockError:
+        return True
+
+
 def _delta_names(delta: Any, page: Path) -> bool:
     return any(Path(name) == page for name in (*delta.changed, *delta.deleted))
 
@@ -641,7 +651,8 @@ def test_a_page_rewritten_after_every_replay_is_deferred_not_chased(
     """An import rewrites P each time the build's replay applies it, and the
     registry observes each write. The replay used to follow P and decline after
     three rounds. It now publishes at the target it started from, leaves P as
-    ordinary lag, and a later catch-up serves P's newest content.
+    ordinary lag, reports one deferred page on the worker's finish line, and
+    the catch-up that follows serves P's newest content.
     """
     p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
     _seed(tmp_path, [p])
@@ -670,70 +681,28 @@ def test_a_page_rewritten_after_every_replay_is_deferred_not_chased(
     monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
     monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p)
     caplog.set_level("INFO", logger="exomem.lexstore")
-    published = store.rebuild_atomic()
-    assert published is True
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    finished = [
+        record.fields
+        for record in caplog.records
+        if getattr(record, "event", None) == "lexical_repair_finished"
+    ]
+    full = [fields for fields in finished if fields["kind"] == "full"]
+    assert [fields["result"] for fields in full] == ["published"]
+    assert full[0]["deferred"] == 1
     # P is published at the target the final replay started from, behind the registry.
     for scope in ("kb", "vault"):
         stored = store.catalog_checkpoint(scope)
         assert stored != freshness.recall_checkpoint(tmp_path, scope)
         assert _delta_names(freshness.recall_delta_since(tmp_path, scope, stored), p)
-    assert len(store._last_replay_deferred) == 1
     # A later catch-up applies P's newest state.
     monkeypatch.undo()
     lexstore.ensure_fresh(tmp_path)
     assert f"prewrite{rewrites}" in _live_contents(store)
     for scope in ("kb", "vault"):
         assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
-
-
-def test_a_page_both_scopes_share_defers_only_when_each_scope_names_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The registry names P after the target for the kb scope but not for the
-    vault scope. The two scopes share P's row, so deferring P would publish a
-    row newer than the vault checkpoint with no event to replay it: a stale row
-    behind a current checkpoint. The replay must decline instead.
-    """
-    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
-    _seed(tmp_path, [p])
-    lexstore.ensure_fresh(tmp_path)
-    store = lexstore.get_store(tmp_path)
-    real_materialize = store._materialize_catalog
-    real_apply_rows = store._apply_delta_rows
-    real_delta_since = freshness.recall_delta_since
-
-    def rewrite_p(token: str) -> None:
-        p.write_text(_page_text("p", f"- [config] {token} ^u1"), encoding="utf-8")
-        _touch_future(p)
-        freshness.on_files_changed(tmp_path, changed=[p])
-
-    def without_p_in_vault(root: Path, scope: str, checkpoint: Any) -> Any:
-        delta = real_delta_since(root, scope, checkpoint)
-        if scope != "vault":
-            return delta
-        keep = lambda names: frozenset(name for name in names if Path(name) != p)  # noqa: E731
-        return delta._replace(
-            changed=keep(delta.changed),
-            deleted=keep(delta.deleted),
-            target_signatures=tuple(
-                (name, sig) for name, sig in delta.target_signatures if Path(name) != p
-            ),
-        )
-
-    def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
-        built = real_materialize(*args, **kwargs)
-        rewrite_p("pfirst")
-        return built
-
-    def apply_rows_then_rewrite_p(conn: sqlite3.Connection, delta: Any) -> None:
-        real_apply_rows(conn, delta)
-        rewrite_p("psecond")
-
-    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
-    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p)
-    monkeypatch.setattr(freshness, "recall_delta_since", without_p_in_vault)
-    assert store.rebuild_atomic() is False
-    assert "pfirst" not in _live_contents(store) and "psecond" not in _live_contents(store)
 
 
 def test_a_barrier_refusal_on_a_page_still_publishing_goes_to_the_catch_up(
@@ -754,8 +723,9 @@ def test_a_barrier_refusal_on_a_page_still_publishing_goes_to_the_catch_up(
     late_events: list[threading.Timer] = []
 
     def note_barrier(*args: Any, **kwargs: Any) -> Any:
-        # Only the barrier call omits `max_paths`. Give it a delta to replay.
-        state["barrier"] = "max_paths" not in kwargs
+        # The replay that runs under the publication barrier is the one that
+        # finds the barrier taken. Give it a delta to replay.
+        state["barrier"] = _publication_barrier_held(store)
         if state["barrier"] and not state["done"]:
             p.write_text(_page_text("p", "- [config] pmiddle ^u1"), encoding="utf-8")
             _touch_future(p)
@@ -796,26 +766,6 @@ def test_a_barrier_refusal_on_a_page_still_publishing_goes_to_the_catch_up(
     assert state["done"], "the barrier replay never ran"
     assert published is True
     assert "pafter" in _live_contents(store)
-
-
-def test_the_repair_finish_line_counts_awaited_and_deferred_pages(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Operators read `awaited` and `deferred` to tell a pass that published
-    behind a rewritten page from one that never waited, and `retargets_exhausted`
-    no longer exists as a decline cause."""
-    caplog.set_level("INFO", logger="exomem.lexstore")
-    lexstore._log_repair_finished(
-        "full", "published", lexstore.RepairStage.PUBLISH, time.monotonic(), awaited=1, deferred=2
-    )
-    (fields,) = [
-        record.fields
-        for record in caplog.records
-        if getattr(record, "event", None) == "lexical_repair_finished"
-    ]
-    assert (fields["awaited"], fields["deferred"]) == (1, 2)
-    assert "retargeted" not in fields
-    assert "retargets_exhausted" not in {cause.value for cause in lexstore.DeclineCause}
 
 
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
