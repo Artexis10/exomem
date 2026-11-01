@@ -24,13 +24,13 @@ env:
   KATA_ASSET: "kata-go-static-4.3.1-amd64.tar.zst"
   # The image a cell runs in production (published, anonymous pull).
   CLOUD_IMAGE: ghcr.io/artexis10/exomem:0.154.0-cloud
-  REPEATS: "3"
+  REPEATS: "1"
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
   EXTRA_ARGS: ""
   # "measure" times runc against Kata; "trace" records the syscalls of the runc cell with strace.
-  PHASES: "trace"
-  ARMS: "runc"
+  PHASES: "measure"
+  ARMS: "runc,kata-blk"
 
 jobs:
   measure:
@@ -60,6 +60,12 @@ jobs:
           command -v zstd >/dev/null || sudo apt-get install -y --no-install-recommends zstd
           tar --zstd -xf "$KATA_ASSET"
           sudo mv opt/kata /opt/kata
+          # The block-volume arm needs the runtime to hot-plug a host block device; the shipped default switches
+          # that off. The key does nothing for a mount that is not a block device, so the virtio-fs arm is unchanged.
+          cfg=/opt/kata/share/defaults/kata-containers/configuration-qemu.toml
+          cp "$cfg" "$RUNNER_TEMP/configuration-qemu.shipped.toml"
+          sudo sed -i -E 's/^disable_block_device_use *= *true/disable_block_device_use = false/' "$cfg"
+          diff "$RUNNER_TEMP/configuration-qemu.shipped.toml" "$cfg" || true
           ls -l /opt/kata/bin
           /opt/kata/bin/kata-runtime --version
           /opt/kata/bin/containerd-shim-kata-v2 --version || true

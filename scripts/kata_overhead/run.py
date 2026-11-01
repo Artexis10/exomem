@@ -38,6 +38,10 @@ CELL_PORT = 8765
 PROTOCOL = "2025-11-25"
 IMPORT_NAME = "Project Archive"
 RUNTIMES = ("runc", "kata")
+# Kata with /data as a loop-device ext4 volume handed to the guest as a block device (a directly assigned
+# volume), instead of the default virtio-fs share. It runs on the Docker runtime named "kata".
+BLOCK_ARM = "kata-blk"
+KATA_RUNTIME_BIN = "/opt/kata/bin/kata-runtime"
 MEDIA_DIR = "Knowledge Base/Sources/Media"
 # Both arms run the cell with /data on a real Docker volume. The wrapper only creates the scratch
 # directories the cell's TMPDIR and caches name, then execs the cell command unchanged.
@@ -58,6 +62,10 @@ TOOLS = {
 
 class HarnessError(RuntimeError):
     pass
+
+
+def docker_runtime(arm: str) -> str:
+    return "kata" if arm == BLOCK_ARM else arm
 
 
 def now_ms() -> float:
@@ -557,6 +565,7 @@ class Lab:
         self.stems: list[str] = []
         self.import_counts: dict = {}
         self.media_files: list[str] = []
+        self.blocks: dict[str, str] = {}  # block-arm volume directory -> loop device
         self.slow = 1  # deadline multiplier: strace slows the traced cell several times over
 
     # -- records
@@ -613,7 +622,8 @@ class Lab:
 
     def oneshot_options(self, runtime: str, volume: str, *, mounts: list[str] | None = None,
                         env: dict[str, str] | None = None, limits: bool = False, extra: list[str] | None = None) -> list[str]:
-        argv = ["--runtime", runtime, "--network", "none", *self.security(), "-v", f"{volume}:/data", *(extra or [])]
+        argv = ["--runtime", docker_runtime(runtime), "--network", "none", *self.security(), "-v", f"{volume}:/data",
+                *(extra or [])]
         if limits:
             argv += ["--cpus", "2", "--memory", "3g"]
         for mount in mounts or []:
@@ -637,10 +647,44 @@ class Lab:
         self.docker("volume", "create", name)
         self.helper(name, "chown 10001:10001 /data && chmod 2770 /data")
 
+    def block_volume(self, name: str) -> str:
+        """A sparse ext4 image on a loop device, seeded like the Docker volumes, assigned to Kata as a block volume.
+
+        Returns the host directory that stands for the volume in `-v DIR:/data`: the runtime finds the device
+        behind it in the mount information that `kata-runtime direct-volume add` stored for that path.
+        """
+        base = self.work / "blk"
+        image, mount, volume = base / f"{name}.img", base / f"{name}.mnt", base / name
+        for path in (mount, volume):
+            path.mkdir(parents=True, exist_ok=True)
+        sh(["truncate", "-s", "8G", str(image)])
+        sh(["mkfs.ext4", "-q", "-F", str(image)])
+        sh(["sudo", "mount", "-o", "loop", str(image), str(mount)])
+        try:
+            seed = self.snap / "seed.tar"
+            if seed.exists():
+                sh(["sudo", "tar", "-C", str(mount), "-xpf", str(seed)])
+            sh(["sudo", "chown", "10001:10001", str(mount)])
+            sh(["sudo", "chmod", "2770", str(mount)])
+        finally:
+            sh(["sudo", "umount", str(mount)], check=False)
+        loop = sh(["sudo", "losetup", "--find", "--show", str(image)]).stdout.strip()
+        self.blocks[str(volume)] = loop
+        info = json.dumps({"volume-type": "block", "device": loop, "fstype": "ext4", "options": []})
+        sh(["sudo", KATA_RUNTIME_BIN, "direct-volume", "add", "--volume-path", str(volume), "--mount-info", info])
+        return str(volume)
+
+    def block_volume_remove(self, volume: str) -> None:
+        loop = self.blocks.pop(volume, None)
+        sh(["sudo", KATA_RUNTIME_BIN, "direct-volume", "remove", "--volume-path", volume], check=False)
+        if loop:
+            sh(["sudo", "losetup", "-d", loop], check=False)
+        Path(volume + ".img").unlink(missing_ok=True)
+
     def start_cell(self, runtime: str, name: str, volume: str, *, gated: bool = False) -> tuple[str, float, float]:
         """Returns (base url, `docker run -d` milliseconds, clock at the call). A gated cell waits for the tracer."""
         command = CELL_COMMAND.replace('&& exec "$@"', f"&& {TRACE_GATE}") if gated else CELL_COMMAND
-        argv = ["run", "-d", "--name", name, "--runtime", runtime, "--network", self.network,
+        argv = ["run", "-d", "--name", name, "--runtime", docker_runtime(runtime), "--network", self.network,
                 "--cpus", "2", "--memory", "3g", *self.security(),
                 "-v", f"{volume}:/data", *self.cell_env(),
                 "--entrypoint", "sh", self.image, "-c", command, "cell-process", "exomem",
@@ -771,9 +815,13 @@ class Lab:
         """Which kernel primitives the cell's filesystem layer needs, per runtime and root; unmeasured."""
         volume = f"kv-compat-{self.run_id}"
         self.new_volume(volume)
+        block = ""
         try:
-            for runtime in RUNTIMES:
-                wall, probed = self.oneshot(runtime, volume, ["python", "-c", PROBE_SCRIPT, "/data", "/tmp"],
+            for runtime in (*RUNTIMES, *([BLOCK_ARM] if BLOCK_ARM in self.arms else [])):
+                if runtime == BLOCK_ARM:
+                    block = self.block_volume(f"compat-{self.run_id}")
+                wall, probed = self.oneshot(runtime, block if runtime == BLOCK_ARM else volume,
+                                            ["python", "-c", PROBE_SCRIPT, "/data", "/tmp"],
                                             entrypoint="env", timeout=300)
                 self.log(f"compat {runtime} rc={probed.returncode} {wall:.0f} ms {probed.stdout.strip()[:1200]}"
                          f"{probed.stderr.strip()[-300:]}")
@@ -781,6 +829,8 @@ class Lab:
                                                 "stderr": probed.stderr[-2000:]})
         finally:
             self.docker("volume", "rm", "-f", volume, check=False)
+            if block:
+                self.block_volume_remove(block)
 
     def cgroup_probe(self) -> None:
         """What the cell's media brakes read from the cgroup files, in a container limited like the cell."""
@@ -788,6 +838,8 @@ class Lab:
         self.new_volume(volume)
         try:
             for runtime in self.arms:
+                if runtime == BLOCK_ARM:
+                    continue  # the brake reads cgroup files, which the storage mode does not change
                 wall, probed = self.oneshot(runtime, volume, ["python", "-c", BRAKE_SCRIPT], entrypoint="env",
                                             timeout=300, limits=True)
                 self.log(f"cgroup {runtime} rc={probed.returncode} {probed.stdout.strip()[:1400]}{probed.stderr.strip()[-300:]}")
@@ -868,14 +920,20 @@ class Lab:
         volume = f"kv-{arm}-{rep}-{self.run_id}"
         name = f"kv-cell-{arm}-{rep}-{self.run_id}"
         self.log(f"=== session {tag}")
-        self.new_volume(volume)
-        self.helper(volume, "tar -C /data -xpf /snap/seed.tar && chmod 2770 /data",
-                    mounts=[f"{self.snap}:/snap:ro"])
+        if arm == BLOCK_ARM:
+            volume = self.block_volume(f"{arm}-{rep}-{self.run_id}")
+        else:
+            self.new_volume(volume)
+            self.helper(volume, "tar -C /data -xpf /snap/seed.tar && chmod 2770 /data",
+                        mounts=[f"{self.snap}:/snap:ro"])
         try:
             self.session_body(arm, rep, tag, volume, name)
         finally:
             self.docker("rm", "-f", name, check=False)
-            self.docker("volume", "rm", "-f", volume, check=False)
+            if arm == BLOCK_ARM:
+                self.block_volume_remove(volume)
+            else:
+                self.docker("volume", "rm", "-f", volume, check=False)
 
     def session_body(self, arm: str, rep: int, tag: str, volume: str, name: str) -> None:
         a = self.args
