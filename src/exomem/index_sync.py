@@ -1212,8 +1212,10 @@ def _drain_graph_receipts(
             # meet the same refusal once per page, each with a boundary wait.
             # The per-path record keeps its last verdict: a held boundary says
             # nothing about per-path readiness, and releasing barrier recovery
-            # would start a whole-vault pass against that same boundary. A
-            # refusal that persists releases it through the oldest receipt's age.
+            # would start a whole-vault pass against that same boundary. A busy
+            # boundary counts as a lost race and holds off the age escalation;
+            # any other refusal that persists releases it through the oldest
+            # receipt's age.
             log.info("deferred graph batch refused (%s); work remains queued", refusal)
             return 0, refusal == _BUSY_BOUNDARY_CODE
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)

@@ -414,6 +414,8 @@ def _drain_once(vault_root: Path) -> int:
         return int(index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT) or 0)
     except Exception:  # noqa: BLE001 - queued work stays durable and retryable
         log.warning("graph drain: pass failed; work remains queued", exc_info=True)
+        # A failed pass is not a lost race: let the age limit apply again.
+        note_per_path_race(vault_root, raced=False)
         return 0
 
 
