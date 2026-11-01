@@ -1607,9 +1607,9 @@ def decode_plain_text(data: bytes) -> DecodedText:
     """The text of a plain-text file's bytes, and the encoding that read it.
 
     A byte-order mark names the codec. Without one, UTF-8 reads it when its valid multi-byte
-    sequences outnumber its invalid bytes, then a confident charset-normalizer guess, and last
-    UTF-8 with replacement characters. Every line ending reads as one newline, as
-    `Path.read_text` reads it.
+    sequences are at least as many as its invalid bytes, then a confident charset-normalizer
+    guess, and last UTF-8 with replacement characters. Every line ending reads as one newline,
+    as `Path.read_text` reads it.
     """
     text, encoding = _decode_by_evidence(data)
     return DecodedText(text.replace("\r\n", "\n").replace("\r", "\n"), encoding)
