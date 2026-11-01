@@ -552,6 +552,9 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     link_by_form: dict[str, list[int]] = {}
     embed_total = embed_kept = embed_both_landed = 0
     link_samples: list[dict[str, Any]] = []
+    # What each key item and each distinct edge came to, for a caller that compares two runs item by item.
+    edge_kept: dict[str, bool] = {}
+    embed_edge_kept: dict[str, bool] = {}
     pairs_seen: set[tuple[str, str]] = set()
     entry_forms: Counter[str] = Counter()
     probes: list[Probe] = []
@@ -590,6 +593,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
                     continue  # two links from one note to one target are one outbound edge
                 pairs_seen.add(pair)
                 both = bool(own and targets)
+                edge_kept[f"{note['path']} -> {lk['target']}"] = bool(kept)
                 link_total += 1
                 link_kept += kept
                 link_both_landed += both
@@ -609,6 +613,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
                 hit = any(resolver.names_page(e, t) for e in entries for t in targets) or any(
                     resolver.names_file(e, f) for e in entries for f in files)
                 embed_kept += bool(hit and own)
+                embed_edge_kept[f"{note['path']} -> {emb['attachment']}"] = bool(hit and own)
 
         # recall@5: one query per note probe and one per distinct media phrase
         for note in notes:
@@ -734,6 +739,13 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
         },
         "embeds_bound": {"of_all_embeds": frac(embed_kept, embed_total),
                          "of_embeds_with_both_ends_landed": frac(embed_kept, embed_both_landed)},
+        "per_item": {
+            "unit": "key path -> page count; edges are 'source -> target' over distinct pairs",
+            "pages_per_item": {i["path"]: len(pages_of[i["path"]]) for i in notes + atts},
+            "junk_pages": {i["path"]: len(pages_of[i["path"]]) for i in junk},
+            "links_kept": edge_kept,
+            "embeds_kept": embed_edge_kept,
+        },
         "fidelity": fidelity,
         "homes": homes,
         "rerun_duplicates": duplicates,
