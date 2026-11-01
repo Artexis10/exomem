@@ -1079,6 +1079,19 @@ def _set_or_append(fm_text: str, key: str, value: str) -> str:
     return fm_text.rstrip() + f"\n{key}: {value}"
 
 
+def reviewed_render(text: str, stamp: str) -> str:
+    """The page `text` as this writer renders it at the reviewed instant `stamp`.
+
+    An edit stamps `updated:` with its commit instant. This puts the reviewed
+    instant back, so a page committed later can be compared with reviewed bytes.
+    """
+    match = _FM_PATTERN.match(text)
+    if match is None:
+        return text
+    fm_text = _set_or_append(match.group(1), "updated", stamp)
+    return render_frontmatter_document(fm_text, match.group(2), newline="\n")
+
+
 def _remove_yaml_key(fm_text: str, key: str) -> str:
     """Remove `key: <inline>` line OR `key:\\n  - item\\n  - item` block.
 
