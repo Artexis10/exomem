@@ -358,7 +358,9 @@ def test_catalogue_row_from_before_a_status_only_edit_does_not_prove_custody(
     assert lexstore.holds_content_identities(tmp_path, {rel: delta._digest(after)}) == {rel: True}
 
 
-def test_failed_unproven_prefix_backs_off_and_later_commit_recovers(tmp_path: Path) -> None:
+def test_failed_unproven_prefix_backs_off_and_later_commit_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     before = delta._page(title="Before", body="old", updated="2026-01-01")
     after = delta._page(title="After", body="new", updated="2026-02-01")
     first, second = "Knowledge Base/Notes/first.md", "Knowledge Base/Notes/second.md"
@@ -384,20 +386,25 @@ def test_failed_unproven_prefix_backs_off_and_later_commit_recovers(tmp_path: Pa
     )
     delta._write(tmp_path, later, after)
     repaired = []
+    monkeypatch.setattr(
+        index_sync, "converge_paths_from_current_bytes", lambda *_: repaired.append(True)
+    )
     options = dict(
+        dispatch=None,
         observe_current_generation=lambda _: "generation-current",
         visibility_publisher=pending_recall.publish,
-        converge_current=lambda *_: repaired.append(True),
         limit=1,
     )
-    assert derived_receipts.recover_prepared_batches(tmp_path, now=100.0, **options) == 0
+    derived_drain.drain_once(tmp_path, now=100.0, **options)
     assert (
         derived_receipts.component_status(
             tmp_path, receipt, derived_receipts.DerivedComponent.LEXSTORE
         ).next_attempt_at
         > 100.0
     )
-    assert derived_receipts.recover_prepared_batches(tmp_path, now=101.0, **options) == 1
+    assert derived_receipts._load_receipt(tmp_path, "later-commit").state == "prepared"
+    derived_drain.drain_once(tmp_path, now=101.0, **options)
+    assert derived_receipts._load_receipt(tmp_path, "later-commit").state == "ready"
     assert not repaired, "unproven mixed bytes gained committed authority"
     with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
         assert connection.execute(
@@ -573,8 +580,9 @@ def test_ready_live_recovery_preserves_component_retry_backoff(tmp_path: Path) -
         tmp_path, claim, failure_code="dispatch_failed", now=100.0
     )
     receipt = derived_receipts._load_receipt(tmp_path, "healthy-ready")
-    derived_receipts.recover_prepared_batches(
+    derived_drain.drain_once(
         tmp_path,
+        dispatch=None,
         observe_current_generation=lambda _: "generation-current",
         visibility_publisher=pending_recall.publish,
         limit=1,
@@ -614,13 +622,14 @@ def test_slow_committed_repair_keeps_unrelated_canonical_write_available(
         assert release.wait(timeout=5), "repair test did not release its owner"
         return False
 
+    monkeypatch.setattr(index_sync, "converge_paths_from_current_bytes", blocked_owner)
     with ThreadPoolExecutor(max_workers=1) as worker:
         recovery = worker.submit(
-            derived_receipts.recover_prepared_batches,
+            derived_drain.drain_once,
             tmp_path,
+            dispatch=None,
             observe_current_generation=lambda _: "generation-current",
             visibility_publisher=pending_recall.publish,
-            converge_current=blocked_owner,
             limit=1,
             now=100.0,
         )
@@ -633,7 +642,7 @@ def test_slow_committed_repair_keeps_unrelated_canonical_write_available(
         finally:
             release.set()
             try:
-                assert recovery.result(timeout=5) == 0
+                recovery.result(timeout=5)
             finally:
                 manager.close()
     assert (tmp_path / unrelated).read_text() == "# Unrelated write\n"

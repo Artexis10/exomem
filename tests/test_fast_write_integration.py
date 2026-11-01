@@ -1613,13 +1613,14 @@ def test_crash_cut_committed_before_terminal_converges_without_replay(
     )
     _put(vault, rel, after)  # canonical commit landed; the process then died
 
-    recovered = derived_receipts.recover_prepared_batches(
+    derived_drain.drain_once(
         vault,
+        dispatch=None,
         observe_current_generation=lambda _root: "generation-1",
         visibility_publisher=pending_recall.publish,
         limit=8,
     )
-    assert recovered == 1
+    assert derived_receipts._load_receipt(vault, "cut-committed").state == "ready"
     assert (vault / rel).read_text(encoding="utf-8") == after
     snapshot = derived_receipts.snapshot_pending_visibility(vault, limit=64)
     live = {

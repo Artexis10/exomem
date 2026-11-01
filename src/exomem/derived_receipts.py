@@ -2623,71 +2623,6 @@ def _record_batch_recovery_failure(
 RecoveryOutcome = Literal["recovered", "repair", "stranded", "settled"]
 
 
-def recover_prepared_batches(
-    vault_root: Path,
-    *,
-    observe_current_generation: Callable[[Path], str | None] | None,
-    visibility_publisher: Callable[[Path, DerivedBatchReceipt], bool] | None,
-    limit: int,
-    now: float | None = None,
-    converge_current: Callable[[Path, Sequence[str], Sequence[str]], bool] | None = None,
-) -> int:
-    """Boundedly prove crash-cut custody from an independent live observation.
-
-    The phases the drain runs in its own boundary turns, composed with one
-    guard: healthy batches rotate outside it, every other proof runs under it,
-    and repair runs after it. A held boundary leaves every batch for a later call.
-    """
-    if observe_current_generation is None:
-        return 0
-    observed_at = _timestamp(now)
-    unhealthy: list[str] = []
-    for batch_id in recovery_candidates(vault_root, limit=limit, now=observed_at):
-        try:
-            if not rotate_if_healthy(vault_root, batch_id, now=observed_at):
-                unhealthy.append(batch_id)
-        except Exception as error:  # noqa: BLE001 - one batch cannot stop the rest
-            record_recovery_error(vault_root, batch_id, error, now=observed_at)
-    if not unhealthy:
-        return 0
-    from .cli_ops import OpError
-    from .writer_lease import active_manager
-
-    outcomes: list[tuple[str, RecoveryOutcome]] = []
-    try:
-        with active_manager().consistency_guard(
-            vault_root,
-            operation="derived_receipt_restart_proof",
-            holder_kind="derived-worker",
-        ):
-            for batch_id in unhealthy:
-                try:
-                    outcomes.append((batch_id, prove_recovery_batch(
-                        vault_root,
-                        batch_id,
-                        observe_current_generation=observe_current_generation,
-                        visibility_publisher=visibility_publisher,
-                        converge_current=converge_current,
-                        now=observed_at,
-                    )))
-                except Exception as error:  # noqa: BLE001 - callback failure stays durable and bounded
-                    record_recovery_error(vault_root, batch_id, error, now=observed_at)
-    except OpError as error:
-        if error.code != "MUTATION_BUSY":
-            raise
-        # A writer's boundary is not this custody's failure: nothing was proved.
-        return 0
-    recovered = 0
-    for batch_id, outcome in outcomes:
-        try:
-            recovered += finish_recovery(
-                vault_root, batch_id, outcome, converge_current=converge_current, now=observed_at,
-            )
-        except Exception as error:  # noqa: BLE001 - callback failure stays durable and bounded
-            record_recovery_error(vault_root, batch_id, error, now=observed_at)
-    return recovered
-
-
 def recovery_candidates(vault_root: Path, *, limit: int, now: float) -> tuple[str, ...]:
     """Crash-cut batches with due component work, in recovery's rotation order."""
     if limit <= 0 or not deferred_index.store_path(vault_root).exists():
@@ -3308,36 +3243,6 @@ def settle_component_not_required(
     return "batch_completed" if batch_completed else "settled"
 
 
-def defer_component(
-    vault_root: Path,
-    status: DerivedComponentStatus,
-    *,
-    now: float | None = None,
-) -> DerivedComponentStatus:
-    """Release an exact claim awaiting execution, without spending a failure.
-
-    Reuse the existing due state and lease CAS. No new queue or schema is
-    needed; a short eligibility delay prevents re-claiming in the same pass.
-    The execution owner signals the drain after publication.
-    """
-    deferred_at = _timestamp(now)
-    connection = deferred_index._connect(vault_root, create=True)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            if not _defer_claim(connection, status, deferred_at):
-                raise RuntimeError("component claim is no longer current")
-        except Exception:
-            connection.rollback()
-            raise
-        connection.commit()
-        return _component_status_from_connection(
-            connection, status.batch_id, status.component
-        )
-    finally:
-        connection.close()
-
-
 def defer_components(
     vault_root: Path,
     statuses: Sequence[DerivedComponentStatus],
@@ -3346,9 +3251,10 @@ def defer_components(
 ) -> int:
     """Release several exact claims in one transaction; return how many were current.
 
-    `defer_component` for a pass handing back what it did not reach: one
-    commit instead of one per claim. A claim that is no longer current is
-    skipped, since its newer owner or its expired lease already decides it.
+    Release without spending a failure, reusing the due state and lease CAS; a
+    short eligibility delay keeps a pass from claiming them again. A claim that
+    is no longer current is skipped, since its newer owner or its expired lease
+    already decides it.
     """
     if not statuses:
         return 0
