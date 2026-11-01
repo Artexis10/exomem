@@ -943,7 +943,7 @@ def plan_item(
         from .add import stored_artifact_suffix
         from .preserve import _sanitize_filename
 
-        # An artifact is a `.md` file only when its bytes are not UTF-8 text.
+        # A `.md` original is an artifact when its bytes are not UTF-8 text or exceed the inline bound.
         suffix = stored_artifact_suffix(Path(_sanitize_filename(Path(original_path).name) or "").suffix)
     page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
     reason = access.writable_reason(root, page)

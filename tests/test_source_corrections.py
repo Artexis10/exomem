@@ -211,10 +211,13 @@ def _legacy_original(vault, source_schema, tmp_path, original, *, title="Legacy 
 
 
 def _legacy_markdown_pair(vault, artifact, page):
-    legacy_artifact = artifact.with_suffix("") if artifact.name.endswith(".md.bin") else artifact
+    legacy_artifact = artifact.with_suffix("") if artifact.name.endswith((".md.bin", ".md.txt")) else artifact
     legacy_page = preserve._sidecar_path(legacy_artifact, protected=True)
     metadata, body, _ = vault_module.parse_frontmatter(page.read_text())
     metadata["evidence_file"] = legacy_artifact.relative_to(vault).as_posix()
+    # A legacy `.md` original was never classified for extraction.
+    metadata.pop("media_type", None)
+    metadata.pop("extracted_by", None)
     if "artifact_adoption" in metadata:
         metadata["artifact_adoption"]["stored_path"] = legacy_artifact.relative_to(vault).as_posix()
         metadata["artifact_adoption"]["page_path"] = legacy_page.relative_to(vault).as_posix()
