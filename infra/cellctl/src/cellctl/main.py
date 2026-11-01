@@ -309,16 +309,8 @@ def run() -> None:
 
     cluster_config = build_cluster_config()
     cluster = ClusterClient(k8s.ApiClient(), storage_config=cluster_config.storage)
-    # D9: cellctl holds no key that creates, lists or deletes an application key. The founder-account
-    # key reaches an old cell's prefix in the old bucket (list and delete files); the cell-data key
-    # only lists the locked backup bucket.
-    object_storage = B2ObjectStorage(
-        B2Config(
-            key_id=os.environ["CELLCTL_B2_LEGACY_KEY_ID"],
-            application_key=os.environ["CELLCTL_B2_LEGACY_APPLICATION_KEY"],
-            bucket_id=os.environ["CELLCTL_B2_BUCKET_ID"],
-        )
-    )
+    # D9: cellctl holds no key that creates, lists or deletes an application key, and no credential in
+    # the founder account. The cell-data key only lists the locked backup bucket.
     backup_listing = B2ObjectStorage(
         B2Config(
             key_id=os.environ["CELLCTL_CELL_DATA_BACKUP_LIST_KEY_ID"],
@@ -332,7 +324,6 @@ def run() -> None:
         run_loop(
             os.environ["CELLCTL_DATABASE_DSN"],
             cluster,
-            object_storage,
             volume_provider,
             build_secrets_config(),
             cluster_config,

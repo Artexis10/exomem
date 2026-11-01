@@ -73,7 +73,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2LegacyDeleteSecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "keyRetentionSources": {
           "type": "array",
@@ -227,7 +227,6 @@
         "databaseDsnSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "backupMasterKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
-        "b2LegacyDeleteSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "cellDataStagingSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "cellDataBackupListSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "hetznerReadTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},

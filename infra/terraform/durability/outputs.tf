@@ -153,13 +153,3 @@ output "cloud_backup_bucket_id" {
 output "cloud_backup_account_id" {
   value = one(b2_bucket.cloud_backups[*].account_id)
 }
-
-output "cloud_legacy_delete_application_key_id" {
-  value     = one(b2_application_key.cloud_legacy_delete[*].application_key_id)
-  sensitive = true
-}
-
-output "cloud_legacy_delete_application_key" {
-  value     = one(b2_application_key.cloud_legacy_delete[*].application_key)
-  sensitive = true
-}

@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from cellctl import main, reconcile
 from cellctl.manifests import render_statefulset
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_artifact_transport import BROKER_URL, CELL_ID, OTHER_CELL_ID, _digest
@@ -128,7 +127,7 @@ async def test_reconcile_gives_only_the_listed_cells_the_public_key(cell_db) -> 
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         for cell_id in cell_ids:
             pod = cluster.applied[("exo-cell-" + cell_id, "StatefulSet", "cell")]["spec"]["template"]["spec"]

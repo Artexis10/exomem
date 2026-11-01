@@ -24,7 +24,6 @@ from cellctl import db, main, manifests, media_edge, reconcile
 from cellctl.decide import GROWTH_THRESHOLD_PERCENT
 from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, MEDIA_STORE_CONFIG_KEY, namespace_name
 from cellctl.state import ClusterObservation, MediaCensus
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_reconcile import (
@@ -296,7 +295,7 @@ class Fleet:
         self.cluster = EdgeCluster()
         self.memory = reconcile.LoopMemory()
         self.connection: asyncpg.Connection | None = None
-        self.b2, self.hetzner = FakeB2(), FakeHetznerVolumeProvider()
+        self.hetzner = FakeHetznerVolumeProvider()
 
     async def seed(self, *cell_ids: str) -> None:
         for cell_id in cell_ids:
@@ -305,7 +304,7 @@ class Fleet:
 
     async def run(self, now: datetime = NOW) -> bool:
         return await reconcile.reconcile_once(
-            self.connection, self.cluster, self.b2, self.hetzner, _secrets_config(), self.config,
+            self.connection, self.cluster, self.hetzner, _secrets_config(), self.config,
             now=now, memory=self.memory)
 
     async def rows(self) -> dict[str, object]:
@@ -798,15 +797,15 @@ async def test_with_the_edge_off_a_schema_without_the_media_key_columns_still_se
     await _seed_cell(cell_db, CANARY, CANARY)
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
-    cluster, b2 = FakeClusterGateway(), FakeB2()
+    cluster = FakeClusterGateway()
     try:
         config = await reconcile._observe_media_key_columns(connection, _cluster_config())
         assert config.reads_media_keys is False
-        await _converged_cell(connection, cluster, b2, NOW)
+        await _converged_cell(connection, cluster, NOW)
         assert (await db.select_all_rows(connection))[0].cell_root_key_wrapped is not None
 
         await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=1))
         retired = (await db.select_all_rows(connection))[0]
         assert retired.cell_root_key_wrapped is retired.backup_key_wrapped is None
@@ -823,5 +822,5 @@ async def test_with_the_edge_on_cellctl_stops_at_startup_on_a_schema_without_the
 
     with pytest.raises(reconcile.MediaKeyColumnsMissing, match="migration 0081_exomem_cloud_media_keys"):
         await asyncio.wait_for(reconcile.run_loop(
-            cell_db.dsn(role="exomem_cellctl"), EdgeCluster(), FakeB2(), FakeHetznerVolumeProvider(),
+            cell_db.dsn(role="exomem_cellctl"), EdgeCluster(), FakeHetznerVolumeProvider(),
             _secrets_config(), config, heartbeat_path=str(tmp_path / "heartbeat")), timeout=20)

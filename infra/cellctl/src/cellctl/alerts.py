@@ -62,8 +62,8 @@ DISK_LOW_ALERT = "cell-disk-low"
 # A serving cell whose recall serves a catalogue that has not advanced, read
 # from the cell's own readiness answer.
 RECALL_LAG_ALERT = "cell-recall-lagging"
-# contain-cloud-controller-compromise D9: a deleted cell's object-store key, and in cell-data its
-# backup files, are removed by the operator, never by cellctl. The alert name carries the cell
+# contain-cloud-controller-compromise D9: a deleted cell's object-store key and backup files are
+# removed by the operator, never by cellctl. The alert name carries the cell
 # id because the receiver's transition has no other field for it; the alert never resolves
 # itself, since cellctl cannot see the provider's key listing.
 CLEANUP_PENDING_ALERT = "cell-storage-cleanup-pending"

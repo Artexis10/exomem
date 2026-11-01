@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Operator clean-up for one deleted cell's object-store key and backup files.
 
-`contain-cloud-controller-compromise` D9: cellctl holds no credential that deletes keys, so a
-deleted cell leaves the alert `cell-storage-cleanup-pending-<cell id>`. This script answers it.
+`contain-cloud-controller-compromise` D9: cellctl holds no credential that deletes keys or backup
+files, so a deleted cell leaves the alert `cell-storage-cleanup-pending-<cell id>`. This script
+answers it.
 
 Run it once per account for every deleted cell, `--account founder` and `--account cell-data`:
 the database no longer says which account holds the cell's key. It lists the account's
-application keys and deletes each key whose name prefix is exactly `cells/<cell id>/`. For the
-cell-data account it also counts the cell's current backup files, and hides them once a 7-day
-grace has passed. It never deletes a key it did not find in the provider's listing, and it never
-deletes a file version: hiding adds a marker, and the compliance lock keeps every version until
-its retention ends.
+application keys and deletes each key whose name prefix is exactly `cells/<cell id>/`. It never
+deletes a key it did not find in the provider's listing.
+- cell-data: it also counts the cell's current backup files in the locked bucket, and hides them
+  once a 7-day grace has passed. It never deletes a file version there: hiding adds a marker, and
+  the compliance lock keeps every version until its retention ends.
+- founder: the old cloud bucket has no lock, so `--apply` also deletes every file version under
+  `cells/<cell id>/` in the bucket named by `--bucket-id`, hidden ones included, with no grace.
 
 The grace starts at the operator's own first dry run, never at a time that cellctl or the
 database holds: both are inputs that a compromised cellctl controls. The first cell-data dry run
@@ -19,12 +22,13 @@ later run. `--apply` for cell-data refuses to run without it. The operator confi
 database row says `desired_state = 'deleted'` before `--apply` (see the runbook).
 
 Dry-run by default. `--apply` acts. Output is value-free (account label, counts, dates) because
-the terminal may be shared. A later dry run that shows `keys_found=0`, and for cell-data
-`files_found=0`, is the proof that the clean-up is complete.
+the terminal may be shared. A later dry run that shows `keys_found=0` and `files_found=0` is the
+proof that the clean-up is complete. For founder, `files_found` counts file versions.
 
 Environment: CELL_CLEANUP_B2_KEY_ID and CELL_CLEANUP_B2_APPLICATION_KEY, the operator's key for
 the chosen account. It needs listKeys and deleteKeys; for cell-data it also needs listFiles and
-writeFiles (hiding a file is a write).
+writeFiles (hiding a file is a write); for founder it also needs listBuckets, listFiles and
+deleteFiles.
 
 Exit status: 0 when the run finished (a dry run included), 1 when a provider call failed, 2 when
 the arguments or the environment are invalid.
@@ -125,21 +129,42 @@ def current_files(session: Session, bucket_id: str, prefix: str) -> list[dict[st
     raise ValueError("the file listing did not end")
 
 
+def file_versions(session: Session, bucket_id: str, prefix: str) -> list[dict[str, str]]:
+    """Every version under `prefix`, hidden ones and unfinished large files included."""
+    versions: list[dict[str, str]] = []
+    cursor: dict[str, str] = {}
+    for _ in range(MAX_PAGES):
+        page = session.post("b2_list_file_versions",
+                            {"bucketId": bucket_id, "prefix": prefix, "maxFileCount": PAGE_SIZE, **cursor})
+        for entry in page["files"]:
+            if not entry["fileName"].startswith(prefix):  # a delete never leaves the cell's prefix
+                raise ValueError("the version listing left the prefix")
+            versions.append({"fileName": entry["fileName"], "fileId": entry["fileId"]})
+        if page.get("nextFileName") is None:
+            return versions
+        cursor = {"startFileName": page["nextFileName"], "startFileId": page["nextFileId"]}
+    raise ValueError("the version listing did not end")
+
+
 def clean_up(
-    session: Session, *, label: str, cell_id: str, apply: bool,
-    backup: tuple[str, date] | None, today: date, out: TextIO,
+    session: Session, *, label: str, cell_id: str, apply: bool, bucket_id: str,
+    first_dry_run: date | None, today: date, out: TextIO,
 ) -> None:
-    """`backup` is the locked bucket's ID and the date of the operator's first dry run, set for the
-    cell-data account. Files are counted on every run; they are hidden only once the grace is over."""
+    """`first_dry_run` is the date of the operator's first dry run, set for the cell-data account:
+    the locked bucket's files are counted on every run and hidden only once the grace is over. Without
+    it (the founder account) the unlocked bucket's file versions are deleted at once."""
     prefix = f"cells/{cell_id}/"
     key_ids = prefix_key_ids(session, prefix)
     for key_id in key_ids if apply else []:
         session.post("b2_delete_key", {"applicationKeyId": key_id})
     print(f"account={label} mode={'apply' if apply else 'dry-run'} keys_found={len(key_ids)} "
           f"keys_deleted={len(key_ids) if apply else 0}", file=out)
-    if backup is None:
+    if first_dry_run is None:
+        versions = file_versions(session, bucket_id, prefix)
+        for version in versions if apply else []:
+            session.post("b2_delete_file_version", version)
+        print(f"files_found={len(versions)} files_deleted={len(versions) if apply else 0}", file=out)
         return
-    bucket_id, first_dry_run = backup
     grace_ends = first_dry_run + HIDE_GRACE
     files = current_files(session, bucket_id, prefix)
     due = today >= grace_ends
@@ -165,7 +190,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--apply", action="store_true", help="act; the default is a dry run")
     parser.add_argument("--first-dry-run", type=_iso_date, metavar="YYYY-MM-DD",
                         help="cell-data: the UTC date of your own first dry run for this cell; the grace runs from it")
-    parser.add_argument("--bucket-id", help="cell-data: the locked backup bucket's ID")
+    parser.add_argument("--bucket-id", help="the bucket's ID: the locked backup bucket for cell-data, "
+                        "the old cloud bucket for founder")
     return parser
 
 
@@ -183,7 +209,7 @@ def main(
     problems = [
         message for failed, message in (
             (not _CELL_ID.fullmatch(args.cell_id), "the cell id is not 16 characters of a-z and 2-7"),
-            (args.account == "cell-data" and not args.bucket_id, "cell-data needs --bucket-id"),
+            (not args.bucket_id, "--bucket-id is required"),
             (args.first_dry_run is not None and args.first_dry_run > today, "--first-dry-run is in the future"),
             (args.account == "cell-data" and args.apply and args.first_dry_run is None,
              "cell-data --apply needs --first-dry-run, the date your own first dry run printed"),
@@ -197,9 +223,9 @@ def main(
     try:
         session = Session(opener or urllib.request.build_opener(), env["CELL_CLEANUP_B2_KEY_ID"],
                           env["CELL_CLEANUP_B2_APPLICATION_KEY"])
-        backup = (args.bucket_id, args.first_dry_run or today) if args.account == "cell-data" else None
-        clean_up(session, label=args.account, cell_id=args.cell_id, apply=args.apply, backup=backup,
-                 today=today, out=out)
+        first_dry_run = (args.first_dry_run or today) if args.account == "cell-data" else None
+        clean_up(session, label=args.account, cell_id=args.cell_id, apply=args.apply, bucket_id=args.bucket_id,
+                 first_dry_run=first_dry_run, today=today, out=out)
     except (OSError, http.client.HTTPException, ValueError, KeyError) as exc:
         # The type only: a provider message could carry an ID.
         print(f"cleanup stopped: {type(exc).__name__}; rerun it, every step is safe to repeat", file=out)

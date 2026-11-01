@@ -30,10 +30,9 @@ report:
   cellctl's staging key and, in the cell's `cell-object-store-key` Secret
   (written under the real key custodian service account, not by cellctl),
   the cell's backup key -- MinIO plays the network protocol, not B2's
-  per-key security model, which stays covered by test_storage_fakes.py. The
-  custodian's own B2 key calls are covered by test_custodian.py; cellctl's
-  remaining B2 calls (an old cell's object versions) stay on the in-process
-  FakeB2.
+  per-key security model. The custodian's own B2 key calls are covered by
+  test_custodian.py; cellctl's one B2 call, the locked bucket's listing, is
+  not made here.
 - Hetzner volumes: the already-tested in-process FakeHetznerVolumeProvider
   (no real Hetzner account is ever contacted).
 - StorageClass: the platform chart's rendered `exomem-cloud-encrypted`
@@ -101,7 +100,6 @@ from cellctl.manifests import (
     namespace_name,
 )
 from cellctl.reconcile import ClusterConfig, SecretsConfig, reconcile_once
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .conftest import CellDatabase
@@ -621,13 +619,12 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
                                     cell_data_backup_bucket=BUCKET_NAME, cell_data_staging_bucket=BUCKET_NAME,
                                     cell_data_endpoint=import_storage["endpoint"],
                                     capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5))
-    fake_b2 = FakeB2()
     volumes = FakeHetznerVolumeProvider()
 
     async def step():
         connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
         try:
-            await reconcile_once(connection, cluster, fake_b2, volumes, secrets, cluster_config,
+            await reconcile_once(connection, cluster, volumes, secrets, cluster_config,
                                  config=LIVE_CONFIG)
         finally:
             await connection.close()
@@ -916,13 +913,12 @@ def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
                                     cell_data_backup_bucket=BUCKET_NAME, cell_data_staging_bucket=BUCKET_NAME,
                                     cell_data_endpoint=import_storage["endpoint"],
                                     capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5))
-    fake_b2 = FakeB2()
     volumes = FakeHetznerVolumeProvider()
 
     async def step():
         connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
         try:
-            await reconcile_once(connection, cluster, fake_b2, volumes, secrets, cluster_config, config=LIVE_CONFIG)
+            await reconcile_once(connection, cluster, volumes, secrets, cluster_config, config=LIVE_CONFIG)
         finally:
             await connection.close()
 
@@ -1199,15 +1195,14 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         # allocatable count: D9's fallback is how a rehearsal publishes slots.
         capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5),
     )
-    # D9: these cells are new, so deletion lists nothing in the founder account; the cell's backup key
-    # is the Secret the key custodian's identity creates below, holding MinIO's one root credential.
-    fake_b2 = FakeB2()
+    # D9: the cell's backup key is the Secret the key custodian's identity creates below, holding
+    # MinIO's one root credential.
     fake_hetzner = FakeHetznerVolumeProvider()
 
     async def _pass() -> None:
         connection = await asyncpg.connect(app_dsn)
         try:
-            await reconcile_once(connection, cluster, fake_b2, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG)
+            await reconcile_once(connection, cluster, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG)
         finally:
             await connection.close()
 

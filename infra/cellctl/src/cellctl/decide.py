@@ -1381,10 +1381,8 @@ def _decide_deletion(row: CellRow, observation: ClusterObservation) -> Decision:
     # staging key empties. Deleting a cell removes all of its data, so this comes first (D9).
     if not observation.staging_objects_absent_confirmed:
         return Decision(delete_staging_objects=True, row_updates={**hold_clear, "observed_state": "deleting"})
-    # An old cell's backup objects are deleted with cellctl's own key. A new cell's backup bucket
-    # is locked: nothing deletes its files, and no key is deleted here (D9).
-    if row.has_stored_object_store_key and not observation.backup_objects_absent_confirmed:
-        return Decision(delete_backup_objects=True, row_updates={**hold_clear, "observed_state": "deleting"})
+    # No backup object is deleted here, and no key: a new cell's bucket is locked, and the operator's
+    # clean-up empties an old cell's prefix in the old bucket and deletes its key (D9).
     return Decision(
         storage_cleanup_pending=True,
         row_updates={

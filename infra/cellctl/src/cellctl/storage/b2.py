@@ -123,8 +123,3 @@ class B2ObjectStorage(B2Session):
                 raise ValueError("repeated B2 file version cursor")
             seen_cursors.add(cursor)
             request["startFileName"], request["startFileId"] = cursor
-
-    def delete_object_version(self, version: ObjectVersion) -> None:
-        self._post(
-            "b2_delete_file_version", {"fileName": version.key, "fileId": version.version_id}
-        )

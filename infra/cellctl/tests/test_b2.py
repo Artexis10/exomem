@@ -7,7 +7,6 @@ from __future__ import annotations
 import httpx
 
 from cellctl.storage.b2 import B2Config, B2ObjectStorage
-from cellctl.storage.interface import ObjectVersion
 
 CONFIG = B2Config(key_id="list-key-id", application_key="list-app-key", bucket_id="bucket-1")
 
@@ -42,23 +41,6 @@ def test_every_call_goes_through_api_v4() -> None:
     B2ObjectStorage(CONFIG, client=_client(handler)).list_object_versions("cells/aaaaaaaaaaaaaaaa/")
 
     assert paths == ["/b2api/v4/b2_authorize_account", "/b2api/v4/b2_list_file_versions"]
-
-
-def test_delete_object_version_names_the_exact_file_and_id() -> None:
-    bodies: list[bytes] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("b2_authorize_account"):
-            return _authorized()
-        assert request.url.path.endswith("b2_delete_file_version")
-        bodies.append(request.content)
-        return httpx.Response(200, json={})
-
-    B2ObjectStorage(CONFIG, client=_client(handler)).delete_object_version(
-        ObjectVersion(key="cells/aaaaaaaaaaaaaaaa/pack", version_id="file-1")
-    )
-
-    assert bodies == [b'{"fileName":"cells/aaaaaaaaaaaaaaaa/pack","fileId":"file-1"}']
 
 
 def test_authorize_is_cached_across_calls() -> None:

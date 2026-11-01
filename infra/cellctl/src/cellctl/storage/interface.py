@@ -60,8 +60,6 @@ class ObjectStorage(Protocol):
         """
         ...
 
-    def delete_object_version(self, version: ObjectVersion) -> None: ...
-
 
 class PrefixKeyStore(Protocol):
     """The key custodian's B2 key operations, in the cell-data account only."""

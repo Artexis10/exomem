@@ -181,7 +181,8 @@ cellctl:
   namespace: exomem-cloud
   replicas: 1
   # The founder-account bucket of the cells created before D9 (those with a stored
-  # per-cell key). Each new cell backs up to cellData.backupBucketName instead.
+  # per-cell key). Each new cell backs up to cellData.backupBucketName instead. No template reads
+  # b2BucketId: it records the ID for the operator's `--bucket-id` in an old cell's clean-up.
   b2BucketName: ""
   b2BucketId: ""
   # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
@@ -205,11 +206,9 @@ cellctl:
   databaseDsnSecretKey: dsn
   cellTokenKeySecretName: exomem-cloud-cell-token-key
   backupMasterKeySecretName: exomem-cloud-backup-master-key
-  # D9: cellctl holds no key-creating credential. Its three object-store keys are bucket-restricted:
-  # the legacy-delete key empties the founder bucket of a deleted pre-D9 cell, the staging key serves
-  # every export and import, and the backup-list key only counts a deleted new cell's backup versions.
-  # Each Secret holds the keys keyId and applicationKey.
-  b2LegacyDeleteSecretName: exomem-cloud-b2-legacy-delete
+  # D9: cellctl holds no key-creating credential and none in the founder account. Its two object-store
+  # keys are bucket-restricted: the staging key serves every export and import, and the backup-list key
+  # only counts a deleted new cell's backup versions. Each Secret holds the keys keyId and applicationKey.
   cellDataStagingSecretName: exomem-cloud-cell-data-staging
   cellDataBackupListSecretName: exomem-cloud-cell-data-backup-list
   hetznerReadTokenSecretName: exomem-cloud-hetzner-read-token

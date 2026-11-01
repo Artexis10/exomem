@@ -289,7 +289,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 2. The custodian runs only in that account. New cells get their keys and repositories there.
 3. `cellctl`'s parent key in the current account is deleted. No in-cluster component then holds a key that can create keys in the current account. The Terraform state, the platform backups and the other product's buckets are then out of the cluster's reach.
 4. The operator rotates the tunnel token and the Access service-token secret, because both sat within reach of `cellctl`'s key.
-5. Existing cells keep their prefix-limited keys in the current account until the backup-lock migration moves their data. The operator's infrastructure tooling deletes those keys when a cell migrates or is deleted.
+5. Existing cells keep their prefix-limited keys in the current account until the backup-lock migration moves their data. The operator's infrastructure tooling deletes those keys when a cell migrates or is deleted. When such a cell is deleted, the operator's cleanup script also empties its prefix in the old bucket.
 
 **The custodian.**
 - It runs as its own small Deployment, with its own service account, in its own namespace. It uses the controller's image with its own command: a separate image would add a publish and attestation pipeline without reducing what the custodian can do, because its power comes from its service account and key. That namespace is outside every namespace that admission rule 1 lets `cellctl` write. The same chart check as the lock extender's enforces this.
@@ -304,10 +304,11 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret. Every key listing uses the provider's v4 API: on 2026-11-01 the v3 listing of a live account returned 6 of its 25 keys.
 - It hides a cell's prefix, and then deletes its key, only on a deletion record that Substrate signed with the grant key (audience `exomem-cell-delete`), and only after a 7-day grace period. It raises an alert on each hide. A deleted or recreated namespace alone hides nothing.
 
-**What `cellctl` keeps.** It keeps three keys that cannot create keys:
+**What `cellctl` keeps.** It keeps two keys that cannot create keys, both in the cell-data account:
 - a key limited to the staging bucket, for presigning and removing export and import objects;
-- a key that can only list files in the backup bucket, for version bookkeeping;
-- until task 3.3, a key limited to the founder account's old cell bucket that can only list buckets and files and delete files, for deleting the objects of cells created before the switch.
+- a key that can only list files in the backup bucket, for version bookkeeping.
+
+`cellctl` holds no credential in the founder account. The operator's cleanup script deletes the keys of a cell created before the switch, and every file version under its prefix in the old bucket. That bucket has no lock, so no grace applies there.
 
 **The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
 - It runs as a scheduled CI job outside the cluster, at least hourly. It alerts with its own receiver credential, which no in-cluster component holds.

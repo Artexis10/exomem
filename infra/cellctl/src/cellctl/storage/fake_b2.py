@@ -31,10 +31,3 @@ class FakeB2:
             if object_key.startswith(prefix)
             for version_id in versions
         ]
-
-    def delete_object_version(self, version: ObjectVersion) -> None:
-        versions = self._objects.get(version.key, [])
-        if version.version_id in versions:
-            versions.remove(version.version_id)
-        if not versions:
-            self._objects.pop(version.key, None)

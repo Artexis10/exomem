@@ -136,7 +136,7 @@ disable certificate verification to make the connection pass.
 
 The values worksheet must resolve these current chart inputs:
 
-- `cellctl.image`, `cellctl.cellImageRepository`, the four `cellctl.b2*` identity/
+- `cellctl.image`, `cellctl.cellImageRepository`, the three `cellctl.b2*` identity/
   endpoint values, and `cellctl.databaseEgressCidrs` with the database's public
   `/32`;
 - `cellctl.nodeSelector` and `cloudGateway.nodeSelector` left at the K3s server

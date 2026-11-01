@@ -72,7 +72,6 @@ async def test_reconcile_prepare_survives_restart_with_real_c5(cell_db):
     import asyncpg
 
     from cellctl import db, reconcile
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import (
         FakeClusterGateway,
@@ -88,32 +87,31 @@ async def test_reconcile_prepare_survives_restart_with_real_c5(cell_db):
     cluster = FakeClusterGateway()
     jobs = {}
     cluster.observe_import_jobs = lambda namespace, import_id: jobs
-    b2 = FakeB2()
     volume = FakeHetznerVolumeProvider()
     try:
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         await app.execute("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES($1,'adopt',4,1)", CELL)
         cluster.observations[CELL] = replace(cluster.observations[CELL], pod_uses_volume=True)
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert not cluster.jobs
         assert (await db.select_all_rows(controller))[0].hold_kind == "import"
         # Each call uses fresh LoopMemory, as after process restart.
         cluster.observations[CELL] = replace(_observed_from_applied(cluster, CELL), pod_uses_volume=False)
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][6] == "prepare"
         # The bucket the controller presigns for is the one the Job checks its URLs against.
         job_env = {entry["name"]: entry.get("value")
                    for entry in cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["env"]}
         assert job_env["EXOMEM_CLOUD_OBJECT_STORE_BUCKET"] == _cluster_config().object_storage_bucket
         jobs["prepare"] = ImportJob(succeeded=True, report={"recipient": "age1" + "a" * 58})
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert (await db.read_import(controller, CELL)).observed_state == "key_ready"
         assert (await db.select_all_rows(controller))[0].hold_kind is None
         jobs.clear()
         cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         current = (await db.select_all_rows(controller))[0]
         assert current.observed_state == "running" and current.ready
         assert (await db.read_import(controller, CELL)).observed_state == "key_ready"
@@ -219,7 +217,6 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
 
     from cellctl import db, reconcile
     from cellctl.imports import ImportStorage
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import (
         FakeClusterGateway,
@@ -232,14 +229,14 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
     await _seed_cell(cell_db, CELL, "cleanup-tenant")
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster, b2, volume = FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider()
+    cluster, volume = FakeClusterGateway(), FakeHetznerVolumeProvider()
     jobs = {}
     cluster.observe_import_jobs = lambda namespace, import_id: jobs.copy()
     current = datetime.now(UTC)
 
     async def step():
         # Fresh loop memory deliberately discards every process-local retry hint.
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), replace(_cluster_config(), object_storage_endpoint="https://storage.example"), now=current)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), replace(_cluster_config(), object_storage_endpoint="https://storage.example"), now=current)
         cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
 
     try:
@@ -362,7 +359,6 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
 
     from cellctl import db, reconcile
     from cellctl.imports import ImportStorage
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import (
         FakeClusterGateway,
@@ -375,7 +371,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
     await _seed_cell(cell_db, CELL, "crash-cleanup-tenant")
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster, b2, volume = FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider()
+    cluster, volume = FakeClusterGateway(), FakeHetznerVolumeProvider()
     jobs = {}
     cluster.observe_import_jobs = lambda namespace, import_id: jobs.copy()
     current = datetime.now(UTC)
@@ -386,7 +382,7 @@ async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(
     ciphertext.write_bytes(b"disposable ciphertext")
 
     async def step():
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), config, now=current)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), config, now=current)
         cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
 
     try:
@@ -535,7 +531,6 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
 
     from cellctl import db, reconcile
     from cellctl.imports import ImportStorage
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import (
         FakeClusterGateway,
@@ -552,7 +547,7 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
     await _seed_cell(cell_db, CELL, "late-adopt-discard")
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster, b2, volume = FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider()
+    cluster, volume = FakeClusterGateway(), FakeHetznerVolumeProvider()
     jobs = {}
     cluster.observe_import_jobs = lambda namespace, import_id: jobs.copy()
     current = datetime.now(UTC)
@@ -561,7 +556,7 @@ async def test_late_intent_removes_adoption_before_discard_publication(cell_db, 
     vault.mkdir()
 
     async def step():
-        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), config, now=current)
+        await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), config, now=current)
         cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
 
     try:

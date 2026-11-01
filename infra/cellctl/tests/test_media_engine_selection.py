@@ -10,7 +10,6 @@ import asyncpg
 
 from cellctl import main, reconcile
 from cellctl.state import CellRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_reconcile import (
@@ -46,7 +45,7 @@ async def _reconcile(cell_db, config: reconcile.ClusterConfig, *cell_ids: str) -
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
     finally:
         await connection.close()

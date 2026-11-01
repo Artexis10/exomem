@@ -6,9 +6,8 @@ through `cellctl.main`'s own builders from the chart-rendered pod
 environment and calls the real `run_loop`, exactly as `cellctl.main.run`
 does. Only the two external services cellctl calls are swapped:
 
-- B2's object-version calls (the founder bucket's listing and deletion, the
-  locked bucket's listing) go to the live S3 double, so the deletion
-  scenario proves the prefix really is empty. cellctl creates no key: the
+- B2's object-version listing (the locked bucket's) goes to the live S3
+  double. cellctl creates no key and holds no founder-account credential: the
   key custodian's double (`rehearsal_custodian`) writes each cell's
   `cell-object-store-key` Secret with the S3 double's one credential, so the
   real backup and restore Jobs authenticate against a live S3 endpoint, and
@@ -58,9 +57,6 @@ class S3BackedFakeB2(FakeB2):
                 versions.append(ObjectVersion(key=item["Key"], version_id=item["VersionId"]))
         return versions
 
-    def delete_object_version(self, version: ObjectVersion) -> None:
-        self._s3.delete_object(Bucket=self._bucket, Key=version.key, VersionId=version.version_id)
-
 
 def main() -> None:
     logging.basicConfig(level=os.environ.get("CELLCTL_LOG_LEVEL", "INFO"))
@@ -68,7 +64,7 @@ def main() -> None:
     logging.getLogger("botocore").setLevel(logging.WARNING)
     k8s_config.load_incluster_config()
     cluster_config = build_cluster_config()
-    object_storage = S3BackedFakeB2(
+    backup_listing = S3BackedFakeB2(
         endpoint=cluster_config.object_storage_endpoint,
         bucket=cluster_config.object_storage_bucket,
         access_key=os.environ["REHEARSAL_S3_ACCESS_KEY"],
@@ -80,14 +76,12 @@ def main() -> None:
             # As cellctl.main.run: without its storage configuration the
             # client reads no local PV's node, so no cell's node is ever lost.
             ClusterClient(k8s.ApiClient(), storage_config=cluster_config.storage),
-            object_storage,
             FakeHetznerVolumeProvider(),
             build_secrets_config(),
             cluster_config,
             config=build_reconcile_config(),
             heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
-            # One bucket plays both the founder and the locked bucket here.
-            backup_listing=object_storage,
+            backup_listing=backup_listing,
         )
     )
 

@@ -186,13 +186,12 @@ async def test_new_cell_is_applied_and_converges_to_running(cell_db: CellDatabas
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
     try:
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = await db.select_all_rows(connection)
         assert rows[0].observed_state == "provisioning"
@@ -205,7 +204,7 @@ async def test_new_cell_is_applied_and_converges_to_running(cell_db: CellDatabas
         # Simulate the pod becoming ready on the StatefulSet the first pass applied.
         cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = await db.select_all_rows(connection)
         assert rows[0].observed_state == "running"
@@ -232,7 +231,6 @@ async def test_an_old_cells_stored_key_reaches_its_secret_unchanged_across_passe
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -240,7 +238,7 @@ async def test_an_old_cells_stored_key_reaches_its_secret_unchanged_across_passe
         key_id = await _give_an_old_cells_key(connection)
         for _ in range(2):
             await reconcile.reconcile_once(
-                connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+                connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
             )
             secret = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "Secret", "cell-credentials")]
             assert base64.b64decode(secret["data"]["b2-key-id"]).decode() == key_id
@@ -309,11 +307,11 @@ async def test_an_old_cells_backup_job_keeps_its_stored_key_and_the_founder_buck
         await connection.close()
 
 
-async def _converged_cell(connection, cluster: FakeClusterGateway, b2: FakeB2, now: datetime) -> None:
+async def _converged_cell(connection, cluster: FakeClusterGateway, now: datetime) -> None:
     hetzner = FakeHetznerVolumeProvider()
-    await reconcile.reconcile_once(connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now)
+    await reconcile.reconcile_once(connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now)
     cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
-    await reconcile.reconcile_once(connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now)
+    await reconcile.reconcile_once(connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now)
 
 
 async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_satisfied(cell_db: CellDatabase) -> None:
@@ -321,15 +319,14 @@ async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     now = datetime(2026, 1, 1, tzinfo=UTC)
     try:
-        await _converged_cell(connection, cluster, b2, now)
+        await _converged_cell(connection, cluster, now)
         await app.execute("UPDATE exomem_cloud_cells SET storage_gib=20 WHERE cell_id='aaaaaaaaaaaaaaaa'")
         cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
             cluster, "aaaaaaaaaaaaaaaa", pvc_resource_version="41", pvc_capacity_bytes=10 * 1024**3,
         )
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now)
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now)
         pending = (await db.select_all_rows(connection))[0]
         claim = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "PersistentVolumeClaim", "cell-data")]
         assert claim["spec"]["resources"]["requests"]["storage"] == "20Gi"
@@ -338,7 +335,7 @@ async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_
         cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
             cluster, "aaaaaaaaaaaaaaaa", pvc_resource_version="42", pvc_capacity_bytes=20 * 1024**3,
         )
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now + timedelta(seconds=1))
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now + timedelta(seconds=1))
         expanded = (await db.select_all_rows(connection))[0]
         assert expanded.observed_storage_capacity_bytes == 20 * 1024**3
         assert expanded.observed_storage_generation == expanded.generation
@@ -348,7 +345,7 @@ async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_
         await connection.close()
 
 
-async def _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now) -> None:
+async def _delete_through_its_namespace(connection, cell_db, cluster, memory, now) -> None:
     """Request the cell's deletion and run passes until its namespace, PV and volume are gone."""
 
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
@@ -356,7 +353,7 @@ async def _delete_through_its_namespace(connection, cell_db, cluster, b2, memory
         await owner.execute("UPDATE exomem_cloud_cells SET desired_state = 'deleted' WHERE cell_id = 'aaaaaaaaaaaaaaaa'")
     finally:
         await owner.close()
-    await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(),
+    await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                    _cluster_config(), now=now, memory=memory)
     assert namespace_name("aaaaaaaaaaaaaaaa") in cluster.deleted_namespaces
     assert (await db.select_all_rows(connection))[0].observed_state == "deleting"
@@ -386,74 +383,48 @@ def staging(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
     return store
 
 
-async def test_an_old_cells_deletion_empties_its_staged_exports_and_backup_prefix_then_reports_the_pending_key_cleanup(
-    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3,
+@pytest.mark.parametrize("old_cell", [True, False], ids=["old cell", "new cell"])
+async def test_a_cells_deletion_empties_its_staged_exports_and_imports_then_reports_the_pending_cleanup(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3, monkeypatch: pytest.MonkeyPatch,
+    old_cell: bool,
 ) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster, b2, memory = FakeClusterGateway(), FakeB2(), reconcile.LoopMemory()
+    cluster, memory = FakeClusterGateway(), reconcile.LoopMemory()
     config = dataclasses.replace(_cluster_config(), alert_delivery_secret=("ns", "alerts", "url"))
     now = datetime(2026, 1, 1, tzinfo=UTC)
+    locked_listing, listed = FakeB2(), []
+
+    def list_object_versions(prefix: str) -> list:
+        listed.append(prefix)
+        return []
+
+    monkeypatch.setattr(locked_listing, "list_object_versions", list_object_versions)
 
     async def passes() -> None:
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
-                                       _secrets_config(), config, now=now, memory=memory)
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config,
+                                       now=now, memory=memory, backup_listing=locked_listing)
 
     try:
         cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
-        await _give_an_old_cells_key(connection)
+        if old_cell:
+            await _give_an_old_cells_key(connection)
         await passes()
-        b2.seed_object("cells/aaaaaaaaaaaaaaaa/snapshot-1")
         staging.versions["cells/aaaaaaaaaaaaaaaa/exports/archive"] = [("v1", b"ciphertext")]
         staging.uploads["u1"] = {"key": "cells/aaaaaaaaaaaaaaaa/imports/archive", "parts": {}}
         staging.versions["cells/bbbbbbbbbbbbbbbb/exports/archive"] = [("v2", b"another cell's")]
-        await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
+        await _delete_through_its_namespace(connection, cell_db, cluster, memory, now)
 
         await passes()  # the namespace is gone: its staged exports and imports go first
         assert (staging.uploads, list(staging.versions)) == ({}, ["cells/bbbbbbbbbbbbbbbb/exports/archive"])
-        assert len(b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1
-
-        await passes()  # then its backup objects
-        assert b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/") == []
         assert delivered == []
 
-        await passes()  # nothing remains: the deletion settles and the key's removal is the operator's
+        await passes()  # nothing stands between the cell and its deletion; the clean-up is the operator's
         row = (await db.select_all_rows(connection))[0]
         assert (row.observed_state, row.b2_key_id, row.backup_key_wrapped) == ("deleted", None, None)
         assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
-    finally:
-        await connection.close()
-
-
-async def test_a_new_cells_deletion_settles_without_touching_its_locked_backups(
-    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3,
-) -> None:
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster, b2, memory = FakeClusterGateway(), FakeB2(), reconcile.LoopMemory()
-    config = dataclasses.replace(_cluster_config(), alert_delivery_secret=("ns", "alerts", "url"))
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    locked_listing = FakeB2()
-    locked_listing.seed_object("cells/aaaaaaaaaaaaaaaa/snapshot-1")
-
-    try:
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
-                                       _secrets_config(), config, now=now, memory=memory)
-        b2.seed_object("cells/aaaaaaaaaaaaaaaa/legacy-bucket-object")
-        staging.versions["cells/aaaaaaaaaaaaaaaa/exports/archive"] = [("v1", b"ciphertext")]
-        await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
-
-        for _ in range(2):  # the staged export goes, then nothing stands between the cell and its deletion
-            await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(),
-                                           config, now=now, memory=memory, backup_listing=locked_listing)
-
-        row = (await db.select_all_rows(connection))[0]
-        assert row.observed_state == "deleted"
-        assert staging.versions == {}
-        assert len(locked_listing.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1  # nothing was deleted
-        assert len(b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1  # the legacy store is no new cell's
-        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
+        # The locked bucket holds none of an old cell's backups, so counting its versions says nothing for one.
+        assert listed == ([] if old_cell else ["cells/aaaaaaaaaaaaaaaa/"])
     finally:
         await connection.close()
 
@@ -463,18 +434,18 @@ async def test_a_restarted_cellctl_raises_the_cleanup_alert_again_for_a_cell_del
 ) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster, b2, memory = FakeClusterGateway(), FakeB2(), reconcile.LoopMemory()
+    cluster, memory = FakeClusterGateway(), reconcile.LoopMemory()
     config = dataclasses.replace(_cluster_config(), alert_delivery_secret=("ns", "alerts", "url"))
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
     async def passes(memory: reconcile.LoopMemory) -> None:
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=now, memory=memory)
 
     try:
         cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
         await passes(memory)
-        await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
+        await _delete_through_its_namespace(connection, cell_db, cluster, memory, now)
         await passes(memory)
         await passes(memory)
         assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
@@ -510,17 +481,15 @@ async def test_namespace_deletion_does_not_wait_for_later_absence_checks(
     await _seed_cell(cell_db, cell_id, "tenant-a", desired_state="deleted")
     cluster = FakeClusterGateway()
     cluster.observations[cell_id] = _served()
-    b2 = FakeB2()
 
     def unavailable(*args: object) -> bool:
         raise RuntimeError("later deletion service unavailable")
 
     monkeypatch.setattr(cluster, "pv_absent_for_namespace", unavailable)
-    monkeypatch.setattr(b2, "list_object_versions", unavailable)
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
         await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(),
+            connection, cluster, FakeHetznerVolumeProvider(),
             _secrets_config(), _cluster_config(),
         )
         assert namespace_name(cell_id) in cluster.deleted_namespaces
@@ -531,12 +500,11 @@ async def test_namespace_deletion_does_not_wait_for_later_absence_checks(
         await connection.close()
 
 
-@pytest.mark.parametrize("remaining_storage", ["pv", "volume", "staging", "objects"])
+@pytest.mark.parametrize("remaining_storage", ["pv", "volume", "staging"])
 def test_deletion_proofs_stop_at_first_remaining_resource(
     remaining_storage: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     store = FakeS3()
     staging = StagedObjects(store.client(None, "staging-key", "secret"), "staging-bucket")
@@ -550,20 +518,20 @@ def test_deletion_proofs_stop_at_first_remaining_resource(
         monkeypatch.setattr(hetzner, "get_volume", unavailable)
     elif remaining_storage == "volume":
         hetzner.add_volume(VolumeInfo(volume_id="vol-1", server_id="node-1", labels={}))
-    elif remaining_storage == "staging":
-        store.versions[f"cells/{row.cell_id}/exports/archive"] = [("v1", b"ciphertext")]
     else:
-        b2.seed_object(f"cells/{row.cell_id}/snapshot-1")
-    if remaining_storage != "objects":
-        monkeypatch.setattr(b2, "list_object_versions", unavailable)
+        store.versions[f"cells/{row.cell_id}/exports/archive"] = [("v1", b"ciphertext")]
+
+    def staging_for() -> StagedObjects:
+        if remaining_storage != "staging":
+            unavailable()
+        return staging
 
     observation = _augment_deletion_observation(
-        ClusterObservation(), row, cluster, b2, hetzner, staging=lambda: staging,
+        ClusterObservation(), row, cluster, hetzner, staging=staging_for,
     )
     assert observation.namespace_absent_confirmed is True
-    assert observation.pv_absent_confirmed is (remaining_storage in {"staging", "objects"})
-    assert observation.staging_objects_absent_confirmed is (remaining_storage == "objects")
-    assert observation.backup_objects_absent_confirmed is False
+    assert observation.pv_absent_confirmed is (remaining_storage == "staging")
+    assert observation.staging_objects_absent_confirmed is False
 
 
 def test_pv_absence_check_blocks_on_a_pv_still_claimed_by_the_namespace() -> None:
@@ -574,7 +542,7 @@ def test_pv_absence_check_blocks_on_a_pv_still_claimed_by_the_namespace() -> Non
     cluster.pv_claims.add(namespace)
     row = _row(volume_id=None)
     observation = _augment_deletion_observation(
-        ClusterObservation(), row, cluster, FakeB2(), FakeHetznerVolumeProvider()
+        ClusterObservation(), row, cluster, FakeHetznerVolumeProvider()
     )
     assert observation.pv_absent_confirmed is False
 
@@ -587,7 +555,7 @@ def test_pv_absence_check_blocks_on_a_hetzner_volume_still_present() -> None:
     hetzner = FakeHetznerVolumeProvider()
     hetzner.add_volume(VolumeInfo(volume_id="vol-1", server_id="node-1", labels={}))
     row = _row(volume_id="vol-1")
-    observation = _augment_deletion_observation(ClusterObservation(), row, cluster, FakeB2(), hetzner)
+    observation = _augment_deletion_observation(ClusterObservation(), row, cluster, hetzner)
     assert observation.pv_absent_confirmed is False
 
 
@@ -595,7 +563,7 @@ def test_pv_absence_check_passes_when_neither_check_finds_anything() -> None:
     cluster = FakeClusterGateway()
     row = _row(volume_id=None)
     observation = _augment_deletion_observation(
-        ClusterObservation(), row, cluster, FakeB2(), FakeHetznerVolumeProvider()
+        ClusterObservation(), row, cluster, FakeHetznerVolumeProvider()
     )
     assert observation.pv_absent_confirmed is True
 
@@ -612,7 +580,6 @@ async def test_a_converged_ready_cell_is_still_considered_for_its_nightly_backup
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, 3, tzinfo=UTC)  # inside the default 02:00-05:00 backup window
 
@@ -620,11 +587,11 @@ async def test_a_converged_ready_cell_is_still_considered_for_its_nightly_backup
         # Converge to running, ready -- exactly the pre-existing
         # "test_new_cell_is_applied_and_converges_to_running" shape.
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = await db.select_all_rows(connection)
         assert rows[0].observed_state == "running"
@@ -634,7 +601,7 @@ async def test_a_converged_ready_cell_is_still_considered_for_its_nightly_backup
         # A third pass, same clean/ready observation, same "now": with
         # last_backup_at still NULL, a nightly backup is due right now.
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = await db.select_all_rows(connection)
         assert rows[0].hold_kind == "backup"
@@ -657,18 +624,17 @@ async def test_a_converged_ready_cell_is_still_considered_for_a_fresh_upgrade(
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
     try:
         # Converge to running, ready on IMAGE_A -- same shape as above.
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = await db.select_all_rows(connection)
         assert rows[0].observed_state == "running"
@@ -691,7 +657,7 @@ async def test_a_converged_ready_cell_is_still_considered_for_a_fresh_upgrade(
         finally:
             await owner.close()
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = await db.select_all_rows(connection)
         assert rows[0].hold_kind == "upgrade"
@@ -722,13 +688,11 @@ async def test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row(
         await owner.close()
 
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     task = asyncio.create_task(
         reconcile.run_loop(
             cell_db.dsn(role="exomem_cellctl"),
             cluster,
-            b2,
             hetzner,
             _secrets_config(),
             _cluster_config(),
@@ -799,13 +763,12 @@ async def test_one_rows_observe_failure_does_not_abort_the_other_rows_or_capacit
     await _seed_cell(cell_db, "bbbbbbbbbbbbbbbb", "tenant-b")  # must still converge
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = _RaisingObserveGateway("aaaaaaaaaaaaaaaa")
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, 3, tzinfo=UTC)
 
     try:
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
         # The healthy row still converged and applied.
@@ -843,13 +806,12 @@ async def test_one_rows_apply_failure_does_not_abort_the_other_rows(cell_db: Cel
             super().apply_all(manifests)
 
     cluster = _RaisingApplyGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, 3, tzinfo=UTC)
 
     try:
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
         assert rows["bbbbbbbbbbbbbbbb"].observed_state == "provisioning"
@@ -868,13 +830,12 @@ async def test_self_check_skips_the_whole_pass_when_the_admission_policy_is_miss
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     cluster.admission_confined = False
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     now = datetime(2026, 1, 1, 3, tzinfo=UTC)
 
     try:
         await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=now
         )
         assert cluster.applied == {}
         rows = await db.select_all_rows(connection)
@@ -900,13 +861,11 @@ async def test_run_loop_reconnects_after_its_database_session_is_killed(
         await owner.close()
 
     cluster = FakeClusterGateway()
-    b2 = FakeB2()
     hetzner = FakeHetznerVolumeProvider()
     task = asyncio.create_task(
         reconcile.run_loop(
             cell_db.dsn(role="exomem_cellctl"),
             cluster,
-            b2,
             hetzner,
             _secrets_config(),
             _cluster_config(),
@@ -988,7 +947,7 @@ async def test_a_capacity_read_failure_does_not_fail_a_pass_whose_rows_succeeded
         old = now - timedelta(hours=1)
         await db.write_capacity(connection, node="worker", cell_slots=2, attachments_used=0, observed_at=old)
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
         assert await connection.fetchrow("SELECT cell_slots, observed_at FROM exomem_cloud_capacity WHERE node = 'worker'") == (2, old)
         rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
@@ -1021,7 +980,7 @@ async def test_an_init_deadline_failure_is_observed_every_pass_but_never_re_appl
         )
         cluster.observations[cell_id] = crash_looping
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
         assert cluster.applied == {}
         row = (await db.select_all_rows(connection))[0]
@@ -1029,12 +988,12 @@ async def test_an_init_deadline_failure_is_observed_every_pass_but_never_re_appl
         # A settled failure is observed at the idle cadence: one broken
         # tenant must not hold the whole fleet's loop at the fast one.
         assert await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         ) is False
 
         cluster.observations[cell_id] = _served(pod_exists=True, pod_init_completed=True, statefulset_row_generation=1)
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
         assert cluster.applied == {}
         row = (await db.select_all_rows(connection))[0]
@@ -1109,11 +1068,11 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
 async def _converge(connection, cluster: FakeClusterGateway, cell_id: str, now: datetime) -> None:
     for _ in range(2):
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
         cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
     await reconcile.reconcile_once(
-        connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
     )
 
 
@@ -1136,7 +1095,7 @@ async def test_an_env_flip_is_recorded_only_by_the_pass_after_it_was_applied(cel
         finally:
             await owner.close()
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
         env = cluster.applied[(namespace_name(cell_id), "StatefulSet", "cell")]["spec"]["template"]["spec"]["containers"][0]["env"]
         assert {"name": "EXOMEM_CLOUD_READ_ONLY", "value": "1"} in env
@@ -1145,7 +1104,7 @@ async def test_an_env_flip_is_recorded_only_by_the_pass_after_it_was_applied(cel
 
         cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
         )
         row = (await db.select_all_rows(connection))[0]
         assert (row.observed_state, row.ready, row.observed_generation) == ("read_only", True, 2)
@@ -1173,7 +1132,7 @@ async def test_a_notification_during_a_pass_triggers_the_next_pass(cell_db: Cell
     monkeypatch.setattr(reconcile, "reconcile_once", pass_that_is_notified_midway)
     task = asyncio.create_task(
         reconcile.run_loop(
-            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeHetznerVolumeProvider(),
             _secrets_config(), _cluster_config(),
         )
     )
@@ -1208,7 +1167,7 @@ async def test_a_timed_out_pass_reopens_the_database_session(cell_db: CellDataba
     monkeypatch.setattr(reconcile, "reconcile_once", pass_that_times_out_once)
     task = asyncio.create_task(
         reconcile.run_loop(
-            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeHetznerVolumeProvider(),
             _secrets_config(), _cluster_config(),
         )
     )
@@ -1237,7 +1196,7 @@ async def test_a_session_lost_inside_a_row_aborts_the_pass_so_the_loop_reconnect
 
     with pytest.raises(asyncpg.InterfaceError):
         await reconcile.reconcile_once(
-            connection, _PartitionedGateway(), FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+            connection, _PartitionedGateway(), FakeHetznerVolumeProvider(), _secrets_config(),
             _cluster_config(), now=datetime(2026, 1, 1, 12, tzinfo=UTC),
         )
 
@@ -1332,7 +1291,7 @@ async def test_a_bearer_rotation_reaches_every_healthy_cell_past_a_broken_one(ce
 
     async def run(secrets: reconcile.SecretsConfig) -> None:
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), secrets, _cluster_config(), now=now
+            connection, cluster, FakeHetznerVolumeProvider(), secrets, _cluster_config(), now=now
         )
 
     def rotated(cell_id: str) -> bool:
@@ -1404,7 +1363,7 @@ class _RefusingGateway(FakeClusterGateway):
 
 async def _pass(connection, cluster, now, secrets=None, memory=None) -> None:
     await reconcile.reconcile_once(
-        connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), secrets or _secrets_config(), _cluster_config(),
+        connection, cluster, FakeHetznerVolumeProvider(), secrets or _secrets_config(), _cluster_config(),
         now=now, memory=memory,
     )
 
@@ -2020,7 +1979,7 @@ async def test_orphan_namespaces_are_logged_by_cell_id_at_most_every_ten_minutes
 
     async def run(at: datetime) -> None:
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(),
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(),
             now=at, memory=memory,
         )
 
@@ -2187,7 +2146,7 @@ async def test_a_deleting_row_asks_hetzner_at_most_once_a_minute(cell_db: CellDa
 
     async def run(at: datetime) -> None:
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), hetzner, _secrets_config(), _cluster_config(), now=at, memory=memory
+            connection, cluster, hetzner, _secrets_config(), _cluster_config(), now=at, memory=memory
         )
 
     try:
@@ -2255,7 +2214,7 @@ async def test_a_settled_rows_observed_at_is_refreshed_once_it_is_five_minutes_o
         monkeypatch.setattr(db, "write_observed", recording_write)
         later = now + timedelta(minutes=5, seconds=1)
         fast = await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=later
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=later
         )
         assert (writes, fast) == ([{"observed_at": later}], False)
     finally:
@@ -2425,7 +2384,7 @@ async def test_a_failing_pass_logs_only_the_exception_class(cell_db: CellDatabas
     with caplog.at_level(logging.DEBUG, logger="cellctl"):
         task = asyncio.create_task(
             reconcile.run_loop(
-                cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+                cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeHetznerVolumeProvider(),
                 _secrets_config(), _cluster_config(),
             )
         )
@@ -2724,7 +2683,7 @@ async def test_only_a_settled_fleet_drops_to_the_idle_cadence(cell_db: CellDatab
 
     async def fast(at: datetime) -> bool:
         return await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=at
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=at
         )
 
     try:
@@ -2766,7 +2725,7 @@ async def test_an_idle_loop_waits_the_idle_interval_until_a_notification_wakes_i
     )
     task = asyncio.create_task(
         reconcile.run_loop(
-            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+            cell_db.dsn(role="exomem_cellctl"), FakeClusterGateway(), FakeHetznerVolumeProvider(),
             _secrets_config(), _cluster_config(),
         )
     )
@@ -3048,7 +3007,7 @@ async def test_selected_cutover_reads_inventory_after_prior_admission_and_promot
         async with admission.transaction():
             await admission.execute("SELECT pg_advisory_xact_lock(hashtext('exomem-cloud-capacity'))")
             await admission.execute("INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) VALUES ($1, $2, 'stopped')", cell_id, tenant)
-            task = asyncio.create_task(reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), config, now=now))
+            task = asyncio.create_task(reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config, now=now))
             await asyncio.sleep(0.05)
             assert not task.done() and not inventoried
         await task
@@ -3056,7 +3015,7 @@ async def test_selected_cutover_reads_inventory_after_prior_admission_and_promot
         assert await controller.fetchval("SELECT SUM(cell_slots) FROM exomem_cloud_capacity") == 0
         monkeypatch.setattr(db, "select_all_rows", original)
         promoted = dataclasses.replace(config, shared_worker=dataclasses.replace(policy, mode="all-shared"))
-        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(), promoted, now=now)
+        await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(), _secrets_config(), promoted, now=now)
         slots = await controller.fetch("SELECT node, cell_slots FROM exomem_cloud_capacity")
         assert {row["node"]: row["cell_slots"] for row in slots} == {"old": 0, "worker": 2}
     finally:
@@ -3070,16 +3029,16 @@ async def test_provider_outage_cannot_preserve_live_content_keys_or_claim_legacy
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "delete-provider-outage")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
-    cluster, b2 = FakeClusterGateway(), FakeB2()
+    cluster = FakeClusterGateway()
     now = datetime(2026, 1, 1, tzinfo=UTC)
     try:
         await _give_an_old_cells_key(connection)
-        await _converged_cell(connection, cluster, b2, now)
+        await _converged_cell(connection, cluster, now)
         before = (await db.select_all_rows(connection))[0]
         assert before.cell_root_key_wrapped is not None
         await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
         cluster.admission_confined = False
-        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
             _secrets_config(), _cluster_config(), now=now)
         retired = (await db.select_all_rows(connection))[0]
         assert retired.cell_root_key_wrapped is retired.backup_key_wrapped is None
@@ -3088,9 +3047,9 @@ async def test_provider_outage_cannot_preserve_live_content_keys_or_claim_legacy
         cluster.admission_confined = True
         def unavailable(*_args):
             raise OSError("offline")
-        monkeypatch.setattr(b2, "list_object_versions", unavailable)
+        monkeypatch.setattr(reconcile, "_staging_s3_client", unavailable)
         for step in range(2):
-            await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+            await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                 _secrets_config(), _cluster_config(), now=now + timedelta(seconds=step))
             current = (await db.select_all_rows(connection))[0]
             assert current.cell_root_key_wrapped is current.backup_key_wrapped is None
@@ -3124,13 +3083,13 @@ async def test_retention_clock_waits_for_workload_drain_and_records_deployed_sou
             {"volume": "per-cell-key", "retained_old_volume": None})})
         await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted'")
         cluster.observations[cell_id] = _served(pod_terminating=True, pod_uses_volume=True)
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=now)
         row = (await db.select_all_rows(connection))[0]
         assert row.last_live_key_destroyed_at is row.keys_expire_at is None
         cluster.observations[cell_id] = ClusterObservation()
         drained_at = now + timedelta(seconds=30)
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=drained_at)
         row = (await db.select_all_rows(connection))[0]
         assert row.last_live_key_destroyed_at == drained_at
@@ -3151,7 +3110,7 @@ async def test_key_retirement_does_not_delete_a_conflicting_namespaces_child_sec
     cluster.applied[secret_key] = {"foreign": True}
     cluster.observations[cell_id] = _served(namespace_cell_label="bbbbbbbbbbbbbbbb")
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), _cluster_config())
         assert secret_key in cluster.applied
         assert (await db.select_all_rows(connection))[0].cell_root_key_wrapped is None
@@ -3188,7 +3147,7 @@ async def test_malformed_retention_is_retained_as_unknown_without_stopping_delet
     try:
         await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
             {"volume": "per-cell-key", "retained_volumes": []})})
-        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeHetznerVolumeProvider(),
             _secrets_config(), dataclasses.replace(_cluster_config(), key_retention_sources=sources),
             now=datetime(2026, 1, 1, tzinfo=UTC))
         row = (await db.select_all_rows(connection))[0]
@@ -3218,7 +3177,7 @@ async def test_nonfinite_retention_input_preserves_raw_evidence_and_completes_de
     try:
         await db.write_observed(connection, cell_id, {"custody_observation": json.dumps(
             {"volume": "per-cell-key", "retained_volumes": []})})
-        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, FakeClusterGateway(), FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         row = (await db.select_all_rows(connection))[0]
         assert row.observed_state == "deleted" and row.keys_expire_at is None

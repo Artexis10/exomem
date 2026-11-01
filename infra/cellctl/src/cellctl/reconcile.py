@@ -692,7 +692,6 @@ def _augment_deletion_observation(
     observation: ClusterObservation,
     row: CellRow,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     now: datetime | None = None,
     memory: LoopMemory | None = None,
@@ -702,11 +701,12 @@ def _augment_deletion_observation(
 ) -> ClusterObservation:
     """D10's absence proofs. The K8s Namespace's disappearance already shows
     up as `namespace_exists` on the base observation; the PV, the Hetzner
-    volume, the cell's staging objects and an old cell's backup objects need
-    their own checks. A new cell's backup objects sit under a compliance lock
-    that nothing deletes, so no proof of their absence exists; `backup_listing`
-    only counts them for the log. `staging` builds the staging client only once
-    the PV proof passes, so a later service never blocks an earlier cleanup step.
+    volume and the cell's staging objects need their own checks. No proof of
+    the backup objects' absence exists: a new cell's sit under a compliance lock
+    that nothing deletes, and the operator's clean-up empties an old cell's
+    prefix in the old bucket. `backup_listing` only counts a new cell's for the
+    log. `staging` builds the staging client only once the PV proof passes, so
+    a later service never blocks an earlier cleanup step.
 
     D10 amendment: PV absence is confirmed by listing every PersistentVolume
     (cluster-scoped; cellctl already holds `get`/`list` on them) and checking
@@ -743,12 +743,8 @@ def _augment_deletion_observation(
     # Exports and imports are staged under the cell's prefix whichever cell it is, and no row tracks
     # them once the cell is gone: only a listing proves the staging bucket holds none of its data.
     staging_objects_absent_confirmed = pv_absent_confirmed and staging is not None and staging().absent(prefix)
-    backup_objects_absent_confirmed = False
-    if row.has_stored_object_store_key:
-        # An old cell: cellctl's own bucket-restricted key empties the prefix, as before.
-        backup_objects_absent_confirmed = (
-            staging_objects_absent_confirmed and len(object_storage.list_object_versions(prefix)) == 0)
-    elif staging_objects_absent_confirmed and backup_listing is not None:
+    # The locked bucket holds no old cell's backups, so counting its versions says nothing for one.
+    if staging_objects_absent_confirmed and backup_listing is not None and not row.has_stored_object_store_key:
         _log_locked_backup_versions(backup_listing, row.cell_id, prefix)
 
     return dataclass_replace(
@@ -756,7 +752,6 @@ def _augment_deletion_observation(
         namespace_absent_confirmed=namespace_absent_confirmed,
         pv_absent_confirmed=pv_absent_confirmed,
         staging_objects_absent_confirmed=staging_objects_absent_confirmed,
-        backup_objects_absent_confirmed=backup_objects_absent_confirmed,
     )
 
 
@@ -1320,7 +1315,6 @@ def _media_edge_settled(
 async def reconcile_once(
     connection: asyncpg.Connection,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     secrets_config: SecretsConfig,
     cluster_config: ClusterConfig,
@@ -1330,8 +1324,7 @@ async def reconcile_once(
     memory: LoopMemory | None = None,
     backup_listing=None,
 ) -> bool:
-    """One pass. `object_storage` lists and deletes an old cell's versions in the founder-account
-    bucket; `backup_listing` only lists a new cell's locked backups. Returns whether the next one
+    """One pass. `backup_listing` only lists a new cell's locked backups. Returns whether the next one
     is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
@@ -1513,7 +1506,6 @@ async def reconcile_once(
             fast |= await _reconcile_row(
                 connection,
                 cluster,
-                object_storage,
                 volume_provider,
                 secrets_config,
                 cluster_config,
@@ -1659,8 +1651,8 @@ async def _cleanup_alerts(
     cluster: ClusterGateway, cluster_config: ClusterConfig, memory: LoopMemory, now: datetime
 ) -> None:
     """D9: one alert per cell this process deleted, naming only its id. It fires and stays: the
-    key and a new cell's locked backup files are the operator's to remove, and cellctl cannot
-    read the provider's key listing to see when that is done."""
+    key and the cell's backup files (locked for a new cell, in the old bucket for an old one) are the
+    operator's to remove, and cellctl cannot read the provider's key listing to see when that is done."""
 
     for cell_id in sorted(memory.cleanup_pending):
         alert = alerts.cleanup_pending_alert(cell_id)
@@ -2093,7 +2085,6 @@ def _local_growth(
 async def _reconcile_row(
     connection: asyncpg.Connection,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     secrets_config: SecretsConfig,
     cluster_config: ClusterConfig,
@@ -2287,15 +2278,15 @@ async def _reconcile_row(
 
     if row.desired_state == "deleted":
         observation = _augment_deletion_observation(
-            observation, row, cluster, object_storage, volume_provider, now, memory, storage=cluster_config.storage,
+            observation, row, cluster, volume_provider, now, memory, storage=cluster_config.storage,
             backup_listing=backup_listing, staging=lambda: _staged_objects(cluster_config, secrets_config),
         )
-        # Namespace, volume, staging and an old cell's private-object absence bound every live content copy
-        # before expiry starts. A new cell's backup files are ciphertext under a lock nothing deletes; the
-        # object-version window in the retention sources already extends its `keys_expire_at` (D2).
+        # Namespace, volume and staging absence bound every live content copy before expiry starts. A
+        # cell's backup files are ciphertext that cellctl does not prove absent: a new cell's sit under a lock
+        # nothing deletes, and the operator's clean-up empties an old cell's prefix. The object-version window
+        # in the retention sources already extends its `keys_expire_at` (D2).
         if (observation.namespace_absent_confirmed and observation.pv_absent_confirmed
                 and observation.staging_objects_absent_confirmed
-                and (observation.backup_objects_absent_confirmed or not row.has_stored_object_store_key)
                 and row.last_live_key_destroyed_at is None):
             prior = json.loads(row.custody_observation or "{}")
             if prior.get("volume") == "per-cell-key" and not _retained_volumes(row):
@@ -2749,11 +2740,10 @@ async def _reconcile_row(
         cluster.delete_namespace(namespace_name(row.cell_id))
     if decision.delete_staging_objects:
         _staged_objects(cluster_config, secrets_config).remove(cell_object_prefix(row.cell_id))
-    if decision.delete_backup_objects:
-        _delete_all_backup_objects(object_storage, row)
     if decision.storage_cleanup_pending:
         memory.cleanup_pending.add(row.cell_id)
-        logger.warning("cellctl: deleted cell %s: its object-store key is the operator's to remove", row.cell_id)
+        logger.warning("cellctl: deleted cell %s: its object-store key and backup files are the operator's to remove",
+                       row.cell_id)
 
     if item is not None and decision.row_updates.get("observed_state") == "deleted":
         await db.write_import(connection, item.import_id, {"observed_state": "discarded", "recipient": None,
@@ -2934,13 +2924,6 @@ def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     return {"retention": RETENTION_ARGS}
 
 
-def _delete_all_backup_objects(object_storage, row: CellRow) -> None:
-    """An old cell's versions, with cellctl's own bucket-restricted key; the key itself stays."""
-    prefix = cell_object_prefix(row.cell_id)
-    for version in object_storage.list_object_versions(prefix):
-        object_storage.delete_object_version(version)
-
-
 def _touch_heartbeat(path: str) -> None:
     try:
         Path(path).touch()
@@ -2972,7 +2955,6 @@ async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_con
 async def run_loop(
     dsn: str,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     secrets_config: SecretsConfig,
     cluster_config: ClusterConfig,
@@ -3037,7 +3019,6 @@ async def run_loop(
                 fast = await reconcile_once(
                     connection,
                     cluster,
-                    object_storage,
                     volume_provider,
                     secrets_config,
                     cluster_config,

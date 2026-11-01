@@ -3,21 +3,20 @@
 # Exomem Cloud key custody
 
 Each cell reads and writes its backups with one object-store key. The key custodian creates
-that key. `cellctl` holds no credential that creates or deletes keys.
+that key. `cellctl` holds no credential that creates or deletes keys, and none in the founder account.
 
 ## Credentials
 
-Terraform creates the first four credentials. Their sources are `infra/terraform/cell-data/keys.tf`
-and `infra/terraform/durability/cloud.tf`. Each credential has one holder.
+Terraform creates the first three credentials. Their source is `infra/terraform/cell-data/keys.tf`.
+Each credential has one holder.
 
 | Credential | Account | Restricted to | Capabilities | Held by |
 | --- | --- | --- | --- | --- |
 | `exomem-cell-data-key-custodian` | cell-data | None. B2 allows key creation only on an account-level key. | `listKeys`, `writeKeys`, `deleteKeys` | The key custodian, in Secret `exomem-key-custodian-b2` |
 | `exomem-cell-data-cellctl-staging` | cell-data | The staging bucket | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | `cellctl`, for exports, imports and the staging sweep of a deletion |
 | `exomem-cell-data-cellctl-backup-list` | cell-data | The locked backup bucket | `listBuckets`, `listFiles` | `cellctl`, to count backup versions for the log |
-| `exomem-cloud-legacy-delete` | founder | The old cloud backups bucket | `listBuckets`, `listFiles`, `deleteFiles` | `cellctl`, to empty an old cell's prefix at deletion |
 | One key per cell | cell-data | The locked backup bucket and the prefix `cells/<cell_id>/` | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | The cell's backup and restore Jobs, in Secret `cell-object-store-key` |
-| Operator key | One account per key | None | `listKeys`, `deleteKeys`; for cell-data also `listFiles`, `writeFiles` | The operator, for the clean-up script only |
+| Operator key | One account per key | None. B2 allows key deletion only on an account-level key. | `listKeys`, `deleteKeys`; for cell-data also `listFiles`, `writeFiles`; for founder also `listBuckets`, `listFiles`, `deleteFiles` | The operator, for the clean-up script only |
 
 The key custodian creates each per-cell key. `cellctl` cannot create that Secret.
 Until D3 is in force, `cellctl` can render a Job that reads the Secret, so it can reach a cell's key by that route.
@@ -25,8 +24,10 @@ No other credential can create or delete a key.
 
 ## Clean up after a cell deletion
 
-`cellctl` cannot delete the deleted cell's key. When a cell reaches `deleted`, `cellctl` raises the
-platform alert `cell-storage-cleanup-pending-<cell_id>`. It raises the alert again after each restart.
+`cellctl` cannot delete the deleted cell's key or its backup files. This holds for a cell created
+before the key custodian too: its backups sit in the old founder bucket, and `cellctl` has no credential
+there. When a cell reaches `deleted`, `cellctl` raises the platform alert
+`cell-storage-cleanup-pending-<cell_id>`. It raises the alert again after each restart.
 
 The alert, `observed_at` and `updated_at` are inputs that `cellctl` controls. A compromised `cellctl`
 could use them to get a live cell's key deleted. Act only on what the control database says,
@@ -39,26 +40,31 @@ the key, so run the script for both accounts.
 2. If the query shows no row, or `desired_state` is not `deleted`, stop. Treat the alert as a possible `cellctl` compromise.
 3. Export the operator key for the `founder` account.
    `export CELL_CLEANUP_B2_KEY_ID=<key id> CELL_CLEANUP_B2_APPLICATION_KEY=<application key>`
-4. Run the dry run for `founder`. It changes nothing and prints counts only.
-   `infra/scripts/cell_storage_cleanup.py <cell_id> --account founder`
+4. Run the dry run for `founder`. It changes nothing and prints counts only. Take the old cloud bucket's ID
+   from the `cloud_backup_bucket_id` output of `infra/terraform/durability`.
+   `infra/scripts/cell_storage_cleanup.py <cell_id> --account founder --bucket-id <old cloud bucket id>`
 5. Export the operator key for the `cell-data` account, then run its dry run.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id>`
 6. Write down the date that the `cell-data` dry run prints as `first_dry_run=<date>`. This date starts the 7-day grace.
-7. If the `founder` dry run shows `keys_found` above 0, run its command again with `--apply`. Expect `keys_deleted` equal to `keys_found`. For `cell-data`, use the command in step 8.
+7. If the `founder` dry run shows `keys_found` or `files_found` above 0, run its command again with `--apply`.
+   This deletes the key and every file version under `cells/<cell_id>/` in the old bucket, hidden versions included.
+   The old bucket has no lock, so no grace applies. Expect `keys_deleted` equal to `keys_found` and
+   `files_deleted` equal to `files_found`. For `cell-data`, use the command in step 8.
 8. For `cell-data`, add the date from step 6 to every later command.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id> --first-dry-run <date> --apply`
 9. Expect `hide=waiting` until the date in `grace_ends`. Rerun step 8 on or after that date.
    Expect `hide=due` and `files_hidden` equal to `files_found`.
-10. Run the dry run again for both accounts. The clean-up is complete when `founder` shows `keys_found=0`
-    and `cell-data` shows `keys_found=0` and `files_found=0`. The alert does not show completion.
+10. Run the dry run again for both accounts. The clean-up is complete when `founder` and `cell-data` each show
+    `keys_found=0` and `files_found=0`. The alert does not show completion.
 
 The grace starts from a date that you pass, not from a state file. The date is one value that you
 already keep with the deletion record. A file would need a path, a place that survives between sessions,
 and trust in its contents, with no gain.
 
 The script deletes only keys that the provider lists with the exact prefix `cells/<cell_id>/`.
-It hides the cell's current backup files and never deletes a file version: the bucket's
-compliance lock keeps every version until its retention ends. Every step is safe to repeat.
+For `cell-data` it hides the cell's current backup files and never deletes a file version: the bucket's
+compliance lock keeps every version until its retention ends. For `founder` it deletes only versions that the
+provider lists under that prefix. Every step is safe to repeat.
 If `keys_found` is more than 1 for one account, stop and ask why the provider holds two keys for one cell.
 
 ## Staging objects of a deleted cell
@@ -74,8 +80,8 @@ one day later. It cancels an unfinished upload after 2 days. The deletion does n
 ## Cut over from the old object-store account
 
 Do this once, before you deploy the chart that uses the cell-data account. After the deploy,
-`cellctl` reads and removes export and import objects only in the staging bucket. It cannot reach
-an object in the old bucket.
+`cellctl` reads and removes export and import objects only in the staging bucket. It holds no credential
+in the old account, so it cannot reach an object in the old bucket.
 
 1. Run this read-only query for exports on the control database. Expect no rows.
    `SELECT export_id, cell_id, observed_state FROM exomem_cloud_exports WHERE observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL OR archive_version_id IS NOT NULL;`

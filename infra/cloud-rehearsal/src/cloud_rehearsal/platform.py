@@ -431,7 +431,7 @@ def overlay_cellctl(documents: list[dict[str, Any]]) -> str:
         ]
     )
     return (
-        "cellctl Deployment: command `python3 -m rehearsal_cellctl` (real run_loop; B2 key management and "
+        "cellctl Deployment: command `python3 -m rehearsal_cellctl` (real run_loop; the B2 listing and "
         "Hetzner volume listing doubled) and the S3 double's credential from Secret rehearsal-s3"
     )
 
@@ -462,7 +462,6 @@ def cellctl_secrets(stack: Stack, *, cell_token_key: bytes, control_plane_key: s
             "currentVersion": "1",
         },
         # Doubled in rehearsal_cellctl; present only because the chart requires them.
-        "exomem-cloud-b2-legacy-delete": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
         "exomem-cloud-cell-data-backup-list": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
         "exomem-cloud-hetzner-read-token": {"token": "rehearsal-double"},
         # Exports and imports reach the live S3 double through the staging key.

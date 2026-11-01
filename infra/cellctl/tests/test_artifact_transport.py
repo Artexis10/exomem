@@ -11,7 +11,6 @@ import pytest
 from cellctl import main, reconcile
 from cellctl.manifests import ResourceSettings, render_network_policies, render_statefulset
 from cellctl.state import CellRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_manifests import _spec
@@ -140,7 +139,7 @@ async def test_reconcile_adds_transport_only_to_the_selected_cell(cell_db) -> No
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         for cell_id in (CELL_ID, "bbbbbbbbbbbbbbbb"):
             namespace = "exo-cell-" + cell_id
@@ -185,10 +184,10 @@ async def test_a_cell_created_after_the_fleet_switch_gets_the_broker_without_bei
     cluster = FakeClusterGateway()
     try:
         await _seed_cell(cell_db, CELL_ID, CELL_ID)
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         await _seed_cell(cell_db, OTHER_CELL_ID, OTHER_CELL_ID)
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, 0, 1, tzinfo=UTC))
         for cell_id in (CELL_ID, OTHER_CELL_ID):
             namespace = "exo-cell-" + cell_id

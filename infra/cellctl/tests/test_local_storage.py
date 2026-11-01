@@ -20,7 +20,6 @@ from cellctl.decide import StorageRoom, decide
 from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import ClusterConfig
 from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, MediaCensus, RolloutRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage_config import LocalStorage, StorageConfig
 
@@ -90,7 +89,7 @@ async def test_after_the_cutover_only_a_new_claim_takes_the_local_class(
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             ClusterConfig(object_storage_bucket="exomem-cloud-backups", storage=CUT_OVER), now=NOW,
         )
     finally:
@@ -263,7 +262,7 @@ async def test_once_local_is_the_domain_only_nodes_with_a_pool_publish_slots(cel
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
         await reconcile.reconcile_once(
-            connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             ClusterConfig(object_storage_bucket="b", storage=CUT_OVER), now=NOW,
         )
         published = await connection.fetch("SELECT node, cell_slots FROM exomem_cloud_capacity")
@@ -566,7 +565,7 @@ async def test_an_hourly_backup_through_the_controller_records_the_backup_and_le
             cluster, cell_id, **local, statefulset_backup_outcome=outcome, **overrides)
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=minute))
 
     try:
@@ -697,7 +696,7 @@ def test_with_local_storage_configured_a_deleting_cell_waits_for_its_logical_vol
     cluster.local_volume_state = lambda local: _remaining(volumes=(LogicalVolume(name="lv", volume_id="vol-1", node="agent-1"),))
 
     observation = _augment_deletion_observation(ClusterObservation(), _row(desired_state="deleted", volume_id="vol-1"),
-                                                cluster, FakeB2(), FakeHetznerVolumeProvider(), storage=MIGRATING)
+                                                cluster, FakeHetznerVolumeProvider(), storage=MIGRATING)
 
     assert observation.pv_absent_confirmed is False
 
@@ -853,7 +852,7 @@ async def test_no_relocation_starts_while_a_cell_is_unobserved(cell_db: CellData
     cluster.observations[tenant] = _bound(LOCAL.class_name, statefulset_row_generation=1, **LOST, pv_node="agent-1",
                                           pv_reclaim_policy="Delete", namespace_cell_label=tenant)
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        ClusterConfig(object_storage_bucket="b", storage=MIGRATING), now=NOW)
     finally:
         await connection.close()
@@ -891,7 +890,7 @@ async def test_a_refused_relocation_step_ends_that_relocation_and_frees_the_flee
                                          pv_reclaim_policy="Delete")
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        ClusterConfig(object_storage_bucket="b", storage=MIGRATING),
                                        now=NOW + timedelta(minutes=minute))
 
@@ -999,7 +998,7 @@ async def test_a_relocation_through_the_controller_retains_the_old_volume_and_re
                                  **overrides})
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=minute))
 
     try:
@@ -1037,7 +1036,7 @@ async def test_with_local_storage_a_pass_needs_the_guard_that_keeps_claim_delete
     cluster = FakeClusterGateway()
     cluster.admission_missing = {reconcile.RETAINED_DELETE_POLICY_NAME}
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        ClusterConfig(object_storage_bucket="b", storage=storage), now=NOW)
         assert (cluster.applied == {}) is skipped
     finally:
@@ -1142,7 +1141,7 @@ async def test_a_stale_backup_fires_once_and_resolves_once_through_the_alert_rec
     memory = reconcile.LoopMemory()
 
     async def run(at: datetime) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=at, memory=memory)
 
     try:
@@ -1194,7 +1193,7 @@ async def test_a_receiver_that_is_down_is_asked_again_a_minute_later_not_every_p
             "observed_state": "running", "observed_generation": 1, "observed_image": IMAGE_A, "ready": True,
             "last_backup_at": NOW - timedelta(hours=3)})
         for at in (NOW, NOW + timedelta(seconds=10), NOW + timedelta(seconds=61), NOW + timedelta(seconds=70)):
-            await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+            await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                            _secrets_config(), config, now=at, memory=memory)
     finally:
         await connection.close()
@@ -1435,7 +1434,7 @@ async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a
             statefulset_grow_storage_gib=int(grow_to) if grow_to else None, **overrides)
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=minute))
 
     try:
@@ -1538,7 +1537,7 @@ async def test_a_cell_whose_node_has_no_room_keeps_its_size_and_raises_the_growt
             statefulset_grow_storage_gib=int(grow_to) if grow_to else None, **overrides)
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=minute), memory=memory)
 
     try:
@@ -1604,7 +1603,7 @@ async def test_a_grown_cell_back_on_its_hetzner_volume_renders_that_volumes_size
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=minute))
 
     try:
@@ -1635,7 +1634,7 @@ async def test_a_grown_cell_takes_the_slots_and_reserve_of_its_grown_size(cell_d
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
         await db.write_observed(connection, cell_id, {"grown_storage_gib": 16})
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        ClusterConfig(object_storage_bucket="b", storage=CUT_OVER), now=NOW)
         slots = await connection.fetchval("SELECT cell_slots FROM exomem_cloud_capacity WHERE node = 'agent-1'")
     finally:

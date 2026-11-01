@@ -360,8 +360,6 @@ spec:
               value: {{ .Values.cellctl.cellResources.memoryLimit | quote }}
             - name: CELLCTL_B2_BUCKET_NAME
               value: {{ .Values.cellctl.b2BucketName | quote }}
-            - name: CELLCTL_B2_BUCKET_ID
-              value: {{ .Values.cellctl.b2BucketId | quote }}
             - name: CELLCTL_B2_ENDPOINT
               value: {{ .Values.cellctl.b2Endpoint | quote }}
             - name: CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME
@@ -409,17 +407,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.cellctl.backupMasterKeySecretName }}
                   key: currentVersion
-            # D9: three bucket-restricted keys, none able to create or delete a key.
-            - name: CELLCTL_B2_LEGACY_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cellctl.b2LegacyDeleteSecretName }}
-                  key: keyId
-            - name: CELLCTL_B2_LEGACY_APPLICATION_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cellctl.b2LegacyDeleteSecretName }}
-                  key: applicationKey
+            # D9: two bucket-restricted keys in the cell-data account, none able to create or delete a key.
             - name: CELLCTL_CELL_DATA_STAGING_KEY_ID
               valueFrom:
                 secretKeyRef:

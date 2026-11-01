@@ -25,7 +25,6 @@ from cellctl.exports import (
 )
 from cellctl.manifests import CellManifestSpec, namespace_name, render_export_job
 from cellctl.state import CellRow, ClusterObservation
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .fake_s3 import FakeS3
@@ -222,7 +221,6 @@ class Harness:
     def __init__(self, cell_db, monkeypatch) -> None:
         self.cell_db = cell_db
         self.cluster = FakeClusterGateway()
-        self.b2 = FakeB2()
         self.s3 = FakeS3()
         self.jobs: dict[str, ExportJob] = {}
         self.cluster.observe_export_job = lambda namespace, export_id, verify=False: self.jobs.get(
@@ -239,7 +237,7 @@ class Harness:
         await self.cellctl.close()
 
     async def run(self, now: datetime = NOW) -> None:
-        await reconcile.reconcile_once(self.cellctl, self.cluster, self.b2, FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(self.cellctl, self.cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), _cluster_config(), now=now)
 
     async def serve(self, cell_id: str, desired_state: str = "running") -> None:
