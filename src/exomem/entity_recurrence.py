@@ -878,9 +878,13 @@ def _alternation(values: Iterable[str]) -> str:
 
 @functools.cache
 def _relation_token() -> re.Pattern[str]:
-    """Any relation token; a clause an anchor frame can match must contain one."""
+    """A relation token between two whitespace characters.
+
+    Both anchor patterns put `\\s+` on each side of the predicate, so a clause
+    they can match always contains this.
+    """
     # nosemgrep: ep-word-search -- _RELATIONS is the versioned identity-frames-v1 closed table.
-    return re.compile(_alternation(_RELATIONS))
+    return re.compile(rf"\s(?:{_alternation(_RELATIONS)})\s")
 
 
 def cue_grammar(entity_types: EntityTypeRegistry) -> CueGrammar:

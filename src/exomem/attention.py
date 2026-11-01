@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import activation as activation_module
 from . import audit as audit_module
+from . import call_spans
 from . import contradiction_stance as contradiction_stance_module
 from . import fusion
 from . import review_state as review_state_module
@@ -995,6 +996,7 @@ def _egress_keep(vault_root: Path):
         return lambda _path: False
 
 
+@call_spans.timed("attention.review_state")
 def _apply_review_state(
     vault_root: Path,
     report: AttentionReport,
