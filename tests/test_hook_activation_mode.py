@@ -102,9 +102,7 @@ def test_mcp_capture_does_not_resolve_personal_service_credentials(monkeypatch, 
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
     monkeypatch.setenv("EXOMEM_EPISODE_ASK_TURNS", "1")
     reads = []
-    monkeypatch.setattr(
-        capture, "_resolve_rest_key", lambda: reads.append("service") or ("", "file")
-    )
+    monkeypatch.setattr(capture, "_rest_lane", lambda: reads.append("service"))
     if branch == "due":
         landing = [{"name": "Bash", "input": {"command": "git push"}}]
         assert capture._episode_ask("s", landing, True, "balanced") is not None

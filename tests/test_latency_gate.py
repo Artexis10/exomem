@@ -135,6 +135,17 @@ WORKING_SET_TURN = (
 )
 #: A turn that names nothing in the vault: the turn slice must abstain on it, at the same cost bound.
 WORKING_SET_ABSTAINING_TURN = "What is a good way to spend a quiet afternoon?"
+#: What the shipped hook sends beside a follow-up: three earlier user turns and each turn's final assistant text,
+#: inside the server's bounds, the newest user turn naming the anchor that `WORKING_SET_TURN` reaches.
+WORKING_SET_CONVERSATION = {
+    "recent": [
+        {"role": role, "text": (prefix + "We went through the rota, the handover notes and what is still open. " * 9)[:limit]}
+        for role, limit, prefix in (
+            ("user", 500, ""), ("assistant", 250, ""), ("user", 500, ""), ("assistant", 250, ""),
+            ("user", 500, "Activation Scale Contact sent the schedule. "), ("assistant", 250, ""),
+        )
+    ],
+}
 
 
 def _seed_freshness_live(vault: Path) -> None:
@@ -1024,8 +1035,9 @@ def test_the_turn_slice_adds_a_bounded_paired_cost_to_a_maps_activation(
     """Each pair is one maps activation with the slice off and one with it on, on the same turn and caller,
     both from cold packet caches, in alternating order so drift cancels. The slice runs the anchors compile
     for the user turn, so it is measured for a turn that reaches an anchor and for one that reaches nothing,
-    for the owner's rebuilt map and for a restricted caller's. The test gates the upper bound of the median
-    paired difference's 95% interval at `SLICE_ADDED_MS_CEILING`, and reports the stage split and the target."""
+    for the owner's rebuilt map and for a restricted caller's, and for the resolving turn with the conversation
+    that the hook sends. The test gates the upper bound of the median paired difference's 95% interval at
+    `SLICE_ADDED_MS_CEILING`, and reports the stage split and the target."""
     from synth_vault import gen_entity_overlay
     from test_governance_egress import _external
 
@@ -1039,14 +1051,14 @@ def test_the_turn_slice_adds_a_bounded_paired_cost_to_a_maps_activation(
         monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
         commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup of each path
 
-    def call(mode: str, turn: str, setting: str) -> dict:
+    def call(mode: str, turn: str, setting: str, conversation: dict | None) -> dict:
         monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
         working_set_runtime.reset_caches_for_tests(packets_only=True)
         if mode == "owner_cleared":
             with context_views._OWNER_MAPS_LOCK:
                 context_views._OWNER_MAPS.clear()
         gc.collect()
-        packet = commands.op_activate_context(vault, turn=turn, include_timings=True)
+        packet = commands.op_activate_context(vault, turn=turn, include_timings=True, conversation=conversation)
         assert packet["abstained"] is False, packet.get("abstention")
         assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
         return packet
@@ -1054,19 +1066,22 @@ def test_the_turn_slice_adds_a_bounded_paired_cost_to_a_maps_activation(
     report: dict[str, dict] = {}
     for mode in ("owner_cleared", "restricted"):
         caller = _external() if mode == "restricted" else principal.owner_principal(surface="library")
-        for label, turn, state in (
-            ("resolving", WORKING_SET_TURN, "ready"),
-            ("abstaining", WORKING_SET_ABSTAINING_TURN, "empty"),
+        for label, turn, state, conversation in (
+            ("resolving", WORKING_SET_TURN, "ready", None),
+            ("abstaining", WORKING_SET_ABSTAINING_TURN, "empty", None),
+            ("resolving_with_conversation", WORKING_SET_TURN, "ready", WORKING_SET_CONVERSATION),
         ):
             samples: dict[str, list[dict]] = {"off": [], "on": []}
             with principal.request_scope(caller):
                 for pair in range(SLICE_PAIRS):
                     for setting in ("off", "on") if pair % 2 == 0 else ("on", "off"):
-                        packet = call(mode, turn, setting)
+                        packet = call(mode, turn, setting, conversation)
                         if setting == "off":
                             assert "turn_slice" not in packet
                         else:
                             assert packet["turn_slice"]["state"] == state, packet["turn_slice"]
+                            # The conversation stage ran inside the measured difference, not skipped.
+                            assert packet["generation"]["conversation"] == ("absent" if conversation is None else "applied")
                         samples[setting].append(packet["timings"])
             differences = [_compiler_ms(on) - _compiler_ms(off) for on, off in zip(samples["on"], samples["off"], strict=True)]
             low, high = _paired_median_interval(differences)

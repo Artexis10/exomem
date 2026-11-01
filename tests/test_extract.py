@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
+import random
 import sys
 import types
 from importlib.machinery import ModuleSpec
@@ -242,6 +244,94 @@ def test_extract_textfile_reads_utf8(tmp_path) -> None:
     r = extract._extract_textfile(f)
     assert r.media_type == "text" and r.engine == "text"
     assert "zylo" in r.text
+
+
+@pytest.mark.parametrize(
+    ("bom", "codec", "engine"),
+    [
+        (codecs.BOM_UTF16_LE, "utf-16-le", "text:utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16-be", "text:utf-16"),
+        # The UTF-32 LE mark begins with the UTF-16 LE mark; reading it as UTF-16 garbles every character.
+        (codecs.BOM_UTF32_LE, "utf-32-le", "text:utf-32"),
+        (codecs.BOM_UTF8, "utf-8", "text:utf-8-sig"),
+    ],
+)
+def test_extract_textfile_reads_the_codec_a_byte_order_mark_names(tmp_path, bom, codec, engine) -> None:
+    f = tmp_path / "minutes.txt"
+    f.write_bytes(bom + "Minutes\nReference code cobalt-kettle-15851 applies.\n".encode(codec))
+    r = extract.extract_text(f)
+    assert r.text == "Minutes\nReference code cobalt-kettle-15851 applies."
+    assert r.engine == engine
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The detector's own ranking reads this short French note as Mac Latin-2 ("cafť ťtait fermť").
+        "Le café était fermé, alors nous sommes allés à la gare.",
+        # The detector names Code Page 775 for this German note and lists Windows-1252 only in its group.
+        "Der Bericht über die Prüfung wird nächste Woche veröffentlicht.",
+    ],
+)
+def test_extract_textfile_decodes_latin1_accents(tmp_path, body) -> None:
+    f = tmp_path / "notes.txt"
+    f.write_bytes(f"{body}\n".encode("latin-1"))
+    r = extract.extract_text(f)
+    assert r.text == body
+    assert r.engine == "text:cp1252"
+
+
+def test_extract_textfile_decodes_a_shift_jis_file_longer_than_the_detection_window(tmp_path) -> None:
+    # Each 55-byte line puts the 64 KiB mark inside a two-byte character, where a plain cut would
+    # split it and the detector would refuse the right codec.
+    text = "会議は明日の十時に始まります。資料を準備してください。\n" * 4000
+    f = tmp_path / "minutes.txt"
+    f.write_bytes(text.encode("shift_jis"))
+    r = extract.extract_text(f)
+    assert r.text == text.strip()
+    assert r.engine == "text:cp932"
+
+
+def test_extract_textfile_keeps_valid_characters_of_utf8_whose_last_character_is_cut_off(tmp_path) -> None:
+    # A detector reads this French text as ISO-8859-10 with high confidence, which turns every valid
+    # multi-byte character into two wrong ones; only the cut-off byte should become a replacement.
+    data = ("La réunion de l'équipe a lieu à Genève.\n" * 20).encode() + "é".encode()[:1]
+    f = tmp_path / "cut.txt"
+    f.write_bytes(data)
+    r = extract.extract_text(f)
+    assert r.text == f.read_text(encoding="utf-8", errors="replace").strip()
+    assert r.text.count("La réunion de l'équipe a lieu à Genève.") == 20 and r.engine == "text"
+
+
+def test_extract_textfile_keeps_the_ascii_words_of_a_short_legacy_file(tmp_path) -> None:
+    # Ten bytes are too few to tell encodings apart; a detector read this phrase as UTF-16 CJK.
+    f = tmp_path / "label.txt"
+    f.write_bytes("river café".encode("latin-1"))
+    r = extract.extract_text(f)
+    assert r.text.startswith("river caf") and r.engine == "text"
+
+
+def test_extract_textfile_keeps_a_utf16_file_whose_last_character_is_cut_off(tmp_path) -> None:
+    f = tmp_path / "cut.txt"
+    f.write_bytes(codecs.BOM_UTF16_LE + "Réunion cobalt-kettle-15851".encode("utf-16-le") + b"R")
+    r = extract.extract_text(f)
+    assert r.text.startswith("Réunion cobalt-kettle-15851") and r.engine == "text:utf-16"
+
+
+def test_extract_textfile_replaces_what_no_codec_explains_as_before(tmp_path) -> None:
+    noise = random.Random(0).randbytes(2000)
+    f = tmp_path / "noise.txt"
+    f.write_bytes(noise)
+    r = extract.extract_text(f)
+    assert r.text == f.read_text(encoding="utf-8", errors="replace").strip()
+    assert r.engine == "text"
+
+
+def test_extract_ics_decodes_a_utf16_calendar(tmp_path) -> None:
+    ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Réunion Appsignal 7731\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    f = tmp_path / "e.ics"
+    f.write_bytes(codecs.BOM_UTF16_LE + ics.encode("utf-16-le"))
+    assert "Réunion Appsignal 7731" in extract.extract_text(f).text
 
 
 def test_extract_eml_pulls_headers_and_body(tmp_path) -> None:

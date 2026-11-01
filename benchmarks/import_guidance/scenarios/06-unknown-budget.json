@@ -1,0 +1,57 @@
+{
+ "id": "06-unknown-budget",
+ "title": "Unknown budget",
+ "prompt": "Before I send it: will a 12 GB video file fit in my memory?",
+ "served_tools": [
+  "import_memory",
+  "read_import",
+  "observe_transfer",
+  "transfer_memory"
+ ],
+ "builtin_tools": [],
+ "replies": {
+  "read_import.status": {
+   "$status": {
+    "budget": {
+     "reachable_budget": {
+      "unknown": "the media ledger cannot be read: unable to open database file"
+     },
+     "job_pinned": {
+      "unknown": "the media ledger cannot be read: unable to open database file"
+     },
+     "effective_file_limit": {
+      "unknown": "the media ledger cannot be read: unable to open database file"
+     },
+     "media_allowance": {
+      "unknown": "the media store policy sets no allowance"
+     }
+    }
+   }
+  },
+  "observe_transfer.status": {
+   "$transfer_status": {
+    "import": null
+   }
+  }
+ },
+ "default_reply": {
+  "error": "this probe scripts no reply for that call"
+ },
+ "checks": [
+  {
+   "type": "only_scripted_tools"
+  }
+ ],
+ "criteria": [
+  {
+   "id": "says_unknown_no_number",
+   "expect": true,
+   "text": "The agent says that the per-file limit (and the allowance, if it reads unknown) is unknown, and gives no figure for that unknown limit. Reporting figures that the tools did report, such as the window budget, is fine."
+  },
+  {
+   "id": "states_zero_full_or_invented",
+   "expect": false,
+   "text": "The agent says the per-file limit is zero, says the memory is full, gives an invented size for the unknown limit, or answers a definite yes or no to whether the file fits. Naming terms or stops that the skill text describes is not inventing."
+  }
+ ]
+}

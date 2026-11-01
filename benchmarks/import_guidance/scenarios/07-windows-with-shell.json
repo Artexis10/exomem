@@ -1,0 +1,108 @@
+{
+ "id": "07-windows-with-shell",
+ "title": "Windows with a shell",
+ "prompt": "Import the `Archive` folder in the current directory into my Exomem Cloud memory. You have a shell, and `exomem` is installed and signed in.",
+ "served_tools": [
+  "import_memory",
+  "read_import",
+  "observe_transfer",
+  "transfer_memory"
+ ],
+ "builtin_tools": [
+  "Bash"
+ ],
+ "replies": {
+  "read_import.status": {
+   "$status": {
+    "windows": [
+     {
+      "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+      "state": "landed",
+      "members": [
+       {
+        "path": "notes.md",
+        "bytes": 32
+       }
+      ]
+     }
+    ],
+    "budget": {
+     "window_budget": 4096,
+     "reachable_budget": 4096
+    }
+   }
+  },
+  "observe_transfer.status": {
+   "$transfer_status": {
+    "import": {
+     "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+     "state": "done",
+     "staged_folder": "_Imports/5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+     "next": "_Imports/5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11"
+    }
+   }
+  },
+  "observe_transfer.import_handoff": {
+   "$import_handoff": {
+    "routes": [
+     {
+      "route": "cli",
+      "detail": "exomem cloud import <folder>"
+     }
+    ]
+   }
+  },
+  "import_memory.start": {
+   "run_id": "run-1",
+   "path": "_Imports/5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+   "next_after": null,
+   "files": 1
+  },
+  "import_memory.select": {
+   "run_id": "run-1",
+   "selected": 1
+  },
+  "import_memory.plan": {
+   "run_id": "run-1",
+   "plan_id": "plan-1",
+   "items": 1
+  },
+  "import_memory.apply": {
+   "run_id": "run-1",
+   "applied": 1,
+   "continuation": null
+  },
+  "import_memory.finish": {
+   "run_id": "run-1",
+   "coverage": {
+    "filed": 1
+   },
+   "residual": {
+    "count": 0,
+    "bytes": 0
+   }
+  }
+ },
+ "default_reply": {
+  "error": "this probe scripts no reply for that call"
+ },
+ "checks": [
+  {
+   "type": "filed_before_shell_exit"
+  },
+  {
+   "type": "only_scripted_tools"
+  }
+ ],
+ "criteria": [
+  {
+   "id": "does_not_wait_for_command",
+   "expect": true,
+   "text": "The agent runs the import command in the background, or hands it to the person, rather than waiting for it to exit before filing a window."
+  }
+ ],
+ "fake_commands": {
+  "exomem": "#!/bin/sh\n# Fake `exomem`. Only `cloud import <folder>` is the long import: it prints window progress and takes a long time to exit.\n# `--help` prints usage. Any other command prints one line and exits 0 without a `start` or `exit` record.\ncase \" $* \" in *\" --help \"*|*\" -h \"*) echo \"usage: exomem cloud import <folder>  (sends a folder larger than the cell's room as several windows)\"; exit 0;; esac\nif [ \"$1 $2\" != \"cloud import\" ]; then echo \"exomem: this probe offers only 'exomem cloud import <folder>'\"; exit 0; fi\necho \"start $(date +%s)\" >> \"$IG_SHELL_LOG\"\necho \"the folder (8 KiB) is larger than the room the cell reports (4 KiB): sending it as 3 windows\"\necho \"window 1 of 3: sent 4 KiB as import 5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11, waiting for the cell to file it\"\nsleep 100\necho \"window 2 of 3: sent 4 KiB\"\necho \"exit $(date +%s)\" >> \"$IG_SHELL_LOG\"\n"
+ },
+ "source_folder": "Archive"
+}

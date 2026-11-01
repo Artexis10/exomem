@@ -59,6 +59,7 @@ from .vault import (
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
+    yaml_flow_list,
     yaml_scalar,
 )
 
@@ -184,9 +185,17 @@ def source_artifact_name(filename: str) -> str:
 
 
 def source_artifact_suffix(filename: str) -> str:
-    """Keep original Markdown opaque to governed page parsers."""
-    suffix = Path(source_artifact_name(filename)).suffix
-    return ".md.bin" if suffix.lower() == ".md" else suffix
+    """Name the stored suffix for an original artifact."""
+    return stored_artifact_suffix(Path(source_artifact_name(filename)).suffix)
+
+
+def stored_artifact_suffix(suffix: str) -> str:
+    """Store a Markdown original as `.md.txt`, outside the graph's `.md` input set.
+
+    The graph reads every `.md` under the knowledge base as a strict UTF-8 page, so an original
+    keeps a suffix the graph never reads; `.txt` has its text extracted in the encoding its bytes show.
+    """
+    return ".md.txt" if suffix.lower() == ".md" else suffix
 
 
 def _artifact_pair(
@@ -1319,7 +1328,7 @@ def _render_source(
     if domain:
         lines.append(f"domain: {domain}")
     if projects:
-        lines.append("projects: [" + ", ".join(projects) + "]")
+        lines.append("projects: " + yaml_flow_list(projects))
     lines.append(f"captured: {date_iso}")
     if source_identity is not None:
         import json
@@ -1328,7 +1337,9 @@ def _render_source(
         lines.append(f"capture_input_digest: {yaml_scalar(capture_input_digest)}")
     lines.extend(extra_lines)
     if artifact_rel:
-        media_type = _media_type_for(artifact_name or artifact_rel)
+        # The stored file is what extraction reads, so its name decides the kind; the original's name
+        # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).
+        media_type = _media_type_for(artifact_rel)
         if media_type:
             lines.append(f"media_type: {media_type}")
         lines.append(f"evidence_file: {artifact_rel}")
@@ -1352,7 +1363,7 @@ def _render_source(
     if url:
         lines.append(f"url: {yaml_scalar(url)}")
     if tags:
-        lines.append("tags: [" + ", ".join(tags) + "]")
+        lines.append("tags: " + yaml_flow_list(tags))
     else:
         lines.append("tags: []")
     lines.append("ingested_into: []")

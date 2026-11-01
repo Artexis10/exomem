@@ -51,16 +51,9 @@ class NativeProjectionPlan(ProjectionPlan):
         """Expose shared index expressions while keeping hints on their physical table."""
         from sqlalchemy.dialects.sqlite import dialect
 
-        compiler = dialect()
-        quote = compiler.identifier_preparer.quote
-        table = declaration(self).alias("n")
-        expressions = _operand_columns(self, table)
-        expressions.update({"collection_id": literal(self.collection_id), "encoding": literal(TYPED_V2),
-                            "view_path": literal(None), "created_txn": table.c.row_id, "values_json": literal(None)})
-        selected = ",".join(str(expression.compile(dialect=compiler, compile_kwargs={"literal_binds": True}))
-                            + " AS " + quote(name) for name, expression in expressions.items())
+        quote = dialect().identifier_preparer.quote
         hint = " NOT INDEXED" if not_indexed else " INDEXED BY " + quote(index) if index is not None else ""
-        return (f"(SELECT n.*,{selected} FROM {quote(schema)}.{quote(self.table_name)} AS n{hint})")
+        return (f"(SELECT n.*,{_relation_columns(self)} FROM {quote(schema)}.{quote(self.table_name)} AS n{hint})")
 
     def create_ddl(self, *, temporary: bool = False) -> tuple[str, ...]:
         from sqlalchemy.dialects.sqlite import dialect
@@ -94,9 +87,9 @@ class NativeProjectionPlan(ProjectionPlan):
                 else:
                     value = MISSING
                     break
-            tag, band, key = native_operands.scalar_operand(value, scalar.kind)
-            result.update({f"k{ordinal}_rank": 2 if tag == 0 else 1 if tag == 1 else 0,
-                           f"k{ordinal}_tag": tag, f"k{ordinal}_band": band, f"k{ordinal}_key": key})
+            rank, tag, band, key = native_operands.ranked_operand(value, scalar.kind)
+            result.update({f"k{ordinal}_rank": rank, f"k{ordinal}_tag": tag, f"k{ordinal}_band": band,
+                           f"k{ordinal}_key": key})
         return result
 
 
@@ -144,9 +137,24 @@ def _operand_columns(plan, table):
     result = {}
     for ordinal, scalar in enumerate(plan.scalars):
         tag, band, key = _expressions(plan, table, scalar)
-        result.update({f"k{ordinal}_rank": case((tag == 0, 2), (tag == 1, 1), else_=0),
+        result.update({f"k{ordinal}_rank": case((tag == MISSING_TAG, 2), (tag == NULL_TAG, 1), else_=0),
                        f"k{ordinal}_tag": tag, f"k{ordinal}_band": band, f"k{ordinal}_key": key})
     return result
+
+
+@lru_cache(maxsize=64)
+def _relation_columns(plan: NativeProjectionPlan) -> str:
+    """The read relation's operand select list, compiled once per frozen plan; every query reads it."""
+    from sqlalchemy.dialects.sqlite import dialect
+
+    compiler = dialect()
+    quote = compiler.identifier_preparer.quote
+    table = declaration(plan).alias("n")
+    expressions = _operand_columns(plan, table)
+    expressions.update({"collection_id": literal(plan.collection_id), "encoding": literal(TYPED_V2),
+                        "view_path": literal(None), "created_txn": table.c.row_id, "values_json": literal(None)})
+    return ",".join(str(expression.compile(dialect=compiler, compile_kwargs={"literal_binds": True}))
+                    + " AS " + quote(name) for name, expression in expressions.items())
 
 
 @lru_cache(maxsize=64)

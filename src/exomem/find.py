@@ -16,9 +16,10 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import date
 from functools import partial, wraps
@@ -869,15 +870,8 @@ class FreshnessSnapshot:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
-                paths: set[str] = set()
                 with call_spans.span("recall.projection.relativize"):
-                    for raw_path in entries:
-                        try:
-                            paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
-                        except (OSError, ValueError):
-                            # Registry identities outside the literal vault spelling are
-                            # never valid semantic-search parents; fail closed.
-                            continue
+                    paths = _relative_to_root(entries, root)
                 projected = frozenset(paths)
                 self._recall[scope] = checkpoint
                 self._recall_paths[scope] = projected
@@ -941,6 +935,33 @@ class _EmptyPendingCoverage:
 
 
 _EMPTY_PENDING_COVERAGE = _EmptyPendingCoverage()
+
+
+def _relative_to_root(raw_paths: Iterable[str], root: Path) -> set[str]:
+    """The vault-relative POSIX spelling of each path under `root`; any other path is dropped.
+
+    A path already spelled the way `Path` would write it, one that continues `root`'s own spelling with
+    plain components, is sliced as a string. Any other spelling goes through `Path`: that costs about
+    forty times more per path, and a catalogue holds one spelling for all of its paths.
+    """
+    prefix = str(root).rstrip("/")
+    relative: set[str] = set()
+    for raw in raw_paths:
+        body = raw[len(prefix):] if isinstance(raw, str) and raw.startswith(prefix) else ""
+        # `Path` would drop a repeated or trailing "/" and a "." component, and a platform separator
+        # other than "/" would change the POSIX spelling; those, and the path outside `root`, take its route.
+        if body[:1] == "/" and len(body) > 1 and not (
+            "//" in body or "/." in body or body.endswith("/") or "\\" in body
+        ):
+            relative.add(body[1:])
+            continue
+        try:
+            relative.add(Path(raw).absolute().relative_to(root).as_posix())
+        except (OSError, ValueError):
+            # Registry identities outside the literal vault spelling are
+            # never valid semantic-search parents; fail closed.
+            continue
+    return relative
 
 
 def _vault_rel(vault_root: Path, path: Path) -> str | None:
@@ -7870,6 +7891,28 @@ def prime_resolver_from_entries(
         return resolver
 
 
+# Pages a curation plan's earlier steps will create, keyed by the resolved vault root.
+_PLANNED_PAGES: ContextVar[tuple[Path, tuple[tuple[str, str | None], ...]] | None] = ContextVar(
+    "exomem_writer_planned_pages", default=None
+)
+
+
+@contextmanager
+def planned_pages(vault_root: Path, pages: Iterable[tuple[str, str | None]]) -> Iterator[None]:
+    """Let writer snapshots resolve links to pages that do not exist yet.
+
+    Curation prepares every step of a plan before any step runs. A later step that
+    links to a page an earlier step creates must render that link as it will once
+    the page lands, or its sealed draft can never match. Each entry is a
+    vault-relative path and the title the page will carry.
+    """
+    token = _PLANNED_PAGES.set((Path(vault_root).resolve(), tuple(pages)))
+    try:
+        yield
+    finally:
+        _PLANNED_PAGES.reset(token)
+
+
 def writer_resolver_snapshot(
     vault_root: Path,
     *,
@@ -7886,8 +7929,25 @@ def writer_resolver_snapshot(
 
     A caller that cannot afford a walk of the vault passes `allow_disk=False`:
     when both cheap routes decline it gets None and the span records
-    `disk_declined`, instead of a resolver built from disk.
+    `disk_declined`, instead of a resolver built from disk. Inside
+    `planned_pages`, the snapshot also holds the planned pages.
     """
+    resolver = _writer_resolver_snapshot(
+        vault_root, freshness_key=freshness_key, allow_disk=allow_disk
+    )
+    planned = _PLANNED_PAGES.get()
+    if resolver is not None and planned is not None and planned[0] == Path(vault_root).resolve():
+        for path, title in planned[1]:
+            resolver.add_pending(path, title=title)
+    return resolver
+
+
+def _writer_resolver_snapshot(
+    vault_root: Path,
+    *,
+    freshness_key: tuple[int, int, str] | None,
+    allow_disk: bool,
+):
     from . import semantic_contract
     from .vault import WikilinkResolver
 

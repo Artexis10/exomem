@@ -90,6 +90,24 @@ class EarlierImport:
     original_sha256: str | None
     captured: str
     aliases: tuple[str, ...]
+    # `imported_from` as written. Two originals whose names differ only in Unicode
+    # normalisation share every normalised field; only this spelling tells them apart.
+    spelled_from: str | None = None
+
+
+def _collection_spelling(path: str | None, collection_path: str | None) -> str | None:
+    """How `path` spells its original inside the collection, or None when it cannot say.
+
+    That is the tail of `path` whose normalised form is `collection_path`, so the spelling
+    survives a collection staged again under another root. Without a collection path it
+    is the whole path.
+    """
+    if path is None or collection_path is None:
+        return path
+    depth = collection_path.count("/") + 1
+    parts = path.split("/")
+    tail = "/".join(parts[-depth:])
+    return tail if len(parts) >= depth and nfc(tail) == collection_path else None
 
 
 def _text_field(value: Any) -> str | None:
@@ -136,6 +154,7 @@ def earlier_import_of(
         original_sha256=planned["original_sha256"],
         captured=captured,
         aliases=tuple(planned.get("aliases") or ()),
+        spelled_from=planned["original_path"],
     )
 
 
@@ -181,7 +200,8 @@ def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
         return None
     if frontmatter is None:
         return None
-    imported_from = _text_field(frontmatter.get("imported_from"))
+    spelled_from = frontmatter.get("imported_from")
+    imported_from = _text_field(spelled_from)
     if imported_from is None:
         return None
     aliases = frontmatter.get("aliases")
@@ -195,6 +215,7 @@ def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
         aliases=tuple(
             nfc(a) for a in aliases if isinstance(a, str) and a.strip()
         ) if isinstance(aliases, list) else (),
+        spelled_from=spelled_from,
     )
 
 
@@ -235,7 +256,16 @@ def latest_earlier_import(
             matches.append(entry)
     if not matches:
         return None
-    return max(matches, key=lambda entry: (entry.captured, entry.path))
+    # A twin original, whose name differs only in Unicode normalisation, matches the
+    # same pages. The pages that spell it inside the collection as this original does
+    # are its own; a collection staged again under another normalisation spells none
+    # of them so, and the normalised match decides as before.
+    own = _collection_spelling(original_path, collection_path if collection is not None else None)
+    spelled = [
+        entry for entry in matches
+        if own is not None and _collection_spelling(entry.spelled_from, entry.collection_path) == own
+    ]
+    return max(spelled or matches, key=lambda entry: (entry.captured, entry.path))
 
 
 def earlier_with_same_bytes(
@@ -910,14 +940,11 @@ def plan_item(
     slug, slug_warning = slugify_with_truncation_check(item["title"])
     suffix = None
     if item["form"] == "artifact":
+        from .add import stored_artifact_suffix
         from .preserve import _sanitize_filename
 
-        suffix = Path(_sanitize_filename(Path(original_path).name) or "").suffix
-        if suffix.lower() == ".md":
-            # An artifact is a `.md` file only when its bytes are not UTF-8 text, and the
-            # graph reads every `.md` under the knowledge base as strict UTF-8.
-            # Storing the bytes under `.bin` keeps them out of the graph input set.
-            suffix = ".bin"
+        # A `.md` original is an artifact when its bytes are not UTF-8 text or exceed the inline bound.
+        suffix = stored_artifact_suffix(Path(_sanitize_filename(Path(original_path).name) or "").suffix)
     page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
     reason = access.writable_reason(root, page)
     if reason is not None:

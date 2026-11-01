@@ -184,6 +184,9 @@ class HeldFile:
 class HeldFilesystem:
     """A retained vault-root anchor with handle-relative leaf operations."""
 
+    # Whether a successful ``rename`` or ``unlink_directory`` flushed every parent directory it changed.
+    name_changes_flush_parents = False
+
     def __enter__(self) -> HeldFilesystem:
         return self
 

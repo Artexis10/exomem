@@ -33,6 +33,8 @@ Two OPTIONAL deepen-the-moat transducers ship here, both DEFAULT-OFF + soft-fail
 
 from __future__ import annotations
 
+import codecs
+import functools
 import itertools
 import json
 import logging
@@ -1592,15 +1594,138 @@ def _extract_rtf(path: Path, media_type: str) -> ExtractResult:
         from striprtf.striprtf import rtf_to_text
     except ImportError as e:
         raise ExtractionUnavailable(f"striprtf not installed: {e}") from e
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    raw = decode_plain_text(path.read_bytes()).text
     text = rtf_to_text(raw, errors="replace").strip()
     return ExtractResult(text=text, media_type=media_type, engine="striprtf")
 
 
+# The byte-order marks the Unicode standard fixes, each with the codec that reads it. UTF-32 LE
+# comes before UTF-16 LE because its mark begins with the UTF-16 LE mark.
+_BYTE_ORDER_MARKS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+# charset-normalizer scores a guess as 1 minus the share of the text that reads as mess. A probe
+# found 1.0 for most correct guesses and 0.82-0.90 for wrong ones on mixed Western text.
+_DETECTION_CONFIDENCE = 0.9
+# Under this many bytes a file gives the detector too little to tell encodings apart: a probe read a
+# 10-byte Latin-1 phrase as UTF-16 and lost its ASCII words. Such a file reads as UTF-8 with replacements.
+_DETECTION_MIN_BYTES = 32
+# The detector reads a window this long only: its cost grows with the input, and a probe took ten
+# seconds and a quarter of a gigabyte on a 30 MB log. The window already shows the file's encoding.
+_DETECTION_WINDOW_BYTES = 64 * 1024
+# Without a byte-order mark the detector can read any even-length bytes as UTF-16 or UTF-32, and
+# those readings turn ASCII words into CJK characters. Only a mark names those codecs.
+_UNMARKED_EXCLUDED = ["utf_16", "utf_16_be", "utf_16_le", "utf_32", "utf_32_be", "utf_32_le"]
+# Windows-1252 is the Encoding Standard's default for legacy Western text, and it wins whenever it
+# reaches the bound. The library's own ranking read Latin-1 French, Swedish and Portuguese as
+# Windows-1250 or Mac Latin-2, which turns an acute "e" into a "c" with a caron or a "t" with one.
+_LEGACY_WESTERN_ENCODING = "cp1252"
+_ASCII_BYTES = bytes(range(0x80))
+_TRAIL_BYTES = bytes(range(0x40, 0x100))
+
+
+@dataclass(frozen=True)
+class DecodedText:
+    text: str
+    encoding: str  # the Python codec name that read it
+
+
+def decode_plain_text(data: bytes) -> DecodedText:
+    """The text of a plain-text file's bytes, and the encoding that read it.
+
+    A byte-order mark names the codec. Without one, UTF-8 reads it when its valid multi-byte
+    sequences are at least as many as its invalid bytes, then a confident charset-normalizer
+    guess, and last UTF-8 with replacement characters. Every line ending reads as one newline,
+    as `Path.read_text` reads it.
+    """
+    text, encoding = _decode_by_evidence(data)
+    return DecodedText(text.replace("\r\n", "\n").replace("\r", "\n"), encoding)
+
+
+def _decode_by_evidence(data: bytes) -> tuple[str, str]:
+    for mark, codec in _BYTE_ORDER_MARKS:
+        if data.startswith(mark):
+            # The mark names the codec; a cut-off last character becomes one replacement character.
+            return data.decode(codec, errors="replace"), codec
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    replaced = data.decode("utf-8", errors="replace")
+    if _mostly_utf8(data, replaced):
+        return replaced, "utf-8"
+    guess = _confident_guess(data) if len(data) >= _DETECTION_MIN_BYTES else None
+    if guess is not None:
+        return data.decode(guess, errors="replace"), guess
+    return replaced, "utf-8"
+
+
+def _mostly_utf8(data: bytes, replaced: str) -> bool:
+    """Whether `replaced`, the UTF-8 reading of `data` with replacement characters, comes from UTF-8
+    with a few stray bytes: it holds at least as many valid multi-byte characters as replacement
+    characters. A stray byte inside a character makes two replacement characters of it, so a tie
+    still means UTF-8. Pure ASCII counts, because it is valid UTF-8."""
+    invalid = replaced.count("\ufffd")
+    if not invalid:
+        return True
+    ascii_count = len(data) - len(data.translate(None, bytes(range(0x80))))
+    multibyte = len(replaced) - ascii_count - invalid
+    return multibyte >= invalid
+
+
+def _confident_guess(data: bytes) -> str | None:
+    from charset_normalizer import from_bytes
+
+    matches = from_bytes(_detection_window(data), cp_exclusion=_UNMARKED_EXCLUDED)
+    accepted = [
+        m for m in matches
+        if 1.0 - m.chaos >= _DETECTION_CONFIDENCE and _keeps_ascii(m.encoding)
+    ]
+    # The library groups codecs that read the sample to the same text and names only the first
+    # of them, so Windows-1252 can stand behind Code Page 775 for German text.
+    if any(_LEGACY_WESTERN_ENCODING in (m.encoding, *m.could_be_from_charset) for m in accepted):
+        return _LEGACY_WESTERN_ENCODING
+    return accepted[0].encoding if accepted else None
+
+
+@functools.cache
+def _keeps_ascii(codec: str) -> bool:
+    """Whether `codec` reads printable ASCII as itself. A file that is not UTF-8 is still mostly
+    ASCII words; a probe read a short Latin-1 note as EBCDIC and lost every one of them."""
+    printable = bytes(range(0x20, 0x7F))
+    try:
+        return printable.decode(codec) == printable.decode("ascii")
+    except (UnicodeDecodeError, LookupError):
+        return False
+
+
+def _detection_window(data: bytes) -> bytes:
+    """The bytes the detector reads: whole characters only, from the line of the first non-ASCII byte.
+
+    Leading ASCII lines say nothing about the encoding. A byte below 0x40 is never the second
+    byte of a character in Shift-JIS, GBK, Big5 or EUC-KR, so a window that starts at the first
+    non-ASCII byte or after a line feed, and ends after such a byte, never cuts a character.
+    """
+    first = len(data) - len(data.lstrip(_ASCII_BYTES))
+    line_feed = data.rfind(b"\n", 0, first)
+    start = line_feed + 1 if line_feed >= 0 else first
+    window = data[start : start + _DETECTION_WINDOW_BYTES]
+    if start + len(window) < len(data):
+        whole = window.rstrip(_TRAIL_BYTES)
+        if whole:
+            window = whole
+    return window
+
+
 def _extract_textfile(path: Path) -> ExtractResult:
-    """Plain-text files: read as UTF-8 (undecodable bytes replaced). No dependency."""
-    text = path.read_text(encoding="utf-8", errors="replace").strip()
-    return ExtractResult(text=text, media_type="text", engine="text")
+    """Plain-text files, in the encoding their bytes show. The engine names a non-UTF-8 one."""
+    decoded = decode_plain_text(path.read_bytes())
+    engine = "text" if decoded.encoding == "utf-8" else f"text:{decoded.encoding}"
+    return ExtractResult(text=decoded.text.strip(), media_type="text", engine=engine)
 
 
 def _extract_eml(path: Path) -> ExtractResult:
@@ -1627,7 +1752,7 @@ _ICS_FIELDS = ("SUMMARY", "DESCRIPTION", "LOCATION", "DTSTART", "DTEND", "ORGANI
 def _extract_ics(path: Path) -> ExtractResult:
     """.ics → human-meaningful VEVENT fields. Minimal native parse (RFC 5545 line
     unfolding); no `icalendar` dependency for what is a low-volume format."""
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    raw = decode_plain_text(path.read_bytes()).text
     unfolded = re.sub(r"\r?\n[ \t]", "", raw)  # join folded continuation lines
     lines: list[str] = []
     for line in unfolded.splitlines():
