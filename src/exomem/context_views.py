@@ -1834,8 +1834,8 @@ def pinned_items(vault_root: Path, response: Mapping[str, Any], caller: CallerVi
 
     The terminal guard serves these in place of the items it is given, and reads none of those. A
     response is named by its ref, its generation and its continuation (the page's position), for
-    this caller. So both guard passes serve the text the generation was computed from, and a release
-    strip in the first pass cannot change what the second pass serves. A response that this invocation
+    this caller. So every guard pass serves the text the generation was computed from, and a release
+    strip in one pass cannot change what a later pass serves. A response that this invocation
     never compiled for this caller, under the admissions that stand now, gets no item.
     """
     served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)

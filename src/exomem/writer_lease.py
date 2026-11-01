@@ -8189,7 +8189,7 @@ def _invocation_provenance(
     """Give each dispatched command one record of what it served, for its own guard passes only.
 
     Outermost, so a store-routed call fills the same record from the store's thread. Under the
-    MCP surface this joins the record that the surface opened for its second pass.
+    MCP surface this joins the record that the surface opened.
     """
     @wraps(function)
     def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:

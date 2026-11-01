@@ -2559,8 +2559,8 @@ def test_dispatcher_emits_one_plaintext_free_receipt_after_final_governed_repres
     assert "Patterns" not in serialized
 
 
-def test_postfilter_second_pass_is_receipt_silent(vault: Path) -> None:
-    """MCP runs this filter twice, so it cannot own receipt emission."""
+def test_a_repeated_postfilter_is_receipt_silent(vault: Path) -> None:
+    """The dispatcher's disclosure boundary owns receipt emission, so a repeated filter writes none."""
     _restricted_vault(vault)
     payload = {"entries": [{"path": RESTRICTED_PATH}]}
     with request_scope(_external()):

@@ -561,7 +561,7 @@ def invocation_served() -> dict[Any, Any] | None:
 def invocation_scope() -> Iterator[None]:
     """Keep what one product invocation serves for its own guard passes, and discard it at the end.
 
-    One invocation is one MCP tool call with its second pass, one REST request, one CLI
+    One invocation is one MCP tool call, one REST request, one CLI
     command or one library call: through the dispatcher, or to a leaf that guards its own
     result. The outermost scope owns the record and a nested one joins it, so the dispatcher's
     scope joins the MCP surface's. A `request_scope` or `library_scope` that spans many
