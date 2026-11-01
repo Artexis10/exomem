@@ -190,10 +190,13 @@ def _reference_key(reference: StoredObject) -> str:
     return json.dumps(reference.fields(), sort_keys=True, separators=(",", ":"))
 
 
-def _source_identity(source: reserved_paths.GenericBinarySource) -> str:
-    version = source.version
+def _version_identity(version: held_fs.FileVersion) -> str:
     return json.dumps((version.identity.device, version.identity.inode, version.change_time_ns,
                        version.mtime_ns, version.size), separators=(",", ":"))
+
+
+def _source_identity(source: reserved_paths.GenericBinarySource) -> str:
+    return _version_identity(source.version)
 
 
 def _identity(vault: Path, path: Path) -> str:
@@ -201,22 +204,48 @@ def _identity(vault: Path, path: Path) -> str:
         return _source_identity(source)
 
 
-def cache_matches(vault: Path, path: Path, *, snapshot: OriginalSnapshot | None = None) -> bool:
-    """Read a proven cache identity without creating state or a store client."""
-    selected = snapshot if snapshot is not None else original_state(vault, path)
-    if selected.state != "cached" or selected.reference is None:
-        return False
+def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> str | None:
+    """The cache identity that a record holds for this cached original's reference and digest, else None.
+
+    Reads without creating state or a store client.
+    """
+    if snapshot.state != "cached" or snapshot.reference is None:
+        return None
     store = MediaJobStore(vault, create=False)
     if not store.path.exists():
-        return False
+        return None
     conn = store._connect(readonly=True)
     try:
         if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache' AND type = 'table'").fetchone() is None:
-            return False
+            return None
         row = conn.execute("SELECT * FROM media_cache WHERE binary_rel = ?", (store._relative(path),)).fetchone()
-        return row is not None and row["reference"] == _reference_key(selected.reference) and row["sha256"] == selected.binary_sha256 and row["identity"] == _identity(vault, path)
+        if row is None or row["reference"] != _reference_key(snapshot.reference) or row["sha256"] != snapshot.binary_sha256:
+            return None
+        return row["identity"]
     finally:
         conn.close()
+
+
+def cache_matches(vault: Path, path: Path, *, snapshot: OriginalSnapshot | None = None) -> bool:
+    """Read a proven cache identity without creating state or a store client."""
+    selected = snapshot if snapshot is not None else original_state(vault, path)
+    recorded = _recorded_identity(vault, path, selected)
+    return recorded is not None and recorded == _identity(vault, path)
+
+
+def cached_sha256(vault: Path, path: Path, version: held_fs.FileVersion) -> str | None:
+    """The verified SHA-256 of a file at this exact version when the cache identity records it, else None.
+
+    A caller that holds the file passes the version taken from its handle, so a match
+    reads no byte (D3). None means the file has no record or no longer matches it.
+    """
+    vault = Path(vault).resolve()
+    selected = original_state(vault, path)
+    try:
+        recorded = _recorded_identity(vault, vault / path, selected)
+    except sqlite3.Error:
+        return None  # An unreadable record is no record, and the caller's hash then proves the bytes.
+    return selected.binary_sha256 if recorded is not None and recorded == _version_identity(version) else None
 
 
 def recover_cache(vault: Path, path: Path, snapshot: OriginalSnapshot) -> bool:

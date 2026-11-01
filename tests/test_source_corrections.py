@@ -83,10 +83,10 @@ def test_custody_page_follows_correction_but_artifact_path_stays_exact(vault, so
     who = owner_principal(surface="mcp")
     with request_scope(who):
         with artifact_recovery.stage(vault, old.path, who) as (copied, descriptor):
-            assert copied.private_path.read_bytes() == current_bytes
+            assert reserved_paths.read_held(copied, 0, copied.size) == current_bytes
             assert descriptor["path"] == current.artifact_path
         with artifact_recovery.stage(vault, old.artifact_path, who) as (copied, descriptor):
-            assert copied.private_path.read_bytes() == historical_bytes
+            assert reserved_paths.read_held(copied, 0, copied.size) == historical_bytes
             assert descriptor["path"] == old.artifact_path
     assert (vault / old.path).read_bytes() == old_page
     assert (vault / old.artifact_path).read_bytes() == historical_bytes
@@ -192,7 +192,7 @@ def test_legacy_markdown_source_receipt_replays_and_original_cannot_claim_identi
     who = owner_principal(surface="mcp")
     with request_scope(who):
         with artifact_recovery.stage(vault, artifact.relative_to(vault).as_posix(), who) as (copied, _):
-            assert copied.private_path.read_bytes() == original
+            assert reserved_paths.read_held(copied, 0, copied.size) == original
         captured_identity = add.add(
             vault, source_schema, title="Independent capture", source_type="session", content="Trusted authored text",
             source_identity={"system": "archive", "record_id": "independent", "revision": "one"},
@@ -279,7 +279,7 @@ def test_legacy_custody_skips_an_unrelated_occupied_companion_name(vault, source
     who = owner_principal(surface="mcp")
     with request_scope(who):
         with artifact_recovery.stage(vault, captured.artifact_path, who) as (copied, _):
-            assert copied.private_path.read_bytes() == original
+            assert reserved_paths.read_held(copied, 0, copied.size) == original
 
 
 def test_utf16_markdown_capture_keeps_bytes_outside_page_indexes(vault, source_schema, tmp_path):
@@ -296,7 +296,7 @@ def test_utf16_markdown_capture_keeps_bytes_outside_page_indexes(vault, source_s
     who = owner_principal(surface="mcp")
     with request_scope(who):
         with artifact_recovery.stage(vault, captured.path, who) as (copied, descriptor):
-            assert copied.private_path.read_bytes() == original
+            assert reserved_paths.read_held(copied, 0, copied.size) == original
             assert descriptor["file_name"] == "original.md"
             assert descriptor["mime_type"] == "text/markdown; charset=utf-16"
 

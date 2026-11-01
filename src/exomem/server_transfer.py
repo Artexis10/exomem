@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect, Request
@@ -520,8 +521,69 @@ def _hydration_too_large(error: BaseException | None) -> JSONResponse | None:
                         status_code=409, headers=_RECOVERY_HEADERS)
 
 
+class _HeldFileResponse(FileResponse):
+    """A `FileResponse` that reads a held original from its handle, with no private copy (task 5.4.12).
+
+    It keeps Starlette's header and range logic and replaces only the three body writers.
+    `read_held` checks the file's version after each read, before the bytes are sent. A file that
+    changes during the stream therefore stops the response, and the chunk that completes the body
+    is sent only after its check passes, so a stopped response never looks complete.
+    """
+
+    def __init__(self, held: reserved_paths.GenericFileCopy, *, media_type: str,
+                 headers: dict[str, str] | None = None, filename: str | None = None):
+        super().__init__(held.relative_path, headers=headers, media_type=media_type, filename=filename,
+                         stat_result=held.source_stat)
+        self.held = held
+
+    async def _send_span(self, send, start: int, end: int, *, more_after: bool) -> None:
+        """Send bytes `start` up to `end`; the last chunk ends the body unless `more_after`."""
+        while True:
+            length = min(self.chunk_size, end - start)
+            chunk = await run_in_threadpool(reserved_paths.read_held, self.held, start, length)
+            start += length
+            done = start >= end
+            await send({"type": "http.response.body", "body": chunk, "more_body": more_after or not done})
+            if done:
+                return
+
+    async def _handle_simple(self, send, send_header_only: bool, send_pathsend: bool) -> None:
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        else:
+            await self._send_span(send, 0, self.held.size, more_after=False)
+
+    async def _handle_single_range(self, send, start: int, end: int, file_size: int, send_header_only: bool) -> None:
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-range"] = f"bytes {start}-{end - 1}/{file_size}"
+        headers["content-length"] = str(end - start)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        else:
+            await self._send_span(send, start, end, more_after=False)
+
+    async def _handle_multiple_ranges(self, send, ranges: list[tuple[int, int]], file_size: int,
+                                      send_header_only: bool) -> None:
+        boundary = secrets.token_hex(13)
+        content_length, header_for = self.generate_multipart(ranges, boundary, file_size, self.headers["content-type"])
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-type"] = f"multipart/byteranges; boundary={boundary}"
+        headers["content-length"] = str(content_length)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        for start, end in ranges:
+            await send({"type": "http.response.body", "body": header_for(start, end), "more_body": True})
+            await self._send_span(send, start, end, more_after=True)
+            await send({"type": "http.response.body", "body": b"\r\n", "more_body": True})
+        await send({"type": "http.response.body", "body": f"--{boundary}--".encode("latin-1"), "more_body": False})
+
+
 class _OriginalDownloadResponse(Response):
-    """Starlette sends only a private verified spool; this response owns its lifetime."""
+    """Starlette sends only a held, verified original; this response owns its lifetime."""
 
     def __init__(self, vault_root: Path, capability: str):
         super().__init__(headers=_RECOVERY_HEADERS)
@@ -537,10 +599,9 @@ class _OriginalDownloadResponse(Response):
                 raise artifact_recovery.RecoveryUnavailable
             async with artifact_recovery.staged(
                 self.vault_root, descriptor["path"], who, expected=descriptor
-            ) as (copied, _, proofs):
-                response = FileResponse(copied.private_path, filename=descriptor["file_name"],
-                    media_type=descriptor["mime_type"], headers=_RECOVERY_HEADERS,
-                    stat_result=copied.private_path.stat())
+            ) as (held, _, proofs):
+                response = _HeldFileResponse(held, filename=descriptor["file_name"],
+                    media_type=descriptor["mime_type"], headers=_RECOVERY_HEADERS)
                 # Only a verified original receives an attachment disposition.
                 del response.headers["content-disposition"]
                 response.headers["content-disposition"] = "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe="")
@@ -551,12 +612,12 @@ class _OriginalDownloadResponse(Response):
                         artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
                         if not await auth_sessions.origin_session_active(who):
                             raise artifact_recovery.RecoveryUnavailable
-                        revision = await run_in_threadpool(artifact_recovery.require_current, self.vault_root, copied, who, byte_proofs=proofs)
+                        revision = await run_in_threadpool(artifact_recovery.require_current, self.vault_root, held, who, byte_proofs=proofs)
                         # Expiry can pass during rehashing a large original.
                         artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
                         if not await auth_sessions.origin_session_active(who):
                             raise artifact_recovery.RecoveryUnavailable
-                        artifact_recovery.require_revision(self.vault_root, who, copied, revision, byte_proofs=proofs)
+                        artifact_recovery.require_revision(self.vault_root, who, held, revision, byte_proofs=proofs)
                         artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
                         headers = dict(message.get("headers", []))
                         for key, value in _RECOVERY_HEADERS.items():
@@ -664,7 +725,7 @@ def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bear
 
 
 class _CloudOriginalDownloadResponse(Response):
-    """Send one verified original to the login the gateway proved; this response owns the private copy.
+    """Send one verified original to the login the gateway proved; this response owns the held handle.
 
     The route returns before the body is sent, so this response binds the
     request's origin again for the checks that run while it streams.
@@ -688,7 +749,7 @@ class _CloudOriginalDownloadResponse(Response):
                     principal_module.cloud_owner_principal(self.request_origin.origin.cell_id, surface="mcp"))
                 if not await auth_sessions.origin_session_active(who):
                     raise artifact_recovery.RecoveryUnavailable
-                async with artifact_recovery.staged(self.vault_root, self.path, who) as (copied, descriptor, proofs):
+                async with artifact_recovery.staged(self.vault_root, self.path, who) as (held, descriptor, proofs):
                     # Every answer, including a refused range, names the whole file's identity.
                     identity = {
                         **_RECOVERY_HEADERS,
@@ -701,8 +762,7 @@ class _CloudOriginalDownloadResponse(Response):
                         # One slice is the contract; repeated Range headers or a multipart answer are not offered.
                         response = PlainTextResponse(status_code=416, headers={"content-range": f"bytes */{descriptor['size']}"})
                     else:
-                        response = FileResponse(copied.private_path, media_type=descriptor["mime_type"],
-                                                stat_result=copied.private_path.stat())
+                        response = _HeldFileResponse(held, media_type=descriptor["mime_type"])
 
                     async def checked_send(message):
                         nonlocal started
@@ -710,8 +770,8 @@ class _CloudOriginalDownloadResponse(Response):
                             if not await auth_sessions.origin_session_active(who):
                                 raise artifact_recovery.RecoveryUnavailable
                             revision = await run_in_threadpool(
-                                artifact_recovery.require_current, self.vault_root, copied, who, byte_proofs=proofs)
-                            artifact_recovery.require_revision(self.vault_root, who, copied, revision, byte_proofs=proofs)
+                                artifact_recovery.require_current, self.vault_root, held, who, byte_proofs=proofs)
+                            artifact_recovery.require_revision(self.vault_root, who, held, revision, byte_proofs=proofs)
                             headers = dict(message.get("headers", []))
                             headers.update({key.encode(): value.encode("latin-1") for key, value in identity.items()})
                             message = {**message, "headers": list(headers.items())}

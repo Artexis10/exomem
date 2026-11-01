@@ -201,26 +201,36 @@ class GenericBinarySource:
     stream: IO[bytes]
     version: held_fs.FileVersion
     _check: Callable[[], None]
+    _probe: Callable[[], held_fs.FileVersion]
 
     def require_current(self) -> None:
         self._check()
 
+    def current_version(self) -> held_fs.FileVersion:
+        """The held file's version now, read from the handle alone; it does not resolve the name again."""
+        return self._probe()
+
 
 @dataclass(frozen=True, slots=True)
 class GenericFileCopy:
-    """A private disk copy bound to the retained canonical source and its bytes."""
+    """The retained canonical source and its verified bytes, as a private disk copy or a held handle.
 
-    private_path: Path
+    A held proof has no `private_path` and no `private_identity`: `held` is the open source,
+    and its bytes are read from that handle.
+    """
+
+    private_path: Path | None
     vault_root: Path
     relative_path: str
     identity: held_fs.StableIdentity
     source_stat: os.stat_result
     sha256: str
     size: int
-    private_identity: held_fs.StableIdentity
+    private_identity: held_fs.StableIdentity | None
     source_version: held_fs.FileVersion
     deadline: float | None = None
     max_bytes: int | None = None
+    held: GenericBinarySource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1385,12 +1395,16 @@ def _copy_deadline(deadline: float | None) -> None:
 
 
 def _digest_descriptor(file, *, deadline: float | None, max_bytes: int | None) -> tuple[str, int]:
+    return _digest_fd(file.descriptor, deadline=deadline, max_bytes=max_bytes)
+
+
+def _digest_fd(descriptor: int, *, deadline: float | None, max_bytes: int | None) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
-    os.lseek(file.descriptor, 0, os.SEEK_SET)
+    os.lseek(descriptor, 0, os.SEEK_SET)
     while True:
         _copy_deadline(deadline)
-        chunk = os.read(file.descriptor, 65536)
+        chunk = os.read(descriptor, 65536)
         if not chunk:
             return digest.hexdigest(), size
         size += len(chunk)
@@ -1458,7 +1472,7 @@ def open_generic_binary(vault_root: Path, value: object, *, physical: bool = Fal
 
             require_current()
             with os.fdopen(os.dup(file.descriptor), "rb") as stream:
-                yield GenericBinarySource(stream, version, require_current)
+                yield GenericBinarySource(stream, version, require_current, file.version)
                 require_current()
     except held_fs.HeldFsError as error:
         raise ReservedPathLeafError(error.code) from error
@@ -1508,9 +1522,70 @@ def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
         raise ReservedPathLeafError("IO_REFUSED") from error
 
 
-def require_current_generic_copy(copied: GenericFileCopy) -> None:
-    """Rehash retained source and private bytes before authorizing their first byte."""
+@contextmanager
+def hold_generic_file(vault_root: Path, value: object, *,
+                      recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                      deadline: float | None = None):
+    """Hold the canonical source open and prove its bytes with no private copy.
+
+    `recorded_sha256` gives the digest that a record proves for the file at the held
+    version, or None. A recorded digest reads no byte. Otherwise one pass through the
+    handle hashes the file. The caller then reads bytes with `read_held`.
+    """
+    _copy_deadline(deadline)
+    with open_generic_binary(vault_root, value) as source:
+        try:
+            version = source.version
+            descriptor = source.stream.fileno()
+            digest = recorded_sha256(version)
+            if digest is None:
+                digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
+                if size != version.size or source.current_version() != version:
+                    raise ReservedPathLeafError("IO_REFUSED")
+            held = GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
+                                   digest, version.size, None, version, deadline, None, source)
+        except (OSError, held_fs.HeldFsError) as error:
+            raise ReservedPathLeafError("IO_REFUSED") from error
+        yield held
+
+
+def read_held(held: GenericFileCopy, offset: int, length: int) -> bytes:
+    """Read exactly `length` bytes at `offset` from a held proof's handle, one reader at a time.
+
+    Raises when the file's version differs from the one held, checked after the read and
+    before the bytes are returned, so a caller never passes on bytes read across a change.
+    """
+    source = held.held
+    if source is None:
+        raise ReservedPathLeafError("IO_REFUSED")
     try:
+        descriptor = source.stream.fileno()
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                raise ReservedPathLeafError("IO_REFUSED")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if source.current_version() != held.source_version:
+            raise ReservedPathLeafError("IDENTITY_CHANGED")
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+    return b"".join(chunks)
+
+
+def require_current_generic_copy(copied: GenericFileCopy) -> None:
+    """Rehash retained source and private bytes before authorizing their first byte.
+
+    A held proof has no copy to rehash: the digest was recorded or hashed at the held
+    version, so the same version, handle and name still prove the bytes.
+    """
+    try:
+        if copied.held is not None:
+            copied.held.require_current()
+            return
         with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
             before = source.version()
             if before != copied.source_version:
