@@ -76,14 +76,20 @@ _FILE_FLAGS = (
 )
 
 
+# A refusal that carries this retry value waits on the person or an operator, not on cellctl: a retry cannot fix it.
+# Any refusal without a retry value may succeed on a retry. cellctl reads the value and never the code.
+RETRY_OWNER = "owner"
+
+
 class ArchiveRefused(Exception):
     """An import stopped. `reason` is a fixed token; nothing here is content."""
 
-    def __init__(self, code: str, reason: str, member_index: int | None = None) -> None:
+    def __init__(self, code: str, reason: str, member_index: int | None = None, retry: str | None = None) -> None:
         super().__init__(f"{code}: {reason}")
         self.code = code
         self.reason = reason
         self.member_index = member_index
+        self.retry = retry
 
     def as_dict(self) -> dict[str, object]:
         return {
