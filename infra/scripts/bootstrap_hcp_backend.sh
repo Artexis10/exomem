@@ -76,7 +76,9 @@ restore_state() {
       echo "encrypted HCP bootstrap state must have mode 0600" >&2
       exit 2
     }
-    "${sops_bin}" decrypt --output "${state_path}" "${escrow_path}"
+    # sops infers a store from each file name. terraform.tfstate seals as binary (`{"data": ...}`)
+    # and the escrow name says JSON, so both directions name the stores explicitly.
+    "${sops_bin}" decrypt --input-type json --output-type binary --output "${state_path}" "${escrow_path}"
     chmod 0600 -- "${state_path}"
   fi
   plaintext_safe_to_remove=true
@@ -94,7 +96,7 @@ seal_state() {
 
   local encrypted_tmp
   encrypted_tmp="$(mktemp "${escrow_parent}/.hcp-bootstrap-state.XXXXXX.sops.json")"
-  if ! "${sops_bin}" encrypt --age "${SOPS_AGE_RECIPIENTS}" --output "${encrypted_tmp}" "${state_path}"; then
+  if ! "${sops_bin}" encrypt --input-type binary --output-type json --age "${SOPS_AGE_RECIPIENTS}" --output "${encrypted_tmp}" "${state_path}"; then
     rm -f -- "${encrypted_tmp}"
     return 1
   fi
