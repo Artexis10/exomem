@@ -10834,7 +10834,7 @@ def op_observe_transfer(
     action: Literal["status", "import_handoff"] = "status",
     import_id: str | None = None,
 ) -> dict:
-    """Check or start moving material into or out of this Exomem Cloud memory.
+    """Check imports into and exports out of this Exomem Cloud memory, and how to send files.
 
     Read-only. The Cloud gateway answers from your account, not this vault. It never
     returns file bytes, upload URLs or download links.
@@ -14074,7 +14074,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _M,
         (),
         {
-            "public_title": "Check or start an import or export",
+            "public_title": "Check an import or export",
             "surface": "advanced",
             "actions": ("adopt",),
             "first_run_safe": True,
