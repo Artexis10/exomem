@@ -103,6 +103,8 @@ def filed_before_shell_exit(spec: dict, evidence: Evidence, **_: Any) -> Outcome
     ]
     if not filings:
         return Outcome("filed_before_shell_exit", FAIL, "no window was filed")
+    if "start" not in evidence.shell_events:
+        return Outcome("filed_before_shell_exit", FAIL, "filed, but the import command never ran")
     exit_at = evidence.shell_events.get("exit")
     if exit_at is None:
         return Outcome("filed_before_shell_exit", PASS, "filed; the command had not exited")

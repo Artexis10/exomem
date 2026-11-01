@@ -311,7 +311,7 @@ def run(args: argparse.Namespace) -> int:
     log_path = workdir / "control.drive.json"
     log_path.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
     ns = argparse.Namespace(key=args.key, drive_log=log_path, out=args.out, python=args.python,
-                            timeout=900.0, warm_deadline=600.0, settle_s=15.0)
+                            timeout=900.0, warm_deadline=600.0, settle_s=15.0, originals=None)
     metrics = asyncio.run(score.score(ns))
     return compare(metrics, built, key, len(duplicated), 1)
 

@@ -197,9 +197,6 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     if query.get("code_challenge_method") != ["S256"] or not query.get("code_challenge"):
         raise StepFailure("native OAuth did not use S256 PKCE")
     checkpoint = fixture / "checkpoint"
-    # The CLI signs in before it inventories the folder and writes checkpoint.json, so only the folder exists yet.
-    if stat.S_IMODE(checkpoint.stat().st_mode) != 0o700:
-        raise StepFailure("native checkpoint folder is not private")
     callback = await ctx.browser.consent_redirect(tenant.session, url, redirect_uri)
     # Deliver to the real loopback server in the CLI container, preserving code/state/issuer.
     await asyncio.to_thread(wait_for, lambda: run(["docker", "exec", name, "python3", "-c", LISTENER_SCRIPT,
@@ -216,6 +213,14 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
 
     await asyncio.to_thread(wait_for, record_written_or_cli_ended, timeout=wait_seconds,
                             description="the native checkpoint record")
+    # A folder import signs in before it makes the checkpoint folder, so the folder is checked once the run has
+    # written its record or ended. A successful run empties the folder but keeps it.
+    try:
+        private = stat.S_IMODE(checkpoint.stat().st_mode) == 0o700
+    except FileNotFoundError:
+        raise StepFailure("the native CLI made no checkpoint folder") from None
+    if not private:
+        raise StepFailure("native checkpoint folder is not private")
     # A CLI that succeeded removes its record, so a fast run may leave none to check.
     with contextlib.suppress(FileNotFoundError):
         if stat.S_IMODE(record.stat().st_mode) != 0o600:
