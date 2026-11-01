@@ -86,7 +86,7 @@ def service_env_value(name: str, path: Path | None) -> str:
     if path is None:
         return ""
     try:
-        text = path.read_text(encoding="utf-8").lstrip("﻿")
+        text = path.read_text(encoding="utf-8").lstrip("\ufeff")
     except Exception:  # noqa: BLE001 — hooks must fail softly
         return ""
     for line in text.splitlines():
