@@ -3993,9 +3993,12 @@ def op_attention(
         limit=limit,
         state=state,
     )
-    from . import vocabulary_entities
+    from . import intent_review, vocabulary_entities
 
-    return vocabulary_entities.annotate_report(vault_root, report.as_dict())
+    annotated = vocabulary_entities.annotate_report(vault_root, report.as_dict())
+    # Undecided write conflicts wait for an owner decision, like the items above, but live in the write journal.
+    annotated["write_conflicts"] = intent_review.conflict_count(vault_root)
+    return annotated
 
 
 def op_evolution(
@@ -9502,8 +9505,11 @@ def op_review_memory(
     if mode == "item":
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
+        from . import intent_review
         from . import upkeep as upkeep_module
 
+        if intent_review.is_write_ref(ref):
+            return intent_review.item(vault_root, ref)
         if promotions_module.is_promotion_ref(ref):
             from . import promotion_revert as promotion_revert_module
 
@@ -10056,21 +10062,35 @@ def op_triage_memory(
     expected_fingerprint: str | None = None,
     source_path: _OptionalRelationText = None,
     decision: _VocabularyDecisionArgument = None,
+    rebase: bool = False,
 ) -> dict:
     """Save review decisions or attention settings; use returned refs and fingerprints.
 
     Args:
-        ref: `exomem://review/<id>` (also `adoption/`, `upkeep/`, `family/<family>`).
+        ref: `exomem://review/<id>` (also `adoption/`, `upkeep/`, `family/<family>`),
+            or `exomem://write/<id>` for a write conflict.
         action: dismiss, snooze, reopen (item); quiet, off, normal (family);
-            decide-vocabulary. `off` also drops explicit review; audit is unaffected.
+            decide-vocabulary; retry-write, discard-write (write conflict). `off` also
+            drops explicit review; audit is unaffected.
         until: YYYY-MM-DD; required for snooze.
         why: Rationale led by a code (`intentional:`, `false_positive:`, `handled:`,
             `deferred:`, `too_frequent:`); required for quiet and off.
         expected_fingerprint: Reviewed fingerprint; mismatch refuses.
         source_path: Source page; required for newly returned relation items.
         decision: Payload for decide-vocabulary.
+        rebase: retry-write only: drop the hash guards so the write applies to current content.
     """
+    from . import intent_review
+
     normalized_action = str(action or "").strip().lower()
+    if intent_review.is_write_ref(ref):
+        if any(item is not None for item in (until, expected_fingerprint, source_path, decision)):
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: a write conflict accepts only ref, action, why and rebase"
+            )
+        return intent_review.triage(vault_root, ref, normalized_action, why=why, rebase=rebase)
+    if rebase:
+        raise ValueError("INVALID_REVIEW_ACTION: rebase applies to a write conflict only")
     vocabulary_ref = ref.startswith("exomem://review/vocabulary/")
     if normalized_action == "decide-vocabulary":
         if not vocabulary_ref:

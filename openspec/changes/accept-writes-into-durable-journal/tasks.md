@@ -39,9 +39,9 @@
 
 ## 5. Reconciliation and decisions
 
-- [ ] 5.1 Add the closed outcome table beside the error codes, and the target rewrite through the stable reference. Proof: one case per row with its own branch, including `MUTATION_ACKNOWLEDGEMENT_PENDING`, committed-uncertain and committed failure (`committed`, no retry), `IDEMPOTENCY_KEY_REUSED` and `CLOUD_CELL_READ_ONLY`.
-- [ ] 5.2 Add the per-intent bound and the `stalled` cause. Proof: an intent whose reference never prepares becomes `conflicted`, `stalled`, after the bound, and a later intent then commits.
-- [ ] 5.3 Add write-conflict review items with the decision evidence: `review_memory(ref)`, `triage_memory` `retry-write` (new key, `rebase=true` for `basis_changed`, owner only for `outcome_unknown`, refused for authorization causes) and `discard-write`, and the attention count. Proof: a hand edit under `expected_hash` produces an item; `discard-write` deletes the arguments; `retry-write` with `rebase=true` commits on current content under the key `intent:<id>:retry:1`.
+- [x] 5.1 Add the closed outcome table beside the error codes, and the target rewrite through the stable reference. Proof: one case per row with its own branch, including `MUTATION_ACKNOWLEDGEMENT_PENDING`, committed-uncertain and committed failure (`committed`, no retry), `IDEMPOTENCY_KEY_REUSED` and `CLOUD_CELL_READ_ONLY`.
+- [x] 5.2 Add the per-intent bound and the `stalled` cause. Proof: an intent whose reference never prepares becomes `conflicted`, `stalled`, after the bound, and a later intent then commits.
+- [x] 5.3 Add write-conflict review items with the decision evidence: `review_memory(ref)`, `triage_memory` `retry-write` (new key, `rebase=true` for `basis_changed`, owner only for `outcome_unknown`, refused for authorization causes) and `discard-write`, and the attention count. Proof: a hand edit under `expected_hash` produces an item; `discard-write` deletes the arguments; `retry-write` with `rebase=true` commits on current content under the key `intent:<id>:retry:1`.
 
 ## 6. Observation and reads
 

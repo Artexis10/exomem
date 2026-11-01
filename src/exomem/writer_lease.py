@@ -8943,7 +8943,10 @@ def invoke_command(
                 from .source_capture import require_authority
 
                 require_authority(injected[0])
-            return get_manager().invoke(
+            # An applier dispatches through the manager that owns its journal, never the process default.
+            applier = intent_accept.current_applier_dispatch()
+            manager = applier.manager if applier is not None and applier.manager is not None else get_manager()
+            return manager.invoke(
                 dispatch_command,
                 injected,
                 kwargs,

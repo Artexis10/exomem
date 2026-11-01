@@ -9064,11 +9064,11 @@
                   "type": "string"
                 },
                 "ref": {
-                  "description": "`exomem://review/<id>` (also `adoption/`, `upkeep/`, `family/<family>`).",
+                  "description": "`exomem://review/<id>` (also `adoption/`, `upkeep/`, `family/<family>`), or `exomem://write/<id>` for a write conflict.",
                   "type": "string"
                 },
                 "action": {
-                  "description": "dismiss, snooze, reopen (item); quiet, off, normal (family); decide-vocabulary. `off` also drops explicit review; audit is unaffected.",
+                  "description": "dismiss, snooze, reopen (item); quiet, off, normal (family); decide-vocabulary; retry-write, discard-write (write conflict). `off` also drops explicit review; audit is unaffected.",
                   "type": "string"
                 },
                 "until": {
@@ -9234,6 +9234,11 @@
                     "choice"
                   ],
                   "type": "object"
+                },
+                "rebase": {
+                  "description": "retry-write only: drop the hash guards so the write applies to current content.",
+                  "type": "boolean",
+                  "default": false
                 }
               },
               "required": [

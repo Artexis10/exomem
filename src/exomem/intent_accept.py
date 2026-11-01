@@ -12,7 +12,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -60,6 +60,8 @@ class ApplierDispatch:
     budget_seconds: float = PER_INTENT_BOUND_SECONDS
     #: Nobody waits for derived convergence on an applied intent, so the applier leaves it pending (design D4).
     wait_for_derived: bool = False
+    #: The lease manager that owns the intent's journal. `None` means the process manager.
+    manager: Any = None
 
 
 _APPLIER_DISPATCH: ContextVar[ApplierDispatch | None] = ContextVar("exomem_applier_dispatch", default=None)
@@ -204,6 +206,30 @@ def planned_hashes(vault_root: Any, paths: Any) -> dict[str, str]:
     return found
 
 
+def planned_references(vault_root: Any, paths: Any) -> dict[str, str]:
+    """The stable memory reference of each planned target that holds one now, keyed by the path the caller named.
+
+    The applier follows a moved target through it (design D5). A path with no readable identity is left out.
+    """
+    from pathlib import Path
+
+    from . import memory_refs
+
+    root = Path(vault_root).resolve()
+    found: dict[str, str] = {}
+    for named in paths or ():
+        try:
+            target = (root / named).resolve()
+            if not (target.is_relative_to(root) and target.is_file()):
+                continue
+            memory_id = memory_refs.read_reference_owner(root, target)
+        except (OSError, ValueError):
+            continue
+        if memory_id is not None:
+            found[named] = memory_refs.memory_ref(memory_id)
+    return found
+
+
 def principal_snapshot(principal: Any) -> dict[str, Any]:
     """Every field of the request principal; none of them holds a bearer, password or session secret."""
     values = dataclasses.asdict(principal)
@@ -302,6 +328,9 @@ def answer_for(intent: write_intents.Intent, *, receipt_id: str | None, idempote
     return envelope
 
 
+#: The `base_guards` key that holds each target's stable reference. Not a guard: a rebase keeps it.
+TARGET_REFERENCES = "target_refs"
+
 # The arguments that bind a write to the state its caller saw (design D3). The command schemas fix these
 # names; a later rebase removes exactly these guards.
 _BASIS_ARGUMENTS = (  # nosemgrep: ep-word-set -- closed argument names that the command schemas fix
@@ -312,6 +341,28 @@ _BASIS_ARGUMENTS = (  # nosemgrep: ep-word-set -- closed argument names that the
     "semantic_transition_token",
     "vocabulary_fingerprint",
 )
+#: What `retry-write` with `rebase=true` removes, so the write applies to current content (design D5).
+REBASE_GUARDS = ("expected_hash", "draft_hash", "vocabulary_fingerprint")  # nosemgrep: ep-word-set -- closed argument names that the command schemas fix
+#: A write bound to one of these cannot rebase: its draft or transition belongs to the state its caller saw.
+UNREBASABLE_ARGUMENTS = ("draft_token", "transition_token", "semantic_transition_token")  # nosemgrep: ep-word-set -- closed argument names that the command schemas fix
+
+def argument_value(arguments: Mapping[str, Any], name: str) -> Any:
+    """A named argument, from the top level or from the nested `operation` that `edit_memory` carries its guards in."""
+    if name in arguments:
+        return arguments[name]
+    operation = arguments.get("operation")
+    return operation.get(name) if isinstance(operation, Mapping) else None
+
+
+def without_arguments(arguments: Mapping[str, Any], names: Sequence[str]) -> dict[str, Any]:
+    """A copy of `arguments` with each named argument removed, at the top level and inside a nested `operation`."""
+    kept = {key: value for key, value in arguments.items() if key not in names}
+    operation = kept.get("operation")
+    if isinstance(operation, Mapping):
+        kept["operation"] = {key: value for key, value in operation.items() if key not in names}
+    return kept
+
+
 # A call that carries a reviewed draft was previewed already, and its preview arguments do not repeat.
 _DRAFT_ARGUMENTS = ("draft_token", "draft_hash", "draft_id")  # nosemgrep: ep-word-set -- closed argument names that the command schemas fix
 
@@ -367,7 +418,7 @@ class Accept:
                 digest=self.digest,
                 retry_key=self.key,
                 window_seconds=self.expires_after,
-                base_guards={name: self.kwargs[name] for name in _BASIS_ARGUMENTS if name in self.kwargs},
+                base_guards=self._base_guards(),
                 validation=validation,
                 planned_paths=sorted(target_pages(self.command, self.kwargs)),
                 target_hashes=planned_hashes(self.injected[0], target_pages(self.command, self.kwargs)),
@@ -378,6 +429,16 @@ class Accept:
             # Arguments the journal cannot serialise cannot be replayed later either.
             log.warning("a write's arguments cannot be journaled: %s", type(unstorable).__name__)
             self.refusal = journal_refusal(write_intents.JournalUnavailable("arguments cannot be stored"))
+
+    def _base_guards(self) -> dict[str, Any]:
+        """The caller-bound basis and the stable reference of each target (design D3). Hashes and ids, never content."""
+        guards = {
+            name: value for name in _BASIS_ARGUMENTS if (value := argument_value(self.kwargs, name)) is not None
+        }
+        references = planned_references(self.injected[0], target_pages(self.command, self.kwargs))
+        if references:
+            guards[TARGET_REFERENCES] = references
+        return guards
 
     def _validate_before_accept(self, *, narrow: bool) -> str:
         """`complete` when the command's own validation passed before accept, else `deferred`.

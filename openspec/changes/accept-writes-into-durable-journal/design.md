@@ -216,7 +216,7 @@ Undecided `conflicted` intents count toward the bounds. A pile of undecided conf
 
 **Boundary wait.** The applier holds no request worker. It waits for the boundary as a loop of bounded attempts, each one an ordinary acquire. It never waits without bound inside writer authority, because a store release waits for every active authority guard to end. It raises the cross-process waiter signal, so background holders step aside at their next unit. An overdue holder raises an operator alarm in doctor and metrics, not a refusal. Each intent is one dispatch. The applier releases the boundary between intents, so other processes and background units interleave. This change does not batch intents.
 
-**Per-intent bound.** Some wait causes belong to one intent: its reference is not prepared, a component it needs stays warming, or the cell is read-only. When such a cause lasts longer than the per-intent bound, the intent becomes `conflicted` with cause `stalled`, and later intents proceed. The default is 15 minutes (my choice). A held boundary and a lost writer lease block every intent alike, so they do not count toward the bound.
+**Per-intent bound.** Some wait causes belong to one intent: its reference is not prepared, a component it needs stays warming, or the cell is read-only. When such a cause lasts longer than the per-intent bound, the intent becomes `conflicted` with cause `stalled`, and later intents proceed. The default is 15 minutes (my choice). A held boundary and a lost writer lease block every intent alike, so they do not count toward the bound. The timer is the age of one unbroken wait on one cause: a change of cause restarts it, so a lost lease or a held boundary in between never adds to it.
 
 **Exactly once.** K in `IdempotencyStore` is the commit authority. Recovery at each crash point:
 
@@ -283,6 +283,10 @@ A `conflicted` intent is a write-conflict review item. Its state name differs fr
 - A discard, and a rejection at apply, release the vocabulary application binding that the intent created at accept. Without that release the binding stays `applying`, and later applications of that item refuse.
 - The attention review and the recall status show the count of undecided write conflicts.
 - The `triage_memory` write-intent actions are never journaled themselves.
+- `retry-write` on an intent that holds a vocabulary binding first ends the old intent `discarded`, which releases its binding as a discard does. It then records the retry under the new key and never rebinds the old key.
+- Rebase removes the hash guards wherever the call carries them: at the top level and inside the nested `operation` of `edit_memory`. Accept records the same guards from both places.
+- Accept records the stable reference of each existing target in the base guards. A missing target that has a recorded reference resolves through it; one current path rewrites the leaf's target argument only.
+- The applier dispatches through its own manager, the one that owns its journal, never the process manager. Two managers in one process stay apart.
 
 **Order after a conflict.** When an intent becomes `conflicted`, a later intent for the same target applies before it. A `retry-write` then applies the earlier write after the later one. The review item says so when a later intent touched the same target.
 

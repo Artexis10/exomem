@@ -12,7 +12,8 @@ The service is the preferred applier: it holds the lock while it runs, and holds
 sidecar that a CLI applier reads to stand aside. A CLI applier releases the lock after each intent.
 
 Crash recovery resolves a row a dead applier left `applying` before the queue is read (design D4, crash
-table). The per-intent bound and the full outcome table belong to later tasks; the seams are marked `# seam:`.
+table). A dispatch that does not commit ends by the closed table in `intent_outcomes`. A cause that belongs to one intent
+ends it `stalled` once it outlasts the per-intent bound (design D4, D5).
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from typing import Any, BinaryIO
 from . import (
     capabilities,
     intent_accept,
+    intent_outcomes,
     mutation_journal,
     mutation_lock,
     request_budget,
@@ -55,20 +57,15 @@ RETRY_PAUSE_SECONDS = 0.1
 STOP_JOIN_SECONDS = 15.0
 
 # Causes this module writes to `conflict` and `wait_cause`: the applier's own protocol, not vocabulary.
-CAUSE_REVOKED = "authorization_revoked"
-CAUSE_EXPIRED = "authorization_expired"
-CAUSE_APPLY_FAILED = "apply_failed"
-CAUSE_REVIEW_REQUIRED = "review_required"
+CAUSE_REVOKED = intent_outcomes.CAUSE_REVOKED
+CAUSE_EXPIRED = intent_outcomes.CAUSE_EXPIRED
+CAUSE_APPLY_FAILED = intent_outcomes.CAUSE_APPLY_FAILED
 CAUSE_STOPPING = "applier_stopping"
-CAUSE_OUTCOME_UNKNOWN = "outcome_unknown"
-CAUSE_WRITER_LEASE = "writer_lease"
+CAUSE_OUTCOME_UNKNOWN = intent_outcomes.CAUSE_OUTCOME_UNKNOWN
+CAUSE_WRITER_LEASE = intent_outcomes.CAUSE_WRITER_LEASE
+CAUSE_TARGET_MOVED = "target_moved"
 #: A replica that is not the writer re-asks the coordinator this often, not on the boundary's retry pause.
 LEASE_WAIT_SECONDS = 1.0
-# Error codes of a refusal that passes, which the applier waits out and re-runs (design D5: "wait and re-run").
-# Closed protocol codes that the writer raises, not vocabulary; task 5.1 owns the full outcome table.
-_WAIT_CODES = ("CLOUD_CELL_READ_ONLY",)  # nosemgrep: ep-word-set -- closed protocol error codes
-# The writer lease is another replica's, or this one's was fenced: the intent stays queued here until it holds it again.
-_LEASE_CODES = ("WRITER_FENCED", "WRITER_LEASE_REQUIRED")  # nosemgrep: ep-word-set -- closed protocol error codes
 # Receipt states of a key whose claim never reached its leaf; every other state is evidence the claim machinery resolves.
 _NO_EVIDENCE_STATES = ("reserved", "pending")  # nosemgrep: ep-word-set -- the idempotency store's closed row states
 
@@ -169,8 +166,11 @@ class Applier:
         *,
         kind: str,
         on_end: Any = None,
+        bound_seconds: float | None = None,
     ):
         self.manager = manager
+        # Read at construction, so a test or an operator setting the module constant sets it for the next applier.
+        self.bound_seconds = intent_accept.PER_INTENT_BOUND_SECONDS if bound_seconds is None else bound_seconds
         self.vault_root = vault_root
         self.journal = journal
         self.kind = kind
@@ -354,6 +354,7 @@ class Applier:
             window_seconds=intent.window_seconds,
             request_id=intent.request_id,
             stop=self._stop,
+            manager=self.manager,
         )
         budget = request_budget.RequestBudget(seconds=dispatch.budget_seconds)
         # The leaf receives the rewritten arguments when a rewrite exists; the claim keeps the original digest.
@@ -378,38 +379,84 @@ class Applier:
     def _classify_result(self, result: Any) -> tuple[str, Any]:
         if isinstance(result, dict) and result.get("state") == "committed":
             return "committed", _portable_value(result)
-        # Design D5 (task 5.1) replaces this with the full table. Until then a write
-        # that did not commit is held as conflicted, never reported as committed.
-        return "conflicted", {"cause": CAUSE_REVIEW_REQUIRED, "result": _portable_value(result)}
+        # A write that did not commit is held as conflicted, never reported as committed.
+        row = intent_outcomes.classify_result(result)
+        return row.kind, {"cause": row.cause, "result": _portable_value(result)}
 
     def _classify_error(self, intent: write_intents.Intent, error: Exception) -> tuple[str, Any]:
+        """Map a dispatch that raised to its row of the outcome table (design D5)."""
         public = error_dict(error)
-        # A leaf may wrap the writer's refusal; the public form names the code the caller would have seen.
-        code = getattr(error, "code", None) or public.get("code")
-        if code in _LEASE_CODES:
-            return "wait", CAUSE_WRITER_LEASE
-        if intent_accept.is_precommit_refusal(error) or code in _WAIT_CODES:
-            return "wait", getattr(error, "details", {}).get("cause") or code or "busy"
-        if code == "MUTATION_OUTCOME_UNKNOWN":
+        if intent_outcomes.error_code(error) == intent_outcomes.NOT_FOUND:
+            moved = self._follow_moved_target(intent)
+            if moved is not None:
+                return moved
+        row = intent_outcomes.classify_error(error, validation=intent.validation)
+        if row.kind == intent_outcomes.WAIT:
+            return "wait", row
+        if row.kind == intent_outcomes.COMMITTED:
+            # A write that committed is never retried; its recorded failure or uncertainty is its terminal.
+            log.warning("an applied intent committed without a persisted terminal: %s", public.get("code"), exc_info=error)
+            terminal = {"ok": False, "state": "committed", "committed": True, "error": public}
+            return "committed", {**terminal, "uncertain": True} if row.uncertain else terminal
+        if row.kind == intent_outcomes.REJECTED:
+            return "rejected", {"error": public}
+        if row.cause == CAUSE_OUTCOME_UNKNOWN:
             # The claim on K died without evidence. The write may have landed, so it is never re-run (design D4).
             return "conflicted", self._outcome_unknown(intent)
-        if getattr(error, "committed", False) is True:
-            # A write that committed is never retried; its recorded failure is its terminal.
-            log.warning("an applied intent committed without a persisted terminal: %s", public.get("code"), exc_info=error)
-            return "committed", {"ok": False, "state": "committed", "error": public}
-        # seam: the full outcome table (design D5, task 5.1) splits this by code. The synchronous error is
-        # recorded as it is, so a caller that polls sees what a synchronous caller would have seen.
-        if intent.validation == "deferred":
-            return "rejected", {"error": public}
-        return "conflicted", {"cause": CAUSE_APPLY_FAILED, "error": public}
+        return "conflicted", {"cause": row.cause, "error": public}
+
+    def _follow_moved_target(self, intent: write_intents.Intent) -> tuple[str, Any] | None:
+        """Handle a missing target through the stable reference recorded at accept (design D5).
+
+        Returns `("wait", ...)` after it rewrote the leaf's target to the one current path, a `target_missing`
+        conflict when the reference no longer resolves to one path, and `None` when no recorded target is missing,
+        so the error is not about the target.
+        """
+        from . import memory_refs
+        from .find import RetrievalIndexWarming
+
+        references = (intent.base_guards or {}).get(intent_accept.TARGET_REFERENCES) or {}
+        present = intent_accept.planned_hashes(self.vault_root, list(references))
+        missing = {path: ref for path, ref in references.items() if path not in present}
+        if not missing:
+            return None
+        moved: dict[str, str] = {}
+        for path, reference in missing.items():
+            memory_id = memory_refs.parse_memory_ref(reference)
+            try:
+                found = memory_refs.paths_for_ids_read_only(self.vault_root, [memory_id]).get(memory_id, ())
+            except RetrievalIndexWarming:
+                return "wait", intent_outcomes.Outcome(intent_outcomes.WAIT, "MUTATION_WARMING", counts=True)
+            except (memory_refs.ReferenceError, OSError):
+                found = ()
+            if len(found) != 1:
+                return "conflicted", {
+                    "cause": intent_outcomes.CAUSE_TARGET_MISSING,
+                    "evidence": {"targets": sorted(missing)},
+                }
+            moved[path] = found[0]
+        command = _command(intent.command, intent.surface)
+        arguments = dict(intent.leaf_arguments if intent.leaf_arguments is not None else intent.arguments)
+        rewritten = False
+        for role in command.path_roles if command is not None else ():
+            if arguments.get(role.argument) in moved:
+                arguments[role.argument] = moved[arguments[role.argument]]
+                rewritten = True
+        if not rewritten:
+            return None
+        self.journal.set_leaf_arguments(intent.intent_id, arguments)
+        return "wait", intent_outcomes.Outcome(intent_outcomes.WAIT, CAUSE_TARGET_MOVED)
 
     def _settle(self, intent: write_intents.Intent, attempt: tuple[str, Any]) -> None:
         outcome, detail = attempt
         journal = self.journal
         if outcome == "wait":
-            journal.requeue(intent.intent_id, str(detail))
-            if str(detail) != CAUSE_STOPPING:
-                self._stop.wait(LEASE_WAIT_SECONDS if detail == CAUSE_WRITER_LEASE else RETRY_PAUSE_SECONDS)
+            if detail.counts and self._stalled(intent, detail.cause):
+                self._stall(intent, detail.cause)
+                return
+            journal.requeue(intent.intent_id, str(detail.cause))
+            if detail.cause != CAUSE_STOPPING:
+                self._stop.wait(LEASE_WAIT_SECONDS if detail.cause == CAUSE_WRITER_LEASE else RETRY_PAUSE_SECONDS)
             return
         if outcome == "committed":
             journal.finish(intent.intent_id, "committed", terminal=detail)
@@ -418,6 +465,31 @@ class Applier:
             journal.finish(intent.intent_id, "rejected", terminal={"ok": False, "state": "rejected", **detail})
         else:
             journal.finish(intent.intent_id, "conflicted", conflict=detail)
+        intent_accept.notify_applier_progress()
+
+    def _stalled(self, intent: write_intents.Intent, cause: str | None) -> bool:
+        """Whether this intent's own wait cause has lasted the per-intent bound.
+
+        `wait_since` restarts when the cause changes, and a lost writer lease or a held boundary is a different
+        cause, so those waits never add to it: only an unbroken wait on one cause of this intent counts.
+        """
+        return (
+            intent.wait_cause == cause
+            and intent.wait_since is not None
+            and self.journal.clock() - intent.wait_since >= self.bound_seconds
+        )
+
+    def _stall(self, intent: write_intents.Intent, cause: str | None) -> None:
+        conflict: dict[str, Any] = {
+            "cause": intent_outcomes.CAUSE_STALLED,
+            "stalled_on": cause,
+            "since": intent.wait_since,
+            "bound_seconds": self.bound_seconds,
+        }
+        if cause == intent_outcomes.CAUSE_ACKNOWLEDGEMENT_PENDING:
+            # The write may have committed behind the store's pending acknowledgement: the owner needs the same evidence.
+            conflict["evidence"] = self._outcome_unknown(intent)["evidence"]
+        self.journal.finish(intent.intent_id, "conflicted", conflict=conflict)
         intent_accept.notify_applier_progress()
 
 

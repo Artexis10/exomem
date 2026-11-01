@@ -663,6 +663,58 @@ class WriteIntentJournal:
         finally:
             conn.close()
 
+    @_unavailable_on_sqlite_error
+    def set_leaf_arguments(self, intent_id: str, leaf_arguments: Mapping[str, Any]) -> bool:
+        """Record the arguments the leaf receives when the applier moved the target. The key and its digest stay."""
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "UPDATE intents SET leaf_arguments = ?, updated_at = ? WHERE intent_id = ? AND state = 'applying'",
+                (_dump(leaf_arguments), self.clock(), intent_id),
+            )
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    # -- review reads -----------------------------------------------------------------------------------
+
+    @_unavailable_on_sqlite_error
+    def conflicted(self, *, audience: str | None = None) -> list[Intent]:
+        """Intents that wait for an owner decision, oldest first; `audience` limits them to one principal audience."""
+        query = "SELECT * FROM intents WHERE state = 'conflicted'"
+        params: tuple[Any, ...] = ()
+        if audience is not None:
+            query += " AND audience = ?"
+            params = (audience,)
+        conn = self._connect()
+        try:
+            rows = conn.execute(query + " ORDER BY seq", params).fetchall()
+        finally:
+            conn.close()
+        return [_decode(row) for row in rows]
+
+    @_unavailable_on_sqlite_error
+    def count_conflicted(self) -> int:
+        conn = self._connect()
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM intents WHERE state = 'conflicted'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    @_unavailable_on_sqlite_error
+    def after(self, seq: int) -> list[Intent]:
+        """Every intent accepted after `seq` that is not discarded, oldest first: what a retry would overtake."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM intents WHERE seq > ? AND state != 'discarded' ORDER BY seq", (seq,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_decode(row) for row in rows]
+
     # -- end of life ----------------------------------------------------------------------------------
 
     @_unavailable_on_sqlite_error
@@ -713,6 +765,104 @@ class WriteIntentJournal:
         if drop_inputs:
             self._remove_staged(intent_id)
         return None if row is None else _decode(row)
+
+    @_unavailable_on_sqlite_error
+    def retry(
+        self,
+        intent_id: str,
+        *,
+        arguments: Mapping[str, Any],
+        digest: str,
+        base_guards: Mapping[str, Any],
+        reason: str,
+    ) -> Intent | None:
+        """Replace one `conflicted` intent with a new `accepted` one under a new key at the end of the line (design D3, rule 6).
+
+        One transaction ends the old intent `discarded`, which releases nothing here but drops its arguments, and
+        inserts the new row with the old row's principal, surface, validation, targets and staged inputs. The new key is
+        `intent:<id>:retry:1`: an intent is retried once, because the retry replaces it. Returns None when the intent
+        is not `conflicted`. The caller releases any vocabulary binding of the old key before it calls this.
+        """
+        old = self.get(intent_id)
+        if old is None or old.state != _CONFLICTED:
+            return None
+        new_id = uuid.uuid4().hex
+        staged_source = self.inputs_root / intent_id
+        staged_copy = self.inputs_root / new_id
+        if staged_source.is_dir():
+            try:
+                shutil.copytree(staged_source, staged_copy, copy_function=shutil.copy2)
+                _fsync_directory(staged_copy)
+                _fsync_directory(self.inputs_root)
+            except OSError as error:
+                shutil.rmtree(staged_copy, ignore_errors=True)
+                raise JournalUnavailable(f"staged inputs cannot be copied: {error}") from error
+        argument_text = _dump(arguments)
+        now = self.clock()
+        row = {
+            "intent_id": new_id,
+            "vault_id": old.vault_id,
+            "replica_id": old.replica_id,
+            "audience": old.audience,
+            "state": "accepted",
+            "command": old.command,
+            "arguments": argument_text,
+            "leaf_arguments": None,
+            "surface": old.surface,
+            "principal": _dump(old.principal),
+            "retry_key": f"intent:{intent_id}:retry:1",
+            "digest": digest,
+            "window_seconds": INTENT_RETENTION_SECONDS,
+            "request_id": str(uuid.uuid4()),
+            "base_guards": _dump(base_guards),
+            "validation": old.validation,
+            "planned_paths": _dump(old.planned_paths),
+            "target_hashes": _dump(old.target_hashes),
+            "inputs": _dump(old.inputs),
+            "held_bytes": len(argument_text.encode("utf-8"))
+            + sum(int(item.get("size", 0)) for item in old.inputs or ()),
+            "accepted_at": now,
+            "updated_at": now,
+        }
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                ended = conn.execute(
+                    "UPDATE intents SET state = 'discarded', updated_at = ?, terminal = ?, conflict = NULL, "
+                    "terminal_at = ?, arguments = NULL, leaf_arguments = NULL WHERE intent_id = ? AND state = 'conflicted'",
+                    (
+                        now,
+                        _dump({"ok": False, "state": "discarded", "reason": reason}),
+                        now,
+                        intent_id,
+                    ),
+                )
+                if ended.rowcount != 1:
+                    conn.execute("ROLLBACK")
+                    shutil.rmtree(staged_copy, ignore_errors=True)
+                    return None
+                conn.execute(
+                    f"INSERT INTO intents({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+                    tuple(row.values()),
+                )
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            created = conn.execute(
+                "SELECT * FROM intents WHERE intent_id = ?", (new_id,)
+            ).fetchone()
+        except BaseException as error:
+            shutil.rmtree(staged_copy, ignore_errors=True)
+            if isinstance(error, sqlite3.Error):
+                raise JournalUnavailable(f"intent journal cannot write: {error}") from error
+            raise
+        finally:
+            conn.close()
+        self._remove_staged(intent_id)
+        return _decode(created)
 
     @_unavailable_on_sqlite_error
     def purge_expired(self) -> int:
