@@ -34,7 +34,13 @@ from . import (
 )
 from .cell_init import _ensure_private_directory
 from .cloud_cell import CELL_ID_PATTERN
-from .cloud_import import DEFAULT_MAX_MEMBERS, ArchiveRefused, reserve_bytes_from_env, unpack_stream
+from .cloud_import import (
+    DEFAULT_MAX_MEMBERS,
+    RETRY_OWNER,
+    ArchiveRefused,
+    reserve_bytes_from_env,
+    unpack_stream,
+)
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 
 CHUNK_BYTES = 1024 * 1024
@@ -384,7 +390,7 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
         # A walk skips the settling of renamed members and records the wrong codes.
         raise ArchiveRefused("IMPORT_REQUEST_INVALID", "walk_stage")
     if receipt is None and stage.exists() and not walk_stage:
-        raise ArchiveRefused("IMPORT_RECEIPT_UNREADABLE", "receipt")
+        raise ArchiveRefused("IMPORT_RECEIPT_UNREADABLE", "receipt", retry=RETRY_OWNER)
     renamed = rename_journal.pending(vault_root, under=f"{import_stage.STAGE_DIR}/{import_id}")
     if renamed:
         # A renamed member has no stage copy and no page: its manifest entry is all that settles it. The Job does not
@@ -396,7 +402,7 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
             _private_json(import_stage.receipt_path(vault_root, import_id), receipt)
         else:
             _write_walk(vault_root, import_id, import_stage.renames_pending_record(pending))
-        raise ArchiveRefused("IMPORT_RENAMES_PENDING", "renamed members")
+        raise ArchiveRefused("IMPORT_RENAMES_PENDING", "renamed members", retry=RETRY_OWNER)
     if receipt is None:
         if walk_stage:
             _walk(vault_root, import_id)
@@ -407,9 +413,9 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
         if import_stage.RESIDUAL_KEY not in receipt and (import_stage.MEMBERS_KEY in receipt or stage.exists()):
             unfiled = adoption_run.unfiled_members(vault_root, import_id)
             # The receipt's record outranks a walk's. An empty one would say that every member was filed over the
-            # members that a walk listed, so the walk's record stands.
+            # members that a walk listed, so the walk's record stands. One with members carries the walk's.
             if unfiled or not import_stage.read_walk_members(vault_root, import_id):
-                receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record(unfiled)
+                receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record_with_walk(vault_root, import_id, unfiled)
                 changed = True
         for key in (import_stage.MEMBERS_KEY, import_stage.RENAMES_PENDING_KEY):
             changed |= receipt.pop(key, None) is not None
@@ -427,7 +433,6 @@ def _walk(vault_root: Path, import_id: str) -> None:
     _write_walk(vault_root, import_id, import_stage.residual_record([
         import_stage.residual_member(path, size, import_stage.UNREADABLE_CODE)
         for path, size in import_stage.staged_files(vault_root, import_id)
-        if path != import_stage.SERIES_FILE
     ]))
 
 
@@ -470,6 +475,8 @@ def main(argv: list[str] | None = None) -> int:
             result = run_import(request, args.vault, lambda: urlopen(args.url, timeout=30))
     except ArchiveRefused as error:
         result = {"ok": False, "error": error.code}
+        if error.retry is not None:
+            result["retry"] = error.retry
     except Exception:  # noqa: BLE001 -- errors may contain member names or signed URLs
         result = {"ok": False, "error": "IMPORT_FAILED"}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")

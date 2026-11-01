@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
@@ -300,6 +300,8 @@ class _FastAcknowledgementSession:
     advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
     handoff_in_progress: bool = False
+    #: `_owed_proofs` for the batch and pending counts it was read at.
+    owed_proofs: tuple[tuple[int, int], tuple[int, int]] | None = None
 
 
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
@@ -525,8 +527,79 @@ _handoff_samples: dict[Path, deque[float]] = {}
 _handoff_samples_lock = threading.Lock()
 
 
-def _pending_handoff_batches(session: _FastAcknowledgementSession) -> int:
-    return sum(1 for b in session.batches if b.handoff_outcome is None and b.handoff_error is None)
+def _unhanded_batches(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    return [
+        batch
+        for batch in session.batches
+        if batch.handoff_outcome is None and batch.handoff_error is None
+    ]
+
+
+def _custody_proofs(
+    session: _FastAcknowledgementSession,
+    rel_paths: Collection[str],
+    holders: frozenset[str] | None,
+) -> list[_FastAcknowledgementBatch]:
+    """The session's batches, newest first, that a handoff moving `rel_paths` proves.
+
+    Each batch on one of the paths that is not handed off or whose handoff failed, and each
+    earlier one that still holds unretired custody on one of them. An earlier batch whose
+    rows on those paths are all retired handed them on before, to the batch that holds them
+    now, so its re-proof would find nothing to hand on. Without that skip each handoff
+    re-proves every batch that shares an import's index pages, and an import's handoffs
+    cost the square of its batches. Unknown `holders` (unreadable custody) prove every
+    batch on the paths: dearer, never less.
+    """
+    return [
+        batch
+        for batch in reversed(session.batches)
+        if any(path.rel_path in rel_paths for path in batch.receipt.paths)
+        and (
+            batch.handoff_outcome is None
+            or batch.handoff_error is not None
+            or holders is None
+            or batch.receipt.batch_id in holders
+        )
+    ]
+
+
+def _handoff_targets(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    """The batches the next handoff proves, newest first: `_custody_proofs` of the unhanded."""
+    unhanded = _unhanded_batches(session)
+    changed = {path.rel_path for batch in unhanded for path in batch.receipt.paths}
+    if not changed:
+        return []
+    from . import derived_receipts
+
+    holders = derived_receipts.open_custody_batches(session.vault_root, changed)
+    return _custody_proofs(session, changed, holders)
+
+
+def _owed_proofs(session: _FastAcknowledgementSession) -> tuple[int, int]:
+    """The batches the session's next handoff proves now, and the ones a later batch adds.
+
+    A batch still to commit moves what the newest batch moved, as each batch of an import
+    rewrites its index and log pages, so it also re-proves the earlier holders of those
+    pages. Read once per commit or handoff: between them custody only retires, so the
+    counts stay an upper bound.
+    """
+    unhanded = _unhanded_batches(session)
+    key = (len(session.batches), len(unhanded))
+    if session.owed_proofs is not None and session.owed_proofs[0] == key:
+        return session.owed_proofs[1]
+    changed = {path.rel_path for batch in unhanded for path in batch.receipt.paths}
+    newest = session.batches[-1:]
+    later = {path.rel_path for batch in newest for path in batch.receipt.paths}
+    counts = (0, 0)
+    if changed or later:
+        from . import derived_receipts
+
+        holders = derived_receipts.open_custody_batches(session.vault_root, changed | later)
+        proved = {batch.receipt.batch_id for batch in _custody_proofs(session, changed, holders)}
+        held = {batch.receipt.batch_id for batch in _custody_proofs(session, later, holders)}
+        counts = (len(proved), len(held - proved))
+    session.owed_proofs = (key, counts)
+    return counts
 
 
 def _timed_handoff(session: _FastAcknowledgementSession) -> None:
@@ -544,9 +617,10 @@ def _timed_handoff(session: _FastAcknowledgementSession) -> None:
 def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> float | None:
     """Seconds the custody handoff will take once `more_batches` more batches have committed.
 
-    The dearest recent time per proved batch, times every batch of the active session plus
-    `more_batches`, or nothing when no batch is owed. None when no handoff has been measured for
-    this vault.
+    The dearest recent time per proved batch, times the batches a handoff would prove
+    (`_owed_proofs`): those it proves now, `more_batches`, and with them the earlier
+    holders of the pages they move. Nothing when no batch is owed. None when no handoff
+    has been measured for this vault.
     """
     with _handoff_samples_lock:
         samples = _handoff_samples.get(_fast_ack_root_key(vault_root))
@@ -555,14 +629,12 @@ def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> floa
         return None
     session = _ACTIVE_FAST_ACK_SESSION.get()
     if session is None or not active_derived_batch_custody(vault_root):
-        batches = pending = 0
+        proved, held = 0, 0
     else:
-        batches, pending = len(session.batches), _pending_handoff_batches(session)
-    if not pending and not more_batches:
+        proved, held = _owed_proofs(session)
+    if not proved and not more_batches:
         return 0.0
-    # A handoff re-proves each earlier batch that shares a path with a new one, and a batch's
-    # paths are known only once it commits; an import's batches all share its index pages.
-    return dearest * (batches + more_batches)
+    return dearest * (proved + (more_batches + held if more_batches else 0))
 
 
 #: What the running leaf declared about its default duplicate/overlap sweep:
@@ -906,26 +978,17 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> int:
     """Cache exact custody before releasing canonical writers, without waits.
 
     A newer hold can move a path whose earlier receipt was already handed off.
-    Re-prove only those overlapping receipts after publishing the newer custody.
+    Re-prove only the earlier receipts that still hold custody on such a path
+    (`_handoff_targets`), after publishing the newer custody.
     A failed handoff stays pending and cannot escape into canonical rollback.
     Returns how many receipts it proved, for the handoff's per-batch time.
     """
     proved = 0
     if session.handoff_in_progress:
         return proved
-    pending = [
-        batch
-        for batch in session.batches
-        if batch.handoff_outcome is None and batch.handoff_error is None
-    ]
-    if not pending:
+    affected = _handoff_targets(session)
+    if not affected:
         return proved
-    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
-    affected = [
-        batch
-        for batch in reversed(session.batches)
-        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
-    ]
     where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
     # Public proof and publication guards reenter consistency_guard, including
     # on the direct leaf fallback where no enclosing canonical hold exists.
@@ -4404,17 +4467,17 @@ _CAPTURE_WAIT_CEILING_SECONDS = 600.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
 _CAPTURE_WAITERS_FULL_REMEDIATION = (
     "The write did not commit. Other writes are already waiting on the boundary and "
-    "the server keeps workers free for reads: retry with the same idempotency key "
-    "after retry_after_ms."
+    "the server keeps workers free for reads: retry after retry_after_ms, with the "
+    "same idempotency key if the write carried one."
 )
 _CAPTURE_HOLDER_OVERDUE_REMEDIATION = (
     "The write did not commit. The mutation boundary's holder has run past its "
     "allowance and looks stuck: inspect coordination_status or cell health, then "
-    "retry with the same idempotency key once it clears."
+    "retry once it clears, with the same idempotency key if the write carried one."
 )
 _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
     "The write did not commit. The boundary stayed busy for the whole bounded wait: "
-    "retry with the same idempotency key after retry_after_ms."
+    "retry after retry_after_ms, with the same idempotency key if the write carried one."
 )
 
 
@@ -4423,6 +4486,26 @@ def _writes_absorb_contention() -> bool:
         "0",
         "false",
     }
+
+
+_CALLER_HOLDS_NO_REQUEST_WORKER: ContextVar[bool] = ContextVar(
+    "exomem_caller_holds_no_request_worker", default=False
+)
+
+
+@contextmanager
+def caller_holds_no_request_worker() -> Iterator[None]:
+    """Mark a write whose caller is a background thread, not an anyio request worker.
+
+    The waiter cap below protects anyio's request workers from a long holder. A background
+    commit thread is not one, so such a write still waits in line and parks, but it neither
+    takes nor counts a waiter slot and so can never make a request's write refuse as full.
+    """
+    token = _CALLER_HOLDS_NO_REQUEST_WORKER.set(True)
+    try:
+        yield
+    finally:
+        _CALLER_HOLDS_NO_REQUEST_WORKER.reset(token)
 
 
 # A waiting write parks one of the process's sync workers (anyio's limiter,
@@ -4514,7 +4597,8 @@ def _wait_out_write_warmup(
         return warming, "absorb_disabled", 0.0
     if time.monotonic() >= deadline:
         return warming, "warm_wait_exhausted", 0.0
-    if not _take_capture_waiter_slot():
+    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
+    if counted and not _take_capture_waiter_slot():
         return warming, "capture_waiters_full", 0.0
     started = time.monotonic()
     try:
@@ -4527,7 +4611,8 @@ def _wait_out_write_warmup(
             readiness.wait(warming, min(remaining, _WARMUP_POLL_SECONDS))
             warming = still_warming()
     finally:
-        _release_capture_waiter_slot()
+        if counted:
+            _release_capture_waiter_slot()
     waited = time.monotonic() - started
     return warming, None if warming is None else "warm_wait_exhausted", waited
 
@@ -4637,12 +4722,17 @@ class _ContentionWait:
         self.deadline = self.started + wait_seconds if deadline is None else deadline
         self.ticket: object | None = None
         self.holds_slot = False
+        # Whether the slot counts against the cap; a caller with no request worker holds one free.
+        self.slot_counted = False
         self.absorbed = 0
         self.last_attempt_seconds = 0.0
 
     def take_slot(self) -> bool:
         if not self.holds_slot:
-            self.holds_slot = _take_capture_waiter_slot()
+            if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
+                self.holds_slot = True
+            else:
+                self.holds_slot = self.slot_counted = _take_capture_waiter_slot()
         return self.holds_slot
 
     def join_line(self) -> None:
@@ -4674,9 +4764,9 @@ class _ContentionWait:
         return round((time.monotonic() - self.started) * 1000)
 
     def close(self) -> None:
-        if self.holds_slot:
+        if self.slot_counted:
             _release_capture_waiter_slot()
-            self.holds_slot = False
+        self.holds_slot = self.slot_counted = False
         if self.ticket is not None:
             self.queue.leave(self.ticket)
             self.ticket = None

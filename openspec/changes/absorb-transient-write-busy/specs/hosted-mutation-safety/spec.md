@@ -4,7 +4,9 @@
 
 The system SHALL acquire the vault mutation boundary before invoking a write-capable command leaf or committing an upload. If safe ownership cannot be obtained within the configured bound, the operation MUST fail with a stable machine-readable busy or unavailable error before creating, modifying, moving, or deleting any vault or sidecar file.
 
-A direct `/upload` commit that finds the boundary held by a holder still inside its allowance SHALL wait it out within the request's budget, under the same arrival-order queue, waiter cap and refusal causes (`holder_overdue`, `capture_wait_exhausted`, `capture_waiters_full`) as a keyed command write, because the handler has read or written no vault byte before it holds the boundary. A source capture of client artifacts SHALL wait out the boundary the same way, because it stages its bytes outside the vault before it holds the boundary, and its body SHALL run once. A tus upload session whose commit ends retryable with a busy or warming code SHALL be committed again by the server, with backoff and before the session expires, without waiting for the client's next read of the session.
+A direct `/upload` commit that finds the boundary held by a holder still inside its allowance SHALL wait it out within the request's budget, under the same arrival-order queue, waiter cap and refusal causes (`holder_overdue`, `capture_wait_exhausted`, `capture_waiters_full`) as a keyed command write, because the handler has read or written no vault byte before it holds the boundary. A source capture of client artifacts SHALL wait out the boundary the same way, because it stages its bytes outside the vault before it holds the boundary, and its body SHALL run once. A tus upload session whose commit ends retryable with a busy or warming code SHALL be committed again by the server, with backoff and before the session expires, without waiting for the client's next read of the session. A background session commit waits in line like any keyed write but takes no waiter slot, because the waiter cap protects request workers and a commit thread is not one.
+
+A write whose server-planned navigation auxiliary (index, subindex or log) changed while it waited for the boundary SHALL be run again by the server within its wait, or refused with a retryable `MUTATION_BUSY` whose `cause` is `auxiliary_changed` for a caller that does not wait. It SHALL NOT be refused with `STALE_SEMANTIC_WRITE`. The refusal needs positive evidence that an auxiliary's guard no longer holds. A write whose own basis changed (its page, source, vocabulary or retained input) keeps its staleness error, and a refusal with no moved guard keeps its own error and is not run again.
 
 #### Scenario: Lock wait exceeds its bound
 
@@ -31,6 +33,19 @@ A direct `/upload` commit that finds the boundary held by a holder still inside 
 - **AND** the holder releases within the capture's wait budget
 - **THEN** the source capture stores its file once and the client receives its stored outcome
 - **AND** no busy refusal reaches the client
+
+#### Scenario: Navigation changes while a keyed write waits
+
+- **WHEN** an upload rewrites `log.md` and an index after a keyed write planned its navigation and before it acquired the boundary
+- **THEN** the write commits once with one log entry and a resend with the same key replays
+- **AND** no `STALE_SEMANTIC_WRITE` reaches the caller
+- **AND** a write whose own page changed in the same interval still returns its staleness error
+- **AND** a write refused because its folder is not writable ends at once with its own error, not with `MUTATION_BUSY`
+
+#### Scenario: A tus commit waits while a request write needs a waiter slot
+
+- **WHEN** a tus session commit is waiting for the boundary and the waiter cap is one
+- **THEN** a keyed request write waits and commits instead of refusing with `capture_waiters_full`
 
 #### Scenario: A tus commit stays busy past its own wait
 
