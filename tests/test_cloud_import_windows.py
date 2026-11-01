@@ -121,6 +121,8 @@ class FakeCloud:
         self.fail_prepare_once = False
         self.short_parts_once = False
         self.creates = 0  # Every create request, including the ones that Cloud refuses.
+        self.cancelled: list[str] = []  # The import IDs that the cancel route received.
+        self.on_read = lambda import_id: None  # Runs before Cloud answers a read of one import, which may not exist.
 
     @staticmethod
     def holds_cell(row: dict) -> bool:
@@ -166,9 +168,22 @@ class FakeCloud:
             self.registered_calls.append(len(self.rig.cell.calls))
             return httpx2.Response(200, json={"import": self.rows[body["import_id"]]})
         import_id = path.removeprefix(base + "/").split("/")[0]
+        if request.method == "GET":
+            self.on_read(import_id)
         if import_id not in self.rows:
             return httpx2.Response(404, json={"error": {"code": "IMPORT_NOT_FOUND"}})
         row = self.rows[import_id]
+        if request.method == "GET" and row["requested_state"] == "cancelled" and self.holds_cell(row):
+            # Cloud ends a cancelled import over two passes: it cleans up, then the row is `discarded`.
+            row["observed_state"] = "discarded" if row["observed_state"] == "cleanup_running" else "cleanup_running"
+        if request.method == "POST" and path.endswith("/cancel"):
+            # Substrate's cancel: a repeat is a replay, and an import that ended or is being discarded refuses it.
+            if row["requested_state"] != "cancelled":
+                if row["requested_state"] == "discard_requested" or not self.holds_cell(row):
+                    return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
+                row["requested_state"] = "cancelled"
+                self.cancelled.append(import_id)
+            return httpx2.Response(200, json={"import": row})
         if request.method == "GET" and import_id in self.held:
             if self.fail_next_read:
                 self.fail_next_read = False
@@ -1062,24 +1077,7 @@ def test_rule_d_a_window_whose_create_meets_another_open_import_stops_at_once_an
     assert rig.run()["import_ids"] == [first] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
-def test_a_member_change_after_an_abandoned_upload_stops_while_that_attempt_holds_the_cell(rig):
-    """R2: catches a never-uploaded attempt read as over: the new import conflicts with it and the run loops."""
-    rig.files(a01__bin=800, a02__bin=800)
-    rig.cloud.short_parts_once = True
-    with pytest.raises(CloudImportError) as abandoned:
-        rig.run()
-    assert abandoned.value.code == "PARTS_INVALID"
-    (rig.source / "a02.bin").write_bytes(b"changed after the abandon")
-
-    with pytest.raises(CloudImportError) as stop:
-        rig.run()
-
-    assert stop.value.resume and "earlier attempt of this window" in stop.value.message
-    assert len(rig.cloud.rows) == 1 and rig.cloud.creates == 2
-
-
-@pytest.mark.parametrize("requested, observed", [
-    ("requested", "key_ready"), ("uploaded", "importing"), ("uploaded", "done"), ("discard_requested", "failed")])
+@pytest.mark.parametrize("requested, observed", [("uploaded", "importing"), ("discard_requested", "failed")])
 def test_rule_a_a_window_keeps_its_import_while_cloud_holds_its_earlier_attempt_open_or_done(rig, requested, observed):
     """Rule (a): catches a new import ID while the earlier attempt is open or done, which lands the window twice or loops."""
     _stop_with_cloud_importing_slowly_then_change_a_member(rig)
@@ -1101,10 +1099,11 @@ def test_rule_b_a_window_gets_one_new_import_per_ended_attempt_and_retries_its_s
     rig.cloud.rows[old].update(observed_state="failed")
     rig.cloud.open_another_import()
 
-    for creates in (3, 4):  # The renewal and its one retry, then a rerun that keeps the new ID.
+    for creates in (2, 3):  # The rerun renews on its read of the failed row and creates once, then a rerun keeps the new ID.
         with pytest.raises(CloudImportError) as stop:
             rig.run(poll_seconds=0.001)
         assert "another import is open" in stop.value.message and stop.value.resume
+        assert old not in stop.value.message  # The failed attempt no longer holds the cell, so the stop never names it as the open import.
         assert rig.cloud.creates == creates and _first_window(rig)["attempts"] == [old]
 
 
@@ -1122,3 +1121,201 @@ def test_rule_c_after_cloud_ends_the_earlier_attempt_the_next_run_sends_the_wind
 
     assert rig.cloud.all_sent() == ["a01.bin"]
     assert len(rig.cloud.rows) == 2 and old not in result["import_ids"]
+
+
+# -- Task 5.4.20: the CLI settles its own stalled attempts (rules (c), (e) and (f) in cloud_import_windows.py)
+
+
+def _network_error(*_) -> None:
+    raise httpx2.ConnectError("interrupted")
+
+
+def _stop_after_complete_while_cloud_imports(rig: Rig) -> str:
+    """The window is uploaded and Cloud imports it, and the run stops on a dropped read. Returns its import ID."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(poll_seconds=0.001)
+    assert stop.value.code == "NETWORK_ERROR"
+    rig.cloud.holding = False
+    return _first_window(rig)["import_id"]
+
+
+def _checkpoints(rig: Rig) -> list[Path]:
+    return list(rig.tmp.glob("checkpoint/window-*/checkpoint.json"))
+
+
+def test_rule_e_a_checkpoint_whose_import_cloud_has_no_row_for_is_dropped_and_the_window_lands_once(rig):
+    """Rule (e): catches a stale checkpoint that a rerun resumes, so it waits on a new row that never gets an upload."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    del rig.cloud.rows[old]  # Cloud has no row for the window's import ID.
+    rig.cloud.held.clear()
+    unsent = []
+
+    def cloud_expires_an_import_that_gets_no_upload(import_id):
+        row = rig.cloud.rows.get(import_id)
+        if row is not None and "part_urls" not in row:
+            unsent.append(import_id)
+            if len(unsent) >= 3:
+                row.update(observed_state="expired", error_code="IMPORT_EXPIRED")
+
+    rig.cloud.on_read = cloud_expires_an_import_that_gets_no_upload
+
+    result = rig.run(poll_seconds=0.001)
+
+    assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_rule_e_a_network_error_never_drops_a_checkpoint(rig):
+    """Rule (e): catches a failed read taken as "Cloud cannot show a row", which drops a live checkpoint."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    del rig.cloud.rows[old]
+    rig.cloud.held.clear()
+    creates = rig.cloud.creates
+    rig.cloud.on_read = _network_error
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.resume and NOT_IN_EXOMEM in stop.value.message
+    assert len(_checkpoints(rig)) == 1 and rig.cloud.creates == creates
+
+
+def test_verify_a_member_change_after_a_stopped_attempt_lands_once_with_the_new_member_set_and_no_manual_cancel(rig):
+    """Verify of 5.4.20, rule (f): catches a never-uploaded attempt that holds the cell until the person presses Cancel in Home."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.short_parts_once = True
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "PARTS_INVALID"
+    old = _first_window(rig)["import_id"]
+    (rig.source / "a02.bin").write_bytes(b"changed after the abandon")
+
+    result = rig.run()
+
+    assert rig.cloud.cancelled == [old] and rig.cloud.rows[old]["observed_state"] == "discarded"
+    assert rig.cloud.all_sent() == ["a01.bin"] and len(rig.cloud.rows) == 2
+    assert old not in result["import_ids"] and "a02.bin" in rig.said()
+
+
+def test_rule_f_a_member_change_that_empties_a_stopped_window_cancels_its_attempt_and_lands_the_rest_once(rig):
+    """Rule (f): catches an emptied window that leaves the record while its never-uploaded attempt holds the cell."""
+    rig.files(a01__bin=800, a02__bin=800, a03__bin=800)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 2000  # Window 1 is a01.bin and a02.bin.
+    rig.cloud.short_parts_once = True
+    with pytest.raises(CloudImportError) as abandoned:
+        rig.run()
+    assert abandoned.value.code == "PARTS_INVALID"
+    old = _first_window(rig)["import_id"]
+    for name in ("a01.bin", "a02.bin"):
+        (rig.source / name).write_bytes(b"changed after the abandon")
+
+    result = rig.run()
+
+    assert rig.cloud.cancelled == [old] and old not in result["import_ids"]
+    assert rig.cloud.all_sent() == ["a03.bin"] and result["not_sent"] == ["a01.bin", "a02.bin"]
+
+
+def test_rule_f_a_network_error_never_cancels_an_attempt(rig):
+    """Rule (f): catches a cancel that a failed row read reaches, which ends an attempt on no evidence."""
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.short_parts_once = True
+    with pytest.raises(CloudImportError):
+        rig.run()
+    old = _first_window(rig)["import_id"]
+    (rig.source / "a02.bin").write_bytes(b"changed after the abandon")
+    creates = rig.cloud.creates
+    # Cloud stops answering reads once the changed declaration conflicts.
+    rig.cloud.on_read = lambda import_id: _network_error() if rig.cloud.creates > creates else None
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.resume and NOT_IN_EXOMEM in stop.value.message
+    assert rig.cloud.cancelled == [] and rig.cloud.rows[old]["requested_state"] == "requested"
+    assert len(rig.cloud.rows) == 1
+
+
+def test_verify_a_restored_cell_that_lost_a_windows_receipt_sends_that_window_again_exactly_once(rig):
+    """Verify of 5.4.20, rule (c): catches a done attempt whose receipt a restore lost read as landed, so its members never arrive."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.release()  # Cloud finishes the import, and the cell records its receipt.
+    rig.cell.windows.clear()  # A restore of the cell loses the receipt.
+
+    result = rig.run()
+
+    assert rig.cloud.all_sent() == ["a01.bin", "a01.bin", "a02.bin", "a02.bin"]
+    assert len(rig.cloud.completed) == 2 and _first_window(rig)["attempts"] == [old]
+    assert old not in result["import_ids"]
+
+
+def test_rule_c_a_done_attempt_whose_receipt_the_cell_lists_once_cloud_finishes_is_not_sent_again(rig):
+    """Rule (c): catches a lost receipt judged from a listing read before the row, while Cloud was still finishing the import."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.on_read = lambda import_id: rig.cloud.release()  # Cloud finishes while the CLI reads the row.
+
+    result = rig.run()
+
+    assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+
+
+def test_rule_c_an_unknown_listing_never_sends_a_done_window_again(rig):
+    """Rule (c): catches an unknown listing taken as a lost receipt, which lands the window twice."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.release()
+    rig.cell.windows.clear()
+    # The listing is known when the rerun starts and turns unknown once the CLI reads the done row.
+    rig.cloud.on_read = lambda import_id: setattr(rig.cell, "windows_unknown", "the window records cannot be listed")
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.resume and NOT_IN_EXOMEM in stop.value.message
+    assert rig.cloud.completed == [old] and len(rig.cloud.rows) == 1
+    assert f"import_discard, import_id {old}" in stop.value.message
+
+
+def test_rule_c_a_home_cancel_of_an_importing_attempt_whose_discard_leaves_a_record_files_each_member_once(rig):
+    """Rule (c): catches an ended attempt read as over while the cell holds its record, so a rerun and a resend file it twice."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.release()  # The Job imports the window before cellctl stops it.
+    del rig.cell.windows[old]
+    rig.cloud.rows[old].update(requested_state="cancelled", observed_state="discarded")  # The person pressed Cancel in Home.
+    # The discard's residual record appears after the rerun lists the receipts and before it reads the row.
+    rig.cloud.on_read = lambda import_id: rig.cell.discard(old, ["a01.bin", "a02.bin"]) if import_id == old else None
+
+    rig.run()
+    rig.run()
+    rig.run(resend_residual=True)
+
+    # The old import carries both members and its discard files neither, so the resend files each member once.
+    assert rig.cloud.all_sent() == ["a01.bin", "a01.bin", "a02.bin", "a02.bin"]
+    assert _first_window(rig)["import_id"] == old and _first_window(rig)["attempts"] == []
+
+
+def test_a_window_that_lands_on_the_cells_record_at_a_rerun_leaves_no_encrypted_copy(rig):
+    """Catches a window that lands on the cell's record without the client, which keeps a full encrypted copy on disk."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    assert list(rig.tmp.glob("checkpoint/window-*/archive.age"))  # The stall keeps the copy for the rerun.
+    rig.cloud.release()  # Cloud finishes the import, and the cell lists its receipt.
+
+    result = rig.run()
+
+    assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+    assert not list(rig.tmp.glob("checkpoint/window-*/archive.age")) and not _checkpoints(rig)
+
+
+def test_a_series_record_whose_window_folder_is_not_the_clis_own_stops_the_run_and_removes_nothing(rig):
+    """Catches a damaged `dir` in the record that a landed window's cleanup turns into removing the whole checkpoint folder."""
+    _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.release()  # The window lands at the rerun, and a landed window's folder is removed.
+    record = rig.tmp / "checkpoint" / "series.json"
+    damaged = json.loads(record.read_text())
+    damaged["windows"][0]["dir"] = ""
+    record.write_text(json.dumps(damaged))
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert record.exists() and list(rig.tmp.glob("checkpoint/window-*/archive.age"))
+    assert stop.value.code == "SERIES_RECORD_DAMAGED" and NOT_IN_EXOMEM in stop.value.message
