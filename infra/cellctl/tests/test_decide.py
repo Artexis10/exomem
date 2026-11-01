@@ -1695,9 +1695,9 @@ def test_deletion_then_checks_pv_absence() -> None:
     assert decision.row_updates["observed_state"] == "deleting"
 
 
-def test_deletion_then_deletes_backup_objects() -> None:
+def test_an_old_cell_deletion_deletes_its_backup_objects_with_cellctls_own_key() -> None:
     decision = decide(
-        row(desired_state="deleted"),
+        row(desired_state="deleted", b2_key_id="key-1"),
         rollout(),
         obs(namespace_absent_confirmed=True, pv_absent_confirmed=True),
         now=NOW,
@@ -1706,31 +1706,14 @@ def test_deletion_then_deletes_backup_objects() -> None:
         config=CONFIG,
     )
     assert decision.delete_backup_objects is True
+    assert decision.storage_cleanup_pending is False
 
 
-def test_deletion_then_deletes_the_b2_key_when_one_exists() -> None:
-    decision = decide(
-        row(desired_state="deleted", b2_key_id="key-1"),
-        rollout(),
-        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, backup_objects_absent_confirmed=True),
-        now=NOW,
-        cell_image=IMAGE_A,
-        start_upgrade=False,
-        config=CONFIG,
-    )
-    assert decision.delete_b2_key is True
-
-
-def test_deletion_completes_and_nulls_the_wrapped_keys() -> None:
+def test_an_old_cell_deletion_completes_without_waiting_for_its_key_to_vanish() -> None:
     decision = decide(
         row(desired_state="deleted", b2_key_id="key-1", generation=3),
         rollout(),
-        obs(
-            namespace_absent_confirmed=True,
-            pv_absent_confirmed=True,
-            backup_objects_absent_confirmed=True,
-            b2_key_absent_confirmed=True,
-        ),
+        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, backup_objects_absent_confirmed=True),
         now=NOW,
         cell_image=IMAGE_A,
         start_upgrade=False,
@@ -1740,19 +1723,22 @@ def test_deletion_completes_and_nulls_the_wrapped_keys() -> None:
     assert decision.row_updates["b2_key_id"] is None
     assert decision.row_updates["backup_key_wrapped"] is None
     assert decision.row_updates["observed_generation"] == 3
+    assert decision.storage_cleanup_pending is True
 
 
-def test_a_never_run_cell_can_still_be_deleted() -> None:
+def test_a_new_cells_deletion_never_waits_on_or_deletes_its_locked_backups() -> None:
     decision = decide(
         row(desired_state="deleted", b2_key_id=None),
         rollout(),
-        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True, backup_objects_absent_confirmed=True),
+        obs(namespace_absent_confirmed=True, pv_absent_confirmed=True),
         now=NOW,
         cell_image=IMAGE_A,
         start_upgrade=False,
         config=CONFIG,
     )
+    assert decision.delete_backup_objects is False
     assert decision.row_updates["observed_state"] == "deleted"
+    assert decision.storage_cleanup_pending is True
 
 
 # --- Same-pass convergence (D4 write-back) -----------------------------------

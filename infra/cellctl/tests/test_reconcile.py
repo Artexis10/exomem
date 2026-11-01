@@ -15,14 +15,15 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest
 
-from cellctl import db, reconcile
+from cellctl import alerts, db, reconcile
 from cellctl.capacity import CapacityObservation, LocalCapacityObservation
 from cellctl.manifests import STORAGE_CLASS, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
+from cellctl.secrets import wrap_secret
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
-from cellctl.storage.interface import CELL_KEY_CAPABILITIES, VolumeInfo
+from cellctl.storage.interface import VolumeInfo
 
 from .conftest import CellDatabase, insert_tenant, tenant_uuid
 
@@ -136,6 +137,9 @@ class FakeClusterGateway:
     def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
         return {}
 
+    def read_secret_value(self, namespace: str, name: str, key: str) -> str:
+        return "https://receiver.example/alerts/token"
+
 
 def _secrets_config() -> reconcile.SecretsConfig:
     return reconcile.SecretsConfig(
@@ -145,11 +149,18 @@ def _secrets_config() -> reconcile.SecretsConfig:
         cell_token_key_previous_version=None,
         backup_master_keys={1: b"m" * 32},
         backup_master_key_current_version=1,
+        staging_key_id="staging-key-id",
+        staging_application_key="staging-key-secret",
     )
 
 
 def _cluster_config() -> reconcile.ClusterConfig:
-    return reconcile.ClusterConfig(object_storage_bucket="exomem-cloud-backups")
+    return reconcile.ClusterConfig(
+        object_storage_bucket="exomem-cloud-backups",
+        cell_data_backup_bucket="cell-backups-locked",
+        cell_data_staging_bucket="cell-staging",
+        cell_data_endpoint="https://s3.cell-data.example",
+    )
 
 
 async def _seed_cell(cell_db: CellDatabase, cell_id: str, tenant_id: str, *, desired_state: str = "running") -> None:
@@ -186,7 +197,7 @@ async def test_new_cell_is_applied_and_converges_to_running(cell_db: CellDatabas
         namespace = namespace_name("aaaaaaaaaaaaaaaa")
         assert (namespace, "StatefulSet", "cell") in cluster.applied
         assert ("", "Namespace", namespace) in cluster.applied
-        assert rows[0].b2_key_id is not None  # created on first pass
+        assert rows[0].b2_key_id is None  # cellctl mints no key (D9); the custodian does
         assert rows[0].backup_key_wrapped is not None
 
         # Simulate the pod becoming ready on the StatefulSet the first pass applied.
@@ -205,7 +216,17 @@ async def test_new_cell_is_applied_and_converges_to_running(cell_db: CellDatabas
         await connection.close()
 
 
-async def test_reused_object_storage_key_is_stable_across_passes(cell_db: CellDatabase) -> None:
+async def _give_an_old_cells_key(connection, cell_id: str = "aaaaaaaaaaaaaaaa", secret: str = "old-key-secret") -> str:
+    """The per-cell key a cell created before D9 still holds: stored wrapped, like cellctl once minted it."""
+
+    wrapped = wrap_secret(b"m" * 32, secret.encode(), cell_id=cell_id, column="b2_key_wrapped", key_version=1)
+    await connection.execute(
+        "UPDATE exomem_cloud_cells SET b2_key_id='old-key-id', b2_key_wrapped=$1, b2_key_version=1 WHERE cell_id=$2",
+        wrapped, cell_id)
+    return "old-key-id"
+
+
+async def test_an_old_cells_stored_key_reaches_its_secret_unchanged_across_passes(cell_db: CellDatabase) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
@@ -214,28 +235,83 @@ async def test_reused_object_storage_key_is_stable_across_passes(cell_db: CellDa
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
     try:
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        first_rows = await db.select_all_rows(connection)
-        first_key_id = first_rows[0].b2_key_id
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        second_rows = await db.select_all_rows(connection)
-        assert second_rows[0].b2_key_id == first_key_id
-        assert b2.key_exists(first_key_id)
+        key_id = await _give_an_old_cells_key(connection)
+        for _ in range(2):
+            await reconcile.reconcile_once(
+                connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
+            )
+            secret = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "Secret", "cell-credentials")]
+            assert base64.b64decode(secret["data"]["b2-key-id"]).decode() == key_id
+            assert base64.b64decode(secret["data"]["b2-key-secret"]).decode() == "old-key-secret"
+            assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
     finally:
         await connection.close()
 
 
-async def _converged_cell(connection, cluster: FakeClusterGateway, b2: FakeB2, now: datetime) -> str:
+async def test_a_new_cells_secret_carries_no_object_store_key(cell_db: CellDatabase) -> None:
+    """D9: the custodian's Secret is the only place a new cell's key lives, never cell-credentials."""
+
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    try:
+        await _pass(connection, cluster, datetime(2026, 1, 1, tzinfo=UTC))
+        secret = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "Secret", "cell-credentials")]
+        assert not {"b2-key-id", "b2-key-secret"} & set(secret["data"])
+    finally:
+        await connection.close()
+
+
+async def _backup_job(connection, cluster: FakeClusterGateway, cell_id: str) -> dict:
+    """Drive a cell through its nightly backup hold and return the Job cellctl ran."""
+
+    window = datetime(2026, 1, 1, 2, tzinfo=UTC)
+    for _ in range(3):
+        await _pass(connection, cluster, window - timedelta(hours=3))
+        cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
+    await _pass(connection, cluster, window)
+    cluster.observations[cell_id] = _observed_from_applied(
+        cluster, cell_id, pod_exists=False, pod_uses_volume=False, pod_ready=False)
+    await _pass(connection, cluster, window + timedelta(minutes=1))
+    return cluster.jobs[-1]
+
+
+def _job_env(job: dict) -> dict:
+    env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+    return {entry["name"]: entry.get("value") or entry["valueFrom"]["secretKeyRef"] for entry in env}
+
+
+async def test_a_new_cells_backup_job_reads_the_custodians_secret_and_the_locked_bucket(cell_db: CellDatabase) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        env = _job_env(await _backup_job(connection, FakeClusterGateway(), "aaaaaaaaaaaaaaaa"))
+        assert env["RESTIC_REPOSITORY"] == "s3:https://s3.cell-data.example/cell-backups-locked/cells/aaaaaaaaaaaaaaaa"
+        assert env["AWS_ACCESS_KEY_ID"] == {"name": "cell-object-store-key", "key": "keyId"}
+        assert env["AWS_SECRET_ACCESS_KEY"] == {"name": "cell-object-store-key", "key": "applicationKey"}
+    finally:
+        await connection.close()
+
+
+async def test_an_old_cells_backup_job_keeps_its_stored_key_and_the_founder_bucket(cell_db: CellDatabase) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await _give_an_old_cells_key(connection)
+        env = _job_env(await _backup_job(connection, FakeClusterGateway(), "aaaaaaaaaaaaaaaa"))
+        assert env["RESTIC_REPOSITORY"].endswith("/exomem-cloud-backups/cells/aaaaaaaaaaaaaaaa")
+        assert not env["RESTIC_REPOSITORY"].startswith("s3:https://s3.cell-data.example")
+        assert env["AWS_ACCESS_KEY_ID"] == {"name": "cell-credentials", "key": "b2-key-id"}
+        assert env["AWS_SECRET_ACCESS_KEY"] == {"name": "cell-credentials", "key": "b2-key-secret"}
+    finally:
+        await connection.close()
+
+
+async def _converged_cell(connection, cluster: FakeClusterGateway, b2: FakeB2, now: datetime) -> None:
     hetzner = FakeHetznerVolumeProvider()
     await reconcile.reconcile_once(connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now)
     cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
     await reconcile.reconcile_once(connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now)
-    return (await db.select_all_rows(connection))[0].b2_key_id
 
 
 async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_satisfied(cell_db: CellDatabase) -> None:
@@ -270,344 +346,93 @@ async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_
         await connection.close()
 
 
-def _rendered_b2_key_id(cluster: FakeClusterGateway) -> str:
-    secret = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "Secret", "cell-credentials")]
-    return base64.b64decode(secret["data"]["b2-key-id"]).decode("utf-8")
+async def _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now) -> None:
+    """Request the cell's deletion and run passes until its namespace, PV and volume are gone."""
 
-
-async def test_a_key_lacking_a_backup_capability_is_replaced_on_re_render(cell_db: CellDatabase) -> None:
-    """A key minted before listBuckets was required cannot back up: B2's S3
-    API refuses restic's first HEAD with 403. The next re-render replaces
-    it, points the cell's Secret at the new key and deletes the old one."""
-
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        old_key_id = await _converged_cell(connection, cluster, b2, now)
-        b2.set_key_capabilities(old_key_id, {"listFiles", "readFiles", "writeFiles", "deleteFiles"})
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
-        )
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
-        )
-
-        new_key_id = (await db.select_all_rows(connection))[0].b2_key_id
-        assert new_key_id != old_key_id
-        assert b2.key_absent(old_key_id)
-        assert b2.key_capabilities(new_key_id) >= set(CELL_KEY_CAPABILITIES)
-        assert _rendered_b2_key_id(cluster) == new_key_id
+        await owner.execute("UPDATE exomem_cloud_cells SET desired_state = 'deleted' WHERE cell_id = 'aaaaaaaaaaaaaaaa'")
     finally:
-        await connection.close()
+        await owner.close()
+    await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(),
+                                   _cluster_config(), now=now, memory=memory)
+    assert namespace_name("aaaaaaaaaaaaaaaa") in cluster.deleted_namespaces
+    assert (await db.select_all_rows(connection))[0].observed_state == "deleting"
+    cluster.observations["aaaaaaaaaaaaaaaa"] = ClusterObservation()
 
 
-async def test_a_key_with_every_backup_capability_survives_a_re_render(cell_db: CellDatabase) -> None:
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    now = datetime(2026, 1, 1, tzinfo=UTC)
+@pytest.fixture
+def delivered(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
+    """The cleanup alerts sent, as (name, active)."""
 
-    try:
-        key_id = await _converged_cell(connection, cluster, b2, now)
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
-        )
+    sent: list[tuple[str, bool]] = []
 
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
-        )
+    def deliver(url: str, *, alert: str, active: bool, observed_at: datetime) -> None:
+        if alert.startswith(alerts.CLEANUP_PENDING_ALERT):
+            sent.append((alert, active))
 
-        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
-        assert b2.key_exists(key_id)
-        assert _rendered_b2_key_id(cluster) == key_id
-    finally:
-        await connection.close()
+    monkeypatch.setattr(alerts, "deliver", deliver)
+    return sent
 
 
-async def test_a_lost_key_replacement_deletes_the_fresh_key_and_uses_the_stored_one(
-    cell_db: CellDatabase, monkeypatch
+async def test_an_old_cells_deletion_empties_its_prefix_then_reports_the_pending_key_cleanup(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]],
 ) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
+    cluster, b2, memory = FakeClusterGateway(), FakeB2(), reconcile.LoopMemory()
+    config = dataclasses.replace(_cluster_config(), alert_delivery_secret=("ns", "alerts", "url"))
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
+    async def passes() -> None:
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=now, memory=memory)
+
     try:
-        old_key_id = await _converged_cell(connection, cluster, b2, now)
-        b2.set_key_capabilities(old_key_id, {"listFiles"})
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
-        )
-        created: list[str] = []
-        real_create = b2.create_prefix_key
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
+        await _give_an_old_cells_key(connection)
+        await passes()
+        b2.seed_object("cells/aaaaaaaaaaaaaaaa/snapshot-1")
+        await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
 
-        def recording_create(cell_id: str):
-            key = real_create(cell_id)
-            created.append(key.key_id)
-            return key
+        await passes()  # the namespace is gone: its backup objects go next
+        assert b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/") == []
+        assert delivered == []
 
-        async def another_pass_won(conn, cell_id, columns, *, match_column, expected):
-            # Another pass already swapped in its own key; this one loses.
-            winner = real_create(cell_id)
-            await db.write_observed(conn, cell_id, {"b2_key_id": winner.key_id})
-            return False
-
-        monkeypatch.setattr(b2, "create_prefix_key", recording_create)
-        monkeypatch.setattr(db, "try_replace_group", another_pass_won)
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
-        )
-
-        stored = (await db.select_all_rows(connection))[0].b2_key_id
-        assert created and stored not in created
-        assert all(b2.key_absent(key_id) for key_id in created)
-        assert _rendered_b2_key_id(cluster) == stored
+        await passes()  # nothing remains: the deletion settles and the key's removal is the operator's
+        row = (await db.select_all_rows(connection))[0]
+        assert (row.observed_state, row.b2_key_id, row.backup_key_wrapped) == ("deleted", None, None)
+        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
     finally:
         await connection.close()
 
 
-async def test_a_failed_key_listing_keeps_the_stored_key(cell_db: CellDatabase, monkeypatch) -> None:
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-
-    try:
-        key_id = await _converged_cell(connection, cluster, b2, now)
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
-        )
-
-        def unavailable(_key_id: str):
-            raise RuntimeError("b2 unavailable")
-
-        monkeypatch.setattr(b2, "key_capabilities", unavailable)
-        applies_before = sum(1 for event in cluster.events if event[0] == "apply_statefulset")
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
-        )
-
-        # The re-render still happened; the listing failure did not stop it.
-        assert sum(1 for event in cluster.events if event[0] == "apply_statefulset") > applies_before
-        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
-        assert _rendered_b2_key_id(cluster) == key_id
-    finally:
-        await connection.close()
-
-
-async def test_a_key_missing_from_the_listing_is_kept(cell_db: CellDatabase, monkeypatch) -> None:
-    """B2 may lag, so absence from the listing is not evidence the key is
-    wrong: replacing on it could churn a freshly minted key."""
-
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-
-    try:
-        key_id = await _converged_cell(connection, cluster, b2, now)
-        monkeypatch.setattr(b2, "key_capabilities", lambda _key_id: None)
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
-        )
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
-        )
-
-        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
-        assert b2.key_exists(key_id)
-        assert _rendered_b2_key_id(cluster) == key_id
-    finally:
-        await connection.close()
-
-
-async def test_a_failed_key_replacement_keeps_the_stored_key_and_still_applies(
-    cell_db: CellDatabase, monkeypatch
+async def test_a_new_cells_deletion_settles_without_touching_its_locked_backups(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]],
 ) -> None:
-    """A B2 outage while replacing must not block the apply: a hold's exit
-    and a stall's exit are applies too."""
-
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
+    cluster, b2, memory = FakeClusterGateway(), FakeB2(), reconcile.LoopMemory()
+    config = dataclasses.replace(_cluster_config(), alert_delivery_secret=("ns", "alerts", "url"))
     now = datetime(2026, 1, 1, tzinfo=UTC)
+    locked_listing = FakeB2()
+    locked_listing.seed_object("cells/aaaaaaaaaaaaaaaa/snapshot-1")
 
     try:
-        key_id = await _converged_cell(connection, cluster, b2, now)
-        b2.set_key_capabilities(key_id, {"listFiles"})
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
-        )
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=now, memory=memory)
+        b2.seed_object("cells/aaaaaaaaaaaaaaaa/legacy-bucket-object")
+        await _delete_through_its_namespace(connection, cell_db, cluster, b2, memory, now)
 
-        def unavailable(_cell_id: str):
-            raise RuntimeError("b2 unavailable")
-
-        monkeypatch.setattr(b2, "create_prefix_key", unavailable)
-        applies_before = sum(1 for event in cluster.events if event[0] == "apply_statefulset")
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
-        )
-
-        assert sum(1 for event in cluster.events if event[0] == "apply_statefulset") > applies_before
-        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
-        assert _rendered_b2_key_id(cluster) == key_id
-    finally:
-        await connection.close()
-
-
-async def test_a_backup_hold_start_replaces_a_deficient_key_and_a_running_hold_leaves_it_alone(
-    cell_db: CellDatabase, monkeypatch
-) -> None:
-    """The pass that starts a backup hold runs outside the hold, so a key
-    minted without a needed capability is replaced before the Job renders.
-    Inside the hold, the Job reads the key from the Secret, so the key is
-    neither listed nor replaced."""
-
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    outside_window = datetime(2026, 1, 1, 1, tzinfo=UTC)
-    inside_window = datetime(2026, 1, 1, 3, tzinfo=UTC)
-
-    try:
-        old_key_id = await _converged_cell(connection, cluster, b2, outside_window)
-        b2.set_key_capabilities(old_key_id, {"listFiles", "readFiles", "writeFiles", "deleteFiles"})
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=inside_window
-        )
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), config,
+                                       now=now, memory=memory, backup_listing=locked_listing)
 
         row = (await db.select_all_rows(connection))[0]
-        assert row.hold_kind == "backup"
-        assert row.b2_key_id != old_key_id
-        assert b2.key_absent(old_key_id)
-        assert _rendered_b2_key_id(cluster) == row.b2_key_id
-
-        held_key_id = row.b2_key_id
-        b2.set_key_capabilities(held_key_id, {"listFiles"})
-        listings: list[str] = []
-        real_listing = b2.key_capabilities
-        monkeypatch.setattr(b2, "key_capabilities", lambda key_id: listings.append(key_id) or real_listing(key_id))
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
-
-        await reconcile.reconcile_once(
-            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=inside_window
-        )
-
-        assert listings == []
-        assert (await db.select_all_rows(connection))[0].b2_key_id == held_key_id
-        assert b2.key_exists(held_key_id)
-    finally:
-        await connection.close()
-
-
-async def test_a_verified_key_is_not_listed_again_by_the_same_process(cell_db: CellDatabase, monkeypatch) -> None:
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    memory = reconcile.LoopMemory()
-
-    try:
-        await _converged_cell(connection, cluster, b2, now)
-        listings: list[str] = []
-        real_listing = b2.key_capabilities
-        monkeypatch.setattr(b2, "key_capabilities", lambda key_id: listings.append(key_id) or real_listing(key_id))
-
-        for digest in ("rendered-by-an-older-cellctl", "rendered-by-an-even-older-cellctl"):
-            cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
-                cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest=digest
-            )
-            await reconcile.reconcile_once(
-                connection,
-                cluster,
-                b2,
-                FakeHetznerVolumeProvider(),
-                _secrets_config(),
-                _cluster_config(),
-                now=now,
-                memory=memory,
-            )
-
-        assert len(listings) == 1
-    finally:
-        await connection.close()
-
-
-async def test_deletion_runs_to_completion_across_passes(cell_db: CellDatabase) -> None:
-    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
-    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
-    b2 = FakeB2()
-    hetzner = FakeHetznerVolumeProvider()
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-
-    try:
-        # First: create it and let it become ready with a real b2 key and backup key.
-        cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        b2_key_id = (await db.select_all_rows(connection))[0].b2_key_id
-        b2.seed_object("cells/aaaaaaaaaaaaaaaa/snapshot-1")
-
-        owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
-        try:
-            await owner.execute(
-                "UPDATE exomem_cloud_cells SET desired_state = 'deleted' WHERE cell_id = 'aaaaaaaaaaaaaaaa'"
-            )
-        finally:
-            await owner.close()
-
-        namespace = namespace_name("aaaaaaaaaaaaaaaa")
-
-        # Pass 1: namespace still "exists" in the fake until we simulate its removal.
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        assert namespace in cluster.deleted_namespaces
-        rows = await db.select_all_rows(connection)
-        assert rows[0].observed_state == "deleting"
-
-        # Simulate the namespace (and its PVC/PV) actually being gone now.
-        cluster.observations["aaaaaaaaaaaaaaaa"] = ClusterObservation()
-
-        # Pass 2: namespace absent -> checks backup objects next, deletes them.
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        assert b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/") == []
-
-        # Pass 3: backup objects gone -> deletes the b2 key.
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        assert not b2.key_exists(b2_key_id)
-
-        # Pass 4: everything confirmed absent -> reports deleted, nulls wrapped keys.
-        await reconcile.reconcile_once(
-            connection, cluster, b2, hetzner, _secrets_config(), _cluster_config(), now=now
-        )
-        rows = await db.select_all_rows(connection)
-        assert rows[0].observed_state == "deleted"
-        assert rows[0].b2_key_id is None
-        assert rows[0].backup_key_wrapped is None
+        assert row.observed_state == "deleted"
+        assert len(locked_listing.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1  # nothing was deleted
+        assert len(b2.list_object_versions("cells/aaaaaaaaaaaaaaaa/")) == 1  # the legacy store is no new cell's
+        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
     finally:
         await connection.close()
 
@@ -642,7 +467,6 @@ async def test_namespace_deletion_does_not_wait_for_later_absence_checks(
 
     monkeypatch.setattr(cluster, "pv_absent_for_namespace", unavailable)
     monkeypatch.setattr(b2, "list_object_versions", unavailable)
-    monkeypatch.setattr(b2, "key_absent", unavailable)
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
         await reconcile.reconcile_once(
@@ -678,7 +502,6 @@ def test_deletion_proofs_stop_at_first_remaining_resource(
         b2.seed_object(f"cells/{row.cell_id}/snapshot-1")
     if remaining_storage != "objects":
         monkeypatch.setattr(b2, "list_object_versions", unavailable)
-    monkeypatch.setattr(b2, "key_absent", unavailable)
 
     observation = _augment_deletion_observation(
         ClusterObservation(), row, cluster, b2, hetzner,
@@ -686,7 +509,6 @@ def test_deletion_proofs_stop_at_first_remaining_resource(
     assert observation.namespace_absent_confirmed is True
     assert observation.pv_absent_confirmed is (remaining_storage == "objects")
     assert observation.backup_objects_absent_confirmed is False
-    assert observation.b2_key_absent_confirmed is False
 
 
 def test_pv_absence_check_blocks_on_a_pv_still_claimed_by_the_namespace() -> None:
@@ -3194,6 +3016,7 @@ async def test_provider_outage_cannot_preserve_live_content_keys_or_claim_legacy
     cluster, b2 = FakeClusterGateway(), FakeB2()
     now = datetime(2026, 1, 1, tzinfo=UTC)
     try:
+        await _give_an_old_cells_key(connection)
         await _converged_cell(connection, cluster, b2, now)
         before = (await db.select_all_rows(connection))[0]
         assert before.cell_root_key_wrapped is not None
@@ -3326,6 +3149,9 @@ async def test_nonfinite_retention_input_preserves_raw_evidence_and_completes_de
     await _seed_cell(cell_db, cell_id, "raw-retention", desired_state="deleted")
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_KEY_RETENTION_SOURCES", raw)
     config = main.build_cluster_config()
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))

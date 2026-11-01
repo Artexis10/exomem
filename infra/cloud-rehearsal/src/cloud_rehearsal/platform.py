@@ -2,16 +2,20 @@
 
 `helm template` runs from a pinned Helm image against a copy of
 `infra/helm/platform` with its three subchart dependencies removed (the
-rehearsal renders only `templates/cellctl.yaml`, `cloud-gateway.yaml` and
-`cloud-storage-class.yaml`, none of which reads a subchart). Everything the
+rehearsal renders only `templates/cellctl.yaml`, `cloud-gateway.yaml`,
+`cloud-storage-class.yaml` and `key-custodian.yaml`, none of which reads a subchart). Everything the
 chart renders is applied as rendered, except the overlays below. Each
 overlay is returned so the report lists it:
 
 - the StorageClass keeps its name and policy but uses K3s's local-path
   provisioner, since there is no Hetzner CSI driver here;
 - the cellctl container runs `rehearsal_cellctl` (build.py), the real loop
-  with B2 key management and Hetzner doubles, and gets the S3 double's
-  credential.
+  with B2 object-version and Hetzner doubles, and gets the S3 double's
+  credential;
+- the key custodian's Deployment runs `rehearsal_custodian`, the real watch
+  loop under the chart's own identity, handing every cell the S3 double's
+  credential in place of a B2 key. Its namespace, RBAC and admission policy
+  are applied as rendered.
 
 The gateway Deployment is applied exactly as rendered. If it omits any
 variable the pinned Substrate gateway requires at startup, the platform stage
@@ -45,6 +49,7 @@ from .shell import run, wait_for
 
 PLATFORM_CHART = images.REPO_ROOT / "infra/helm/platform"
 CLOUD_NAMESPACE = "exomem-cloud"
+CUSTODY_NAMESPACE = "exomem-key-custody"
 PLATFORM_NAMESPACE = "exomem-platform"
 # The chart's Traefik namespaceOverride: the gateway admits ingress only from here.
 EDGE_NAMESPACE = "exomem-edge"
@@ -99,7 +104,6 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
         "cellImageRepository": cell_repository,
         "b2BucketName": BACKUP_BUCKET,
         "b2BucketId": "rehearsal-bucket-id",
-        "b2AccountId": "rehearsal-account-id",
         "b2Endpoint": stack.object_store.endpoint(from_host=False),
         # The forced-canary step waits out this deadline inside a 40-minute budget; the
         # chart's production default (30) would leave it no margin.
@@ -108,10 +112,23 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
     }
 
 
+def cell_data_values(stack: Stack) -> dict[str, Any]:
+    """The chart's `cellData` values: the S3 double's one bucket plays both the locked backup
+    bucket and the staging bucket."""
+
+    return {
+        "backupBucketName": BACKUP_BUCKET,
+        "backupBucketId": "rehearsal-backup-bucket-id",
+        "stagingBucketName": BACKUP_BUCKET,
+        "endpoint": stack.object_store.endpoint(from_host=False),
+    }
+
+
 def _render(stack: Stack, config: PlatformConfig) -> Platform:
     pg_cidr = f"{stack.postgres.ip}/32"
     values = {
         "cellctl": cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository),
+        "cellData": cell_data_values(stack),
         "capacity": {"attachmentsLimitFallback": config.attachments_limit_fallback},
         "cells": {
             "backupWindow": config.backup_window,
@@ -163,6 +180,20 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
              or (doc["kind"] == "ClusterRoleBinding" and doc["metadata"]["name"] == "exomem-break-glass"))
     ]
     hetzner = next(doc for source, doc in rendered if source == "templates/cloud-storage-class.yaml")
+    # The custodian template refuses to render unless every private range is excepted from egress, which
+    # would hide the S3 double above. It needs no S3 route (its double reads no bucket), so it renders from
+    # its own call, with the chart's default exceptions and its API-server egress aimed at this K3s.
+    custodian = render_chart(
+        stack,
+        {
+            **{name: value for name, value in values.items() if name != "cells"},
+            "cells": {"backupWindow": config.backup_window},
+            "keyCustodian": {"enabled": True},
+            "edge": {"apiServerCidrs": [f"{stack.k3s.ip}/32"]},
+        },
+        show_only=("templates/key-custodian.yaml",),
+    )
+    documents += [doc for source, doc in custodian if source == "templates/key-custodian.yaml"]
     return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"], cell_class=hetzner["metadata"]["name"])
 
 
@@ -289,6 +320,7 @@ def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, di
     )
 
     platform.overlays.append(overlay_cellctl(documents))
+    platform.overlays.append(overlay_custodian(documents))
     if stack.object_store.ca_path:
         platform.overlays.append(trust_storage_ca(stack, documents))
 
@@ -315,6 +347,7 @@ def apply(stack: Stack, config: PlatformConfig, *, cellctl_secrets: dict[str, di
     _kubectl_apply(stack, others)
 
     _kubectl_apply(stack, cellctl_secret_documents(stack, cellctl_secrets))
+    _kubectl_apply(stack, custodian_secret_documents(stack))
     _apply_ingress(stack, pki, ingress_source_value, ingress_image)
     _kubectl_apply(stack, workloads)
     if config.renders_local_storage:
@@ -395,6 +428,18 @@ def overlay_cellctl(documents: list[dict[str, Any]]) -> str:
     )
 
 
+def overlay_custodian(documents: list[dict[str, Any]]) -> str:
+    """Runs the rendered key-custodian Deployment as `rehearsal_custodian`; returns the overlay's
+    description for the report."""
+
+    container = _find(documents, "Deployment", "key-custodian")["spec"]["template"]["spec"]["containers"][0]
+    container["command"] = ["python3", "-m", "rehearsal_custodian"]
+    return (
+        "key-custodian Deployment: command `python3 -m rehearsal_custodian` (real watch loop, B2 account doubled: "
+        "every cell key is the S3 double's credential, read from the custodian's own B2 Secret)"
+    )
+
+
 def cellctl_secrets(stack: Stack, *, cell_token_key: bytes, control_plane_key: str) -> dict[str, dict[str, str]]:
     """The Secrets the chart's cellctl and gateway read, by name."""
 
@@ -409,8 +454,13 @@ def cellctl_secrets(stack: Stack, *, cell_token_key: bytes, control_plane_key: s
             "currentVersion": "1",
         },
         # Doubled in rehearsal_cellctl; present only because the chart requires them.
-        "exomem-cloud-b2-key-management": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
+        "exomem-cloud-b2-legacy-delete": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
+        "exomem-cloud-cell-data-backup-list": {"keyId": "rehearsal-double", "applicationKey": "rehearsal-double"},
         "exomem-cloud-hetzner-read-token": {"token": "rehearsal-double"},
+        # Exports and imports reach the live S3 double through the staging key.
+        "exomem-cloud-cell-data-staging": {
+            "keyId": stack.object_store.access_key, "applicationKey": stack.object_store.secret_key,
+        },
     }
 
 
@@ -427,6 +477,13 @@ def cellctl_secret_documents(stack: Stack, values: dict[str, dict[str, str]]) ->
 def platform_env(platform: Platform, deployment: str) -> list[dict[str, Any]]:
     rendered = _find(platform.rendered, "Deployment", deployment)
     return rendered["spec"]["template"]["spec"]["containers"][0].get("env", [])
+
+
+def custodian_secret_documents(stack: Stack) -> list[dict[str, Any]]:
+    """The custodian's own B2 Secret, holding the S3 double's credential for `rehearsal_custodian` to hand out."""
+
+    store = stack.object_store
+    return [_secret(CUSTODY_NAMESPACE, "exomem-key-custodian-b2", {"keyId": store.access_key, "applicationKey": store.secret_key})]
 
 
 def _secret(namespace: str, name: str, data: dict[str, str]) -> dict[str, Any]:

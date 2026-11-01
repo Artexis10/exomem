@@ -268,7 +268,7 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
 
 
 class ImportStorage:
-    """Use the maintained S3 SDK with the cell's prefix-restricted credential."""
+    """Use the maintained S3 SDK with cellctl's staging-bucket credential."""
     def __init__(self, client, bucket: str):
         self.client, self.bucket = client, bucket
 

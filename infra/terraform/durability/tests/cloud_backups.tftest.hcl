@@ -21,12 +21,12 @@ run "disabled_by_default_preserves_legacy_storage" {
     condition = (
       var.cloud_backup_enabled == false &&
       length(b2_bucket.cloud_backups) == 0 &&
-      length(b2_application_key.cloud_controller) == 0 &&
+      length(b2_application_key.cloud_legacy_delete) == 0 &&
       output.cloud_backup_bucket_name == null &&
       output.cloud_backup_bucket_id == null &&
       output.cloud_backup_account_id == null &&
-      output.cloud_controller_application_key_id == null &&
-      output.cloud_controller_application_key == null
+      output.cloud_legacy_delete_application_key_id == null &&
+      output.cloud_legacy_delete_application_key == null
     )
     error_message = "Cloud backup storage and credentials must be absent by default."
   }
@@ -42,11 +42,17 @@ run "disabled_by_default_preserves_legacy_storage" {
   }
 }
 
-run "enabled_adds_one_private_unlocked_bucket_and_one_unrestricted_controller_key" {
+run "enabled_adds_one_private_unlocked_bucket_and_one_bucket_restricted_delete_key" {
   command = plan
 
   variables {
     cloud_backup_enabled = true
+  }
+
+  override_resource {
+    target          = b2_bucket.cloud_backups[0]
+    override_during = plan
+    values          = { bucket_id = "mock-cloud-bucket" }
   }
 
   assert {
@@ -73,18 +79,19 @@ run "enabled_adds_one_private_unlocked_bucket_and_one_unrestricted_controller_ke
     error_message = "Only unfinished multipart uploads under cells/ may expire; live backup packs must keep their versions."
   }
 
+  # The account-wide key that minted tenant keys is not in this root any more.
   assert {
     condition = (
-      length(b2_application_key.cloud_controller) == 1 &&
-      b2_application_key.cloud_controller[0].key_name == "exomem-cloud-controller" &&
-      toset(b2_application_key.cloud_controller[0].capabilities) == toset([
-        "listKeys", "writeKeys", "deleteKeys", "listFiles", "deleteFiles"
+      length(b2_application_key.cloud_legacy_delete) == 1 &&
+      b2_application_key.cloud_legacy_delete[0].key_name == "exomem-cloud-legacy-delete" &&
+      toset(b2_application_key.cloud_legacy_delete[0].capabilities) == toset([
+        "listBuckets", "listFiles", "deleteFiles"
       ]) &&
-      b2_application_key.cloud_controller[0].bucket_id == null &&
-      b2_application_key.cloud_controller[0].bucket_ids == null &&
-      b2_application_key.cloud_controller[0].name_prefix == null
+      b2_application_key.cloud_legacy_delete[0].bucket_id == null &&
+      b2_application_key.cloud_legacy_delete[0].bucket_ids == toset(["mock-cloud-bucket"]) &&
+      b2_application_key.cloud_legacy_delete[0].name_prefix == null
     )
-    error_message = "The controller key must have exactly the requested account-wide key and cleanup capabilities."
+    error_message = "The legacy delete key must be limited to the Cloud bucket and hold only listing and file-delete capabilities."
   }
 
   assert {

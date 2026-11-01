@@ -6,11 +6,13 @@ through `cellctl.main`'s own builders from the chart-rendered pod
 environment and calls the real `run_loop`, exactly as `cellctl.main.run`
 does. Only the two external services cellctl calls are swapped:
 
-- B2 key management stays the in-process `FakeB2`: every per-cell key it
-  "creates" is the S3 double's one credential, so the real backup and
-  restore Jobs authenticate against a live S3 endpoint. Object listing and
-  deletion for D10's absence proof go to that same live endpoint, so the
-  deletion scenario proves the prefix really is empty;
+- B2's object-version calls (the founder bucket's listing and deletion, the
+  locked bucket's listing) go to the live S3 double, so the deletion
+  scenario proves the prefix really is empty. cellctl creates no key: the
+  key custodian's double (`rehearsal_custodian`) writes each cell's
+  `cell-object-store-key` Secret with the S3 double's one credential, so the
+  real backup and restore Jobs authenticate against a live S3 endpoint, and
+  the staging Secret carries that credential for exports and imports;
 - Hetzner's read-only volume listing is `FakeHetznerVolumeProvider`: the
   rehearsal's local-path volumes have no Hetzner id.
 """
@@ -34,10 +36,10 @@ from kubernetes import config as k8s_config
 
 
 class S3BackedFakeB2(FakeB2):
-    """FakeB2's key management, the live S3 double's objects."""
+    """FakeB2's interface, the live S3 double's objects."""
 
     def __init__(self, *, endpoint: str, bucket: str, access_key: str, secret_key: str) -> None:
-        super().__init__(fixed_credentials=(access_key, secret_key))
+        super().__init__()
         self._bucket = bucket
         self._s3 = boto3.client(
             "s3",
@@ -84,6 +86,8 @@ def main() -> None:
             cluster_config,
             config=build_reconcile_config(),
             heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
+            # One bucket plays both the founder and the locked bucket here.
+            backup_listing=object_storage,
         )
     )
 

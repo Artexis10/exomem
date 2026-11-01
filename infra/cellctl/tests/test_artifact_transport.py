@@ -30,6 +30,9 @@ CELL_ID = "aaaaaaaaaaaaaaaa"
 def test_artifact_transport_settings_load_without_discovery(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_URL", BROKER_URL)
     monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_CELL_IDS", '["aaaaaaaaaaaaaaaa"]')
     config = main.build_cluster_config()
@@ -40,6 +43,9 @@ def test_artifact_transport_settings_load_without_discovery(monkeypatch) -> None
 def _broker_environment(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_URL", BROKER_URL)
 
 

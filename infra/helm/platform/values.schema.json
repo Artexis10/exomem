@@ -5,7 +5,11 @@
   "$defs": {
     "mediaEngineName": {"enum": ["documents", "ocr", "speech"]}
   },
-  "allOf": [{"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}}],
+  "allOf": [
+    {"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}},
+    {"if": {"required": ["cellctl"], "properties": {"cellctl": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"required": ["cellData"], "properties": {"cellData": {"properties": {"backupBucketName": {"minLength": 1}, "backupBucketId": {"minLength": 1}, "stagingBucketName": {"minLength": 1}, "endpoint": {"minLength": 1}}}}}},
+    {"if": {"required": ["keyCustodian"], "properties": {"keyCustodian": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"required": ["cellData"], "properties": {"cellData": {"properties": {"backupBucketName": {"minLength": 1}, "backupBucketId": {"minLength": 1}}}, "cellctl": {"properties": {"image": {"pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"}}}}}}
+  ],
   "properties": {
     "runtime": false,
     "platformJobs": {
@@ -69,7 +73,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2LegacyDeleteSecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "keyRetentionSources": {
           "type": "array",
@@ -209,7 +213,6 @@
         "replicas": {"type": "integer", "minimum": 1, "maximum": 1},
         "b2BucketName": {"type": "string"},
         "b2BucketId": {"type": "string"},
-        "b2AccountId": {"type": "string"},
         "b2Endpoint": {"type": "string"},
         "initDeadlineMinutes": {"type": "integer", "minimum": 1},
         "upgradeReadyDeadlineMinutes": {
@@ -224,7 +227,9 @@
         "databaseDsnSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "backupMasterKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
-        "b2KeyManagementSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "b2LegacyDeleteSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "cellDataStagingSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "cellDataBackupListSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "hetznerReadTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
         "databaseEgressCidrs": {
@@ -258,10 +263,35 @@
         "cellImageRepository": {"pattern": "^[^\\s@]+$"},
         "b2BucketName": {"minLength": 1},
         "b2BucketId": {"minLength": 1},
-        "b2AccountId": {"minLength": 1},
         "b2Endpoint": {"minLength": 1},
         "databaseEgressCidrs": {"minItems": 1}
       }}
+    },
+    "cellData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backupBucketName", "backupBucketId", "stagingBucketName", "endpoint"],
+      "properties": {
+        "backupBucketName": {"type": "string"},
+        "backupBucketId": {"type": "string"},
+        "stagingBucketName": {"type": "string"},
+        "endpoint": {"type": "string", "pattern": "^(|https?://[^\\s]+)$"}
+      }
+    },
+    "keyCustodian": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "namespace", "secretName", "nodeSelector", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "namespace": {"const": "exomem-key-custody"},
+        "secretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+        "resources": {
+          "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
+          "properties": {"requests": {"type": "object"}, "limits": {"type": "object"}}
+        }
+      }
     },
     "artifactBroker": {
       "type": "object",

@@ -10,7 +10,6 @@ import pytest
 
 from cellctl import main
 from cellctl.alerts import AlertThresholds
-from cellctl.storage.b2 import B2Config
 
 from .test_manifests import RELOCATING_KEYS
 
@@ -18,6 +17,9 @@ from .test_manifests import RELOCATING_KEYS
 def _settings_env(monkeypatch, model_env: dict[str, str]) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_CELL_MODEL_ENV", json.dumps(model_env))
 
 
@@ -68,6 +70,9 @@ def test_a_model_env_that_is_not_a_string_map_fails_at_settings_load(monkeypatch
     # A non-string value would make every cell's StatefulSet apply refuse.
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_CELL_MODEL_ENV", raw)
     with pytest.raises(ValueError):
         main.build_cluster_config()
@@ -84,6 +89,8 @@ def _secrets_env(monkeypatch, current: str, previous: str | None = None) -> None
         monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION", "1")
     monkeypatch.setenv("CELLCTL_BACKUP_MASTER_KEYS", json.dumps({"1": "bWFzdGVy"}))
     monkeypatch.setenv("CELLCTL_BACKUP_MASTER_KEY_CURRENT_VERSION", "1")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_KEY_ID", "staging-key-id")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_APPLICATION_KEY", "staging-application-key")
 
 
 def test_the_cell_token_key_is_the_64_hex_key_the_gateway_reads(monkeypatch) -> None:
@@ -109,7 +116,7 @@ def test_synthetic_platform_bundles_match_cellctl_consumers(monkeypatch) -> None
         "keys": json.dumps({"1": base64.b64encode(backup_key).decode("ascii")}),
         "currentVersion": "1",
     }
-    b2 = {"keyId": "synthetic-key-id", "applicationKey": "synthetic-application-key"}
+    staging = {"keyId": "synthetic-key-id", "applicationKey": "synthetic-application-key"}
     _secrets_env(monkeypatch, token["current"], token["previous"])
     monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_VERSION", token["currentVersion"])
     monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION", token["previousVersion"])
@@ -120,14 +127,10 @@ def test_synthetic_platform_bundles_match_cellctl_consumers(monkeypatch) -> None
     assert config.cell_token_key_previous == bytes.fromhex(token["previous"])
     assert config.backup_master_keys == {1: backup_key}
     assert config.backup_master_key_current_version == 1
-    b2_config = B2Config(
-        key_management_key_id=b2["keyId"],
-        key_management_application_key=b2["applicationKey"],
-        bucket_id="synthetic-bucket",
-        account_id="synthetic-account",
-    )
-    assert b2_config.key_management_key_id == b2["keyId"]
-    assert b2_config.key_management_application_key == b2["applicationKey"]
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_KEY_ID", staging["keyId"])
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_APPLICATION_KEY", staging["applicationKey"])
+    config = main.build_secrets_config()
+    assert (config.staging_key_id, config.staging_application_key) == (staging["keyId"], staging["applicationKey"])
 
 
 @pytest.mark.parametrize(

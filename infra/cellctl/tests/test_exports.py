@@ -217,19 +217,17 @@ def test_a_local_export_job_tolerates_its_cordoned_node():
 
 
 class FakeS3:
-    """S3 at the SDK boundary. One store; each client is one B2 key, refused
-    outside its cell's prefix exactly as FakeB2 refuses that key."""
+    """S3 at the SDK boundary. One store; every client is cellctl's one staging key (D9)."""
 
-    def __init__(self, b2: FakeB2) -> None:
-        self.b2 = b2
+    def __init__(self) -> None:
         self.uploads: dict[str, dict] = {}
         self.versions: dict[str, list[tuple[str, bytes]]] = {}
         self.calls: list[tuple[str, str]] = []  # (key id, object name)
         self.abort_error: Exception | None = None
         self._ids = itertools.count(1)
 
-    def client(self, cluster_config, key_id: str, key_secret: str) -> FakeS3Client:
-        return FakeS3Client(self, key_id)
+    def client(self, cluster_config, secrets_config) -> FakeS3Client:
+        return FakeS3Client(self, secrets_config.staging_key_id)
 
     def put_part(self, url: str, data: bytes) -> str:
         """What the export Job's PUT through a presigned part URL does."""
@@ -244,7 +242,6 @@ class FakeS3Client:
         self.store, self.key_id = store, key_id
 
     def _use(self, name: str) -> None:
-        self.store.b2.authorize(self.key_id, name)
         self.store.calls.append((self.key_id, name))
 
     def get_paginator(self, operation: str):
@@ -313,11 +310,11 @@ class Harness:
         self.cell_db = cell_db
         self.cluster = FakeClusterGateway()
         self.b2 = FakeB2()
-        self.s3 = FakeS3(self.b2)
+        self.s3 = FakeS3()
         self.jobs: dict[str, ExportJob] = {}
         self.cluster.observe_export_job = lambda namespace, export_id, verify=False: self.jobs.get(
             export_id + ("-verify" if verify else ""), ExportJob())
-        monkeypatch.setattr(reconcile, "_cell_s3_client", self.s3.client)
+        monkeypatch.setattr(reconcile, "_staging_s3_client", self.s3.client)
 
     async def __aenter__(self) -> Harness:
         self.app = await asyncpg.connect(self.cell_db.dsn(role="substrate_app"))
@@ -521,8 +518,8 @@ async def test_a_large_cells_job_and_part_urls_last_as_long_as_its_hold(cell_db,
         assert {parse_qs(urlsplit(url).query)["expires"][0] for url in packed["urls"]} == {str(330 * 60)}
 
 
-async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkeypatch):
-    """Defect: one tenant's export is created, completed or linked with another cell's key or prefix."""
+async def test_every_export_goes_through_the_staging_key_under_its_own_cells_prefix(cell_db, monkeypatch):
+    """Defect: an export is created, completed or linked outside its cell's prefix, or in the backup bucket."""
     async with Harness(cell_db, monkeypatch) as harness:
         await harness.serve(CELL)
         await harness.serve(OTHER_CELL)
@@ -535,13 +532,14 @@ async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkey
             await harness.app.execute("UPDATE exomem_cloud_exports SET link_requested_at=now() WHERE export_id=$1",
                                       uuid.UUID(export_id))
         await harness.run()
+        staging_key_id = _secrets_config().staging_key_id
         for cell_id, export_id in exports.items():
-            key_id = (await harness.cell(cell_id)).b2_key_id
             url = urlsplit((await harness.export(export_id))["download_url"])
-            assert url.path == f"/exomem-cloud-backups/cells/{cell_id}/exports/{export_id}.zip"
-            assert parse_qs(url.query)["key_id"] == [key_id]
-            assert {name for used, name in harness.s3.calls if used == key_id} <= {
-                f"cells/{cell_id}/exports/{export_id}.zip"}
+            staging_bucket = _cluster_config().cell_data_staging_bucket
+            assert url.path == f"/{staging_bucket}/cells/{cell_id}/exports/{export_id}.zip"
+            assert parse_qs(url.query)["key_id"] == [staging_key_id]
+        assert {used for used, _name in harness.s3.calls} == {staging_key_id}
+        assert {name.split("/")[1] for _used, name in harness.s3.calls} == {CELL, OTHER_CELL}
 
 
 async def test_each_role_holds_exactly_its_c6_columns(cell_db):

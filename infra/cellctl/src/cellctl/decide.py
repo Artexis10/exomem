@@ -1377,11 +1377,12 @@ def _decide_deletion(row: CellRow, observation: ClusterObservation) -> Decision:
         )
     if not observation.pv_absent_confirmed:
         return Decision(row_updates={**hold_clear, "observed_state": "deleting"})
-    if not observation.backup_objects_absent_confirmed:
+    # An old cell's objects are deleted with cellctl's own key. A new cell's backup bucket is
+    # locked: nothing deletes its files, and no key is deleted here (D9).
+    if row.b2_key_id is not None and not observation.backup_objects_absent_confirmed:
         return Decision(delete_backup_objects=True, row_updates={**hold_clear, "observed_state": "deleting"})
-    if row.b2_key_id is not None and not observation.b2_key_absent_confirmed:
-        return Decision(delete_b2_key=True, row_updates={**hold_clear, "observed_state": "deleting"})
     return Decision(
+        storage_cleanup_pending=True,
         row_updates={
             **hold_clear,
             "observed_state": "deleted",

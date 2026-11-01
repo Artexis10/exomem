@@ -8,11 +8,15 @@ cellctl:
   cellImageRepository: ghcr.io/substrate-systems/exomem-cloud-cell
   b2BucketName: exomem-cloud-backups
   b2BucketId: b2-bucket-id-example
-  b2AccountId: b2-account-id-example
   b2Endpoint: https://s3.us-west-002.backblazeb2.com
   initDeadlineMinutes: 10
   databaseEgressCidrs:
     - 10.0.1.5/32
+cellData:
+  backupBucketName: exomem-cell-backups
+  backupBucketId: cell-backup-bucket-id-example
+  stagingBucketName: exomem-cell-staging
+  endpoint: https://s3.us-west-004.backblazeb2.com
 cellStorage:
   local:
     enabled: true

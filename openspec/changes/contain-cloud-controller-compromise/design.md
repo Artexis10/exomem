@@ -292,7 +292,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 5. Existing cells keep their prefix-limited keys in the current account until the backup-lock migration moves their data. The operator's infrastructure tooling deletes those keys when a cell migrates or is deleted.
 
 **The custodian.**
-- It runs as its own small Deployment, with its own service account and image, in its own namespace. That namespace is outside every namespace that admission rule 1 lets `cellctl` write. The same chart check as the lock extender's enforces this.
+- It runs as its own small Deployment, with its own service account, in its own namespace. It uses the controller's image with its own command: a separate image would add a publish and attestation pipeline without reducing what the custodian can do, because its power comes from its service account and key. That namespace is outside every namespace that admission rule 1 lets `cellctl` write. The same chart check as the lock extender's enforces this.
 - It runs on a node that runs no cell. A default-deny NetworkPolicy lets it reach only the API server and the object store. It takes no inbound traffic.
 - It receives its key through a Secret reference, never as a literal environment value, because `cellctl` can list pods cluster-wide.
 - It writes one Secret of its own in each cell namespace, `cell-object-store-key`, and no other Secret. Admission limits its writes to that name, because RBAC `resourceNames` cannot limit `create`. It never reads `cell-credentials`.
@@ -301,7 +301,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
   - the bucket pinned in the chart;
   - the name prefix `cells/<cell_id>/`, where the cell ID comes from the namespace name, never from a request;
   - exactly `listBuckets`, `listFiles`, `readFiles`, `writeFiles` and `deleteFiles`.
-- It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret.
+- It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret. Every key listing uses the provider's v4 API: on 2026-11-01 the v3 listing of a live account returned 6 of its 25 keys.
 - It hides a cell's prefix, and then deletes its key, only on a deletion record that Substrate signed with the grant key (audience `exomem-cell-delete`), and only after a 7-day grace period. It raises an alert on each hide. A deleted or recreated namespace alone hides nothing.
 
 **What `cellctl` keeps.** It keeps two keys that cannot create keys:

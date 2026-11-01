@@ -39,6 +39,9 @@ def _uploads(public_key: str, cell_ids=(CELL_ID, OTHER_CELL_ID), **overrides) ->
 def test_upload_settings_are_off_when_the_environment_omits_them(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     config = main.build_cluster_config()
     assert config.upload_cell_ids == ()
     assert config.upload_public_key == ""
@@ -48,6 +51,9 @@ def test_upload_settings_load_from_the_environment(monkeypatch) -> None:
     public_key = _public_pem()
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_UPLOAD_CELL_IDS", f'["{CELL_ID}","{OTHER_CELL_ID}"]')
     monkeypatch.setenv("CELLCTL_UPLOAD_PUBLIC_KEY", public_key)
     config = main.build_cluster_config()

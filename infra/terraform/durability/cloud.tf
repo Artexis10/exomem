@@ -38,10 +38,14 @@ resource "b2_bucket" "cloud_backups" {
   }
 }
 
-# Key creation requires account scope. cellctl uses this parent only to mint
-# tenant keys; tenant prefix restrictions are enforced by the runtime.
-resource "b2_application_key" "cloud_controller" {
-  count        = var.cloud_backup_enabled ? 1 : 0
-  key_name     = "exomem-cloud-controller"
-  capabilities = ["listKeys", "writeKeys", "deleteKeys", "listFiles", "deleteFiles"]
+# Cells created before the cell-data account keep their backups in this bucket. Deleting one removes
+# its object versions with this key. It is limited to this bucket and cannot create, list or delete
+# keys: the account-wide key that minted every tenant key is gone, and key creation now belongs to
+# the key custodian in the cell-data account.
+resource "b2_application_key" "cloud_legacy_delete" {
+  count      = var.cloud_backup_enabled ? 1 : 0
+  key_name   = "exomem-cloud-legacy-delete"
+  bucket_ids = [b2_bucket.cloud_backups[0].bucket_id]
+  # B2 capability names are protocol tokens. listBuckets lets an S3 or native client resolve the bucket.
+  capabilities = ["listBuckets", "listFiles", "deleteFiles"]
 }

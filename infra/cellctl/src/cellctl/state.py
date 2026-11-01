@@ -299,8 +299,9 @@ class ClusterObservation:
     namespace_absent_confirmed: bool = False
     pv_absent_confirmed: bool = False
     provider_volume_absent_confirmed: bool = False
+    # An old cell's backup objects, all deleted. A new cell's sit under a lock nothing deletes,
+    # so this stays False for it and no deletion step waits on it.
     backup_objects_absent_confirmed: bool = False
-    b2_key_absent_confirmed: bool = False
 
 
 @dataclass
@@ -331,7 +332,9 @@ class Decision:
     # D4/D8: a BACKUP_FAILED hold exit deletes this hold's backup Job before
     # the cell restarts, so the ResourceQuota does not hold the restart back.
     delete_backup_job: bool = False
-    delete_b2_key: bool = False
+    # D9: the cell's deletion is complete here, but its object-store key (and a new cell's
+    # locked backup files) is the operator's to remove; the pass raises the pending alert.
+    storage_cleanup_pending: bool = False
     run_backup_job: bool = False
     run_restore_job_snapshot: str | None = None
 

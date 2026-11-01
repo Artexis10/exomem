@@ -1504,6 +1504,7 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
 
     values = {
         "cellctl": platform.cellctl_values(stack, image=cellctl_image, cell_repository=build.CELL_REPOSITORY),
+        "cellData": platform.cell_data_values(stack),
         "cells": {"jobEgressExcept": [infra.K3S_POD_CIDR, infra.K3S_SERVICE_CIDR]},
         "cellStorage": {"domain": "local", "local": {"enabled": True, "maxCellGib": DRILL_MAX_CELL_GIB}},
     }
