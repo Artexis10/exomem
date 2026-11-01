@@ -240,7 +240,7 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
     return (page_rel, rel) if (vault_root / page_rel).is_file() else None
 
 
-def _repoint_artifact(old_binary: str, new_binary: str, new_page: str | None = None):
+def _repoint_artifact(old_binary: str, new_binary: str):
     """A content transform that repoints a moved page at its moved bytes.
 
     Only the pointer fields change, patched where the YAML parser places them,
@@ -266,13 +266,6 @@ def _repoint_artifact(old_binary: str, new_binary: str, new_page: str | None = N
             changes["governance_companion"] = moved_descriptor
         if frontmatter.get("original_filename") == Path(old_binary).name:
             changes["original_filename"] = Path(new_binary).name
-        if new_page is not None and "next_part" in frontmatter:
-            from . import extraction_parts
-
-            # The folder of further parts is named for the page and moves with it.
-            changes["next_part"] = extraction_parts.part_path(Path(new_page), 2).relative_to(
-                Path(new_page).parent
-            ).as_posix()
         protection = frontmatter.get("raw_protection")
         if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
             changes["raw_protection"] = {**protection, "artifact_path": new_binary}
@@ -280,6 +273,26 @@ def _repoint_artifact(old_binary: str, new_binary: str, new_page: str | None = N
             return text
         try:
             return splice_markdown_frontmatter(text, changes)
+        except FrontmatterSpliceError as error:
+            raise MoveFileError(error.code, error.reason) from error
+
+    return transform
+
+
+def _repoint_parts(new_page: str):
+    """A content transform that points a moved page's `next_part` at its moved folder of parts."""
+
+    def transform(text: str) -> str:
+        from . import extraction_parts
+        from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+        frontmatter, _body, block = parse_frontmatter(text, strict=True)
+        page = Path(new_page)
+        moved = extraction_parts.part_path(page, 2).relative_to(page.parent).as_posix()
+        if block is None or frontmatter.get("next_part") in (None, moved):
+            return text
+        try:
+            return splice_markdown_frontmatter(text, {"next_part": moved})
         except FrontmatterSpliceError as error:
             raise MoveFileError(error.code, error.reason) from error
 
@@ -614,9 +627,11 @@ def _move_file_local(
                 ),
             )
         content_transform = _compose_transforms(
-            content_transform, _repoint_artifact(*paired_binary, new_rel)
+            content_transform, _repoint_artifact(*paired_binary)
         )
-        # The hidden pages that hold the rest of a long extraction move with their Source.
+    if not recovering_from_trash and old_rel.lower().endswith(".md"):
+        # The hidden pages that hold the rest of a long extraction move with their page, paired
+        # with an original or not.
         from . import extraction_parts
 
         old_folder = extraction_parts.folder_for(Path(old_rel))
@@ -632,6 +647,7 @@ def _move_file_local(
                     code="DEST_EXISTS",
                     reason=f"destination already exists: {paired_parts[1]}. This op refuses to overwrite.",
                 )
+            content_transform = _compose_transforms(content_transform, _repoint_parts(new_rel))
 
     try:
         reserved_paths.inspect_generic_path(vault_root, new_rel)
@@ -1010,17 +1026,6 @@ def _move_file_local(
                             None,
                         )
                     )
-                part_writes: list[PlannedWrite] = []
-                for old_part in moved_parts:
-                    old_part_rel = old_part.as_posix()
-                    new_part = Path(paired_parts[1]) / old_part.name
-                    part_content, _guard = read_guarded_text(vault_root, vault_root / old_part)
-                    catalog_removals.append(
-                        catalog_publication.CatalogRemoval(old_part_rel, content_hash(part_content))
-                    )
-                    part_writes.append(
-                        PlannedWrite(path=vault_root / new_part, content=part_content, create_only=True)
-                    )
                 catalog_writes = [
                     *lifecycle_writes,
                     PlannedWrite(
@@ -1030,7 +1035,6 @@ def _move_file_local(
                     ),
                     *writes,
                     *extra_writes,
-                    *part_writes,
                     *log_plan.writes,
                 ]
                 try:

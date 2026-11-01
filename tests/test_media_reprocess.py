@@ -172,6 +172,28 @@ def test_reprocess_keeps_the_whole_old_extraction_on_its_page_and_leaves_no_old_
     assert extraction_parts.whole_text(vault, prior, prior.read_text(encoding="utf-8")) == old_text
 
 
+def test_reprocess_publishes_when_a_part_of_the_old_extraction_is_missing(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 600)
+    old_text = "\n\n".join(f"[0:{number:02d}] wrong {number} " + "alpha " * 40 for number in range(12)).strip()
+    monkeypatch.setitem(globals(), "WRONG", old_text)
+    _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    extraction_parts.part_path(sidecar, 3).unlink()
+
+    media_processing.reprocess_media(vault, binary, language="et")
+    _run_to_idle(vault, worker)
+
+    now = sidecar.read_text(encoding="utf-8")
+    assert RIGHT in now
+    assert media_jobs.status(vault)["jobs"] == []
+    assert not extraction_parts.folder_for(sidecar).exists()
+    (link,) = prior_extraction.links_of(now)
+    kept = extraction_parts.whole_text(vault, vault / f"{link}.md", (vault / f"{link}.md").read_text(encoding="utf-8"))
+    assert "[part 3 of this extraction was missing when it was replaced]" in kept
+
+
 def test_a_language_hint_is_pinned_until_a_later_request_replaces_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

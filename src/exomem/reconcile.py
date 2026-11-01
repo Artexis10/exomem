@@ -62,6 +62,7 @@ class ReconcileReport:
     part_orphans_removed: int = 0
     parts_rebuilt: int = 0
     parts_missing: list[str] = field(default_factory=list)
+    parts_unowned: list[str] = field(default_factory=list)
     semantic_suppressed_drift: list[dict[str, str]] = field(default_factory=list)
     semantic_suppressed_purged: list[str] = field(default_factory=list)
     semantic_suppressed_corrupt: list[dict[str, str]] = field(default_factory=list)
@@ -119,6 +120,7 @@ class ReconcileReport:
             "part_orphans_removed": self.part_orphans_removed,
             "parts_rebuilt": self.parts_rebuilt,
             "parts_missing": self.parts_missing,
+            "parts_unowned": self.parts_unowned,
             "semantic_suppressed_drift": self.semantic_suppressed_drift,
             "semantic_suppressed_purged": self.semantic_suppressed_purged,
             "semantic_suppressed_corrupt": self.semantic_suppressed_corrupt,
@@ -406,6 +408,9 @@ def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
     ]
     entries += [["clip", key] for key in _clip_orphans(vault_root, missing_clip_orphans)]
     entries += [["frames", _rel(frame_dir, vault_root)] for frame_dir, _video in _dangling_frame_dirs(vault_root)]
+    from . import extraction_parts
+
+    entries += [["part", rel] for rel in extraction_parts.sweep(vault_root, dry_run=True).removed]
     if lifecycle.cleanup_safe:
         entries += [["lifecycle", item.prepared.page_identity, item.prepared.reference] for item in _cleanup_eligible(lifecycle)]
     entries += [["graph-quarantine", member] for member in quarantine or ()]
@@ -827,14 +832,15 @@ def reconcile(
                 pass
     report.frame_orphans_removed = len(frame_orphans)
 
-    # Hidden part pages of long extractions: remove those no Source owns, and write missing
-    # ones again where the original reads cheaply. A recording's or image's are only reported.
+    # Hidden part pages of long extractions: remove those left over from a longer extraction,
+    # write missing ones again where the original reads cheaply, and report the rest.
     from . import extraction_parts
 
     swept = extraction_parts.sweep(vault_root, dry_run=dry_run)
     report.part_orphans_removed = len(swept.removed)
     report.parts_rebuilt = len(swept.rebuilt)
     report.parts_missing = swept.missing
+    report.parts_unowned = swept.unowned
 
     # ---- 3. Stable-reference sidecar ----
     from . import memory_refs
@@ -934,6 +940,7 @@ def _job_summary(report: ReconcileReport) -> dict[str, Any]:
         "frame_orphans_removed": report.frame_orphans_removed,
         "part_orphans_removed": report.part_orphans_removed,
         "parts_missing": len(report.parts_missing),
+        "parts_unowned": len(report.parts_unowned),
         "semantic_suppressed_purged": len(report.semantic_suppressed_purged),
         "semantic_missing_purged": len(report.semantic_missing_purged),
         "semantic_suppressed_corrupt_purged": dict(report.semantic_suppressed_corrupt_purged),

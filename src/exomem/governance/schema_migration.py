@@ -301,8 +301,12 @@ def _catalog_items(
     kb = vault_root / kb_dirname()
     if not kb.is_dir():
         raise ForwardMigrationUnavailable
+    from .. import extraction_parts
+
     items: list[projection_store.ProjectionItemVariants] = []
     for path in sorted(find_corpus.walk_md(kb)):
+        if extraction_parts.source_page_for(path) is not None:
+            continue  # a part page is governed as its Source, as catalog publication skips it
         try:
             relative = path.relative_to(vault_root).as_posix()
             snapshot = reserved_paths.read_generic_bytes(vault_root, relative)

@@ -285,6 +285,38 @@ def retire(vault_root: Path, pages: tuple[Path, ...]) -> None:
         pass
 
 
+def carry(vault_root: Path, page_rel: str, new_page_rel: str) -> list[tuple[str, str]]:
+    """Move the folder of further parts of the page at `page_rel` to sit beside `new_page_rel`.
+
+    A part belongs to its page, so it goes where the page goes: to Trash, back from it, and on a
+    move. Returns each moved part as `(old path, new path)`, empty when the page has no folder of
+    parts. Raises `OSError` when the folder cannot move; it then stays where it was.
+    """
+    from . import file_watcher, reserved_paths
+    from .cli_ops import OpError
+
+    old, new = folder_for(Path(page_rel)), folder_for(Path(new_page_rel))
+    if not (vault_root / old).is_dir():
+        return []
+    moved = [
+        ((old / entry.name).as_posix(), (new / entry.name).as_posix())
+        for entry in sorted((vault_root / old).iterdir())
+        if part_number(entry) is not None
+    ]
+    # The removal is ours, so the watcher need not report it again.
+    try:
+        file_watcher.register_self_delete(vault_root, [before for before, _after in moved])
+    except Exception:  # noqa: BLE001 — suppression is best-effort
+        pass
+    try:
+        reserved_paths.move_generic_path(
+            vault_root, old.as_posix(), new.as_posix(), source_kind="directory", physical=True
+        )
+    except (OpError, reserved_paths.ReservedPathLeafError) as error:
+        raise OSError(f"the part pages in {old.as_posix()} could not move to {new.as_posix()}") from error
+    return moved
+
+
 def iter_texts(vault_root: Path, page: Path, content: str) -> Iterator[str]:
     """The text of each part of the extraction on `page`, in order, read exactly.
 
