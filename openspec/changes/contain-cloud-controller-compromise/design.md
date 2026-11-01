@@ -332,7 +332,7 @@ Every container command is `sh -c` with a preamble. The preamble is `ulimit -c 0
 
 | Kind | Process and arguments | Environment names |
 |---|---|---|
-| StatefulSet init container | `exomem cell-init --vault /data/vault --json` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`; with a local volume, also `EXOMEM_CLOUD_CELL_BACKED_UP` (optional `secretKeyRef`) |
+| StatefulSet init container | `command`: `exomem cell-init`. `args`: `--vault /data/vault --json` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`; with a local volume, also `EXOMEM_CLOUD_CELL_BACKED_UP` (optional `secretKeyRef`) |
 | StatefulSet serving container | `exomem --transport http --host 0.0.0.0 --port 8765` | Fixed: `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `EXOMEM_CLOUD_CELL_TOKEN` (`secretKeyRef`), `EXOMEM_CLOUD_HEALTH_PORT`, `EXOMEM_VAULT_PATH`, `TMPDIR`, `EXOMEM_LOG_DIR`. Conditional: `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS` (optional `secretKeyRef`), `EXOMEM_CLOUD_READ_ONLY`, `EXOMEM_CLOUD_ARTIFACT_BROKER_URL`, `EXOMEM_CLOUD_MEDIA_SLOT_URL`, `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, `EXOMEM_MEDIA_STORE_CONFIG`, `EXOMEM_MEDIA_EDGE_URL`, `EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE`, `EXOMEM_MEDIA_ENGINES`. Then every `model_env` entry |
 | `cell-backup` Job | One shell string: vault check, `restic snapshots \|\| restic init`, `restic backup`, snapshot-ID capture, `restic forget --prune`, the termination message | `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (`secretKeyRef`), `RESTIC_PASSWORD` (`secretKeyRef`), `RESTIC_CACHE_DIR`, `TMPDIR` |
 | `cell-restore` Job | One shell string: `restic restore <64-hex snapshot ID> --target / --delete --include /data/vault --include /data/host` | The same six names as the backup Job |
@@ -341,6 +341,8 @@ Every container command is `sh -c` with a preamble. The preamble is `ulimit -c 0
 | `cell-export` verification Job | The same subcommand with `--verify --archive-bytes <n> --archive-sha256 <hex> --archive-version-id <id>` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`, `EXOMEM_EXPORT_VERIFY_URL` (`secretKeyRef` to the per-export Secret) |
 
 The `cell-import` and `cell-export` Jobs also carry the trust-anchor names of the next section when `cellctl` has the values.
+
+Two fields carry the vector. The init container splits it: `command` holds the preamble and `exomem cell-init`, and `args` holds the rest. Kubernetes appends `args` to `command`, and the preamble's `exec "$@"` passes them on to the process. Every Job and the serving container put the whole vector in `command` and set no `args`. So the admission rule of task 4.2 must pin `args` as well, exact or absent. A pin on `command` alone leaves `args` free to extend the process.
 
 What the check shows against D3:
 - The closed set for the subcommands is smaller today than D3 names. The cell has `cell-init`, `cell-import` and `cell-export`, and `serve` is the process with no subcommand. `cell-backup` and `cell-restore` are shell strings until task 4.1. `cell-backup-migrate` belongs to D5.
@@ -353,22 +355,27 @@ What the check shows against D3:
 The mode is a constant of the cell image, `cloud_containment.ENFORCE` in `src/exomem/cloud_containment.py`. No environment value, flag or rendered argument selects it, so nothing that `cellctl` writes can switch it. Each check also takes an `enforce` parameter that defaults to the constant, so tests cover the enforce branch. Task 5.1 changes the constant, and the minimum-release floor (D8) then stops a rollback.
 
 Events. Both are in `EVENT_CATALOG`, carry no content and name no token, claim or URL. A serving cell writes them to its JSONL log. A Job writes them to its stderr in the `key=value` form.
-- `cloud_request_credential`, once per `/mcp` request. Fields: `credential` (`both`, `bearer_only`, `proof_only`, `neither` or `proof_unconfigured`), `proof` (`valid`, `invalid`, `absent` or `unconfigured`), `cell_id` and `verdict`.
-- `cloud_operation_check`, once per reason for each `cell-export` or `cell-import` run that moves data, or once with `reason=none` when the run passes. Fields: `operation`, `operation_id`, `cell_id`, `reason` and `verdict`. The cell logs `operation_id` only in its canonical UUID form, and `invalid` otherwise.
+- `cloud_request_credential`, once per `/mcp` request. Fields: `credential` (`both`, `bearer_only`, `proof_only` or `neither`), `proof` (`valid`, `invalid`, `absent` or `unconfigured`), `cell_id` and `verdict`. The `credential` follows from the bearer's validity and the proof's alone. A cell without the proof key reports a valid bearer as `bearer_only`, with `proof` `unconfigured`, so the D1 step-2 query for no bearer-only requests covers that cell too.
+- `cloud_operation_check`, once per reason for each `cell-export` or `cell-import` run that moves data, or once with `reason=none` when the run passes. Fields: `operation`, `operation_id`, `cell_id`, `reason` and `verdict`. The cell logs `cell_id` only as sixteen base32 characters and `operation_id` only as a canonical UUID, and logs `invalid` otherwise, so no value can add a line to the log.
 - `verdict` is `pass`, `would_refuse` (report mode) or `refused` (enforce mode).
-- The reasons are `grant_missing`, `grant_unconfigured`, `grant_invalid`, `grant_operation`, `grant_request`, `destination_unconfigured`, `url_malformed`, `url_scheme`, `url_userinfo`, `url_host`, `url_path`, `url_foreign_key`, `url_grant_key`, `check_failed` and `none`.
+- The reasons are `grant_missing`, `grant_unconfigured`, `grant_invalid`, `grant_operation`, `grant_request`, `destination_unconfigured`, `url_malformed`, `url_scheme`, `url_userinfo`, `url_host`, `url_path`, `url_foreign_key`, `url_grant_key`, `url_query`, `url_missing`, `check_failed` and `none`.
 
 Trust anchors. `cellctl` renders them as literal values into the import, export and export-verification Jobs, from its own object-store endpoint and bucket settings:
 - `EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT` and `EXOMEM_CLOUD_OBJECT_STORE_BUCKET`;
-- `EXOMEM_CLOUD_GRANT_PUBLIC_KEY`, an Ed25519 public key PEM from the chart value `cellctl.grantPublicKey`. The value is empty until Substrate signs grants, and an empty anchor is not rendered.
+- `EXOMEM_CLOUD_GRANT_PUBLIC_KEY`, an Ed25519 public key PEM that `cellctl` reads from its own `CELLCTL_GRANT_PUBLIC_KEY`. Nothing sets that variable yet. The controller wiring, and the choice between a chart value and a Secret, come with the Substrate grant batch (task 3.3). An empty anchor is not rendered.
+
+Today `cellctl` renders these anchors, so a compromised `cellctl` can change them and the cell's checks report without yet protecting. Once task 4.2 pins them in the admission policy (D2), `cellctl` can change none of them.
 
 Grant claims, as `cloud_grant.py` verifies them. The token is an `EdDSA` JWT with header `typ` `JWT`.
 - Every grant has exactly `aud` (`exomem-cell-operation`), `iat`, `exp`, `jti`, `tenant_id`, `cell_id`, `operation`, `operation_id` and `object_key`.
 - An import grant adds `ciphertext_bytes` and `ciphertext_sha256`. A restore grant adds `snapshot_id`.
-- There is no `v` or `iss` claim. `exp - iat` is at most 72 hours, because an import grant is signed with its request and the 24-hour upload window passes before its Job runs. Substrate's signer (task 3.3) must use these claim names and bound.
+- Task 4.3 adds a `recipient` claim to the export and import grants. That changes the exact claim set, so the cell's verifier and Substrate's signer (task 3.3) change in the same release.
+- There is no `v` or `iss` claim. `exp - iat` is at most 72 hours. Substrate signs an import grant when it records the upload, because the ciphertext digest exists only then. A replayed grant still names one operation ID, one object key and one digest, and an import is idempotent per import ID, so the long bound adds no capability. Substrate's signer (task 3.3) must use these claim names and bound.
 - The cell checks the claims with the same function as the gateway proof (`cloud_origin.signed_claims`), then the `operation` and `operation_id` against the subcommand's, then each presigned URL.
 
-Destination rule. The cell parses each URL with `urllib.parse`. The scheme, host and port must equal the pinned endpoint's. The URL may carry no user information and no fragment. The path must be `/<pinned bucket>/<object key>` with every segment decoded once, no empty, `.` or `..` segment, and no encoded slash. The key must sit under `cells/<own cell ID>/`, and it must equal the grant's `object_key` when a grant is present. `cellctl` presigns path-style URLs of this shape for its object-store endpoint (checked with botocore 1.43.111), so the exact-path check holds.
+Destination rule. The cell parses each URL with `urllib.parse`. The scheme, host and port must equal the endpoint anchor's. The URL may carry no user information and no fragment. The path must be `/<bucket anchor>/<object key>` with every segment decoded once, no empty, `.` or `..` segment, and no encoded slash. The key must sit under `cells/<own cell ID>/`, and it must equal the grant's `object_key` when a grant is present. `cellctl` presigns path-style URLs of this shape (checked with botocore 1.43.111), and its S3 client pins path style so the check does not rest on a library default.
+
+The query may hold only these names, compared without case: the six SigV4 presign names (`X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders` and `X-Amz-Signature`), `partNumber` and `uploadId` for an upload part, and `versionId` and `response-content-disposition` for a download. The SigV4 and S3 protocols fix these names. They come from presigning with `cellctl`'s own export and import storage classes, and a `cellctl` test fails when a URL gains another name. A name such as `x-amz-acl` or `x-amz-copy-source` changes what the request does, so the cell reports `url_query`. An operation with no URL reports `url_missing`.
 
 ## Reuse
 

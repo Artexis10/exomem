@@ -14,9 +14,11 @@ token, a claim, a URL or a tenant's content.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from enum import StrEnum
 
+from . import cloud_cell
 from .log_events import KeyValueFormatter, log_event
 
 #: Report mode (False) or enforce mode (True). This is a constant of the image,
@@ -33,13 +35,16 @@ log = logging.getLogger(__name__)
 
 
 class Credential(StrEnum):
-    """Which credential a request used. The proof is the one that will remain (D1)."""
+    """Which credential a request used, from the bearer's validity and the proof's alone (D1).
+
+    A cell without the proof key reports `bearer_only` for a valid bearer, so the
+    query "no bearer-only requests" covers it. The `proof` field says why.
+    """
 
     BOTH = "both"
     BEARER_ONLY = "bearer_only"
     PROOF_ONLY = "proof_only"
     NEITHER = "neither"
-    PROOF_UNCONFIGURED = "proof_unconfigured"
 
 
 class Proof(StrEnum):
@@ -63,22 +68,33 @@ def refusal_verdict(enforce: bool) -> Verdict:
     return Verdict.REFUSED if enforce else Verdict.WOULD_REFUSE
 
 
-def emit(event: str, verdict: Verdict, **fields: str) -> None:
-    """Log one containment event. A check that passes logs at INFO; one that refuses logs at WARNING."""
+#: What an event logs for an ID that is not in its canonical form.
+INVALID_ID = "invalid"
+
+
+def emit(event: str, verdict: Verdict, *, cell_id: object, operation_id: object = None, **fields: str) -> None:
+    """Log one containment event. A check that passes logs at INFO; one that refuses logs at WARNING.
+
+    The cell ID comes from a Job's environment and the operation ID from the controller's
+    argument, and not every caller checks them. This one path therefore logs an ID only in
+    its canonical form, so a newline or a `key=value` pair in it cannot forge an event line.
+    """
+    fields["cell_id"] = (
+        cell_id if isinstance(cell_id, str) and re.fullmatch(cloud_cell.CELL_ID_PATTERN, cell_id) else INVALID_ID)
+    if operation_id is not None:
+        fields["operation_id"] = cloud_cell.canonical_app_id(operation_id) or INVALID_ID
     log_event(log, logging.INFO if verdict is Verdict.PASS else logging.WARNING, event,
               fields={**fields, "verdict": verdict})
 
 
-def judge_request(*, bearer_valid: bool, proof: Proof, cell_id: str, enforce: bool = ENFORCE) -> Verdict:
+def judge_request(*, bearer_valid: bool, proof: Proof, cell_id: object, enforce: bool = ENFORCE) -> Verdict:
     """Log the credential an MCP request used and return the proof gate's verdict.
 
     The gate passes only on a valid proof. Whether the bearer is also valid
     changes the credential that the event names, never the verdict: the bearer
     check itself stays with the server's own authentication.
     """
-    if proof is Proof.UNCONFIGURED:
-        credential = Credential.PROOF_UNCONFIGURED
-    elif proof is Proof.VALID:
+    if proof is Proof.VALID:
         credential = Credential.BOTH if bearer_valid else Credential.PROOF_ONLY
     else:
         credential = Credential.BEARER_ONLY if bearer_valid else Credential.NEITHER

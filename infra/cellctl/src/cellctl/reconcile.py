@@ -2899,9 +2899,12 @@ def _cell_s3_client(cluster_config: ClusterConfig, key_id: str, key_secret: str)
     import boto3
     from botocore.config import Config
 
+    # Path style is pinned, not left to botocore's default: the cell checks the exact path
+    # `/<bucket>/<object key>` of every presigned URL this client makes (cloud_grant.Destination).
     return boto3.client("s3", endpoint_url=cluster_config.object_storage_endpoint,
                         aws_access_key_id=key_id, aws_secret_access_key=key_secret,
                         region_name="us-east-1", config=Config(signature_version="s3v4",
+                        s3={"addressing_style": "path"},
                         connect_timeout=10, read_timeout=30, retries={"max_attempts": 2}))
 
 

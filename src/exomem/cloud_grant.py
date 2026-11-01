@@ -1,16 +1,18 @@
 """The signed grant and the destination check for an export, import or restore (contain-cloud-controller-compromise D4).
 
-Substrate signs a grant when it creates a request. The Job that moves the data
-checks, before any byte moves, that the grant is for this cell, operation and
-operation ID, and that every presigned URL it uses names the pinned object
-store, the pinned bucket and the grant's own object key. `cellctl` relays the
-grant and presigns the URLs, so it can change neither of them without the
-cell noticing.
+Substrate signs a grant for each export, import and restore. The Job that moves
+the data checks, before any byte moves, that the grant is for this cell,
+operation and operation ID, and that every presigned URL it uses names the
+object store, the bucket and the grant's own object key. `cellctl` relays the
+grant and presigns the URLs.
 
-The trust anchors come from the environment today (the grant's verifying key,
-the object-store endpoint and the bucket) and become admission-pinned literals
-later (D2). Report mode (`cloud_containment.ENFORCE`) logs each mismatch and
-lets the Job run; enforce mode refuses with `OperationRefused`.
+Today `cellctl` also renders the trust anchors (the grant's verifying key, the
+object-store endpoint and the bucket) into the Job's environment, so a
+compromised `cellctl` can change them and this check only reports. Once D2 pins
+the anchors in the admission policy, `cellctl` can change neither the grant nor
+the destination without the cell noticing. Report mode
+(`cloud_containment.ENFORCE`) logs each mismatch and lets the Job run; enforce
+mode refuses with `OperationRefused`.
 """
 
 from __future__ import annotations
@@ -20,18 +22,27 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from . import cloud_cell, cloud_containment, cloud_origin
 
 GRANT_AUDIENCE = "exomem-cell-operation"
 GRANT_PUBLIC_KEY_ENV = "EXOMEM_CLOUD_GRANT_PUBLIC_KEY"
+GRANT_KEY_INVALID = "CLOUD_GRANT_KEY_INVALID"
 OBJECT_STORE_ENDPOINT_ENV = "EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT"
 OBJECT_STORE_BUCKET_ENV = "EXOMEM_CLOUD_OBJECT_STORE_BUCKET"
-# An import's grant is signed with its request and spends its 24-hour upload window before the Job runs.
+# A grant is signed before its Job runs. A replay still names one operation ID, one key and, for an import, one
+# digest, and an import is idempotent per import ID, so a long window adds no new capability.
 GRANT_MAX_LIFETIME = 72 * 3600
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DEFAULT_PORT = {"https": 443, "http": 80}  # nosemgrep: ep-word-set -- the URL schemes' default ports.
+# The query names that cellctl's S3 clients put in a presigned URL (checked with botocore 1.43.111): the SigV4
+# presign names, the multipart names of an upload part, and the version and response names of a download.
+# Any other name, such as `x-amz-acl` or `x-amz-copy-source`, changes what the request does.
+_PRESIGN_QUERY = frozenset({  # nosemgrep: ep-word-set -- parameter names fixed by the SigV4 and S3 protocols.
+    "x-amz-algorithm", "x-amz-credential", "x-amz-date", "x-amz-expires", "x-amz-signedheaders",
+    "x-amz-signature", "uploadid", "partnumber", "versionid", "response-content-disposition",
+})
 
 
 class Operation(StrEnum):
@@ -69,6 +80,8 @@ class Reason(StrEnum):
     URL_PATH = "url_path"
     URL_FOREIGN_KEY = "url_foreign_key"
     URL_GRANT_KEY = "url_grant_key"
+    URL_QUERY = "url_query"
+    URL_MISSING = "url_missing"
     CHECK_FAILED = "check_failed"
     NONE = "none"
 
@@ -100,7 +113,7 @@ def _key_is_own(key: object, cell_id: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Destination:
-    """The object store the cell may reach: the pinned endpoint and bucket."""
+    """The object store the cell may reach: the endpoint and bucket anchors."""
 
     scheme: str
     host: str
@@ -109,7 +122,7 @@ class Destination:
 
     @classmethod
     def parse(cls, endpoint: str, bucket: str) -> Destination | None:
-        """The pinned destination, or None when the endpoint is not a bare http(s) origin or the bucket is empty."""
+        """The destination the anchors name, or None when the endpoint is not a bare http(s) origin or the bucket is empty."""
         try:
             parts = urlsplit(endpoint)
             port = parts.port
@@ -130,6 +143,7 @@ class Destination:
 
         The shape is the one `cellctl` produces: path style, `/<bucket>/<object key>`, with the
         signature in the query. A virtual-host URL names another host and is refused as one.
+        The query may carry only the names of `_PRESIGN_QUERY`, compared without case.
         """
         # A parser silently drops tabs and newlines and clients read a backslash as a slash, so refuse these first.
         if not isinstance(url, str) or any(ord(char) <= 0x20 or ord(char) >= 0x7F or char == "\\" for char in url):
@@ -162,6 +176,8 @@ class Destination:
             return Reason.URL_FOREIGN_KEY
         if grant_key is not None and key != grant_key:
             return Reason.URL_GRANT_KEY
+        if any(name.lower() not in _PRESIGN_QUERY for name, _ in parse_qsl(parts.query, keep_blank_values=True)):
+            return Reason.URL_QUERY
         return None
 
 
@@ -174,7 +190,7 @@ def _grant_reason(
 ) -> tuple[dict | None, Reason | None]:
     """The grant's claims, or the reason they cannot be used for this operation."""
     try:
-        key = cloud_origin.load_public_key(key_pem, GRANT_PUBLIC_KEY_ENV)
+        key = cloud_origin.load_public_key(key_pem, GRANT_PUBLIC_KEY_ENV, GRANT_KEY_INVALID)
     except cloud_cell.CloudConfigError:
         return None, Reason.GRANT_UNCONFIGURED
     claims = cloud_origin.signed_claims(
@@ -218,6 +234,8 @@ def reasons_for(
             reasons[problem] = None
         elif any(claims[name] != value for name, value in (bound or {}).items()):
             reasons[Reason.GRANT_REQUEST] = None
+    if not urls:
+        reasons[Reason.URL_MISSING] = None
     destination = Destination.from_env(values)
     if destination is None:
         reasons[Reason.DESTINATION_UNCONFIGURED] = None
@@ -238,7 +256,8 @@ def authorize_operation(
     """Log what would stop this operation from moving data; in enforce mode, refuse it.
 
     Call this before the first byte moves. The log carries the operation, its ID, the cell ID and a
-    reason token, never a URL, a token or a claim.
+    reason token, never a URL, a token or a claim. `cloud_containment.emit` logs the IDs only in
+    their canonical form.
     """
     try:
         reasons = reasons_for(operation=operation, operation_id=operation_id, cell_id=cell_id, urls=urls,
@@ -247,11 +266,9 @@ def authorize_operation(
         if enforce:
             raise
         reasons = [Reason.CHECK_FAILED]
-    # The operation ID is the controller's argument: log it only in its canonical form.
-    logged_id = operation_id if cloud_origin.canonical_uuid(operation_id) else "invalid"
     verdict = cloud_containment.refusal_verdict(enforce) if reasons else cloud_containment.Verdict.PASS
     for reason in reasons or [Reason.NONE]:
         cloud_containment.emit(cloud_containment.OPERATION_EVENT, verdict, operation=operation,
-                               operation_id=logged_id, cell_id=cell_id, reason=reason)
+                               operation_id=operation_id, cell_id=cell_id, reason=reason)
     if reasons and enforce:
         raise OperationRefused(reasons[0])

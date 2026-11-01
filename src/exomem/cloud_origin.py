@@ -95,17 +95,20 @@ _current: ContextVar[RequestOrigin | None] = ContextVar("exomem_cloud_origin", d
 
 
 @lru_cache(maxsize=8)
-def load_public_key(pem: str, env_name: str = PUBLIC_KEY_ENV) -> Ed25519PublicKey:
-    """The Ed25519 verifying key a variable holds, for every signed object a cell checks."""
+def load_public_key(
+    pem: str, env_name: str = PUBLIC_KEY_ENV, code: str = "CLOUD_UPLOAD_KEY_INVALID",
+) -> Ed25519PublicKey:
+    """The Ed25519 verifying key a variable holds, for every signed object a cell checks.
+
+    `code` names the variable's own error, so a bad grant key does not read as a bad upload key.
+    """
     try:
         key = serialization.load_pem_public_key(pem.encode("ascii"))
     except (ValueError, TypeError, UnicodeError):
         key = None
     if not isinstance(key, Ed25519PublicKey):
         # Never echo key material; name only the variable.
-        raise cloud_cell.CloudConfigError(
-            "CLOUD_UPLOAD_KEY_INVALID", f"{env_name} must be an Ed25519 public key"
-        )
+        raise cloud_cell.CloudConfigError(code, f"{env_name} must be an Ed25519 public key")
     return key
 
 
@@ -330,5 +333,5 @@ class CloudOriginMiddleware:
         # The server's own authentication runs outside this middleware; the user it set is its verdict on the bearer.
         bearer_valid = type(getattr(scope.get("user"), "access_token", None)) is CloudCellAccessToken
         verdict = cloud_containment.judge_request(
-            bearer_valid=bearer_valid, proof=proof, cell_id=_serving_cell_id() or "unknown", enforce=self.enforce)
+            bearer_valid=bearer_valid, proof=proof, cell_id=_serving_cell_id(), enforce=self.enforce)
         return verdict is not cloud_containment.Verdict.REFUSED

@@ -411,7 +411,8 @@ def test_report_mode_still_refuses_a_request_without_a_bearer(cell, caplog):
     assert [record.fields["credential"] for record in _credential_events(caplog)] == ["proof_only", "neither"]
 
 
-def test_report_mode_without_a_gateway_key_logs_the_proof_as_unconfigured(cell, monkeypatch, caplog):
+def test_report_mode_without_a_gateway_key_logs_a_bearer_as_bearer_only_with_the_proof_unconfigured(
+        cell, monkeypatch, caplog):
     _key, app, _vault = cell
     monkeypatch.delenv("EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
     caplog.set_level(logging.INFO)
@@ -420,7 +421,7 @@ def test_report_mode_without_a_gateway_key_logs_the_proof_as_unconfigured(cell, 
 
     assert response.status_code == 200
     assert _one_credential_event(caplog) == {
-        "credential": "proof_unconfigured", "proof": "unconfigured", "verdict": "would_refuse", "cell_id": CELL_ID}
+        "credential": "bearer_only", "proof": "unconfigured", "verdict": "would_refuse", "cell_id": CELL_ID}
 
 
 def test_credential_event_carries_no_token_or_claim(cell, caplog):

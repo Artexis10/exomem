@@ -186,10 +186,6 @@ cellctl:
   # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
   # B2's native API (e.g. https://s3.us-west-002.backblazeb2.com).
   b2Endpoint: ""
-  # contain-cloud-controller-compromise D4: the PEM public key (Ed25519) that verifies the signed grant of
-  # an import or an export. Public material, so it is a value. Empty leaves the Jobs logging a missing grant.
-  # Wiring it into the controller's environment (CELLCTL_GRANT_PUBLIC_KEY) belongs to templates/cellctl.yaml.
-  grantPublicKey: ""
   # D3 default; not pinned exactly by the design, kept configurable per the
   # design owner's ruling rather than hardcoded.
   initDeadlineMinutes: 10

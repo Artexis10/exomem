@@ -8,15 +8,16 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from datetime import UTC, datetime
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
-from cellctl import main
+from cellctl import main, reconcile
 from cellctl.capacity import GIB
-from cellctl.exports import ExportRow, ExportSize
-from cellctl.imports import ImportRow
+from cellctl.exports import ExportRow, ExportSize, ExportStorage
+from cellctl.imports import ImportRow, ImportStorage
 from cellctl.manifests import (
     CellManifestSpec,
     render_export_job,
@@ -30,7 +31,7 @@ from .test_reconcile import _cluster_config
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 MIB = 1024 * 1024
-# Shared with the cell's own names (src/exomem/cloud_grant.py).
+# The cell reads exactly these names (src/exomem/cloud_grant.py).
 ENDPOINT_ENV = "EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT"
 BUCKET_ENV = "EXOMEM_CLOUD_OBJECT_STORE_BUCKET"
 GRANT_KEY_ENV = "EXOMEM_CLOUD_GRANT_PUBLIC_KEY"
@@ -122,3 +123,60 @@ def test_a_grant_key_the_cell_would_refuse_is_refused_here_without_echoing_it() 
         assert bad not in str(raised.value)
         with pytest.raises(ValueError, match="grant public key must be an Ed25519"):
             _spec(grant_public_key=bad)
+
+
+class _OfflineS3:
+    """The real client for presigning. The calls that would reach the network answer locally."""
+
+    def __init__(self, client) -> None:
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def get_paginator(self, _operation):
+        return type("Pages", (), {"paginate": staticmethod(lambda **_arguments: [])})()
+
+    def create_multipart_upload(self, **_arguments):
+        return {"UploadId": "upload-1"}
+
+    def complete_multipart_upload(self, **_arguments):
+        return {"VersionId": "version-1"}
+
+    def head_object(self, **_arguments):
+        return {"ContentLength": 256, "VersionId": "version-1"}
+
+
+def _presigned_cell_urls(endpoint: str) -> list[str]:
+    """Every kind of URL a Job receives, made by cellctl's own storage classes and S3 client."""
+    config = dataclasses.replace(_cluster_config(), object_storage_endpoint=endpoint)
+    client = _OfflineS3(reconcile._cell_s3_client(config, "key-id", "key-secret"))
+    export = ExportRow(str(uuid.uuid4()), CELL_ID, "requested", NOW, upload_id="upload-1",
+                       archive_version_id="version-1", ready_at=NOW)
+    upload = ImportRow(str(uuid.uuid4()), CELL_ID, "adopt", 1, 1, "uploaded", NOW, ciphertext_bytes=256,
+                       ciphertext_sha256="a" * 64, upload_id="upload-1", part_urls=[{"part_number": 1}],
+                       part_etags=[{"part_number": 1, "etag": "etag-1"}])
+    exports, imports = ExportStorage(client, config.object_storage_bucket), ImportStorage(client, config.object_storage_bucket)
+    return [*exports.part_urls(export, 1, expires_in=3600), exports.link(export, expires_in=3600),
+            imports.prepare(upload)[1][0]["url"], imports.complete(upload)]
+
+
+def test_the_urls_for_a_job_are_path_style() -> None:
+    """Defect: a virtual-host URL names another host, and the cell refuses it as one."""
+    bucket = _cluster_config().object_storage_bucket
+    for url in _presigned_cell_urls("https://s3.example"):
+        assert urlsplit(url).netloc == "s3.example"
+        assert urlsplit(url).path.startswith(f"/{bucket}/cells/{CELL_ID}/")
+
+
+def test_the_query_of_a_job_url_holds_only_the_names_the_cell_admits() -> None:
+    """Defect: a new parameter in a presigned URL turns every export into a refusal once the cell enforces.
+
+    The cell's list is `_PRESIGN_QUERY` in src/exomem/cloud_grant.py. It is the SigV4 presign names plus
+    the multipart, version and response names that these four URL kinds carry.
+    """
+    admitted = {"x-amz-algorithm", "x-amz-credential", "x-amz-date", "x-amz-expires", "x-amz-signedheaders",
+                "x-amz-signature", "uploadid", "partnumber", "versionid", "response-content-disposition"}
+    used = {name.lower() for url in _presigned_cell_urls("https://s3.example")
+            for name, _value in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
+    assert used == admitted

@@ -32,14 +32,6 @@ IMPORT_KEY = f"cells/{CELL}/imports/{OPERATION_ID}.age"
 DIGEST = hashlib.sha256(b"ciphertext").hexdigest()
 
 
-def test_the_trust_anchors_are_read_under_the_names_cellctl_renders():
-    """Defect: a renamed anchor leaves every Job unconfigured and report mode logs it as such forever."""
-    # Shared with cellctl's own test (infra/cellctl/tests/test_job_trust_anchors.py).
-    assert (cloud_grant.OBJECT_STORE_ENDPOINT_ENV, cloud_grant.OBJECT_STORE_BUCKET_ENV,
-            cloud_grant.GRANT_PUBLIC_KEY_ENV) == (
-        "EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT", "EXOMEM_CLOUD_OBJECT_STORE_BUCKET", "EXOMEM_CLOUD_GRANT_PUBLIC_KEY")
-
-
 def _pem(key: Ed25519PrivateKey) -> str:
     return key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
@@ -187,6 +179,9 @@ def test_a_grant_for_another_operation_is_reported_as_for_another_operation(sign
     pytest.param(_url().replace("/exports", "/exp\norts"), Reason.URL_MALFORMED, id="newline"),
     pytest.param(f"{ENDPOINT}:notaport/{BUCKET}/{EXPORT_KEY}?sig=1", Reason.URL_MALFORMED, id="unparseable-port"),
     pytest.param(_url(f"cells/{CELL}/exports/{uuid.uuid4()}.zip"), Reason.URL_GRANT_KEY, id="another-key-than-the-grant"),
+    pytest.param(_url() + "&x-amz-acl=public-read", Reason.URL_QUERY, id="an-acl-parameter"),
+    pytest.param(_url() + "&X-Amz-Copy-Source=%2Fother-bucket%2Fkey", Reason.URL_QUERY, id="a-copy-source-parameter"),
+    pytest.param(_url() + "&x%2Damz%2Dacl=public-read", Reason.URL_QUERY, id="an-encoded-parameter-name"),
 ])
 def test_a_url_that_leaves_the_pinned_object_is_refused(signer, env, url, reason):
     assert _reasons(env, grant=_grant(signer), urls=[url]) == [reason]
@@ -196,16 +191,30 @@ def test_the_default_port_written_out_names_the_same_destination(signer, env):
     assert _reasons(env, grant=_grant(signer), urls=[_url(base="https://objects.example:443")]) == []
 
 
-def test_an_http_anchor_for_the_object_store_double_admits_http_and_not_https(signer, env):
+def test_an_http_anchor_admits_an_http_url_and_refuses_an_https_one(signer, env):
     env[cloud_grant.OBJECT_STORE_ENDPOINT_ENV] = "http://127.0.0.1:9000"
     grant = _grant(signer)
     assert _reasons(env, grant=grant, urls=[_url(base="http://127.0.0.1:9000")]) == []
     assert _reasons(env, grant=grant, urls=[_url(base="https://127.0.0.1:9000")]) == [Reason.URL_SCHEME]
 
 
+def test_the_query_names_cellctl_presigns_are_admitted_in_either_case(signer, env):
+    """Defect: a name cellctl really presigns is refused, and enforce mode would stop every export."""
+    query = ("partNumber=1&uploadId=abc&versionId=v1&response-content-disposition=attachment"
+             "&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=k%2F20260101&X-Amz-Date=20260101T000000Z"
+             "&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=0123abcd")
+    url = f"{ENDPOINT}/{BUCKET}/{EXPORT_KEY}?{query}"
+    assert _reasons(env, grant=_grant(signer), urls=[url]) == []
+    assert _reasons(env, grant=_grant(signer), urls=[url.replace("uploadId", "uploadid")]) == []
+
+
 def test_every_part_url_of_an_export_is_checked(signer, env):
     urls = [_url() + "&partNumber=1", _url(base="https://attacker.example") + "&partNumber=2"]
     assert _reasons(env, grant=_grant(signer), urls=urls) == [Reason.URL_HOST]
+
+
+def test_an_operation_with_no_url_is_reported_instead_of_passing(signer, env):
+    assert _reasons(env, grant=_grant(signer), urls=[]) == [Reason.URL_MISSING]
 
 
 @pytest.mark.parametrize("anchors", [
@@ -303,3 +312,14 @@ def test_an_operation_id_that_is_not_a_uuid_is_logged_as_invalid(env, caplog):
     cloud_grant.authorize_operation(operation=Operation.EXPORT, operation_id="x\nevent=forged", cell_id=CELL,
                                     urls=[_url()], grant=None, env=env)
     assert {record.fields["operation_id"] for record in _events(caplog)} == {"invalid"}
+
+
+def test_a_cell_id_that_is_not_a_cell_id_cannot_forge_a_second_event_line(env, capsys):
+    """Defect: the verify branch never checks the cell ID, so a newline in the environment value forged a line."""
+    cloud_containment.log_to_stderr()
+    forged = f"{CELL}\nts=2026-01-01 level=INFO event=cloud_operation_check cell_id={CELL} reason=none verdict=pass"
+    cloud_grant.authorize_operation(operation=Operation.EXPORT, operation_id=OPERATION_ID, cell_id=forged,
+                                    urls=[_url()], grant=None, env=env)
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 2  # the missing grant and the foreign key, which the fake cell ID makes of the URL
+    assert all(line.count("event=cloud_operation_check") == 1 and "cell_id=invalid" in line for line in lines)
