@@ -189,10 +189,10 @@ def _volume(root: Path) -> tuple[int, int]:
 
 
 def _growth_threshold(config: dict) -> float:
-    value = config.get("growth_threshold")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+    threshold = media_capacity.growth_threshold(config)
+    if threshold is None:
         raise _Unknown("the media store policy sets no growth threshold")
-    return float(value)
+    return threshold
 
 
 def _limits(config: dict) -> media_capacity.HydrationLimits:
@@ -407,7 +407,17 @@ def report(root: Path, *, after: str | None = None, series_id: str | None = None
         reply["window_budget"] = {"unknown": config_problem}
     elif config is not None and config.get("enabled") is True:
         reply["window_budget"] = _budget_section(root, config, windows, series)
+    elif config is not None and config.get("enabled") is False:
+        reply["retained_store"] = {"shortfall": _figure(lambda: _shortfall(root, config))}
     return reply
+
+
+def _shortfall(root: Path, config: dict) -> int:
+    """The bytes of evicted originals that do not fit below the growth threshold; the store drains at zero (D12)."""
+    try:
+        return media_store.retained_shortfall(root, config)
+    except media_store.MediaStoreError as error:
+        raise _Unknown(str(error)) from error
 
 
 def _census_or_unknown(root: Path) -> list[Window]:

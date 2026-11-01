@@ -1270,9 +1270,18 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
             conn.close()
 
 
+def _may_evict(config: dict[str, object]) -> bool:
+    """Whether the policy asks for eviction, with offload on or off.
+
+    A cell whose edge was turned off keeps its policy and sets `enabled` false, as cellctl renders it (D12,
+    the retained store). It still hydrates an owner read, so eviction must still return the copy to the store.
+    """
+    return config.get("eviction_enabled") is True and isinstance(config.get("enabled"), bool)
+
+
 def _evict_one(vault: Path, path: Path) -> str:
     config = _settings(vault)
-    if config.get("enabled") is not True or config.get("eviction_enabled") is not True:
+    if not _may_evict(config):
         return KEPT
     ledger = MediaJobStore(vault)
     snapshot = _cached_original(vault, ledger, path)
@@ -1409,6 +1418,68 @@ def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_secon
     return Occupancy(evictable, pending[0], pending[1], pinned)
 
 
+def evicted_bytes(vault: Path) -> int:
+    """The bytes of the originals that the media ledger records as evicted; raises `MediaStoreError` when it cannot say."""
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", "the media ledger does not exist")
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            total, unsized = conn.execute(
+                "SELECT COALESCE(SUM(size), 0), COUNT(*) - COUNT(size) FROM media_cache WHERE evicted = 1").fetchone()
+    except _LEDGER_UNREADABLE as error:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
+    if unsized:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger records no size for {unsized} evicted originals")
+    return int(total)
+
+
+def evicted_census(vault: Path, binding: originals.StoreBinding) -> tuple[int, int]:
+    """The count and bytes of the evicted originals of one store, each ledger row checked against its sidecar (D12).
+
+    The backup report carries this census, and cellctl drops a cell's media access once it shows none.
+    Raises `MediaStoreError` when the ledger, a row or a sidecar cannot be read: an incomplete census
+    is unknown, never a lower count. The messages carry no path or name, because a Job prints them.
+    """
+    from .vault import FrontmatterError
+
+    vault = Path(vault).resolve()
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        # A wrong state root looks the same as a ledger that never existed, and 0 would drain the cell.
+        raise MediaStoreError("MEDIA_CENSUS_UNKNOWN", "the media ledger does not exist")
+    count = size = 0
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            for (relative,) in conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 1 ORDER BY binary_rel"):
+                snapshot = original_state(vault, relative, binding=binding)
+                if snapshot.state == "evicted":
+                    count, size = count + 1, size + snapshot.binary_size
+                elif snapshot.state == "missing":
+                    # `original_state` reads a malformed sidecar as no sidecar; here it is no census.
+                    originals.bound_companion(vault, relative)
+    except (*_LEDGER_UNREADABLE, ValueError, UnicodeError, FrontmatterError) as error:
+        raise MediaStoreError("MEDIA_CENSUS_UNKNOWN", f"the media ledger or a sidecar cannot be read ({type(error).__name__})") from error
+    return count, size
+
+
+def retained_shortfall(vault: Path, config: dict[str, object]) -> int:
+    """The bytes of evicted originals that do not fit in the room below the growth threshold (D12, the retained store).
+
+    The store drains when this reaches zero. Raises `MediaStoreError` when the policy, the ledger or the volume
+    cannot give it: an unknown shortfall is never zero.
+    """
+    threshold = media_capacity.growth_threshold(config)
+    if threshold is None:
+        raise MediaStoreError("MEDIA_SHORTFALL_UNKNOWN", "the media store policy sets no growth threshold")
+    evicted = evicted_bytes(Path(vault).resolve())
+    try:
+        usage = shutil.disk_usage(vault)
+    except OSError as error:
+        raise MediaStoreError("MEDIA_SHORTFALL_UNKNOWN", f"the volume's size and use cannot be read: {error}") from error
+    return max(0, evicted - max(0, int(threshold * usage.total) - usage.used))
+
+
 def record_demand(vault: Path, series: str, demand_bytes: int, *, budget: int, reachable_budget: int) -> bool:
     """Renew one import series' demand for room; a demand above the reachable budget is ignored.
 
@@ -1514,8 +1585,16 @@ def evict_to_target(vault: Path) -> int:
     """Evict above the everyday target, or while a live demand can be met (D3, M3)."""
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
-    if config is None or config.get("enabled") is not True or config.get("eviction_enabled") is not True:
+    if config is None or not _may_evict(config):
         return 0
+    if config["enabled"] is False:
+        # A retained store drains once its evicted originals fit, so a copy that fits stays (D12). An unknown
+        # shortfall evicts as a served cell does: `evict` re-confirms the stored version first.
+        try:
+            if retained_shortfall(vault, config) == 0:
+                return 0
+        except MediaStoreError:
+            pass
     bounds = media_capacity.bounds_for(config, vault)
     if bounds is None:
         return 0

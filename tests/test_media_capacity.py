@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
+from exomem import media_capacity
 from exomem.media_capacity import OFFLOADABLE, RESIDENT, Bounds, age_ciphertext_size
+
+CELLCTL_MANIFESTS = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "manifests.py"
 
 GiB = 1024 ** 3
 MiB = 1024 ** 2
@@ -31,3 +37,13 @@ def test_on_a_12_gib_volume_a_4_gib_file_is_resident_and_3_gib_is_the_largest():
 
     assert bounds.classify(4 * GiB) == RESIDENT
     assert bounds.largest_offloadable() == 3 * GiB
+
+
+def test_cellctl_and_the_cell_name_the_same_hydration_keys():
+    """Catches a key added on one side only: cellctl renders a policy that the cell reads as no capacity, or the reverse."""
+    # cellctl cannot import the cell and the cell cannot import cellctl, so this reads cellctl's constant from its source.
+    assignments = [node for node in ast.parse(CELLCTL_MANIFESTS.read_text(encoding="utf-8")).body
+                   if isinstance(node, ast.Assign) and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["MEDIA_HYDRATION_KEYS"]]
+    assert len(assignments) == 1
+
+    assert ast.literal_eval(assignments[0].value) == media_capacity._HYDRATION_KEYS

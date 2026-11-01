@@ -22,6 +22,8 @@ Subcommands:
   migration, no custody environment
 - `cell-export` — Exomem Cloud owner export Job: the canonical ZIP of a held
   cell, uploaded to controller-presigned parts; reports sizes and digests only
+- `cell-media-census` — Exomem Cloud backup Job: the count and bytes of the cell's
+  evicted originals from its media ledger, or `unknown unknown` when it cannot say
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -310,6 +312,9 @@ def _dispatch_main(raw: list[str]) -> int:
     if raw and raw[0] == "cell-export":
         from .cloud_export import main as export_main
         return export_main(raw[1:])
+    if raw and raw[0] == "cell-media-census":
+        from .cell_media_census import main as census_main
+        return census_main(raw[1:])
     if raw and raw[0] == "cell-init":
         return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context

@@ -831,6 +831,9 @@ def test_disabled_store_retains_identity_and_hydration(vault: Path, selected_sto
     assert originals.original_state(vault, path).state == "evicted"
     with media_store.open_original(vault, path) as source:
         assert source.stream.read() == expected
+    # The identity alone, which a drained cell keeps, has no policy to evict by. A turned-off store whose policy
+    # asks for eviction evicts a hydrated copy again (D12, the retained store).
+    config.write_text(json.dumps({"vaults": {str(vault): {k: values[k] for k in ("store", "adapter")} | {"enabled": False}}}))
     assert not media_store.evict(vault, path)
 
 
@@ -2893,3 +2896,115 @@ def test_a_ledger_that_refuses_the_census_record_does_not_stop_the_batch(vault: 
     usage = media_store.OffloadBatch(vault).usage(RefusingLedger())
 
     assert usage.versions is not None
+
+
+def _retained(selected_store, vault: Path, **policy) -> None:
+    """The policy cellctl renders for a cell whose edge is turned off: offload off, the rest of the policy kept."""
+    _configure(selected_store, vault, **{"enabled": False, "growth_threshold": 0.8, **policy})
+
+
+def _evicted_pair(vault: Path) -> tuple[Path, Path, int]:
+    """Two stored originals, both evicted, and their bytes."""
+    from exomem import media_store
+
+    first, second = _stored(vault, "first", 300), _stored(vault, "second", 400)
+    evicted = first.stat().st_size + second.stat().st_size
+    assert media_store.evict(vault, first) and media_store.evict(vault, second)
+    return first, second, evicted
+
+
+def test_a_retained_store_that_cannot_hold_its_evicted_originals_evicts_a_hydrated_copy_again(vault: Path, selected_store, monkeypatch):
+    """Catches a turned-off cell that hydrates an owner read and never evicts the copy, so the volume fills."""
+    from exomem import commands, media_store
+
+    first, second, evicted = _evicted_pair(vault)
+    _retained(selected_store, vault)
+    newcomer = _preserved(vault, category="newcomer")
+    # 450 bytes in use; the growth threshold of 800 leaves room for 350 of the evicted bytes.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 450, first, second))
+
+    with media_store.open_original(vault, first, read=True):
+        pass
+    assert originals.original_state(vault, first).state == "cached"
+    assert media_store.evict_to_target(vault) == 1
+
+    assert originals.original_state(vault, first).state == "evicted"
+    assert originals.original_state(vault, second).state == "evicted"
+    with pytest.raises(media_store.MediaStoreError, match="offload is disabled"):
+        media_store.offload(vault, newcomer)
+    assert originals.original_state(vault, newcomer).state == "local"
+    status = commands.op_adoption_studio(vault, action="status")
+    assert status["retained_store"] == {"shortfall": {"bytes": evicted - 350}}
+
+
+def test_a_retained_store_whose_evicted_originals_fit_keeps_a_hydrated_copy(vault: Path, selected_store, monkeypatch):
+    """Catches eviction that undoes the drain: a hydrated copy leaves again although everything evicted fits."""
+    from exomem import commands, media_store
+
+    first, second, _evicted = _evicted_pair(vault)
+    _retained(selected_store, vault, growth_threshold=0.99, eviction_target=0.5)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 250, first, second))
+
+    with media_store.open_original(vault, first, read=True):
+        pass
+    # The copy puts the volume above its eviction target, which evicts it while the policy was served.
+    assert shutil.disk_usage(vault).used > 500
+
+    assert media_store.evict_to_target(vault) == 0
+    assert originals.original_state(vault, first).state == "cached"
+    assert commands.op_adoption_studio(vault, action="status")["retained_store"] == {"shortfall": {"bytes": 0}}
+
+
+def test_a_retained_store_with_an_unreadable_ledger_reports_its_shortfall_as_unknown(vault: Path, selected_store, monkeypatch):
+    """Catches a shortfall of 0 for a ledger that the cell could not read."""
+    from exomem import commands, media_jobs
+
+    first, second, _evicted = _evicted_pair(vault)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 450, first, second))
+    media_jobs.MediaJobStore(vault).path.write_bytes(b"not a database" * 100)
+
+    shortfall = commands.op_adoption_studio(vault, action="status")["retained_store"]["shortfall"]
+
+    assert set(shortfall) == {"unknown"}
+
+
+def _census(vault: Path, selected_store, monkeypatch, capsys) -> tuple[int, str, str]:
+    """Run `exomem cell-media-census` as the backup Job does: it has no store policy, only the store identity."""
+    from exomem import cell_media_census
+
+    monkeypatch.delenv("EXOMEM_MEDIA_STORE_CONFIG")
+    code = cell_media_census.main(["--vault", str(vault), "--store", selected_store[0]["store"]])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_the_census_counts_three_evicted_originals_and_their_bytes(vault: Path, selected_store, monkeypatch, capsys):
+    """Catches a census that counts a hydrated copy as evicted, or reports a size other than the original's."""
+    from exomem import media_store
+
+    paths = [_stored(vault, f"original-{size}", size) for size in (200, 300, 450)]
+    cached = _stored(vault, "still-on-the-volume", 100)
+    sizes = [path.stat().st_size for path in paths]
+    for path in paths:
+        assert media_store.evict(vault, path)
+    assert originals.original_state(vault, cached).state == "cached"
+
+    code, out, _err = _census(vault, selected_store, monkeypatch, capsys)
+
+    assert (code, out) == (0, f"3 {sum(sizes)}\n")
+
+
+def test_the_census_is_unknown_when_one_sidecar_cannot_be_read(vault: Path, selected_store, monkeypatch, capsys):
+    """Catches a census that skips the row it cannot read, which reports a lower count and drains a cell that holds media."""
+    from exomem import media_store
+
+    paths = [_stored(vault, f"original-{size}", size) for size in (200, 300, 450)]
+    for path in paths:
+        assert media_store.evict(vault, path)
+    paths[1].with_name(paths[1].name + ".md").write_bytes(b"\xff\xfe not a sidecar")
+
+    code, out, err = _census(vault, selected_store, monkeypatch, capsys)
+
+    assert (code, out) == (1, "unknown unknown\n")
+    assert "MEDIA_CENSUS_UNKNOWN" in err and str(vault) not in err
