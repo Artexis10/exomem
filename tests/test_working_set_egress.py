@@ -1574,6 +1574,48 @@ def test_the_fully_withheld_flip_at_l0_abstains_as_unresolved(vault: Path) -> No
     assert [m for m in guarded["missing"] if m.get("reason") == "withheld"] == []
 
 
+def _anchorless_packet_pointing_at(path: str) -> dict:
+    """A served packet with no anchor whose one captured-page pointer names `path`."""
+    return {
+        "anchors": [], "roles": [], "units": [], "current_state": [], "ambiguity": [], "missing": [],
+        "pointers": [{
+            "ref": path, "anchor": path, "title": "Captured page", "reason": "requires_read",
+            "why": "Uncompiled source material, attributed to its origin and not a conclusion; read it before relying on it.",
+        }],
+        "budget": {"limit_chars": 4000, "used_chars": 20},
+        "generation": {}, "abstained": False,
+    }
+
+
+def test_an_anchorless_packet_that_lost_its_only_pointer_at_a_notice_level_abstains_withheld(vault: Path) -> None:
+    """Served with no anchor and nothing left after the guard: an abstention that says so, not an empty served packet."""
+    write_scope(vault)
+    write_rule(vault, ceiling=1)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, _anchorless_packet_pointing_at(RESTRICTED_PATH), _prose_release())
+
+    assert guarded is not None
+    assert guarded["abstained"] is True and guarded["abstention"] == {"reason": "withheld"}
+    assert guarded["pointers"] == []
+    assert {"role": "pointers", "reason": "withheld"} in guarded["missing"]
+    assert RESTRICTED_PATH not in json.dumps(guarded)
+
+
+def test_an_anchorless_packet_that_lost_its_only_pointer_at_l0_abstains_unresolved_and_marks_nothing(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, _anchorless_packet_pointing_at(RESTRICTED_PATH), _prose_release())
+
+    assert guarded is not None
+    assert guarded["abstained"] is True and guarded["abstention"] == {"reason": "unresolved"}
+    assert guarded["missing"] == []
+
+
 # --------------------------------------------------------------------------- #
 # Round five: a frontmatter alias is identity too
 # --------------------------------------------------------------------------- #

@@ -2685,8 +2685,11 @@ def _carry_groups_by_retrieval(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
+    phrases: list[Any] | None = None,
 ) -> tuple[tuple[tuple[str, float], ...], ...]:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
+
+    `phrases` collects the phrases judged, for the captured pass (`_with_source_pointers`).
 
     Same refusals, same budget rule, same bounded catalogue. `skip_terms` is
     the words a resolved anchor already consumed, so a turn that resolved one
@@ -2723,6 +2726,7 @@ def _carry_groups_by_retrieval(
             status_basis=status_basis,
             visible=visible,
             query_context=query_context,
+            phrases=phrases,
         )
     if state != "available":
         return ()
@@ -3955,10 +3959,20 @@ def compile_packet(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     origins: dict[str, str] = {}
+    from . import working_set_runtime
+
+    slots = working_set_runtime.activation_source_slots()
+    scan = _SourceScan() if slots else None
     with ExitStack() as selection:
         packet = _compile_packet(
-            vault_root, _origins=origins, _selection_stack=selection,
+            vault_root, _origins=origins, _source_scan=scan, _selection_stack=selection,
             **kwargs, status_basis=status_basis,
+        )
+    if scan is not None and scan.phrases:
+        packet = _with_source_pointers(
+            vault_root, packet, scan, slots=slots, status_basis=status_basis,
+            freshness_snapshot=kwargs.get("freshness_snapshot"),
+            query_context=kwargs.get("lexical_admission"),
         )
     _label_origins(
         packet,
@@ -3968,6 +3982,141 @@ def compile_packet(
             if kwargs.get("trigger") == "task_refresh" else _DEFAULT_ORIGIN
         ),
     )
+    return packet
+
+
+#: What a captured pointer says about itself. It is fixed prose, not a page's own words.
+SOURCE_POINTER_WHY = (
+    "Uncompiled source material, attributed to its origin and not a conclusion; read it before relying on it."
+)
+
+
+def is_source_pointer(pointer: Mapping[str, Any]) -> bool:
+    """Is `pointer` a standalone captured page, one that hangs from no compiled page?"""
+    return pointer.get("why") == SOURCE_POINTER_WHY and bool(pointer.get("ref")) and pointer.get("anchor") == pointer.get("ref")
+
+
+@dataclass
+class _SourceScan:
+    """What the compile hands the captured pass: the phrases its carries judged, and the reader view."""
+
+    phrases: list[Any] = field(default_factory=list)
+    visible: Callable[[str], bool] | None = None
+
+
+def _compiled_citations(
+    vault_root: Path, compiled: Sequence[str], captured: Sequence[str]
+) -> dict[str, str]:
+    """For each captured page that a page of `compiled` cites, the first such page.
+
+    Read the way source coverage reads it (`source_closure.claims_in`, `resolve_reference`), over a resolver
+    of the candidate pages alone: it answers whether a claim names one of them, and walks nothing else.
+    """
+    from . import find, note_types, source_closure, vault
+
+    root = Path(vault_root)
+    resolver = vault.WikilinkResolver.from_entries(
+        root, ((path, _page_title(root, path) or None) for path in captured)
+    )
+    type_basis = note_types.Basis(root)
+    cited: dict[str, str] = {}
+    for note in compiled:
+        page = find._CACHE.get(root / note, root)
+        if page is None:
+            continue
+        for claim in source_closure.claims_in(page.frontmatter, type_basis):
+            target = source_closure.resolve_reference(root, claim, resolver=resolver)
+            if target in captured:
+                cited.setdefault(target, note)
+    return cited
+
+
+def _with_source_pointers(
+    vault_root: Path,
+    packet: dict[str, Any],
+    scan: _SourceScan,
+    *,
+    slots: int,
+    status_basis: lifecycle_statuses.Basis,
+    freshness_snapshot: Any = None,
+    query_context: Any = None,
+) -> dict[str, Any]:
+    """`packet` with pointers to the uncompiled captured pages the turn named.
+
+    Runs after every compiled lane has spent its share, so captured pointers are charged last. A served
+    packet gains pointers; an unresolved abstention that lists nothing becomes a served packet with no anchor.
+    Any other abstention, and a conversation-inferred packet, is returned as it was: a compiled menu stands.
+    A page that a carried or resolved compiled page cites hangs from that page; any other qualifies only
+    where it outranks the compiled pages of its phrase (`working_set_runtime.carry_source_hits`).
+    """
+    from . import working_set_conversation as conversation_module
+    from . import working_set_runtime
+
+    if isinstance(packet, conversation_module.InferredPacket):
+        return packet
+    empty_abstention = False
+    if packet.get("abstained"):
+        reason = (packet.get("abstention") or {}).get("reason")
+        listed = ("anchors", "ambiguity", "related", "units", "pointers", "current_state")
+        if reason != activation_result.UNRESOLVED or any(packet.get(key) for key in listed):
+            return packet
+        empty_abstention = True
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot points at nothing
+            log.debug("activation captured pass freshness unavailable", exc_info=True)
+            return packet
+    try:
+        hits = working_set_runtime.carry_source_hits(
+            vault_root, scan.phrases, freshness=freshness, recall_checkpoint=recall_checkpoint,
+            visible=scan.visible, status_basis=status_basis, query_context=query_context,
+        )
+    except BudgetExhausted:
+        return packet  # the pass yielded to the deadline (noted on the budget); only the pointers are lost
+    if not hits:
+        return packet
+    compiled = [
+        str(anchor["path"]) for anchor in packet.get("anchors") or ()
+        if anchor.get("path") and anchor.get("status") in ("resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS)
+    ]
+    cited = _compiled_citations(vault_root, compiled, [hit.path for hit in hits]) if compiled else {}
+    chosen = [hit for hit in hits if hit.path in cited or hit.outranks_compiled][:slots]
+    if not chosen:
+        return packet
+    registry = context_roles.load_roles(vault_root)
+    role = next((role.id for role in registry.roles.values() if role.lane == "material"), None)
+    budget = packet["budget"]
+    remaining = int(budget["limit_chars"]) - int(budget["used_chars"])
+    pointers: list[dict[str, Any]] = []
+    starved = False
+    for hit in chosen:
+        pointer = {
+            "ref": hit.path,
+            "anchor": cited.get(hit.path, hit.path),
+            **({"role": role} if role else {}),
+            "title": _page_title(vault_root, hit.path) or hit.path,
+            "why": SOURCE_POINTER_WHY,
+            "reason": "requires_read",
+        }
+        cost = served_chars("pointers", pointer)
+        if cost > remaining:
+            starved = True
+            break
+        pointers.append(pointer)
+        remaining -= cost
+    if starved:
+        packet["missing"].append({"role": role or "pointers", "reason": "budget"})
+    if not pointers:
+        return packet
+    packet["pointers"] = [*packet["pointers"], *pointers]
+    budget["used_chars"] = int(budget["limit_chars"]) - remaining
+    if empty_abstention:
+        packet["abstained"] = False
+        packet.pop("abstention", None)
     return packet
 
 
@@ -4007,6 +4156,7 @@ def _compile_packet(
     *,
     _selection_stack: ExitStack,
     _origins: dict[str, str] | None = None,
+    _source_scan: _SourceScan | None = None,
     conversation: working_set_conversation.Conversation | None = None,
     turn: str,
     max_chars: int | None = None,
@@ -4106,6 +4256,8 @@ def _compile_packet(
     # (`working_set_runtime.serve`); narrowing it again is a no-op for that
     # caller and the only guard for a direct one.
     visible = reader if reader is not None else _reader_view(root, purpose)
+    if _source_scan is not None:
+        _source_scan.visible = visible
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live
@@ -4701,6 +4853,7 @@ def _compile_packet(
             visible=visible,
             status_basis=status_basis,
             query_context=query_context,
+            phrases=None if _source_scan is None else _source_scan.phrases,
         )
         carry_named_nothing = not groups
         domains, _contested = named_domains(groups)
@@ -5029,6 +5182,7 @@ def _compile_packet(
             retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
             query_context=lexical_admission,
+            phrases=None if _source_scan is None else _source_scan.phrases,
         )
         if beside_anchors:
             items = (*items, *beside_items)
@@ -5079,6 +5233,7 @@ def _named_beside(
     retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
+    phrases: list[Any] | None = None,
 ) -> tuple[
     tuple[dict[str, Any], ...],
     tuple[LaneItem, ...],
@@ -5124,6 +5279,7 @@ def _named_beside(
             visible=visible,
             status_basis=status_basis,
             query_context=query_context,
+            phrases=phrases,
         )
     except BudgetExhausted:
         groups = ()  # the carry yielded to the deadline (noted on the budget); the resolved material stands

@@ -4015,7 +4015,17 @@ def guard_working_set(
     # empty blocks would state that the turn resolved and the vault had nothing,
     # which is a different and false claim. Everything downstream of an anchor
     # goes with it, since a unit's only warrant was the anchor it hung from.
-    if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
+    # A packet that resolved no anchor but served material (a captured pointer) is emptied the same way:
+    # nothing it served survived, so what is left is an abstention, not a served packet with nothing to say.
+    served_sections = ("units", "pointers", "current_state")
+    emptied = (
+        bool(packet.get("anchors"))
+        or (
+            any(packet.get(section) for section in served_sections)
+            and not any(guarded.get(section) for section in served_sections)
+        )
+    )
+    if emptied and not guarded["anchors"] and not guarded.get("abstained"):
         guarded["abstained"] = True
         # At L0 the turn resolved nothing the caller may know of, which is
         # what `unresolved` says; `withheld` is for material released at a

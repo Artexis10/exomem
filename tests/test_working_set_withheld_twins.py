@@ -677,3 +677,35 @@ def test_an_l0_unit_on_a_page_superseded_by_a_notice_page_is_still_absent(vault:
 
     assert restricted == clean
     assert any(unit["ref"].endswith("gauge-ruling.md#g-b") for unit in clean["units"])
+
+
+INVOICE = "Knowledge Base/Sources/zerrin-bracken-invoice.md"
+INVOICE_TURN = "what did the zerrin bracken invoice say about the freight total"
+
+
+def _invoice() -> str:
+    return (
+        "---\ntype: source\nstatus: active\nupdated: 2026-09-09\n---\n\n# Zerrin Bracken invoice\n\n"
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.\n"
+    )
+
+
+def test_a_captured_page_withheld_at_l0_leaves_the_packet_of_a_vault_without_it(vault: Path) -> None:
+    """The only page that answers the turn is withheld from this caller: it gets the packet of a vault that
+    never held the page, an `unresolved` abstention, not an emptied served packet."""
+    seed_ordinary_notes(vault)
+    _write(vault, SECRET, _note("Secret cluster", "- [fact] Hidden. ^s-1"))
+    _write(vault, INVOICE, _invoice())
+    _withhold(vault, SECRET, ceiling=0)
+    visible = _ask(vault, INVOICE_TURN)
+    assert [pointer["ref"] for pointer in visible["pointers"]] == [INVOICE]  # the control: this caller does reach it
+
+    _withhold(vault, SECRET, INVOICE, ceiling=0)
+    restricted = _ask(vault, INVOICE_TURN)
+    (vault / INVOICE).unlink()
+    clean = _ask(vault, INVOICE_TURN)
+
+    assert restricted == clean
+    assert restricted["abstained"] is True and restricted["abstention"] == {"reason": "unresolved"}
+    assert INVOICE not in json.dumps(restricted)
+

@@ -61,7 +61,7 @@ from . import (
     working_set_state,
 )
 from .activation_result import AMBIGUOUS, INDEX_WARMING, UNRESOLVED, WITHHELD
-from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
+from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_SOURCE, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
 from .vocabulary import registry
@@ -1352,6 +1352,8 @@ class Lead:
     match: str
     evidence: tuple[str, ...]
     origin: str = working_set_conversation.ORIGIN_TURN
+    #: Set for an uncompiled captured page, which has no catalogue row: its title, wikilinks removed.
+    source_title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1428,6 +1430,13 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
     for item in packet.get("related") or ():
         if isinstance(item, Mapping):
             add(item, "related")
+    # A captured page that hangs from a carried page is that page's, not a lead of its own.
+    for item in packet.get("pointers") or ():
+        if isinstance(item, Mapping) and working_set.is_source_pointer(item) and _lead_ref(item) not in found:
+            found[_lead_ref(item)] = Lead(
+                _lead_ref(item), "carried", ("retrieval",),
+                source_title=egress.without_wikilinks(str(item.get("title") or "")),
+            )
     leads = tuple(sorted(found.values(), key=lambda lead: MATCHES.index(lead.match)))
     return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence, conversation)
 
@@ -1536,6 +1545,12 @@ def _slice_rows(
     extras: dict[str, dict[str, Any]] = {}
     for lead in leads.leads:
         row = by_name.get(lead.ref)
+        if row is None and lead.source_title is not None and caller.sees(lead.ref):
+            # A captured page is in no catalogue: its row is the page's own path and title, and no description.
+            row = Row(
+                lead.ref, KIND_SOURCE, "", lead.source_title or lead.ref, "", context_catalogue.ORIGIN_NONE,
+                lead.ref, lead.ref, (), None, "",
+            )
         if row is not None and row.entry_id not in extras:
             rows.append(row)
             extras[row.entry_id] = {"match": lead.match, "evidence": list(lead.evidence)}

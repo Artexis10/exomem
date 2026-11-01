@@ -765,3 +765,49 @@ def test_a_slice_the_request_budget_stops_reports_no_conversation_read(vault: Pa
         request_budget.reset_current(token)
     assert packet["turn_slice"]["state"] == "skipped"
     assert packet["generation"]["conversation"] == "absent"
+
+
+INVOICE = f"{KB}/Sources/zerrin-bracken-invoice.md"
+INVOICE_TURN = "what did the zerrin bracken invoice say about the freight total"
+INVOICE_NOTE = f"{KB}/Notes/Research/zerrin-bracken-freight.md"
+
+
+def _captured_vault(vault: Path, *, cited: bool) -> None:
+    """A vault past the lexical corpus floor whose captured invoice no compiled page cites, or one note does."""
+    from test_working_set_carry import seed_ordinary_notes
+
+    _structured(vault)
+    seed_ordinary_notes(vault)
+    _write(vault, INVOICE, (
+        "---\ntype: source\nstatus: active\nupdated: 2026-09-09\n---\n\n# [[Zerrin]] Bracken invoice\n\n"
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.\n"
+    ))
+    if cited:
+        _write(vault, INVOICE_NOTE, (
+            '---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\nsources: ["[[zerrin-bracken-invoice]]"]\n---\n\n'
+            "# Zerrin Bracken freight\n\n## Summary\n\n- [decision] The zerrin bracken freight total was settled. ^z-1\n"
+        ))
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+
+
+def test_a_captured_page_the_turn_names_is_a_source_lead_beside_the_map(vault: Path) -> None:
+    """The default packet's slice lists the page that only a captured document answers, as a labelled lead."""
+    _captured_vault(vault, cited=False)
+
+    packet = _activate(vault, turn=INVOICE_TURN)
+
+    (item,) = [item for item in packet["turn_slice"]["items"] if item["kind"] == "source"]
+    assert item["ref"] == INVOICE and item["match"] == "carried"
+    assert item["title"].strip() == "Bracken invoice"  # the wikilinked word is removed, as for any title the guard serves
+    assert item["description"] == ""
+
+
+def test_a_captured_page_cited_by_a_carried_note_is_not_a_lead_of_its_own(vault: Path) -> None:
+    _captured_vault(vault, cited=True)
+
+    packet = _activate(vault, turn=INVOICE_TURN)
+
+    leads = {(item["kind"], item["ref"]) for item in packet["turn_slice"]["items"]}
+    assert ("source", INVOICE) not in leads
+    assert any(ref == INVOICE_NOTE for _kind, ref in leads)  # the control: the citing note is the lead

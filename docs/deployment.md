@@ -1398,6 +1398,28 @@ Any value other than `off` serves the slice. A value other than `on` or `off`
 also logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using on`. The
 setting has no effect in the `anchors` mode.
 
+### Captured pages in the packet
+
+A turn can name a phrase that only a captured page holds: a page under `Sources/`
+or `Evidence/` that no note was compiled from. The packet then carries a pointer
+to that page, labelled as uncompiled source material that is not a conclusion.
+It carries no text from the page. The agent reads the page with `read_memory`.
+A compiled note that answers the same phrase as strongly keeps precedence, and
+a captured page that a carried note cites hangs from that note. In the `maps`
+packet the turn slice lists the page as a lead of kind `source`. Pages under
+`Sources/Episodes/` are never pointed to this way.
+
+`EXOMEM_ACTIVATION_SOURCE_SLOTS` is the most captured pages one packet points to.
+The default is 2. To restore the packet from before this feature, set the value
+to 0 and restart the service in the way that the turn slice steps above describe.
+Then call `recall_context` once with a turn that names the page: the packet has
+no captured pointer. At 0 the service runs no captured-page query.
+
+A value that is not a whole number of at least 0 logs one warning,
+`invalid EXOMEM_ACTIVATION_SOURCE_SLOTS; using 2`, and serves the default. Do not
+only remove the line to return to the default: a managed supervisor keeps the value
+that it started with. The setting applies in both packet modes.
+
 ### The map while the vault changes
 
 A managed service that holds the owner's map does not rebuild it on the thread that serves the call.

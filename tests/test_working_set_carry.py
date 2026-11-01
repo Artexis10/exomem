@@ -2972,3 +2972,123 @@ def test_hidden_status_contributors_do_not_change_public_carry_at_production_vol
         (unit["provenance"]["path"], unit["text"]) for unit in absent["units"]
     }
     assert not any(anchor.get("status") == "resolved" for anchor in ambiguous["anchors"])
+
+
+# --------------------------------------------------------------------------- #
+# Uncompiled captured pages: pointed to, never carried as conclusions
+# --------------------------------------------------------------------------- #
+
+#: A captured page that no compiled note was written from, and the turn that names a phrase only it holds.
+INVOICE_SOURCE = "Knowledge Base/Sources/zerrin-bracken-invoice.md"
+INVOICE_TURN = "what did the zerrin bracken invoice say about the freight total"
+
+
+def _capture(vault: Path, rel: str, body: str, *, title: str, sources: str = "") -> str:
+    """A captured page under `Sources/`, indexed; `rel` is relative to the knowledge base."""
+    _write(
+        vault / "Knowledge Base" / rel,
+        f"---\ntype: source\nstatus: active\nupdated: 2026-09-09\n{sources}---\n\n# {title}\n\n{body}\n",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    return f"Knowledge Base/{rel}"
+
+
+def test_a_phrase_only_a_captured_page_holds_gets_one_labelled_pointer(carry_vault: Path, budget_free) -> None:
+    """The live failure: an invoice only a captured page records got an empty packet."""
+    path = _capture(
+        carry_vault, "Sources/zerrin-bracken-invoice.md",
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.", title="Zerrin Bracken invoice",
+    )
+
+    packet = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+
+    assert packet["abstained"] is False
+    assert packet["anchors"] == [] and packet["units"] == []
+    (pointer,) = packet["pointers"]
+    assert pointer["ref"] == path and pointer["anchor"] == path
+    assert pointer["title"] == "Zerrin Bracken invoice"
+    assert pointer["reason"] == "requires_read"
+    assert pointer["why"] == working_set.SOURCE_POINTER_WHY
+
+
+def test_a_compiled_note_keeps_precedence_over_a_captured_page_of_equal_words(carry_vault: Path, budget_free) -> None:
+    """A note and a source that say the same thing: the note is the answer, so no pointer to the source."""
+    sentence = "The brannock tessel ledger closes on the ninth, and the tessel board signs it off."
+    _write(
+        carry_vault / "Knowledge Base/Notes/Research/brannock-tessel-ledger.md",
+        f"---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n# Brannock tessel ledger\n\n"
+        f"## Summary\n\n- [decision] {sentence} ^b-decision\n",
+    )
+    _capture(carry_vault, "Sources/brannock-tessel-ledger-notes.md", sentence, title="Brannock tessel ledger notes")
+
+    packet = working_set.compile_packet(
+        carry_vault, turn="when does the brannock tessel ledger close", max_chars=4000
+    )
+
+    assert [anchor["path"] for anchor in packet["anchors"]] == ["Knowledge Base/Notes/Research/brannock-tessel-ledger.md"]
+    assert packet["pointers"] == []
+
+
+def test_a_captured_page_that_a_carried_note_cites_hangs_from_that_note(carry_vault: Path, budget_free) -> None:
+    """One pointer to the page, anchored on the note that cites it, not a second standalone one."""
+    note = "Knowledge Base/Notes/Research/zerrin-bracken-freight.md"
+    _write(
+        carry_vault / note,
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n"
+        'sources: ["[[zerrin-bracken-invoice]]"]\n---\n\n# Zerrin Bracken freight\n\n## Summary\n\n'
+        "- [decision] The zerrin bracken freight total was disputed and settled. ^z-decision\n",
+    )
+    source = _capture(
+        carry_vault, "Sources/zerrin-bracken-invoice.md",
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.", title="Zerrin Bracken invoice",
+    )
+
+    packet = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+
+    assert [anchor["path"] for anchor in packet["anchors"]] == [note]
+    (pointer,) = [pointer for pointer in packet["pointers"] if pointer["ref"] == source]
+    assert pointer["anchor"] == note
+    assert not working_set.is_source_pointer(pointer)
+
+
+def test_episodes_and_page_families_yield_no_captured_pointer(carry_vault: Path, budget_free) -> None:
+    """An Episode is recent context, and a phrase on a whole window of captured pages names a family."""
+    _capture(
+        carry_vault, "Sources/Episodes/2026-09-09-zerrin-bracken.md",
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.", title="Zerrin Bracken recap",
+    )
+    episode_only = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+    for index in range(working_set.carry_fetch_size(120) + 5):
+        _write(
+            carry_vault / f"Knowledge Base/Sources/bulk/zerrin-bracken-{index:03d}.md",
+            f"---\ntype: source\nstatus: active\n---\n\n# Zerrin Bracken export {index:03d}\n\n"
+            "Zerrin Bracken Ltd freight total.\n",
+        )
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+    family = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+
+    assert episode_only["pointers"] == [] and episode_only["abstained"] is True
+    assert family["pointers"] == [] and family["abstained"] is True
+
+
+def test_a_bound_of_zero_restores_the_packet_without_captured_pages(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one switch: at 0 the turn that only a captured page answers gets today's empty abstention."""
+    before = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+    _capture(
+        carry_vault, "Sources/zerrin-bracken-invoice.md",
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.", title="Zerrin Bracken invoice",
+    )
+    monkeypatch.setenv("EXOMEM_ACTIVATION_SOURCE_SLOTS", "0")
+    off = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+    monkeypatch.delenv("EXOMEM_ACTIVATION_SOURCE_SLOTS")
+    on = working_set.compile_packet(carry_vault, turn=INVOICE_TURN, max_chars=4000)
+
+    def comparable(packet: dict) -> dict:
+        return {**packet, "generation": {k: v for k, v in packet["generation"].items() if k not in ("freshness_key", "index_generation")}}
+
+    assert comparable(off) == comparable(before)
+    assert len(on["pointers"]) == 1  # the control: the same vault does reach the page with the bound on

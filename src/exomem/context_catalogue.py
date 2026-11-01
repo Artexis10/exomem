@@ -65,6 +65,8 @@ KIND_ANCHOR = "anchor"
 KIND_NOTE = "note"
 KIND_THREAD = "thread"
 KIND_COLLECTION = "collection"
+# A captured page that the turn slice lists as a lead. It has no catalogue row: the slice builds it per request.
+KIND_SOURCE = "source"
 
 # Where a description came from, best first. `registry` (a topic's) is applied
 # at read time and `model` has no store yet, so neither is written here.

@@ -53,7 +53,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
@@ -111,6 +111,34 @@ def activation_turn_slice() -> bool:
             log.warning("invalid EXOMEM_ACTIVATION_TURN_SLICE; using on")
             _SLICE_WARNING_EMITTED = True
     return True
+
+
+#: Captured pages per packet when `EXOMEM_ACTIVATION_SOURCE_SLOTS` is unset.
+SOURCE_SLOTS_DEFAULT = 2
+_SOURCE_SLOTS_WARNING_EMITTED = False
+
+
+def activation_source_slots() -> int:
+    """How many uncompiled captured pages a packet may point to; 0 is the rollback.
+
+    `EXOMEM_ACTIVATION_SOURCE_SLOTS` is a whole number of at least 0. Anything else logs one warning
+    and serves the default.
+    """
+    global _SOURCE_SLOTS_WARNING_EMITTED
+    raw = os.environ.get("EXOMEM_ACTIVATION_SOURCE_SLOTS")
+    if raw is None or not raw.strip():
+        return SOURCE_SLOTS_DEFAULT
+    try:
+        slots = int(raw)
+    except ValueError:
+        slots = -1
+    if slots >= 0:
+        return slots
+    with _CACHE_LOCK:
+        if not _SOURCE_SLOTS_WARNING_EMITTED:
+            log.warning("invalid EXOMEM_ACTIVATION_SOURCE_SLOTS; using %d", SOURCE_SLOTS_DEFAULT)
+            _SOURCE_SLOTS_WARNING_EMITTED = True
+    return SOURCE_SLOTS_DEFAULT
 
 
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
@@ -315,6 +343,7 @@ def cache_key(
         tuple(sorted(str(ref) for ref in continuity_refs)),
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
+        activation_source_slots(),
         str(heat_digest),
 
         str(conventions_turn_hash),
@@ -1752,6 +1781,31 @@ def _carry_search(*args, **kwargs):
     return lexstore.search_bm25_result(*args, **kwargs)
 
 
+@dataclass(frozen=True, slots=True)
+class JudgedPhrase:
+    """One phrase the compiled carry judged: what the captured pass needs to ask the same question.
+
+    `survivors` are the compiled pages that passed the phrase gate, which the captured pass ranks
+    beside the captured pages so that both pools score under one statistic.
+    """
+
+    words: str
+    rare: tuple[str, ...]
+    corpus_pages: int
+    pairs: tuple[tuple[str, str], ...]
+    survivors: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceHit:
+    """A captured page that one phrase reached, with whether it outranks the phrase's compiled pages."""
+
+    path: str
+    score: float
+    adjusted: float
+    outranks_compiled: bool
+
+
 @_stopping_at_budget
 def carry_named_groups(
     vault_root: Path,
@@ -1765,6 +1819,7 @@ def carry_named_groups(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
+    phrases: list[JudgedPhrase] | None = None,
 ) -> tuple[tuple[tuple[tuple[str, float], ...], ...], str]:
     """The pages this turn NAMED, one group per phrase that named them.
     Returns `(groups, readiness status)`.
@@ -1786,6 +1841,9 @@ def carry_named_groups(
     pages dropped before anyone counts. Rarity is counted over the request's
     admitted pages (`request_admission`), and each ranking query decides on
     its own snapshot whether that admission lets it rank on the catalogue.
+
+    `phrases`, when given, receives each phrase judged (`JudgedPhrase`), whether
+    or not a compiled page survived it. It costs no query.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find
@@ -1877,6 +1935,10 @@ def carry_named_groups(
                         contacts.setdefault(path, set()).update(
                             (left, right) for left, right, pair in occurrences if pair in supported
                         )
+            if phrases is not None:
+                phrases.append(JudgedPhrase(
+                    content_words(turn), tuple(rare), corpus_pages, tuple(component), tuple(body_hits)
+                ))
             if body_hits:
                 groups.append(tuple(body_hits))
             # Numeric body coincidences need complete-title proof, not partial title contact.
@@ -1914,6 +1976,101 @@ def carry_named_groups(
     except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
         log.debug("activation carry recall unavailable", exc_info=True)
         return (), "unavailable"
+
+
+@_stopping_at_budget
+def carry_source_hits(
+    vault_root: Path,
+    phrases: Sequence[JudgedPhrase],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
+) -> tuple[SourceHit, ...]:
+    """The uncompiled captured pages the judged `phrases` reach, strongest first.
+
+    The compiled carry's own question, asked once more of a pool it leaves out: the captured pages the
+    request admits (`RequestQueryContext.with_captured`) beside the phrase's compiled survivors, so both
+    score under one statistic, with the same corroboration, term budget and checkpoint. A phrase whose
+    window fills names a family of pages, not a document, and yields none. A page qualifies when its raw
+    score clears `RETRIEVAL_CARRY_MIN_SCORE`; it outranks the compiled pages when its score, after the
+    note-type factor that recall applies, beats theirs after the same factor.
+    Empty on any refusal: this pass only ever adds pointers.
+    """
+    if not phrases:
+        return ()
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    from . import find, find_policy, lexstore, note_types
+
+    try:
+        admission = request_admission(vault_root, visible, status_basis, query_context).with_captured()
+        pool_result = lexstore.captured_pool(
+            vault_root, admission, freshness=freshness, recall_checkpoint=recall_checkpoint
+        )
+        if not pool_result.readiness.complete or not pool_result.value:
+            return ()
+        pool = pool_result.value
+        type_basis = note_types.Basis(vault_root)
+
+        def factor(path: str) -> float | None:
+            page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
+            if page is None:
+                return None
+            return find_policy.page_type_factor(page.page_type, page.media_type, type_basis=type_basis)
+
+        found: dict[str, SourceHit] = {}
+        for phrase in phrases:
+            survivors = {path for path, _score in phrase.survivors}
+            fetch = working_set.carry_fetch_size(phrase.corpus_pages)
+            result = _carry_search(
+                vault_root,
+                phrase.words,
+                fetch,
+                scope="kb",
+                freshness=freshness,
+                allow_delta=False,
+                corroboration_tokens=list(phrase.rare),
+                corroboration_groups=[list(pair) for pair in phrase.pairs],
+                recall_checkpoint=recall_checkpoint,
+                term_budget=lexical_term_budget(),
+                exclude_navigation=True,
+                allowed_paths=set(pool) | survivors,
+                query_context=admission,
+            )
+            if not result.readiness.complete:
+                return ()
+            rows = result.value or ()
+            if len(rows) >= fetch:
+                continue  # a bounded window cannot tell one document from a family of them
+            adjusted = [(str(path), float(score), factor(str(path))) for path, score in rows]
+            best_compiled = max(
+                (score * weight for path, score, weight in adjusted if path in survivors and weight is not None),
+                default=None,
+            )
+            for path, score, weight in adjusted:
+                if (
+                    path not in pool
+                    or weight is None
+                    or score <= working_set.RETRIEVAL_CARRY_MIN_SCORE
+                    or not working_set._is_current_page(vault_root, path, status_basis=status_basis)
+                ):
+                    continue
+                hit = SourceHit(path, score, score * weight, best_compiled is None or score * weight > best_compiled)
+                held = found.get(path)
+                if held is None or (hit.outranks_compiled, hit.adjusted) > (held.outranks_compiled, held.adjusted):
+                    found[path] = hit
+        return tuple(sorted(found.values(), key=lambda hit: (-hit.adjusted, hit.path)))
+    except lifecycle_statuses.ClassificationUnavailable as error:
+        from .governance import egress
+
+        raise egress.ReaderViewUnavailable("status classification is unavailable") from error
+    except working_set.BudgetExhausted:
+        raise
+    except Exception:  # noqa: BLE001 - the captured pass is additive; it adds nothing, never raises
+        log.debug("activation captured-source pass unavailable", exc_info=True)
+        return ()
 
 
 def _carry_title_groups(
