@@ -559,6 +559,121 @@ def test_a_page_edited_while_the_last_catch_up_step_waits_is_replayed_before_the
     )
 
 
+def test_a_catch_up_step_whose_source_moved_settles_nothing_before_the_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A step that rolled back must not vouch for its page when a later step stamps.
+
+    A page saved while a step reads it fails that step's source proof and rolls
+    its rows back. The save's event reaches the registry only after the catch-up
+    ends, so no event marks the page as touched: the rolled-back step's own
+    record is the only thing that could settle it. The last step stamps every
+    lagging page, so the page must be replayed from its saved bytes first.
+    Otherwise the catalogue is admitted with the old text.
+    """
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    bulk = []
+    # One full step, which holds the page that moves, and a short last step.
+    for index in range(cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    freshness.on_files_changed(tmp_path, changed=bulk)
+    moved = []
+    real_insert = store._insert_page
+
+    def insert_while_the_editor_saves(conn, path, *args, **kwargs):
+        real_insert(conn, path, *args, **kwargs)
+        if not moved:
+            moved.append(path)
+            path.write_text("# Saved\n\nsavedmidstep and more\n", encoding="utf-8")
+
+    monkeypatch.setattr(store, "_insert_page", insert_while_the_editor_saves)
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert len(moved) == 1
+    assert rebuilds == []
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "savedmidstep", k=3, scope="kb"), (
+        "the catalogue was stamped over a page whose step had rolled back"
+    )
+
+
+def test_a_page_saved_on_every_catch_up_step_declines_as_outpaced_and_the_full_pass_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    live_catalogue,
+) -> None:
+    """An editor that outruns the catch-up costs one full pass, not an endless replay.
+
+    Every step's source moves and rolls back, so the lag never shrinks. The
+    catch-up gives up within the steps the first lag needed plus two, and the
+    worker's full pass then publishes the catalogue. The editor stops saving
+    after twelve steps, so a catch-up without that bound ends too, late.
+    """
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    store, changed, _removed = live_catalogue
+    changed.write_text("# After\n\nfirstsave\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    attempts = []
+    in_step = False
+    real_retry = store.retry_deferred_upsert
+    real_insert = store._insert_page
+
+    def retry(paths, **kwargs):
+        nonlocal in_step
+        attempts.append(list(paths))
+        in_step = True
+        try:
+            return real_retry(paths, **kwargs)
+        finally:
+            in_step = False
+
+    def insert_while_the_editor_saves(conn, path, *args, **kwargs):
+        real_insert(conn, path, *args, **kwargs)
+        if in_step and len(attempts) <= 12:
+            # A longer file each time, so no two saves share a signature.
+            changed.write_text("# Edited\n\n" + "outpacedsave " * len(attempts), encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[changed])
+
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+    monkeypatch.setattr(store, "_insert_page", insert_while_the_editor_saves)
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    # One step for the lag, plus two slack steps.
+    assert len(attempts) <= 3, "the catch-up kept replaying a page that moved on every step"
+    assert any("catch-up declined (outpaced)" in message for message in caplog.messages)
+    assert rebuilds == [True]
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "outpacedsave", k=3, scope="kb")
+
+
 def test_a_tainted_lag_over_the_foreground_cap_still_rebuilds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
