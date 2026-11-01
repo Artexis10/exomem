@@ -323,20 +323,37 @@ def test_each_arms_role_comes_from_its_binding_record(tmp_path):
     assert report["statistics"]["success"]["c"] == 1
 
 
-@pytest.mark.parametrize("forgery", ["candidate_at_base", "foreign_binding_ref"])
-def test_a_forged_binding_or_a_run_of_another_binding_is_refused(tmp_path, forgery):
+@pytest.mark.parametrize(
+    ("forgery", "match"),
+    [
+        ("candidate_at_base", "contradicts its base"),
+        ("foreign_binding_ref", "binding_ref"),
+        # A run root reused across two binds keeps the older candidate's record.
+        ("second_candidate", "two candidate bindings"),
+        ("other_base", "different base revisions"),
+        ("integer_role", "names no role"),
+    ],
+)
+def test_a_forged_binding_or_a_run_of_another_binding_is_refused(tmp_path, forgery, match):
     out, keys = tmp_path / "out", tmp_path / "keys"
     write_key(keys, pair_key("d01", "generic_or_none", [], "none_required"))
     write_run(out, "d01", "x1", pages=[ALPHA, BETA])
     run = write_run(out, "d01", "x2", pages=[ALPHA, BETA])
+    record = json.loads((out / "binding-x2.json").read_text(encoding="utf-8"))
     if forgery == "candidate_at_base":
-        record = json.loads((out / "binding-x2.json").read_text(encoding="utf-8"))
         record["revision"] = record["base_revision"]
-        (out / "binding-x2.json").write_text(json.dumps(record), encoding="utf-8")
-    else:
+    elif forgery == "foreign_binding_ref":
         run["binding_ref"] = "x1-binding"
         (out / "d01" / "x2" / "run.json").write_text(json.dumps(run), encoding="utf-8")
-    with pytest.raises(ScoreRefused, match="contradicts its base|binding_ref"):
+    elif forgery == "second_candidate":
+        stale = {**record, "arm": "x3", "binding_ref": "x3-binding"}
+        (out / "binding-x3.json").write_text(json.dumps(stale), encoding="utf-8")
+    elif forgery == "other_base":
+        record["base_revision"] = "d" * 40
+    else:
+        record["reason_capable"] = 1
+    (out / "binding-x2.json").write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ScoreRefused, match=match):
         score(out, keys, expect=["d01"])
 
 
@@ -411,6 +428,23 @@ def test_a_key_without_its_variants_false_precision_field_is_refused(tmp_path):
     del key["false_precision"]
     with pytest.raises(ScoreRefused, match=r"false_precision\.pairs"):
         baseline_row(tmp_path, key, pages=[ALPHA, BETA])
+
+
+def test_a_referent_key_without_its_anchor_pairs_is_refused(tmp_path):
+    # Failure caught: a referent key that lists wrong types but no anchor pairs
+    # scores an unsupported edge to the anchor as no false precision.
+    key = {
+        "id": "d01",
+        "category": "referent",
+        "variant": "positive",
+        "endpoints": {"A": "Anchor One", "R": "the referent page"},
+        "referent": {"match_tokens": ["token zed"], "wrong_core_types": ["person"]},
+        "state_success": {"rule": "referent_entity_exists_with_fitting_type"},
+        "false_precision": {"wrong_core_types": ["person"]},
+        "accepted": ["token zed"],
+    }
+    with pytest.raises(ScoreRefused, match=r"false_precision\.pairs"):
+        baseline_row(tmp_path, key, pages=[entity("anchor-one", "Anchor One")])
 
 
 def test_a_key_file_name_that_links_to_another_file_is_refused(tmp_path):
@@ -631,7 +665,7 @@ def test_a_referent_typed_as_a_child_of_the_promoted_type_uses_the_promoted_entr
         "referent": {"match_tokens": ["token zed"], "wrong_core_types": ["person"]},
         "promoted_entry": {"registry": "entity-types", "key": "type-x"},
         "state_success": {"rule": "referent_type_lineage_includes_promoted"},
-        "false_precision": {"wrong_core_types": ["person"]},
+        "false_precision": {"wrong_core_types": ["person"], "pairs": []},
         "accepted": ["value-v"],
     }
     row = baseline_row(
