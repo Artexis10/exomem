@@ -1821,6 +1821,45 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     assert titles(service.root, CID) == ["Canonical", "Late committed"]
 
 
+def test_a_store_write_applied_by_the_applier_commits_inside_the_per_intent_bound_not_the_request_budget(
+    service, monkeypatch
+):
+    """The store derives its completion deadline from the budget; an applied intent has no client and must not read as pending.
+
+    The ambient budget here is the one that makes a synchronous call return `MUTATION_ACKNOWLEDGEMENT_PENDING`
+    (see the test above); the applier's dispatch lifts it to the per-intent bound.
+    """
+    import uuid
+
+    from exomem import intent_accept, request_budget
+    from exomem.collection_store.writer import CollectionWriter
+
+    release = threading.Event()
+    append = CollectionWriter.append_record
+
+    def slow(writer, *args, **kwargs):
+        assert release.wait(10), "the slow leaf was never released"
+        return append(writer, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "append_record", slow)
+    threading.Timer(1.0, release.set).start()
+    dispatch = intent_accept.ApplierDispatch(
+        intent_id="applied-intent", key="applied-late-commit", digest="a" * 64, window_seconds=600.0,
+        request_id=str(uuid.uuid4()), stop=threading.Event(),
+    )
+    token = request_budget.set_current(request_budget.RequestBudget(
+        seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.3))
+    try:
+        with intent_accept.applier_dispatch(dispatch):
+            applied = call(service.root, "record_memory", action="append", collection=CID,
+                           item={"title": "Applied late"}, item_key=LATER, why="applied by the applier")
+    finally:
+        request_budget.reset_current(token)
+        release.set()
+    assert applied["outcome"] == "committed"
+    assert "Applied late" in titles(service.root, CID)
+
+
 def test_accepted_store_work_can_finish_its_bulk_dependency(service, monkeypatch):
     """A caller waiting for accepted work must not keep that work's bulk dependency parked."""
     from contextlib import contextmanager

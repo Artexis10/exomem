@@ -436,6 +436,18 @@ def bind(
     return ApplicationBinding(item=item, choice=choice, request_id=request, operation_id=operation_id, curation=curation, relation_step=relation_step)
 
 
+def release(vault_root, *, kwargs: Mapping[str, Any], idempotency_key: str, command_digest: str, principal: str) -> bool:
+    """Release the binding that `bind` made for this exact operation, when its write did not commit.
+
+    The operation id is `bind`'s own, so only the application of this identity is released. A write that ends
+    without committing (discarded or rejected) would otherwise leave the item `applying`, and every later
+    application of it would refuse (write-intent design D5).
+    """
+    ref, fingerprint = _metadata(kwargs)
+    operation_id = _hash({"domain": "vocabulary-application/v1", "principal": principal, "key": idempotency_key, "command": command_digest})
+    return VocabularyState(vault_root).release_application(ref=ref, fingerprint=fingerprint, operation_id=operation_id)
+
+
 def _writer_terminal(value: Mapping[str, Any]) -> _WriterTerminal:
     """Writer lease only: make an unforgeable-in-band terminal capability."""
     return _WriterTerminal(value=value, seal=_SEAL)

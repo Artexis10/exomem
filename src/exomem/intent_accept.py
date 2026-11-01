@@ -36,6 +36,9 @@ ACCEPT_DEADLINE_SECONDS = 2.0
 POLL_AFTER_MS = 2000
 #: How often a request thread re-reads the row while it waits for the applier, which may be in another process.
 POST_ROW_POLL_SECONDS = 0.25
+#: The longest one applied intent may spend on a dispatch (design D4: the owner's default, 15 minutes). Task 5.2
+#: also ends an intent whose own wait cause outlasts it.
+PER_INTENT_BOUND_SECONDS = 15 * 60.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,10 @@ class ApplierDispatch:
     window_seconds: float
     request_id: str
     stop: threading.Event
+    #: How long one dispatch may take before the store or the acknowledgement gives up on it: the per-intent bound.
+    budget_seconds: float = PER_INTENT_BOUND_SECONDS
+    #: Nobody waits for derived convergence on an applied intent, so the applier leaves it pending (design D4).
+    wait_for_derived: bool = False
 
 
 _APPLIER_DISPATCH: ContextVar[ApplierDispatch | None] = ContextVar("exomem_applier_dispatch", default=None)
@@ -174,6 +181,27 @@ def depends_on_queued(
     return any(
         intent.audience == audience or not pages.isdisjoint(intent.planned_paths or ()) for intent in queued
     )
+
+
+def planned_hashes(vault_root: Any, paths: Any) -> dict[str, str]:
+    """The sha256 of each planned target that exists now, keyed by the path the caller named.
+
+    A path outside the vault, a missing file and a directory are left out; this is evidence for an owner
+    who decides a write that crashed, never an input to a decision. Content never enters the journal, only its hash.
+    """
+    import hashlib
+    from pathlib import Path
+
+    root = Path(vault_root).resolve()
+    found: dict[str, str] = {}
+    for named in paths or ():
+        try:
+            target = (root / named).resolve()
+            if target.is_relative_to(root) and target.is_file():
+                found[named] = hashlib.sha256(target.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            continue
+    return found
 
 
 def principal_snapshot(principal: Any) -> dict[str, Any]:
@@ -342,6 +370,7 @@ class Accept:
                 base_guards={name: self.kwargs[name] for name in _BASIS_ARGUMENTS if name in self.kwargs},
                 validation=validation,
                 planned_paths=sorted(target_pages(self.command, self.kwargs)),
+                target_hashes=planned_hashes(self.injected[0], target_pages(self.command, self.kwargs)),
             )
         except write_intents.JournalRefusal as refused:
             self.refusal = journal_refusal(refused)

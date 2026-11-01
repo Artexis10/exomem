@@ -11,8 +11,8 @@ One OS lock per vault (`WriteIntentJournal.applier_lock_path`) admits one applie
 The service is the preferred applier: it holds the lock while it runs, and holds a shared lock on a
 sidecar that a CLI applier reads to stand aside. A CLI applier releases the lock after each intent.
 
-Crash recovery of an `applying` row, fencing and idle release, vocabulary binding release and the
-per-intent bound belong to later tasks; the seams are marked `# seam:`.
+Crash recovery resolves a row a dead applier left `applying` before the queue is read (design D4, crash
+table). The per-intent bound and the full outcome table belong to later tasks; the seams are marked `# seam:`.
 """
 
 from __future__ import annotations
@@ -28,7 +28,14 @@ import time
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from . import capabilities, intent_accept, mutation_lock, write_intents
+from . import (
+    capabilities,
+    intent_accept,
+    mutation_journal,
+    mutation_lock,
+    request_budget,
+    write_intents,
+)
 from .cli_ops import error_dict
 
 log = logging.getLogger(__name__)
@@ -53,9 +60,17 @@ CAUSE_EXPIRED = "authorization_expired"
 CAUSE_APPLY_FAILED = "apply_failed"
 CAUSE_REVIEW_REQUIRED = "review_required"
 CAUSE_STOPPING = "applier_stopping"
+CAUSE_OUTCOME_UNKNOWN = "outcome_unknown"
+CAUSE_WRITER_LEASE = "writer_lease"
+#: A replica that is not the writer re-asks the coordinator this often, not on the boundary's retry pause.
+LEASE_WAIT_SECONDS = 1.0
 # Error codes of a refusal that passes, which the applier waits out and re-runs (design D5: "wait and re-run").
 # Closed protocol codes that the writer raises, not vocabulary; task 5.1 owns the full outcome table.
-_WAIT_CODES = ("CLOUD_CELL_READ_ONLY", "WRITER_FENCED")  # nosemgrep: ep-word-set -- closed protocol error codes
+_WAIT_CODES = ("CLOUD_CELL_READ_ONLY",)  # nosemgrep: ep-word-set -- closed protocol error codes
+# The writer lease is another replica's, or this one's was fenced: the intent stays queued here until it holds it again.
+_LEASE_CODES = ("WRITER_FENCED", "WRITER_LEASE_REQUIRED")  # nosemgrep: ep-word-set -- closed protocol error codes
+# Receipt states of a key whose claim never reached its leaf; every other state is evidence the claim machinery resolves.
+_NO_EVIDENCE_STATES = ("reserved", "pending")  # nosemgrep: ep-word-set -- the idempotency store's closed row states
 
 
 # -- the per-vault lock and its preferred-applier sidecar --------------------------------------------
@@ -234,9 +249,12 @@ class Applier:
             grace_until = time.monotonic() + CLI_LOCK_GRACE_SECONDS
 
     def _apply_next_or_idle(self, *, idle_seconds: float) -> bool:
-        # seam: crash recovery (task 3.4) starts here, by resolving rows left `applying` by a dead applier
-        # before the queue is read. Until then such a row is skipped, never re-run.
         try:
+            # This process holds the applier lock, so an `applying` row belongs to an applier that is gone.
+            for orphan in self.journal.applying():
+                if self._stop.is_set():
+                    return False
+                self._recover(orphan)
             intent = self.journal.next_accepted()
         except write_intents.JournalRefusal:
             log.warning("write-intent journal unreadable; the applier retries", exc_info=True)
@@ -249,6 +267,41 @@ class Applier:
             return False
         self._apply(intent)
         return True
+
+    # -- crash recovery ----------------------------------------------------------------------------
+
+    def _recover(self, intent: write_intents.Intent) -> None:
+        """Resolve one `applying` row without running its leaf again (design D4, crash table).
+
+        K in the idempotency store is the commit authority. A key with a claim past its reservation goes
+        back through dispatch, which replays a persisted terminal, resumes one from the commit receipt, or
+        raises `MUTATION_OUTCOME_UNKNOWN` for a dead claim without evidence. A key with no claim, or one
+        that never reached its leaf, may have lost its receipt, so the row is `outcome_unknown` and never re-run.
+        """
+        try:
+            state = self.manager.idempotency.claim_state(intent.retry_key)
+            if state is None or state in _NO_EVIDENCE_STATES:
+                self._settle(intent, ("conflicted", self._outcome_unknown(intent)))
+            else:
+                self._settle(intent, self._attempt(intent))
+        except write_intents.JournalRefusal:
+            log.warning("write-intent journal could not record a recovery step", exc_info=True)
+            self._stop.wait(RETRY_PAUSE_SECONDS)
+
+    def _outcome_unknown(self, intent: write_intents.Intent) -> dict[str, Any]:
+        """The conflict record of a write that may or may not have committed, with the evidence an owner decides on."""
+        now = intent_accept.planned_hashes(self.vault_root, intent.planned_paths)
+        at_accept = intent.target_hashes or {}
+        return {
+            "cause": CAUSE_OUTCOME_UNKNOWN,
+            "evidence": {
+                "targets": {
+                    path: {"at_accept": at_accept.get(path), "now": now.get(path)}
+                    for path in intent.planned_paths or ()
+                },
+                "logged_outcomes": mutation_journal.outcomes_for_request(intent.request_id),
+            },
+        }
 
     # -- one intent --------------------------------------------------------------------------------
 
@@ -276,12 +329,16 @@ class Applier:
             principal = upload_tokens._principal_from_values(copy.deepcopy(intent.principal))
         except (TypeError, ValueError, AttributeError):
             return "conflicted", {"cause": CAUSE_APPLY_FAILED, "error": {"code": "PRINCIPAL_UNREADABLE"}}
-        # The authority the caller held at accept is not the authority it holds now (design D4, D5).
-        session = principal.verified_authorization_session
-        if session is not None and time.time() > session.expires_at:
-            return "conflicted", {"cause": CAUSE_EXPIRED}
-        if not asyncio.run(auth_sessions.origin_session_active(principal)):
-            return "conflicted", {"cause": CAUSE_REVOKED}
+        # The authority the caller held at accept is not the authority it holds now (design D4, D5). A key
+        # with a claim past its reservation never runs the leaf again, so it needs no authority; the write
+        # that holds that claim committed under the authority it had.
+        state = self.manager.idempotency.claim_state(intent.retry_key)
+        if state is None or state in _NO_EVIDENCE_STATES:
+            session = principal.verified_authorization_session
+            if session is not None and time.time() > session.expires_at:
+                return "conflicted", {"cause": CAUSE_EXPIRED}
+            if not asyncio.run(auth_sessions.origin_session_active(principal)):
+                return "conflicted", {"cause": CAUSE_REVOKED}
 
         injected = (
             (self.vault_root, schema_module.load_source_schema(self.vault_root))
@@ -298,8 +355,10 @@ class Applier:
             request_id=intent.request_id,
             stop=self._stop,
         )
+        budget = request_budget.RequestBudget(seconds=dispatch.budget_seconds)
         # The leaf receives the rewritten arguments when a rewrite exists; the claim keeps the original digest.
         arguments = dict(intent.leaf_arguments if intent.leaf_arguments is not None else intent.arguments)
+        budget_token = request_budget.set_current(budget)
         try:
             with (
                 principal_module.request_scope(principal),
@@ -312,6 +371,8 @@ class Applier:
                 )
         except Exception as error:  # noqa: BLE001 - every dispatch failure is classified, never lost
             return self._classify_error(intent, error)
+        finally:
+            request_budget.reset_current(budget_token)
         return self._classify_result(result)
 
     def _classify_result(self, result: Any) -> tuple[str, Any]:
@@ -322,9 +383,16 @@ class Applier:
         return "conflicted", {"cause": CAUSE_REVIEW_REQUIRED, "result": _portable_value(result)}
 
     def _classify_error(self, intent: write_intents.Intent, error: Exception) -> tuple[str, Any]:
-        if intent_accept.is_precommit_refusal(error) or getattr(error, "code", None) in _WAIT_CODES:
-            return "wait", getattr(error, "details", {}).get("cause") or getattr(error, "code", "busy")
         public = error_dict(error)
+        # A leaf may wrap the writer's refusal; the public form names the code the caller would have seen.
+        code = getattr(error, "code", None) or public.get("code")
+        if code in _LEASE_CODES:
+            return "wait", CAUSE_WRITER_LEASE
+        if intent_accept.is_precommit_refusal(error) or code in _WAIT_CODES:
+            return "wait", getattr(error, "details", {}).get("cause") or code or "busy"
+        if code == "MUTATION_OUTCOME_UNKNOWN":
+            # The claim on K died without evidence. The write may have landed, so it is never re-run (design D4).
+            return "conflicted", self._outcome_unknown(intent)
         if getattr(error, "committed", False) is True:
             # A write that committed is never retried; its recorded failure is its terminal.
             log.warning("an applied intent committed without a persisted terminal: %s", public.get("code"), exc_info=error)
@@ -341,15 +409,49 @@ class Applier:
         if outcome == "wait":
             journal.requeue(intent.intent_id, str(detail))
             if str(detail) != CAUSE_STOPPING:
-                self._stop.wait(RETRY_PAUSE_SECONDS)
+                self._stop.wait(LEASE_WAIT_SECONDS if detail == CAUSE_WRITER_LEASE else RETRY_PAUSE_SECONDS)
             return
         if outcome == "committed":
             journal.finish(intent.intent_id, "committed", terminal=detail)
         elif outcome == "rejected":
+            release_vocabulary_binding(self.vault_root, intent)
             journal.finish(intent.intent_id, "rejected", terminal={"ok": False, "state": "rejected", **detail})
         else:
             journal.finish(intent.intent_id, "conflicted", conflict=detail)
         intent_accept.notify_applier_progress()
+
+
+def release_vocabulary_binding(vault_root: Path, intent: write_intents.Intent) -> bool:
+    """Free the vocabulary application that this intent's dispatch bound, for an intent that ends uncommitted (design D5).
+
+    Never raises: a binding that cannot be released stays `applying`, which an owner sees and repairs.
+    """
+    arguments = intent.arguments
+    if not isinstance(arguments, dict) or arguments.get("vocabulary_ref") is None:
+        return False
+    from . import vocabulary_application
+
+    try:
+        return vocabulary_application.release(
+            vault_root,
+            kwargs=arguments,
+            idempotency_key=intent.retry_key,
+            command_digest=intent.digest,
+            principal=intent.audience,
+        )
+    except (OSError, ValueError):
+        log.warning("a vocabulary application binding could not be released", exc_info=True)
+        return False
+
+
+def discard(journal: write_intents.WriteIntentJournal, vault_root: Path, intent_id: str, reason: str) -> bool:
+    """End a `conflicted` intent as `discarded`, releasing its vocabulary binding. Task 5.3's `discard-write` calls this."""
+    intent = journal.get(intent_id)
+    if intent is None or intent.state != "conflicted":
+        return False
+    release_vocabulary_binding(vault_root, intent)
+    journal.finish(intent_id, "discarded", terminal={"ok": False, "state": "discarded", "reason": reason})
+    return True
 
 
 def _command(name: str, surface: str) -> Any | None:

@@ -618,6 +618,16 @@ class WriteIntentJournal:
         return None if row is None else _decode(row)
 
     @_unavailable_on_sqlite_error
+    def applying(self) -> list[Intent]:
+        """The `applying` rows, oldest first. Only a dead applier, or one whose last journal write failed, leaves one."""
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT * FROM intents WHERE state = 'applying' ORDER BY seq").fetchall()
+        finally:
+            conn.close()
+        return [_decode(row) for row in rows]
+
+    @_unavailable_on_sqlite_error
     def begin_apply(self, intent_id: str) -> bool:
         """Move one `accepted` intent to `applying` and count the attempt. False when another writer moved it first."""
         return self._move(intent_id, "accepted", "applying", count_attempt=True)

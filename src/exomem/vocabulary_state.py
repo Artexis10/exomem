@@ -437,6 +437,33 @@ class VocabularyState:
 
         self._update(update, affected_refs=(item.ref,))
 
+    def release_application(self, *, ref: str, fingerprint: str, operation_id: str) -> bool:
+        """Drop the binding of an application that never committed, so the reviewed item can be applied again.
+
+        Returns whether a binding was released. A binding that committed or is uncertain stays: its write may exist.
+        """
+
+        def update(section):
+            record = section["decisions"].get(f"{ref}:{fingerprint}")
+            application = record.get("application") if isinstance(record, dict) else None
+            if not isinstance(application, dict) or record.get("receipts"):
+                return False
+            operations = application.get("operations")
+            if isinstance(operations, list):
+                bound = [entry for entry in operations if entry.get("operation_id") == operation_id]
+                if not bound or any(entry.get("state") != "bound" for entry in bound):
+                    return False
+                operations[:] = [entry for entry in operations if entry.get("operation_id") != operation_id]
+                if operations:
+                    return True
+            elif application.get("operation_id") != operation_id or application.get("state") == "uncertain":
+                return False
+            record.pop("application", None)
+            record["state"] = "proposed"
+            return True
+
+        return bool(self._update(update, affected_refs=(ref,)))
+
     def record_application_uncertain(self, item: WorkItem, *, operation_id: str) -> None:
         """Retain a post-commit correlation failure without changing the mutation."""
         def update(section):

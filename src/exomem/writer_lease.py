@@ -268,6 +268,11 @@ def acknowledgement_budget_deadline(entry: float | None = None) -> float:
     everything derived has been proven.
     """
     started = _fast_ack_monotonic() if entry is None else float(entry)
+    dispatch = intent_accept.current_applier_dispatch()
+    if dispatch is not None:
+        # No client waits on an applied intent, so its limit is the per-intent bound and no delivery reserve
+        # applies. A budget of "now" here would make every store apply return pending (design D4).
+        return started + dispatch.budget_seconds
     deadline = (
         started + _MUTATION_REQUEST_BUDGET_SECONDS - _TERMINAL_DELIVERY_RESERVE_SECONDS
     )
@@ -948,6 +953,7 @@ def _acknowledge_derived_batches(
     session: _FastAcknowledgementSession,
     *,
     budget_deadline: float | None = None,
+    wait_for_components: bool = True,
 ) -> Any:
     """Prove, publish, signal and freeze one post-canonical status snapshot."""
     if not session.batches:
@@ -955,7 +961,7 @@ def _acknowledge_derived_batches(
     with call_spans.span("derived.acknowledgement"):
         try:
             return _acknowledge_derived_batches_timed(
-                result, session, budget_deadline=budget_deadline
+                result, session, budget_deadline=budget_deadline, wait_for_components=wait_for_components
             )
         finally:
             call_spans.record_span(
@@ -1095,6 +1101,7 @@ def _acknowledge_derived_batches_timed(
     session: _FastAcknowledgementSession,
     *,
     budget_deadline: float | None = None,
+    wait_for_components: bool = True,
 ) -> Any:
     # What this acknowledgement still owes, per batch: a component that batch 1
     # completed says nothing about batch 2's, so one shared set would under-report
@@ -1128,6 +1135,10 @@ def _acknowledge_derived_batches_timed(
         )
         if budget_deadline is not None:
             deadline = min(deadline, budget_deadline)
+        if not wait_for_components:
+            # The applier's own setting: nobody waits for derived convergence, so the components stay
+            # as prepared and the terminal records them pending, as it does when this deadline passes.
+            deadline = float("-inf")
         # Direct leaves without a matching vault hold keep the guarded fallback.
         # Held writes reuse their exact handoff, including a cached failure.
         _timed_handoff(session)
@@ -3313,6 +3324,16 @@ class IdempotencyStore:
         except (AttributeError, EOFError, ImportError, IndexError, pickle.UnpicklingError, TypeError):
             return None
         return terminal if isinstance(terminal, Mapping) else None
+
+    def claim_state(self, key: str) -> str | None:
+        """The state of the receipt row for `key` (`reserved`, `executing`, `canonically_committed`, `completed`, ...), or None.
+
+        A read that takes no claim and changes nothing, so crash recovery can tell a key that has evidence
+        from one that has none before it dispatches.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT state FROM mutations WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
 
     def _validate_existing_runtime_paths(self) -> None:
         """Reject attacker-controlled SQLite/pickle paths before opening them."""
@@ -6422,6 +6443,7 @@ class LeaseManager:
                     result,
                     fast_ack_session,
                     budget_deadline=acknowledgement_deadline,
+                    wait_for_components=dispatch is None or dispatch.wait_for_derived,
                 )
                 if fast_ack_session is not None
                 else result
@@ -8107,6 +8129,18 @@ class LeaseManager:
             return
         self._log_lease_event("lease_reclaimed")
 
+    def _intents_waiting(self) -> bool:
+        """Whether a journal this manager opened holds an accepted or applying intent. An unreadable journal counts as none."""
+        with self._intent_journals_lock:
+            journals = list(self._intent_journals.values())
+        for journal in journals:
+            try:
+                if journal.has_active():
+                    return True
+            except write_intents.JournalRefusal:
+                continue
+        return False
+
     def _maybe_idle_release(self, token: int) -> bool:
         """Hand writer authority back when idle. Returns True if it released
         (the caller should skip renewing this tick).
@@ -8122,6 +8156,10 @@ class LeaseManager:
         if idle_seconds <= 0 or self.config.preferred_writer:
             return False
         assert self.client is not None
+        if self._intents_waiting():
+            # An accepted write needs this replica's authority to commit (design D4). Releasing would hand
+            # the lease to the preferred replica, and the applier would then wait to take it back.
+            return False
         with self._lock:
             if self._fencing_token != token or self._store_handoff or self._store_closed:
                 return False

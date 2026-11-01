@@ -131,6 +131,30 @@ def _rotate_if_needed(path: Path) -> None:
     _size_cache[key] = 0
 
 
+def outcomes_for_request(request_id: str) -> list[str]:
+    """The outcomes `logs/mutations.jsonl` holds for one request id, oldest first. Empty when it holds none or cannot be read.
+
+    Crash recovery reads this as evidence of what an applier that died did; it never decides from it.
+    """
+    outcomes: list[str] = []
+    path = journal_path()
+    for candidate in (path.with_name(path.name + ".1"), path):
+        try:
+            with candidate.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if request_id not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if row.get("request_id") == request_id and isinstance(row.get("outcome"), str):
+                        outcomes.append(row["outcome"])
+        except OSError:
+            continue
+    return outcomes
+
+
 def record_mutation(
     *,
     request_id: str,
