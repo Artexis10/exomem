@@ -75,8 +75,14 @@ def fmt(value, digits=1):
     return "-" if value is None else f"{value:,.{digits}f}"
 
 
+ARMS = ("runc: the cell on Docker's default runtime, data on a Docker volume. "
+        "runsc: the cell on gVisor (runsc 20261026.0, systrap, directfs on) with the volume as a read-only lower "
+        "layer and every write held in sandbox memory (`--overlay2=all:memory`), because plain runsc cannot start "
+        "the cell on a volume. The init container and the import Job run on plain runsc over the volume.")
+
+
 def render(summary: dict[str, dict]) -> str:
-    lines = ["| case | runc median | runsc median | ratio (runsc/runc) | 95% interval | n | verdict | throughput runc -> runsc (items/s) | failures |",
+    lines = [ARMS, "", "| case | runc median | runsc median | ratio (runsc/runc) | 95% interval | n | verdict | throughput runc -> runsc (items/s) | failures |",
              "|---|---:|---:|---:|---|---:|---|---|---|"]
     for name, e in summary.items():
         interval = "-" if e["ci_low"] is None else f"{e['ci_low']:.2f} to {e['ci_high']:.2f}"

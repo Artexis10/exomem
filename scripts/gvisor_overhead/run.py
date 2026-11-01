@@ -36,7 +36,12 @@ CELL_ID = "abcdefghijklmnop"
 CELL_PORT = 8765
 PROTOCOL = "2025-11-25"
 IMPORT_NAME = "Project Archive"
-RUNTIMES = ("runc", "runsc", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug")
+RUNTIMES = ("runc", "runsc", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug", "runsc-overlay")
+# The runtime that runs the long-lived cell in each arm. Plain runsc cannot start the cell on a
+# volume: the sandbox refuses renameat2(RENAME_NOREPLACE) on its gofer-backed mounts, and the
+# cell's filesystem probe then fails closed. `runsc-overlay` keeps the volume as a read-only
+# lower layer and holds every write in sandbox memory, so the cell runs but its writes do not persist.
+CELL_RUNTIME = {"runc": "runc", "runsc": "runsc-overlay"}
 MEDIA_DIR = "Knowledge Base/Sources/Media"
 CELL_COMMAND = (
     'ulimit -c 0 && mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && exec "$@"'
@@ -566,6 +571,10 @@ class Lab:
         self.new_volume(volume)
         self.helper(volume, "tar -C /data -xpf /snap/seed.tar && chmod 2770 /data",
                     mounts=[f"{self.snap}:/snap:ro"])
+        if "media" in self.args.only:
+            # Staged before the cell starts: an overlay over the volume would not see a later host-side copy.
+            self.helper(volume, f"mkdir -p '/data/vault/{MEDIA_DIR}' && cp /media/* '/data/vault/{MEDIA_DIR}/'",
+                        mounts=[f"{self.fx / 'media'}:/media:ro"], user="10001:10001")
         try:
             self.session_body(arm, rep, tag, volume, name)
         finally:
@@ -589,7 +598,7 @@ class Lab:
             except Exception as error:  # noqa: BLE001 - recorded, the session goes on
                 self.fail(arm, rep, "c.import_stage_job", f"{type(error).__name__}: {error}")
         # (e) startup
-        url, created, t0 = self.start_cell(arm, name, volume)
+        url, created, t0 = self.start_cell(CELL_RUNTIME[arm], name, volume)
         live = self.wait_http(url, "/health", t0, 240)
         ready = self.wait_http(url, "/health/ready", t0, 400)
         self.record(arm, rep, "e.docker_run_returns", [created])
@@ -739,8 +748,6 @@ class Lab:
 
     # -- (d)
     def work_media(self, arm: str, rep: int, mcp: Mcp, volume: str) -> None:
-        self.helper(volume, f"mkdir -p '/data/vault/{MEDIA_DIR}' && cp /media/* '/data/vault/{MEDIA_DIR}/'",
-                    mounts=[f"{self.fx / 'media'}:/media:ro"], user="10001:10001")
         for filename in self.media_files:
             path = f"{MEDIA_DIR}/{filename}"
             case = f"d.media_{filename.replace('.', '_').replace('-', '_')}"

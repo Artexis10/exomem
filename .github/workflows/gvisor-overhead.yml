@@ -23,7 +23,7 @@ env:
   REPEATS: "1"
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
-  EXTRA_ARGS: "--compat-only"
+  EXTRA_ARGS: ""
 
 jobs:
   measure:
@@ -58,6 +58,8 @@ jobs:
           sudo runsc install --runtime=runsc-ptrace -- --platform=ptrace
           sudo mkdir -p /tmp/runsc-debug
           sudo runsc install --runtime=runsc-debug -- --platform=systrap --directfs=true --debug --debug-log=/tmp/runsc-debug/
+          # The cell runs on this one: the volume is a read-only lower layer and writes stay in sandbox memory.
+          sudo runsc install --runtime=runsc-overlay -- --platform=systrap --directfs=true --overlay2=all:memory
           sudo systemctl restart docker
           cat /etc/docker/daemon.json
           docker info --format '{{json .Runtimes}}'
