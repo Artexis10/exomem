@@ -2,10 +2,10 @@ name: B2 key watcher
 
 # Lists the application keys and buckets of each pinned object-store account and
 # reports drift to a receiver outside the cluster. The pinned set, the receiver URL
-# and the list-only credentials are repository secrets: this public repository
-# holds none of them, and the script prints only labels, reason tokens and counts.
-# The script exits non-zero on an empty or invalid pinned set, so a missing secret
-# fails the run instead of passing it silently.
+# and the list-only credentials are secrets of the `key-watcher` environment, which
+# only main can deploy to: this public repository holds none of them, and the script
+# prints only labels, reason tokens and counts. The script exits non-zero on an empty
+# or invalid pinned set, so a missing secret fails the run instead of passing it.
 
 on:
   schedule:
@@ -29,6 +29,7 @@ jobs:
     if: github.repository == 'Artexis10/exomem'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    environment: key-watcher
     permissions:
       contents: read
     steps:

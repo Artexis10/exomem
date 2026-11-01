@@ -54,6 +54,7 @@ def test_cell_data_is_a_b2_only_domain_with_its_own_state_workspace() -> None:
     assert "backblaze/b2" in cell_data
     assert "hetznercloud/hcloud" not in cell_data
     assert "cloudflare/cloudflare" not in cell_data
+    # A regex reads HCL here because no HCL parser is a dependency and Terraform has no offline view of the cloud block.
     assert re.search(
         r'cloud\s*{.*workspaces\s*{\s*name\s*=\s*"exomem-hosted-cell-data"',
         cell_data,

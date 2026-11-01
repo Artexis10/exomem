@@ -21,9 +21,9 @@ override_resource {
 }
 
 variables {
-  b2_application_key_id = "mock-only"
-  b2_application_key    = "mock-only"
-  bucket_prefix         = "exomem-private-alpha"
+  cell_data_b2_application_key_id = "mock-only"
+  cell_data_b2_application_key    = "mock-only"
+  bucket_prefix                   = "exomem-private-alpha"
 }
 
 run "backup_bucket_is_private_encrypted_and_compliance_locked" {

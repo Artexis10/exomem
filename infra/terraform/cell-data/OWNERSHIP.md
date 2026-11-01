@@ -5,10 +5,12 @@ cell backup bucket, the export and import staging bucket, and three purpose-scop
 application keys. It never owns another account's resource, the Hetzner server,
 Cloudflare, Kubernetes objects, or tenant records. Production changes use the
 `cell-data/` remote-state key, and its credentials belong to the member account only.
+Its provider variables are `cell_data_b2_application_key_id` and `cell_data_b2_application_key`,
+unlike durability's `b2_*` names, so a `TF_VAR_b2_*` export meant for durability cannot feed it.
 
 The backup bucket has compliance-mode Object Lock. Its lifecycle expires only
 noncurrent versions, so a current restic pack never expires. A compliance lock
-cannot be shortened or removed, so a longer `backup_retention_days` is hard to undo.
+cannot be shortened or removed, so a longer `backup_retention_days` is hard to undo; the variable accepts 1 to 60 days.
 The staging bucket has no lock; its lifecycle bounds the life of each object.
 
 The key custodian key creates keys, and the provider cannot limit it to a bucket,

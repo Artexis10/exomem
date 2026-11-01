@@ -1,13 +1,15 @@
 """The out-of-cluster B2 key watcher: what it alerts on, what it sends, what it prints.
 
 HTTP is injected at the transport. `FakeTransport` stands in for urllib's opener and
-answers B2 native API v4 and receiver requests with producer-shaped responses.
+answers B2 native API v4 and receiver requests with producer-shaped responses. It knows
+no other API version, so a watcher that reverts to v3 fails every test that lists keys.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import importlib.util
 import io
 import json
@@ -79,10 +81,12 @@ class FakeTransport:
         url = request.full_url
         if url.startswith("https://alerts.example.test/"):
             endpoint = "alert"
-        elif url.startswith("https://api.backblazeb2.com/b2api/v4/"):
+        elif url == "https://api.backblazeb2.com/b2api/v4/b2_authorize_account":
             endpoint = "authorize"
-        else:
+        elif url.startswith("https://api001.backblazeb2.com/b2api/v4/"):
             endpoint = url.rsplit("/", 1)[-1]
+        else:
+            raise urllib.error.HTTPError(url, 404, "not a v4 path", {}, None)  # type: ignore[arg-type]
         headers = {name.lower(): value for name, value in request.header_items()}
         self.sent.append((endpoint, headers, request.data or b""))
         queue = self._outcomes[endpoint]
@@ -205,12 +209,18 @@ def listed_bucket(
 
 
 def account(
-    *, per_cell: bool, pinned: list[str] | None = None, buckets: dict[str, Any] | None = None
+    *,
+    per_cell: bool,
+    pinned: list[str] | None = None,
+    buckets: dict[str, Any] | None = None,
+    label: str = "fixture",
+    key_id_env: str = KEY_ID_ENV,
+    key_env: str = KEY_ENV,
 ) -> dict[str, Any]:
     return {
-        "label": "fixture",
-        "key_id_env": KEY_ID_ENV,
-        "key_env": KEY_ENV,
+        "label": label,
+        "key_id_env": key_id_env,
+        "key_env": key_env,
         "pinned_key_ids": pinned if pinned is not None else [CUSTODIAN_KEY_ID],
         "per_cell": (
             {"bucket_id": BACKUP_BUCKET_ID, "capabilities": CELL_CAPABILITIES} if per_cell else None
@@ -330,29 +340,57 @@ def test_a_key_listed_on_a_later_page_is_still_checked() -> None:
 @pytest.mark.parametrize(
     "key",
     [
-        cell_key(bucket_ids=[STAGING_BUCKET_ID]),
-        cell_key(bucket_ids=[BACKUP_BUCKET_ID, STAGING_BUCKET_ID]),
         cell_key(prefix="cells/"),
         cell_key(prefix="cells/ABCDEFGHIJKLMNOP/"),
-        cell_key(capabilities=[*CELL_CAPABILITIES, "bypassGovernance"]),
         cell_key(capabilities=["listBuckets", "listFiles"]),
     ],
-    ids=[
-        "other-bucket",
-        "two-buckets",
-        "no-cell-id",
-        "bad-cell-id",
-        "extra-capability",
-        "missing-capability",
-    ],
+    ids=["no-cell-id", "bad-cell-id", "missing-capability"],
 )
-def test_a_key_that_is_not_the_per_cell_shape_alerts(key: dict[str, Any]) -> None:
+def test_a_near_miss_of_the_per_cell_shape_alerts_shape_drift(key: dict[str, Any]) -> None:
     fake = transport(keys=[custodian_key(), key])
 
     code, _, _ = run(environment(account(per_cell=True)), fake)
 
     assert code == 1
     assert active_alerts(fake) == {"fixture:PER_CELL_KEY_SHAPE"}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        cell_key(bucket_ids=[STAGING_BUCKET_ID]),
+        cell_key(bucket_ids=[BACKUP_BUCKET_ID, STAGING_BUCKET_ID]),
+        cell_key(capabilities=[*CELL_CAPABILITIES, "bypassGovernance"]),
+        cell_key(prefix="exports/"),
+    ],
+    ids=["other-bucket", "two-buckets", "extra-capability", "foreign-prefix"],
+)
+def test_a_key_that_is_not_a_near_miss_of_the_per_cell_shape_alerts_unknown_key(
+    key: dict[str, Any],
+) -> None:
+    fake = transport(keys=[custodian_key(), key])
+
+    code, _, _ = run(environment(account(per_cell=True)), fake)
+
+    assert code == 1
+    assert active_alerts(fake) == {"fixture:UNKNOWN_KEY"}
+
+
+def test_an_account_wide_key_is_unknown_even_while_a_near_miss_is_active() -> None:
+    wide = listed_key(
+        ROGUE_KEY_ID,
+        capabilities=["listKeys", "writeKeys", "deleteKeys"],
+        bucket_ids=None,
+        prefix=None,
+    )
+    alone = transport(keys=[custodian_key(), wide])
+    beside_near_miss = transport(keys=[custodian_key(), cell_key(prefix="cells/"), wide])
+
+    run(environment(account(per_cell=True)), alone)
+    run(environment(account(per_cell=True)), beside_near_miss)
+
+    assert active_alerts(alone) == {"fixture:UNKNOWN_KEY"}
+    assert active_alerts(beside_near_miss) == {"fixture:UNKNOWN_KEY", "fixture:PER_CELL_KEY_SHAPE"}
 
 
 def test_two_keys_for_one_prefix_alert_a_duplicate() -> None:
@@ -463,6 +501,38 @@ def test_a_failed_key_listing_alerts_without_clearing_the_key_tokens() -> None:
     assert fake.endpoints().count("b2_list_keys") == 2  # one retry after the 5xx
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [ConnectionResetError("fixture reset"), http.client.IncompleteRead(b"")],
+    ids=["connection-reset", "truncated-response"],
+)
+def test_a_transport_failure_in_one_account_does_not_stop_the_next_account(
+    failure: Exception,
+) -> None:
+    first = account(per_cell=False, label="alpha")
+    second = account(
+        per_cell=False, label="beta", key_id_env="WATCHER_BETA_KEY_ID", key_env="WATCHER_BETA_KEY"
+    )
+    env = {
+        **environment(first, second),
+        "WATCHER_BETA_KEY_ID": WATCHER_KEY_ID,
+        "WATCHER_BETA_KEY": WATCHER_KEY,
+    }
+    # The first account's listing fails on both attempts; the second account's listing works.
+    fake = transport(
+        key_outcomes=[failure, failure, {"keys": [custodian_key()], "nextApplicationKeyId": None}]
+    )
+
+    code, _, _ = run(env, fake)
+
+    assert code == 1
+    assert fake.alerts()["alpha:LISTING_FAILURE"] is True
+    assert "alpha:UNKNOWN_KEY" not in fake.alerts()
+    assert fake.alerts()["beta:LISTING_FAILURE"] is False
+    assert fake.alerts()["beta:UNKNOWN_KEY"] is False
+    assert "KEY_WATCHER_RUN" in fake.alerts()
+
+
 def test_the_alert_body_and_transition_id_match_the_receiver_contract() -> None:
     rogue = listed_key(ROGUE_KEY_ID, capabilities=["listKeys"], bucket_ids=None, prefix=None)
     fake = transport(keys=[custodian_key(), rogue])
@@ -470,7 +540,7 @@ def test_the_alert_body_and_transition_id_match_the_receiver_contract() -> None:
     run(environment(account(per_cell=False)), fake)
 
     alert_requests = [(headers, body) for name, headers, body in fake.sent if name == "alert"]
-    expected = expected_transition_id("fixture:UNKNOWN_KEY", True, "2026-11-02")
+    expected = expected_transition_id("fixture:UNKNOWN_KEY", True, "2026-11-02T07")
     sent = {json.loads(body)["alert"]: (headers, body) for headers, body in alert_requests}
     headers, body = sent["fixture:UNKNOWN_KEY"]
     assert json.loads(body) == {
@@ -485,6 +555,11 @@ def test_the_alert_body_and_transition_id_match_the_receiver_contract() -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", expected)
     assert all(len(body) <= 4096 for _, body in alert_requests)
 
+    inactive_headers, inactive = sent["fixture:AUTH_FAILURE"]
+    day_id = expected_transition_id("fixture:AUTH_FAILURE", False, "2026-11-02")
+    assert json.loads(inactive)["transition_id"] == day_id
+    assert inactive_headers["x-exomem-alert-transition"] == day_id
+
     heartbeat_headers, heartbeat = sent["KEY_WATCHER_RUN"]
     hour_id = expected_transition_id("KEY_WATCHER_RUN", False, "2026-11-02T07")
     assert json.loads(heartbeat)["transition_id"] == hour_id
@@ -496,51 +571,44 @@ def test_the_alert_body_and_transition_id_match_the_receiver_contract() -> None:
     )
 
 
-def test_a_repeat_dedupes_per_day_for_checks_and_per_hour_for_the_heartbeat() -> None:
+def test_an_active_alert_is_stamped_by_the_hour_and_an_inactive_one_by_the_day() -> None:
     rogue = listed_key(ROGUE_KEY_ID, capabilities=["listKeys"], bucket_ids=None, prefix=None)
     env = environment(account(per_cell=False))
 
-    def ids_at(now: datetime) -> dict[str, str]:
-        fake = transport(keys=[custodian_key(), rogue])
+    def ids_at(now: datetime, *, drifted: bool) -> dict[str, str]:
+        fake = transport(keys=[custodian_key(), rogue] if drifted else [custodian_key()])
         run(env, fake, now)
         return transition_ids(fake)
 
-    morning = ids_at(datetime(2026, 11, 2, 7, 23, tzinfo=UTC))
-    later_that_day = ids_at(datetime(2026, 11, 2, 19, 23, tzinfo=UTC))
-    next_day = ids_at(datetime(2026, 11, 3, 7, 23, tzinfo=UTC))
+    morning = ids_at(datetime(2026, 11, 2, 7, 23, tzinfo=UTC), drifted=True)
+    evening = ids_at(datetime(2026, 11, 2, 19, 23, tzinfo=UTC), drifted=True)
+    same_hour = ids_at(datetime(2026, 11, 2, 7, 59, tzinfo=UTC), drifted=True)
+    clear_morning = ids_at(datetime(2026, 11, 2, 7, 23, tzinfo=UTC), drifted=False)
+    clear_evening = ids_at(datetime(2026, 11, 2, 19, 23, tzinfo=UTC), drifted=False)
+    clear_next_day = ids_at(datetime(2026, 11, 3, 7, 23, tzinfo=UTC), drifted=False)
 
-    assert later_that_day["fixture:UNKNOWN_KEY"] == morning["fixture:UNKNOWN_KEY"]
-    assert next_day["fixture:UNKNOWN_KEY"] != morning["fixture:UNKNOWN_KEY"]
-    assert later_that_day["KEY_WATCHER_RUN"] != morning["KEY_WATCHER_RUN"]
-    assert (
-        ids_at(datetime(2026, 11, 2, 7, 59, tzinfo=UTC))["KEY_WATCHER_RUN"]
-        == morning["KEY_WATCHER_RUN"]
-    )
-
-
-def test_transition_ids_cannot_be_minted_without_the_receiver_capability() -> None:
-    fake = transport()
-    other_url = "https://alerts.example.test/hooks/another-capability"
-    other = transport()
-
-    run(environment(account(per_cell=False)), fake)
-    run(environment(account(per_cell=False), alert_url=other_url), other)
-
-    plain_hash = hashlib.sha256(b"b2-key-watcher|KEY_WATCHER_RUN|false|2026-11-02T07").hexdigest()
-    assert transition_ids(fake)["KEY_WATCHER_RUN"] != plain_hash
-    assert transition_ids(fake)["KEY_WATCHER_RUN"] != transition_ids(other)["KEY_WATCHER_RUN"]
+    # A drift that clears and returns within one day must not reuse the morning's ID.
+    assert evening["fixture:UNKNOWN_KEY"] != morning["fixture:UNKNOWN_KEY"]
+    assert same_hour["fixture:UNKNOWN_KEY"] == morning["fixture:UNKNOWN_KEY"]
+    assert clear_evening["fixture:UNKNOWN_KEY"] == clear_morning["fixture:UNKNOWN_KEY"]
+    assert clear_next_day["fixture:UNKNOWN_KEY"] != clear_morning["fixture:UNKNOWN_KEY"]
+    assert evening["KEY_WATCHER_RUN"] != morning["KEY_WATCHER_RUN"]
+    assert same_hour["KEY_WATCHER_RUN"] == morning["KEY_WATCHER_RUN"]
 
 
-def test_a_receiver_5xx_is_retried_once_and_a_client_error_fails_the_run() -> None:
+def test_a_receiver_5xx_is_retried_once_and_a_client_error_withholds_the_heartbeat() -> None:
     retried = transport(alert_outcomes=[503, {"ok": True}])
     code, _, _ = run(environment(account(per_cell=False)), retried)
     assert code == 0
 
-    refused = transport(alert_outcomes=[403])
+    refused = transport(alert_outcomes=[{"ok": True}, 403])
     code, out, _ = run(environment(account(per_cell=False)), refused)
     assert code == 1
-    assert re.search(r"deliveries: 0 of \d+ succeeded", out)
+    assert re.search(r"deliveries: 1 of \d+ succeeded", out)
     assert refused.endpoints().count("alert") == len(refused.alerts())  # no retry on a 4xx
+    # One check delivery failed, so the heartbeat must not vouch for a complete report.
+    assert "KEY_WATCHER_RUN" not in refused.alerts()
+    assert "heartbeat withheld" in out
 
 
 @pytest.mark.parametrize(
@@ -552,6 +620,9 @@ def test_a_receiver_5xx_is_retried_once_and_a_client_error_fails_the_run() -> No
         lambda document: document["accounts"][0]["buckets"][BACKUP_BUCKET_ID].update(unexpected=1),
         lambda document: document["accounts"][0]["buckets"][BACKUP_BUCKET_ID].pop("corsRules"),
         lambda document: document["accounts"][0].update(label="Not A Label"),
+        lambda document: document["accounts"][0].update(
+            per_cell={"bucket_id": STAGING_BUCKET_ID, "capabilities": CELL_CAPABILITIES}
+        ),
     ],
     ids=[
         "top-level-field",
@@ -560,6 +631,7 @@ def test_a_receiver_5xx_is_retried_once_and_a_client_error_fails_the_run() -> No
         "bucket-field",
         "missing-bucket-field",
         "label",
+        "per-cell-bucket-not-pinned",
     ],
 )
 def test_an_invalid_pinned_set_fails_loudly_and_sends_nothing(mutate: Any) -> None:

@@ -1,10 +1,11 @@
-variable "b2_application_key_id" {
+# Named cell_data_b2_*, unlike durability's b2_*, so a TF_VAR_b2_* export meant for durability cannot feed this root.
+variable "cell_data_b2_application_key_id" {
   description = "Bootstrap B2 identity of the cell-data member account, used only by reviewed cell-data Terraform applies."
   type        = string
   sensitive   = true
 }
 
-variable "b2_application_key" {
+variable "cell_data_b2_application_key" {
   description = "Bootstrap B2 secret of the cell-data member account, used only by reviewed cell-data Terraform applies."
   type        = string
   sensitive   = true
@@ -26,10 +27,11 @@ variable "backup_retention_days" {
   type        = number
   default     = 30
 
-  # Reject an invalid period at plan time; a compliance lock cannot be shortened once a version carries it.
+  # Reject an invalid period at plan time; a compliance lock cannot be shortened once a version carries it,
+  # so the 60-day cap stops a typo from fixing months of storage cost in place.
   validation {
-    condition     = var.backup_retention_days >= 1 && floor(var.backup_retention_days) == var.backup_retention_days
-    error_message = "backup_retention_days must be a positive whole number of days."
+    condition     = var.backup_retention_days >= 1 && var.backup_retention_days <= 60 && floor(var.backup_retention_days) == var.backup_retention_days
+    error_message = "backup_retention_days must be a whole number of days from 1 to 60."
   }
 }
 

@@ -12,8 +12,8 @@ prints account labels, reason tokens and counts only, because CI logs are public
 
 Exit status: 0 when no alert is active and every delivery succeeded; 1 when a
 drift alert is active or a delivery failed; 2 when the configuration is invalid;
-3 on an unexpected error. Exit 2 and 3 send no heartbeat, so the receiver also
-reports a run that never got as far as evaluating the accounts.
+3 on an unexpected error. Exit 2 and 3 send no heartbeat, and neither does a run with a
+failed check delivery, so the receiver also reports a run that did not finish reporting.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -36,7 +37,8 @@ from urllib.parse import urlsplit
 # v4, not v3: on 2026-11-01 the v3 b2_list_keys of a live account returned 6 of
 # its 25 keys (the v4 listing returned all 25), so a v3 watcher would be blind to
 # most keys. v4 also reports a key's restriction as the `bucketIds` list.
-AUTHORIZE_URL = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account"
+API_VERSION = "v4"
+AUTHORIZE_URL = f"https://api.backblazeb2.com/b2api/{API_VERSION}/b2_authorize_account"
 SCHEMA_VERSION = 1
 JOB = "b2-key-watcher"
 HEARTBEAT_ALERT = "KEY_WATCHER_RUN"
@@ -70,7 +72,8 @@ _BUCKET_TOKENS = (BUCKET_MISSING, BUCKET_SETTING_DRIFT)
 # A cell prefix is `cells/<cell id>/`. The cell id is the 16-character base32 body of
 # cellctl's namespace rule `exo-cell-[a-z2-7]{16}`. That protocol fixes the shape, so a
 # regex over this closed form is sound; it checks a format, not what anyone meant.
-_CELL_PREFIX = re.compile(r"cells/[a-z2-7]{16}/")
+CELL_PREFIX_ROOT = "cells/"
+_CELL_PREFIX = re.compile(re.escape(CELL_PREFIX_ROOT) + r"[a-z2-7]{16}/")
 _ACCOUNT_LABEL = re.compile(r"[a-z0-9-]{1,32}")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 _BUCKET_SETTING_FIELDS = frozenset(
@@ -207,6 +210,8 @@ def parse_pinned_set(raw: str) -> list[Account]:
             bucket_id: _parse_bucket_settings(settings, f"{path}.buckets[{position}]")
             for position, (bucket_id, settings) in enumerate(item["buckets"].items())
         }
+        if per_cell is not None and per_cell.bucket_id not in buckets:
+            raise ConfigError(f"{path}.per_cell.bucket_id: not one of the pinned buckets")
         accounts.append(
             Account(
                 label=label,
@@ -244,11 +249,16 @@ def _open(opener: Opener, request: urllib.request.Request) -> bytes:
     return body
 
 
+# A reset or a truncated response raises OSError or HTTPException, not URLError. Catching
+# only URLError would let one account's connection error end the run before any delivery.
+_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
+
+
 def _send(opener: Opener, request: urllib.request.Request) -> bytes:
     """Send once, and once more after a 5xx, a timeout or a network error."""
     try:
         return _open(opener, request)
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except _TRANSPORT_ERRORS as exc:
         client_error = isinstance(exc, urllib.error.HTTPError) and exc.code < 500
         if client_error:
             raise
@@ -258,7 +268,7 @@ def _send(opener: Opener, request: urllib.request.Request) -> bytes:
 def _call_json(opener: Opener, request: urllib.request.Request) -> dict[str, Any]:
     try:
         payload = json.loads(_send(opener, request))
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+    except (*_TRANSPORT_ERRORS, ValueError) as exc:
         raise ApiError("request failed") from exc
     if not isinstance(payload, dict):
         raise ApiError("unexpected response")
@@ -292,7 +302,7 @@ def _api_post(
     opener: Opener, session: Session, endpoint: str, body: dict[str, Any]
 ) -> dict[str, Any]:
     request = urllib.request.Request(
-        f"{session.api_url}/b2api/v4/{endpoint}",
+        f"{session.api_url}/b2api/{API_VERSION}/{endpoint}",
         data=json.dumps(body).encode("utf-8"),
         headers={"Authorization": session.token, "Content-Type": "application/json"},
         method="POST",
@@ -353,6 +363,17 @@ def _matches_per_cell(key: Mapping[str, Any], shape: PerCell) -> bool:
     )
 
 
+def _near_miss(key: Mapping[str, Any], shape: PerCell) -> bool:
+    """A key for this bucket and a cell prefix whose capabilities fall within the shape."""
+    prefix = key.get("namePrefix")
+    return (
+        key.get("bucketIds") == [shape.bucket_id]
+        and frozenset(key["capabilities"]) <= shape.capabilities
+        and isinstance(prefix, str)
+        and prefix.startswith(CELL_PREFIX_ROOT)
+    )
+
+
 def evaluate_keys(account: Account, keys: list[dict[str, Any]]) -> set[str]:
     active: set[str] = set()
     if account.pinned_key_ids - {key["applicationKeyId"] for key in keys}:
@@ -361,14 +382,17 @@ def evaluate_keys(account: Account, keys: list[dict[str, Any]]) -> set[str]:
     for key in keys:
         if key["applicationKeyId"] in account.pinned_key_ids:
             continue
-        if account.per_cell is None:
-            active.add(UNKNOWN_KEY)
-        elif not _matches_per_cell(key, account.per_cell):
-            active.add(PER_CELL_KEY_SHAPE)
-        elif key["namePrefix"] in prefixes:
-            active.add(DUPLICATE_PREFIX_KEY)
-        else:
+        if account.per_cell is not None and _matches_per_cell(key, account.per_cell):
+            if key["namePrefix"] in prefixes:
+                active.add(DUPLICATE_PREFIX_KEY)
             prefixes.add(key["namePrefix"])
+        elif account.per_cell is not None and _near_miss(key, account.per_cell):
+            active.add(PER_CELL_KEY_SHAPE)
+        else:
+            # Anything else, such as an account-wide writeKeys key, is a rogue key. Only a near
+            # miss may use the shape token: a wider key reported as shape drift would hide
+            # behind an already-active shape alert.
+            active.add(UNKNOWN_KEY)
     return active
 
 
@@ -482,8 +506,11 @@ def transition_id(capability: str, alert: str, active: bool, stamp: str) -> str:
 
     A plain hash of these public strings would let another holder of a scheduler
     capability register the ID first under its own job; the receiver then drops the
-    genuine alert as a duplicate. The stamp is the UTC day for checks and the UTC
-    hour for the heartbeat, which keeps a repeat inside that period idempotent.
+    genuine alert as a duplicate. The stamp is the UTC hour for an active alert and
+    the heartbeat, and the UTC day for an inactive alert. A drift that clears and
+    returns within one day then gets a new ID at its return, which the receiver
+    does not drop as the morning's duplicate; a repeat inside the stamp's period
+    stays idempotent.
     """
     material = f"{JOB}|{alert}|{'true' if active else 'false'}|{stamp}"
     return hmac.new(
@@ -514,7 +541,7 @@ def alert_request(url: str, alert: str, active: bool, stamp: str) -> urllib.requ
 def deliver(opener: Opener, url: str, alert: str, active: bool, stamp: str) -> bool:
     try:
         _send(opener, alert_request(url, alert, active, stamp))
-    except (urllib.error.URLError, TimeoutError):
+    except _TRANSPORT_ERRORS:
         return False
     return True
 
@@ -551,13 +578,22 @@ def run(
             file=out,
         )
         deliveries += [
-            (f"{label}:{token}", states[token], day) for token in ALERT_TOKENS if token in states
+            (f"{label}:{token}", states[token], hour if states[token] else day)
+            for token in ALERT_TOKENS
+            if token in states
         ]
-    deliveries.append((HEARTBEAT_ALERT, False, hour))
 
     delivered = sum(deliver(opener, url, *delivery) for delivery in deliveries)
-    print(f"deliveries: {delivered} of {len(deliveries)} succeeded", file=out)
-    return 1 if active_total or delivered != len(deliveries) else 0
+    # The heartbeat vouches that every account was evaluated and reported. After a failed
+    # delivery it would hide a transition that never arrived, so it is withheld and the
+    # receiver's missing-heartbeat alert fires instead.
+    heartbeat_sent = delivered == len(deliveries) and deliver(
+        opener, url, HEARTBEAT_ALERT, False, hour
+    )
+    print(f"deliveries: {delivered + heartbeat_sent} of {len(deliveries) + 1} succeeded", file=out)
+    if not heartbeat_sent and delivered != len(deliveries):
+        print("heartbeat withheld: a check delivery failed", file=out)
+    return 1 if active_total or not heartbeat_sent else 0
 
 
 def main() -> int:
