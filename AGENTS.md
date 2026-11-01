@@ -21,6 +21,16 @@ When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief,
 - Every review verdict names C4 (vocabulary fixed in code): absent, found in the change, or reported as old debt.
 - The semgrep C6 gate in `.github/quality.yml` flags word lists and word regexes on added lines in `src/exomem`.
 
+## Make correct agent behaviour the default
+
+When an agent misuses Exomem output or tells the user too much, fix Exomem first. Do not close the defect as agent error alone.
+
+- Lead every tool result with a short outcome that the agent can repeat to the user as is.
+- Put error codes, request ids, fingerprints, retry history and indexing state in a clearly marked diagnostics part.
+- Make each error name exactly what to change.
+- Make validation reject every input that commit rejects.
+- Prove the change on real models: the misuse must become less likely.
+
 ## Editing the skill scaffold (hand-authored — keep it generic)
 
 The skill shipped to new users lives at `src/exomem/_scaffold/_Schema/`
