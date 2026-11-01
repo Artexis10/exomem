@@ -90,6 +90,9 @@ class EarlierImport:
     original_sha256: str | None
     captured: str
     aliases: tuple[str, ...]
+    # `imported_from` as written. Two originals whose names differ only in Unicode
+    # normalisation share every normalised field; only this spelling tells them apart.
+    spelled_from: str | None = None
 
 
 def _text_field(value: Any) -> str | None:
@@ -136,6 +139,7 @@ def earlier_import_of(
         original_sha256=planned["original_sha256"],
         captured=captured,
         aliases=tuple(planned.get("aliases") or ()),
+        spelled_from=planned["original_path"],
     )
 
 
@@ -181,7 +185,8 @@ def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
         return None
     if frontmatter is None:
         return None
-    imported_from = _text_field(frontmatter.get("imported_from"))
+    spelled_from = frontmatter.get("imported_from")
+    imported_from = _text_field(spelled_from)
     if imported_from is None:
         return None
     aliases = frontmatter.get("aliases")
@@ -195,6 +200,7 @@ def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
         aliases=tuple(
             nfc(a) for a in aliases if isinstance(a, str) and a.strip()
         ) if isinstance(aliases, list) else (),
+        spelled_from=spelled_from,
     )
 
 
@@ -235,7 +241,11 @@ def latest_earlier_import(
             matches.append(entry)
     if not matches:
         return None
-    return max(matches, key=lambda entry: (entry.captured, entry.path))
+    # A twin original, whose name differs only in Unicode normalisation, matches the
+    # same pages. The pages spelled as this original is spelled are its own; a
+    # collection staged again under another normalisation spells none of them so.
+    spelled = [entry for entry in matches if entry.spelled_from == original_path]
+    return max(spelled or matches, key=lambda entry: (entry.captured, entry.path))
 
 
 def earlier_with_same_bytes(

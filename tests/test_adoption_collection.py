@@ -179,6 +179,22 @@ def test_a_ruled_folder_lands_in_its_kind_directory_and_an_unregistered_kind_cha
 
 
 # --- 2.3: re-import -------------------------------------------------------------
+def test_a_rerun_finds_each_unicode_twin_as_already_imported(tmp_path: Path) -> None:
+    """Two names that differ only in Unicode normalisation share every normalised identity field.
+    A rerun used to compare one twin with the other twin's page and file it again as changed."""
+    composed, decomposed = "Coll/Caf\u00e9 ledger.md", "Coll/Cafe\u0301 ledger.md"
+    vault = _vault(tmp_path, {composed: "# Ledger\n\ncomposed name\n", decomposed: "# Ledger\n\ndecomposed name\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    actions = {item["original_path"]: item["action"] for item in planned["plan"]["items"]}
+    assert actions == {composed: "already-imported", decomposed: "already-imported"}
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 2
+
+
 def test_a_re_staged_collection_plans_existing_refs_and_a_changed_note_names_its_predecessor(
     tmp_path: Path,
 ) -> None:
