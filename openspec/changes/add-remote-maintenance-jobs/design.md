@@ -154,6 +154,26 @@ The CLI-only subcommands need no remote route:
 - `lease`, `warm`, `mode`, `dreamer`, `prominence` and speaker enrollment are
   host administration.
 
+### D10. A remote preview runs as a read-only job
+
+A remote preview of `fix`, `backfill-ids` or `reconcile` reads every page. On a
+vault with about 12,000 pages, the `backfill-ids` preview took 61 s and the
+`fix` preview about 485 s, in-process on a disposable copy. A request through
+the public ingress ends after about 100 s, so a remote client never received
+the `plan_id` that starts a job.
+
+On a request-bound surface, the owner's preview of one of these modes therefore
+starts a read-only job and returns its handle, as a write start does. The job
+runs the same dry-run leaf in the service thread, takes no mutation boundary
+and runs behind foreground requests. Its receipt holds the preview report with
+the `plan_id`, and the planned pages page by cursor like any other entries. The
+owner reads the receipt, then starts the write job with that `plan_id`.
+
+- A preview job is a job: it counts toward one job per vault, an identical
+  running preview returns its handle, and the owner can cancel it.
+- A caller other than the owner keeps the synchronous preview.
+- The local CLI keeps its synchronous preview.
+
 ## Risks / Trade-offs
 
 - A remote `reconcile` blocks other writers for its run, as a CLI `reconcile`
