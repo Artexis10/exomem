@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 import uuid
 
@@ -19,6 +20,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator
+from starlette.middleware import Middleware
 
 from exomem import cloud_origin, server
 from exomem.__main__ import _attach_main
@@ -72,8 +74,7 @@ def _upload_origin(key, login, ticket):
     }
 
 
-@pytest.fixture
-def cell(vault, monkeypatch):
+def _configure_cell(monkeypatch):
     key = Ed25519PrivateKey.generate()
     monkeypatch.setenv("EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY", key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -85,10 +86,30 @@ def cell(vault, monkeypatch):
     monkeypatch.delenv("EXOMEM_CLOUD_READ_ONLY", raising=False)
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    return key
+
+
+@pytest.fixture
+def cell(vault, monkeypatch):
+    key = _configure_cell(monkeypatch)
     mcp = server.build_server(require_auth=True)
     app = mcp.http_app(stateless_http=True, json_response=True, middleware=server.http_middleware(mcp))
     try:
         yield key, app, vault
+    finally:
+        mcp._exomem_local_runtime_activation._shutdown.set()
+
+
+@pytest.fixture
+def enforcing_cell(vault, monkeypatch):
+    """The same cell with the proof gate in enforce mode, selected by the middleware's parameter."""
+    key = _configure_cell(monkeypatch)
+    mcp = server.build_server(require_auth=True)
+    middleware = [entry for entry in server.http_middleware(mcp) if entry.cls is not cloud_origin.CloudOriginMiddleware]
+    middleware.append(Middleware(cloud_origin.CloudOriginMiddleware, enforce=True))
+    app = mcp.http_app(stateless_http=True, json_response=True, middleware=middleware)
+    try:
+        yield key, app
     finally:
         mcp._exomem_local_runtime_activation._shutdown.set()
 
@@ -319,3 +340,131 @@ def test_cli_refuses_an_altered_cloud_token_before_sending(tmp_path, token):
         ["original.bin", "--handoff-file", str(tmp_path / "handoff.json"), "--root", str(tmp_path)],
         transport=httpx.MockTransport(never_send),
     ) == 2
+
+
+# Report mode (contain-cloud-controller-compromise D1): every MCP request logs the credential it used and is
+# served exactly as before. The proof gate itself only refuses when the middleware is told to enforce.
+PROOF_GATE_EVENT = "cloud_request_credential"
+
+
+async def _list_tools(client, *, bearer=True, headers=None):
+    return await client.post(
+        "/mcp",
+        headers={"accept": "application/json, text/event-stream", "content-type": "application/json",
+                 "mcp-protocol-version": "2025-11-25", **({"authorization": f"Bearer {TOKEN}"} if bearer else {}),
+                 **(headers or {})},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+
+
+def _credential_events(caplog):
+    return [record for record in caplog.records if getattr(record, "event", None) == PROOF_GATE_EVENT]
+
+
+def _one_credential_event(caplog):
+    (record,) = _credential_events(caplog)
+    return record.fields
+
+
+def test_report_mode_serves_a_bearer_alone_and_logs_it(cell, caplog):
+    _key, app, _vault = cell
+    caplog.set_level(logging.INFO)
+
+    response = _run(app, lambda client: _list_tools(client))
+
+    assert response.status_code == 200
+    assert _one_credential_event(caplog) == {
+        "credential": "bearer_only", "proof": "absent", "verdict": "would_refuse", "cell_id": CELL_ID}
+
+
+def test_report_mode_logs_a_bearer_with_a_valid_proof_as_both(cell, caplog):
+    key, app, _vault = cell
+    caplog.set_level(logging.INFO)
+
+    response = _run(app, lambda client: _list_tools(client, headers=_mcp_origin(key, LOGIN_A)))
+
+    assert response.status_code == 200
+    assert _one_credential_event(caplog) == {
+        "credential": "both", "proof": "valid", "verdict": "pass", "cell_id": CELL_ID}
+
+
+def test_report_mode_serves_a_forged_proof_as_bearer_only_and_names_the_proof_invalid(cell, caplog):
+    _key, app, _vault = cell
+    caplog.set_level(logging.INFO)
+    forger = Ed25519PrivateKey.generate()
+
+    response = _run(app, lambda client: _list_tools(client, headers=_mcp_origin(forger, LOGIN_A)))
+
+    assert response.status_code == 200
+    assert _one_credential_event(caplog) == {
+        "credential": "bearer_only", "proof": "invalid", "verdict": "would_refuse", "cell_id": CELL_ID}
+
+
+def test_report_mode_still_refuses_a_request_without_a_bearer(cell, caplog):
+    key, app, _vault = cell
+    caplog.set_level(logging.INFO)
+
+    proof_only = _run(app, lambda client: _list_tools(client, bearer=False, headers=_mcp_origin(key, LOGIN_A)))
+    neither = _run(app, lambda client: _list_tools(client, bearer=False))
+
+    assert (proof_only.status_code, neither.status_code) == (401, 401)
+    assert [record.fields["credential"] for record in _credential_events(caplog)] == ["proof_only", "neither"]
+
+
+def test_report_mode_without_a_gateway_key_logs_the_proof_as_unconfigured(cell, monkeypatch, caplog):
+    _key, app, _vault = cell
+    monkeypatch.delenv("EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
+    caplog.set_level(logging.INFO)
+
+    response = _run(app, lambda client: _list_tools(client))
+
+    assert response.status_code == 200
+    assert _one_credential_event(caplog) == {
+        "credential": "proof_unconfigured", "proof": "unconfigured", "verdict": "would_refuse", "cell_id": CELL_ID}
+
+
+def test_credential_event_carries_no_token_or_claim(cell, caplog):
+    key, app, _vault = cell
+    caplog.set_level(logging.INFO)
+    headers = _mcp_origin(key, LOGIN_A)
+
+    _run(app, lambda client: _list_tools(client, headers=headers))
+
+    text = json.dumps(vars(_credential_events(caplog)[0]), default=str)
+    assert not [secret for secret in (TOKEN, *headers.values(), LOGIN_A["tenant_id"], LOGIN_A["client_id"])
+                if secret in text]
+
+
+def test_health_routes_are_not_gated_or_logged(cell, caplog):
+    _key, app, _vault = cell
+    caplog.set_level(logging.INFO)
+
+    async def probe(client):
+        return await client.get("/health")
+
+    assert _run(app, probe).status_code == 200
+    assert _credential_events(caplog) == []
+
+
+def test_enforce_mode_refuses_a_bearer_alone_and_serves_a_valid_proof(enforcing_cell, caplog):
+    key, app = enforcing_cell
+    caplog.set_level(logging.INFO)
+
+    bearer_only = _run(app, lambda client: _list_tools(client))
+    forged = _run(app, lambda client: _list_tools(client, headers=_mcp_origin(Ed25519PrivateKey.generate(), LOGIN_A)))
+    both = _run(app, lambda client: _list_tools(client, headers=_mcp_origin(key, LOGIN_A)))
+
+    assert (bearer_only.status_code, forged.status_code, both.status_code) == (401, 401, 200)
+    assert [record.fields["verdict"] for record in _credential_events(caplog)] == ["refused", "refused", "pass"]
+
+
+def test_enforce_mode_without_a_gateway_key_refuses_every_mcp_request_and_keeps_health(enforcing_cell, monkeypatch):
+    _key, app = enforcing_cell
+    monkeypatch.delenv("EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
+
+    async def scenario(client):
+        return await _list_tools(client), await client.get("/health")
+
+    mcp, health = _run(app, scenario)
+
+    assert (mcp.status_code, health.status_code) == (401, 200)

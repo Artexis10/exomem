@@ -322,6 +322,54 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - After phase 1, a compromised custodian or node can still create any key in the cell-data account. Such a key can extend locks without bound or remove the default retention. The split does not shrink this, because there is no subset rule. The watcher reports such a key, but it cannot undo an extension.
 - Keys created ahead of time outside the cluster would remove key creation from the cluster. That option stays open (Open Questions).
 
+## Early check evidence
+
+### Task 2.1: the rendered kinds
+
+Method: `cellctl` rendered each kind through `render_cell_manifests`, `render_backup_job`, `render_restore_job`, `render_import_job` and `render_export_job` (in `infra/cellctl/src/cellctl/manifests.py`). The check listed each command vector and environment name. It ran on 2026-11-01 against `origin/main` at `17624b2dc`, plus the trust-anchor environment that this change adds.
+
+Every container command is `sh -c` with a preamble. The preamble is `ulimit -c 0`, then `mkdir -p` of the scratch directories under `/data/scratch`, then `exec "$@"` of the process. The two exceptions are the backup and restore Jobs, which run one joined shell string, and the export verification Job, whose preamble has no `mkdir`.
+
+| Kind | Process and arguments | Environment names |
+|---|---|---|
+| StatefulSet init container | `exomem cell-init --vault /data/vault --json` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`; with a local volume, also `EXOMEM_CLOUD_CELL_BACKED_UP` (optional `secretKeyRef`) |
+| StatefulSet serving container | `exomem --transport http --host 0.0.0.0 --port 8765` | Fixed: `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `EXOMEM_CLOUD_CELL_TOKEN` (`secretKeyRef`), `EXOMEM_CLOUD_HEALTH_PORT`, `EXOMEM_VAULT_PATH`, `TMPDIR`, `EXOMEM_LOG_DIR`. Conditional: `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS` (optional `secretKeyRef`), `EXOMEM_CLOUD_READ_ONLY`, `EXOMEM_CLOUD_ARTIFACT_BROKER_URL`, `EXOMEM_CLOUD_MEDIA_SLOT_URL`, `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, `EXOMEM_MEDIA_STORE_CONFIG`, `EXOMEM_MEDIA_EDGE_URL`, `EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE`, `EXOMEM_MEDIA_ENGINES`. Then every `model_env` entry |
+| `cell-backup` Job | One shell string: vault check, `restic snapshots \|\| restic init`, `restic backup`, snapshot-ID capture, `restic forget --prune`, the termination message | `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (`secretKeyRef`), `RESTIC_PASSWORD` (`secretKeyRef`), `RESTIC_CACHE_DIR`, `TMPDIR` |
+| `cell-restore` Job | One shell string: `restic restore <64-hex snapshot ID> --target / --delete --include /data/vault --include /data/host` | The same six names as the backup Job |
+| `cell-import` Job | `exomem cell-import <prepare\|import\|discard> --import-id <id>`; `import` adds `--request <json> --url <presigned URL>`; `discard` may add `--keep-adoption` | The init container's names, plus `EXOMEM_IMPORT_MAX_MEMBERS`, `EXOMEM_IMPORT_RESERVE_BYTES` |
+| `cell-export` Job | `exomem cell-export --export-id <id> --part-bytes <n> --max-bytes <n> --part-url <presigned URL>` (repeated) | The init container's names, plus `EXOMEM_LOG_DIR` |
+| `cell-export` verification Job | The same subcommand with `--verify --archive-bytes <n> --archive-sha256 <hex> --archive-version-id <id>` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`, `EXOMEM_EXPORT_VERIFY_URL` (`secretKeyRef` to the per-export Secret) |
+
+The `cell-import` and `cell-export` Jobs also carry the trust-anchor names of the next section when `cellctl` has the values.
+
+What the check shows against D3:
+- The closed set for the subcommands is smaller today than D3 names. The cell has `cell-init`, `cell-import` and `cell-export`, and `serve` is the process with no subcommand. `cell-backup` and `cell-restore` are shell strings until task 4.1. `cell-backup-migrate` belongs to D5.
+- D3 lists `cell-export-verify` as a subcommand, but the cell runs it as `cell-export --verify` with a different environment set and no scratch volume. Task 4.2 must either add the subcommand or let the policy tell the two apart by `--verify`.
+- The environment allowlist is per rendered variant, not per subcommand: `cell-export` renders two sets, and the serving container's conditional names depend on the cell.
+- `model_env` is still a denylist. `check_model_env` refuses the names in `MODEL_ENV_FORBIDDEN_KEYS`, `MODEL_ENV_FORBIDDEN_PREFIXES` and `MODEL_ENV_FORBIDDEN_SUFFIXES`, and accepts any other upper-case name. So the serving container's names are not a closed set yet, and task 4.2 needs an allowlist in its place. The denylist already refuses the `EXOMEM_CLOUD_` prefix, so it cannot set the trust anchors below.
+
+### Tasks 3.1 and 3.2: names that the report-mode release fixes
+
+The mode is a constant of the cell image, `cloud_containment.ENFORCE` in `src/exomem/cloud_containment.py`. No environment value, flag or rendered argument selects it, so nothing that `cellctl` writes can switch it. Each check also takes an `enforce` parameter that defaults to the constant, so tests cover the enforce branch. Task 5.1 changes the constant, and the minimum-release floor (D8) then stops a rollback.
+
+Events. Both are in `EVENT_CATALOG`, carry no content and name no token, claim or URL. A serving cell writes them to its JSONL log. A Job writes them to its stderr in the `key=value` form.
+- `cloud_request_credential`, once per `/mcp` request. Fields: `credential` (`both`, `bearer_only`, `proof_only`, `neither` or `proof_unconfigured`), `proof` (`valid`, `invalid`, `absent` or `unconfigured`), `cell_id` and `verdict`.
+- `cloud_operation_check`, once per reason for each `cell-export` or `cell-import` run that moves data, or once with `reason=none` when the run passes. Fields: `operation`, `operation_id`, `cell_id`, `reason` and `verdict`. The cell logs `operation_id` only in its canonical UUID form, and `invalid` otherwise.
+- `verdict` is `pass`, `would_refuse` (report mode) or `refused` (enforce mode).
+- The reasons are `grant_missing`, `grant_unconfigured`, `grant_invalid`, `grant_operation`, `grant_request`, `destination_unconfigured`, `url_malformed`, `url_scheme`, `url_userinfo`, `url_host`, `url_path`, `url_foreign_key`, `url_grant_key`, `check_failed` and `none`.
+
+Trust anchors. `cellctl` renders them as literal values into the import, export and export-verification Jobs, from its own object-store endpoint and bucket settings:
+- `EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT` and `EXOMEM_CLOUD_OBJECT_STORE_BUCKET`;
+- `EXOMEM_CLOUD_GRANT_PUBLIC_KEY`, an Ed25519 public key PEM from the chart value `cellctl.grantPublicKey`. The value is empty until Substrate signs grants, and an empty anchor is not rendered.
+
+Grant claims, as `cloud_grant.py` verifies them. The token is an `EdDSA` JWT with header `typ` `JWT`.
+- Every grant has exactly `aud` (`exomem-cell-operation`), `iat`, `exp`, `jti`, `tenant_id`, `cell_id`, `operation`, `operation_id` and `object_key`.
+- An import grant adds `ciphertext_bytes` and `ciphertext_sha256`. A restore grant adds `snapshot_id`.
+- There is no `v` or `iss` claim. `exp - iat` is at most 72 hours, because an import grant is signed with its request and the 24-hour upload window passes before its Job runs. Substrate's signer (task 3.3) must use these claim names and bound.
+- The cell checks the claims with the same function as the gateway proof (`cloud_origin.signed_claims`), then the `operation` and `operation_id` against the subcommand's, then each presigned URL.
+
+Destination rule. The cell parses each URL with `urllib.parse`. The scheme, host and port must equal the pinned endpoint's. The URL may carry no user information and no fragment. The path must be `/<pinned bucket>/<object key>` with every segment decoded once, no empty, `.` or `..` segment, and no encoded slash. The key must sit under `cells/<own cell ID>/`, and it must equal the grant's `object_key` when a grant is present. `cellctl` presigns path-style URLs of this shape for its object-store endpoint (checked with botocore 1.43.111), so the exact-path check holds.
+
 ## Reuse
 
 - The proof verifier, `cloud_origin.py`, and Substrate's `sign()` for the request proof and the grant.

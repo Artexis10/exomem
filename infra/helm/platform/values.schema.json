@@ -211,6 +211,7 @@
         "b2BucketId": {"type": "string"},
         "b2AccountId": {"type": "string"},
         "b2Endpoint": {"type": "string"},
+        "grantPublicKey": {"type": "string"},
         "initDeadlineMinutes": {"type": "integer", "minimum": 1},
         "upgradeReadyDeadlineMinutes": {
           "type": "integer",

@@ -75,6 +75,7 @@ from .manifests import (
     CellManifestSpec,
     ResourceSettings,
     check_artifact_broker_url,
+    check_grant_public_key,
     check_media_slot_url,
     check_upload_public_key,
     dedicated_placement,
@@ -486,6 +487,9 @@ class ClusterConfig:
     # The gateway has no all-cells switch for uploads, so there is none here.
     upload_cell_ids: tuple[str, ...] = ()
     upload_public_key: str = ""
+    # contain-cloud-controller-compromise D4: the PEM public key that verifies the signed grants of an
+    # import and an export, for every cell. "" until Substrate signs them; the Jobs then log a missing grant.
+    grant_public_key: str = ""
     dedicated_cell_ids: tuple[str, ...] = ()
     # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
     # A selection, not a chart-wide value, so an engine can canary in one cell.
@@ -550,6 +554,7 @@ class ClusterConfig:
         ):
             raise ValueError("upload activation requires a public key and at most 1024 unique base32 cell IDs")
         check_upload_public_key(self.upload_public_key)
+        check_grant_public_key(self.grant_public_key)
         for engine, cell_ids in self.media_engine_cell_ids.items():
             if (
                 not isinstance(engine, str)
@@ -2700,6 +2705,9 @@ async def _reconcile_row(
             artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
             media_slot_url=cluster_config.media_slot_for_cell(row.cell_id),
             upload_public_key=cluster_config.upload_public_key_for_cell(row.cell_id),
+            object_store_endpoint=cluster_config.object_storage_endpoint,
+            object_store_bucket=cluster_config.object_storage_bucket,
+            grant_public_key=cluster_config.grant_public_key,
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,
