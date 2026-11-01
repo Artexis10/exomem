@@ -868,30 +868,57 @@ def test_a_commit_that_stays_busy_is_committed_again_by_the_server_under_the_tra
     assert [(seen.surface, seen.resolved) for seen in principals] == [("transfer", False)]
 
 
-def test_a_busy_session_commit_leaves_the_waiter_slots_to_requests(vault, monkeypatch) -> None:
-    """Parked uploads that each held a waiter slot would refuse a request's write as waiters_full."""
-    from exomem import writer_lease
+def test_a_session_commit_waiting_on_the_boundary_does_not_refuse_a_request_write(
+    vault, monkeypatch
+) -> None:
+    """One waiting upload commit filled the only waiter slot, so a request's keyed write was refused."""
+    from exomem import commands, writer_lease
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal, request_scope
 
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "2")  # one waiter slot for request workers
     monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "30")
     monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 120.0)  # never fires here
-    slots = []
-    real_take = writer_lease._take_capture_waiter_slot
-    monkeypatch.setattr(writer_lease, "_take_capture_waiter_slot", lambda: slots.append(1) or real_take())
     client = _client(vault, monkeypatch)
     data = b'{"samples": [{"heart_rate": 62}]}'
+    episode = next(c for c in commands.product_commands_for("mcp") if c.name == "episode_memory")
+    results: list = []
 
-    with held_boundary(vault, monkeypatch, release_when_refused=False):
+    def keyed_write() -> None:
+        with request_scope(owner_principal(surface="mcp")):
+            results.append(
+                writer_lease.get_manager().invoke(
+                    episode,
+                    (vault, schema_module.load_source_schema(vault)),
+                    {
+                        "action": "record",
+                        "episode": "ep-" + "ab" * 16,
+                        "subject": "Harbor Lamp purchase",
+                        "summary": "Chose the brass lamp; delivery date still open.",
+                        "decided": ["Buy the brass Harbor Lamp"],
+                    },
+                    idempotency_key="request-write-key",
+                )
+            )
+
+    with held_boundary(vault, monkeypatch, release_when_refused=False) as held:
         location, secret = _create(client, data)
-        started = time.monotonic()
         assert _patch(client, location, secret, 0, data).status_code == 204
-        session_id = location.rsplit("/", 1)[1]
-        _wait_for(
-            lambda: upload_sessions.open_session(vault, session_id, secret).record.get("code") == "MUTATION_BUSY",
-            "the busy commit to end retryable",
-        )
-        # It met the boundary once and parked, long before the 30 s a request would wait.
-        assert time.monotonic() - started < 10
-    assert slots == []
+        assert held.refused.wait(20), "the session commit never met the boundary"
+        time.sleep(0.5)  # long enough for the commit to be waiting in line
+        writer = threading.Thread(target=keyed_write)
+        writer.start()
+        time.sleep(0.5)  # a refusal for a full waiter cap comes at once
+        held.release.set()
+        writer.join(30)
+
+    assert len(results) == 1, "the request's write was refused instead of waiting"
+    session_id = location.rsplit("/", 1)[1]
+    _wait_for(
+        lambda: upload_sessions.open_session(vault, session_id, secret).record["state"]
+        == upload_sessions.COMMITTED,
+        "the session commit",
+    )
 
 
 def test_a_busy_session_has_one_re_attempt_waiting_and_a_cancelled_one_has_none(vault, monkeypatch) -> None:

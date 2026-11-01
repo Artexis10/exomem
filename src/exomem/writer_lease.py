@@ -4425,26 +4425,24 @@ def _writes_absorb_contention() -> bool:
     }
 
 
-_RETRIED_IN_BACKGROUND: ContextVar[bool] = ContextVar("exomem_retried_in_background", default=False)
+_CALLER_HOLDS_NO_REQUEST_WORKER: ContextVar[bool] = ContextVar(
+    "exomem_caller_holds_no_request_worker", default=False
+)
 
 
 @contextmanager
-def retried_in_background() -> Iterator[None]:
-    """Run a write whose caller holds no request worker and retries it with its own backoff.
+def caller_holds_no_request_worker() -> Iterator[None]:
+    """Mark a write whose caller is a background thread, not an anyio request worker.
 
-    Such a write meets a busy or warming boundary once and returns the refusal at once: it
-    takes no waiter slot and no place in line, so a parked background commit never refuses
-    or delays a request's write.
+    The waiter cap below protects anyio's request workers from a long holder. A background
+    commit thread is not one, so such a write still waits in line and parks, but it neither
+    takes nor counts a waiter slot and so can never make a request's write refuse as full.
     """
-    token = _RETRIED_IN_BACKGROUND.set(True)
+    token = _CALLER_HOLDS_NO_REQUEST_WORKER.set(True)
     try:
         yield
     finally:
-        _RETRIED_IN_BACKGROUND.reset(token)
-
-
-def _waits_out_contention() -> bool:
-    return _writes_absorb_contention() and not _RETRIED_IN_BACKGROUND.get()
+        _CALLER_HOLDS_NO_REQUEST_WORKER.reset(token)
 
 
 # A waiting write parks one of the process's sync workers (anyio's limiter,
@@ -4463,6 +4461,9 @@ def _capture_waiter_cap() -> int:
 
 
 def _take_capture_waiter_slot() -> bool:
+    """Take a slot; a caller with no request worker needs none and counts for none."""
+    if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
+        return True
     global _capture_waiters
     with _CAPTURE_WAITERS_LOCK:
         if _capture_waiters >= _capture_waiter_cap():
@@ -4472,6 +4473,8 @@ def _take_capture_waiter_slot() -> bool:
 
 
 def _release_capture_waiter_slot() -> None:
+    if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
+        return
     global _capture_waiters
     with _CAPTURE_WAITERS_LOCK:
         _capture_waiters = max(0, _capture_waiters - 1)
@@ -4534,8 +4537,6 @@ def _wait_out_write_warmup(
         return warming, refuse_cause, 0.0
     if not _writes_absorb_contention():
         return warming, "absorb_disabled", 0.0
-    if _RETRIED_IN_BACKGROUND.get():
-        return warming, "background_retry", 0.0
     if time.monotonic() >= deadline:
         return warming, "warm_wait_exhausted", 0.0
     if not _take_capture_waiter_slot():
@@ -5274,7 +5275,7 @@ class LeaseManager:
         because it may have consumed the request stream. The caller's place in line and its
         waiter slot end with the acquire: it no longer waits.
         """
-        if not _waits_out_contention():
+        if not _writes_absorb_contention():
             with self.mutation_guard(vault_root, operation=operation) as mutation:
                 yield mutation
             return
@@ -6868,7 +6869,7 @@ class LeaseManager:
         the same way and nothing is stored. A remote caller never sets it, because one that
         gave up during the wait and sent the write again would commit it twice.
         """
-        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _waits_out_contention()
+        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _writes_absorb_contention()
         store_attempt = _ACTIVE_STORE_ATTEMPT.get()
         if store_attempt is not None:
             return self._run_store_attempt(
