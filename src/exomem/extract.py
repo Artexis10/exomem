@@ -1582,17 +1582,18 @@ _DETECTION_CONFIDENCE = 0.9
 # Under this many bytes a file gives the detector too little to tell encodings apart: a probe read a
 # 10-byte Latin-1 phrase as UTF-16 and lost its ASCII words. Such a file reads as UTF-8 with replacements.
 _DETECTION_MIN_BYTES = 32
-# The detector reads this prefix only: its cost grows with the input, and a probe took ten seconds and
-# a quarter of a gigabyte on a 30 MB log. The prefix already shows which encoding the file uses.
-_DETECTION_PREFIX_BYTES = 64 * 1024
+# The detector reads a window this long only: its cost grows with the input, and a probe took ten
+# seconds and a quarter of a gigabyte on a 30 MB log. The window already shows the file's encoding.
+_DETECTION_WINDOW_BYTES = 64 * 1024
 # Without a byte-order mark the detector can read any even-length bytes as UTF-16 or UTF-32, and
 # those readings turn ASCII words into CJK characters. Only a mark names those codecs.
 _UNMARKED_EXCLUDED = ["utf_16", "utf_16_be", "utf_16_le", "utf_32", "utf_32_be", "utf_32_le"]
-# Equally clean single-byte guesses differ only in how they read accented letters. Windows-1252 is
-# the Encoding Standard's default for legacy Western text; the library's own ranking read Latin-1
-# French, Swedish and Portuguese as Windows-1250 at the same score, which turns a grave "e" into a
-# "c" with a caron. It wins only a tie, so text the library scores better as another code page keeps it.
+# Windows-1252 is the Encoding Standard's default for legacy Western text, and it wins whenever it
+# reaches the bound. The library's own ranking read Latin-1 French, Swedish and Portuguese as
+# Windows-1250 or Mac Latin-2, which turns an acute "e" into a "c" with a caron or a "t" with one.
 _LEGACY_WESTERN_ENCODING = "cp1252"
+_ASCII_BYTES = bytes(range(0x80))
+_TRAIL_BYTES = bytes(range(0x40, 0x100))
 
 
 @dataclass(frozen=True)
@@ -1618,6 +1619,10 @@ def _decode_by_evidence(data: bytes) -> tuple[str, str]:
         if data.startswith(mark):
             # The mark names the codec; a cut-off last character becomes one replacement character.
             return data.decode(codec, errors="replace"), codec
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
     replaced = data.decode("utf-8", errors="replace")
     if _mostly_utf8(data, replaced):
         return replaced, "utf-8"
@@ -1642,15 +1647,29 @@ def _mostly_utf8(data: bytes, replaced: str) -> bool:
 def _confident_guess(data: bytes) -> str | None:
     from charset_normalizer import from_bytes
 
-    matches = from_bytes(data[:_DETECTION_PREFIX_BYTES], cp_exclusion=_UNMARKED_EXCLUDED)
-    accepted = [(m.encoding, m.chaos) for m in matches if 1.0 - m.chaos >= _DETECTION_CONFIDENCE]
-    if not accepted:
-        return None
-    best_chaos = min(chaos for _encoding, chaos in accepted)
-    tied = [encoding for encoding, chaos in accepted if chaos == best_chaos]
-    if _LEGACY_WESTERN_ENCODING in tied:
+    matches = from_bytes(_detection_window(data), cp_exclusion=_UNMARKED_EXCLUDED)
+    accepted = [m.encoding for m in matches if 1.0 - m.chaos >= _DETECTION_CONFIDENCE]
+    if _LEGACY_WESTERN_ENCODING in accepted:
         return _LEGACY_WESTERN_ENCODING
-    return tied[0]
+    return accepted[0] if accepted else None
+
+
+def _detection_window(data: bytes) -> bytes:
+    """The bytes the detector reads: whole characters only, from the line of the first non-ASCII byte.
+
+    Leading ASCII lines say nothing about the encoding. A byte below 0x40 is never the second
+    byte of a character in Shift-JIS, GBK, Big5 or EUC-KR, so a window that starts at the first
+    non-ASCII byte or after a line feed, and ends after such a byte, never cuts a character.
+    """
+    first = len(data) - len(data.lstrip(_ASCII_BYTES))
+    line_feed = data.rfind(b"\n", 0, first)
+    start = line_feed + 1 if line_feed >= 0 else first
+    window = data[start : start + _DETECTION_WINDOW_BYTES]
+    if start + len(window) < len(data):
+        whole = window.rstrip(_TRAIL_BYTES)
+        if whole:
+            window = whole
+    return window
 
 
 def _extract_textfile(path: Path) -> ExtractResult:

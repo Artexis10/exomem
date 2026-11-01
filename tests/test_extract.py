@@ -265,13 +265,24 @@ def test_extract_textfile_reads_the_codec_a_byte_order_mark_names(tmp_path, bom,
 
 
 def test_extract_textfile_decodes_latin1_accents(tmp_path) -> None:
-    body = "Brève réunion à la côte; señor Müller prévoit ½ prix, 20°C, façade ouverte."
+    # A short French note: the detector's own ranking reads it as Mac Latin-2 ("cafť ťtait fermť").
+    body = "Le café était fermé, alors nous sommes allés à la gare."
     f = tmp_path / "notes.txt"
-    f.write_bytes(f"{body}\nReference code saffron-kettle-49822 applies.\n".encode("latin-1"))
+    f.write_bytes(f"{body}\n".encode("latin-1"))
     r = extract.extract_text(f)
-    assert body in r.text
-    assert "saffron-kettle-49822" in r.text
+    assert r.text == body
     assert r.engine == "text:cp1252"
+
+
+def test_extract_textfile_decodes_a_shift_jis_file_longer_than_the_detection_window(tmp_path) -> None:
+    # Each 55-byte line puts the 64 KiB mark inside a two-byte character, where a plain cut would
+    # split it and the detector would refuse the right codec.
+    text = "会議は明日の十時に始まります。資料を準備してください。\n" * 4000
+    f = tmp_path / "minutes.txt"
+    f.write_bytes(text.encode("shift_jis"))
+    r = extract.extract_text(f)
+    assert r.text == text.strip()
+    assert r.engine == "text:cp932"
 
 
 def test_extract_textfile_keeps_valid_characters_of_utf8_whose_last_character_is_cut_off(tmp_path) -> None:
