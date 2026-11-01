@@ -7,9 +7,15 @@ processing pass ever picks it up. The whole text is the text of part 1, then par
 on, character for character. Every part is at most `preserve._MAX_EXTRACT_BYTES` of text, so
 no page is ever too big to index or to read.
 
-A part is not a memory of its own. It carries `part_of`, the link of its Source page, and
-every reader that counts or shows memories folds it into that page. The Source page lists
-`extraction_parts` (the number of parts, itself included) and `next_part`.
+A part is not a memory of its own. It carries `part_of`, and every reader that counts or shows
+memories folds it into its Source page. The Source page lists `extraction_parts` (the number of
+parts, itself included) and `next_part`.
+
+The links in these fields are paths relative to the page that holds them, not wikilinks: a
+wikilink from a part would count as a reference to the Source and block moving it, and a
+relative path stays true when the page and its folder move together. A reader finds the Source
+of a part from the part's own path (`source_page_for`), never from the field, so a rename that
+leaves the field behind breaks nothing.
 """
 
 from __future__ import annotations
@@ -119,7 +125,7 @@ def split(text: str) -> list[str]:
 def render_part(
     *,
     artifact_name: str,
-    source_link: str,
+    source_name: str,
     inherited: Mapping[str, object],
     number: int,
     total: int,
@@ -143,12 +149,12 @@ def render_part(
         f"title: {yaml_scalar(title)}",
         f"captured: {date_iso}",
         f"updated: {date_iso}",
-        f"part_of: {yaml_scalar(f'[[{source_link}]]')}",
+        f"part_of: {yaml_scalar(f'../{source_name}')}",
         f"part: {number}",
         f"parts: {total}",
     ]
     if next_link is not None:
-        lines.append(f"next_part: {yaml_scalar(f'[[{next_link}]]')}")
+        lines.append(f"next_part: {yaml_scalar(next_link)}")
     lines += [
         "tags: [" + ", ".join(yaml_scalar(tag) for tag in tags) + "]",
         "ingested_into: []",
@@ -156,7 +162,7 @@ def render_part(
         "",
         f"# {title}",
         "",
-        f"Part {number} of {total} of the extracted text of `{source_link}`.",
+        f"Part {number} of {total} of the extracted text of `{source_name}`.",
         "",
         f"{preserve._EXTRACTED_HEADING}\n\n{text}\n",
     ]
@@ -190,26 +196,22 @@ def count_of(frontmatter: Mapping[str, object]) -> int:
 class Layout:
     """Where the pieces of one extraction sit: what the Source page records about its parts."""
 
-    #: The links of parts 2.., in order.
-    links: tuple[str, ...]
+    #: The path of part 2, relative to the Source page's folder.
+    next_part: str
     #: Where each part starts in the whole text; the first is 0.
     offsets: tuple[int, ...]
     #: The length of the whole text.
     chars: int
 
 
-def layout(vault_root: Path, page: Path, pieces: list[str]) -> Layout | None:
+def layout(page: Path, pieces: list[str]) -> Layout | None:
     """The layout of `pieces` on `page`, or None when the text fits on the page alone."""
     if len(pieces) < 2:
         return None
     offsets = [0]
     for piece in pieces:
         offsets.append(offsets[-1] + len(piece))
-    return Layout(
-        tuple(link_to(vault_root, part_path(page, number)) for number in range(2, len(pieces) + 1)),
-        tuple(offsets[:-1]),
-        offsets[-1],
-    )
+    return Layout(part_path(page, 2).relative_to(page.parent).as_posix(), tuple(offsets[:-1]), offsets[-1])
 
 
 def offsets_of(frontmatter: Mapping[str, object]) -> tuple[int, ...] | None:
@@ -244,7 +246,6 @@ def plan(
     """
     total = len(pieces)
     artifact_name = page.name.removesuffix(".md")
-    source_link = link_to(vault_root, page)
     folder = folder_for(page)
     existing = {
         number: entry
@@ -263,12 +264,12 @@ def plan(
                 part_path(page, number),
                 render_part(
                     artifact_name=artifact_name,
-                    source_link=source_link,
+                    source_name=page.name,
                     inherited=inherited,
                     number=number,
                     total=total,
                     text=pieces[number - 1],
-                    next_link=link_to(vault_root, part_path(page, number + 1)) if number < total else None,
+                    next_link=part_path(page, number + 1).name if number < total else None,
                     exomem_id=exomem_id,
                     date_iso=date_iso,
                 ),
@@ -297,6 +298,13 @@ def retire(vault_root: Path, pages: tuple[Path, ...]) -> None:
         pages[0].parent.rmdir()
     except OSError:
         pass
+
+
+def clear(vault_root: Path, page: Path) -> None:
+    """Remove the part pages of a Source page that is gone, so no part outlives its Source."""
+    folder = folder_for(page)
+    if folder.is_dir():
+        retire(vault_root, tuple(sorted(entry for entry in folder.iterdir() if part_number(entry) is not None)))
 
 
 def iter_texts(vault_root: Path, page: Path, content: str) -> Iterator[str]:

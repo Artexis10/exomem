@@ -144,7 +144,12 @@ class ParsedPage:
     @property
     def part_of(self) -> str | None:
         """The Source page that holds this part of its extracted text, when this page is a part."""
-        return part_source_path(self.frontmatter.get("part_of"))
+        if "part_of" not in self.frontmatter:
+            return None
+        from . import extraction_parts
+
+        source = extraction_parts.source_page_for(Path(self.rel_path))
+        return source.as_posix() if source is not None else None
 
     @property
     def emitted_parent(self) -> str | None:
@@ -234,13 +239,6 @@ class ParsedPage:
         from . import find_policy
 
         return find_policy.dominant_script(self.title + " " + self.search_body)
-
-
-def part_source_path(link: object) -> str | None:
-    """The vault-relative page path that a part's `part_of` link names."""
-    if isinstance(link, str) and link.startswith("[[") and link.endswith("]]"):
-        return link[2:-2] + ".md"
-    return None
 
 
 @dataclass(frozen=True)

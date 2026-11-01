@@ -2191,6 +2191,15 @@ def delete_after_remove(
             scene_frames.clear_scene_frames(vault_root, vault_root / rel)
         except Exception:  # noqa: BLE001 - frame cleanup is best-effort
             log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
+    # A removed Source page takes the hidden pages of its long extraction with it, like the
+    # frames above; `clear` is a no-op for a page that has none.
+    from . import extraction_parts
+
+    for rel in md_rels:
+        try:
+            extraction_parts.clear(vault_root, vault_root / rel)
+        except Exception:  # noqa: BLE001 - part cleanup is best-effort; reconcile sweeps what is left
+            log.warning("extraction part cleanup failed for %s", rel, exc_info=True)
     _apply_exact_path_custody(
         vault_root, changed=[], deleted=md_rels, reason="governed_delete"
     )

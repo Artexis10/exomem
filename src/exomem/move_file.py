@@ -152,7 +152,9 @@ def _admit_publication(vault_root: Path, rel: str, content: bytes | None) -> Non
         raise MoveFileError("WRITE_REFUSED", "target is unavailable") from None
 
 
-def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool = False) -> None:
+def _held_rename(
+    vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool = False, kind: str = "file"
+) -> None:
     try:
         # `old_rel` is always a source this call's caller has already resolved
         # to an existing on-disk spelling (including a macOS-origin NFD name
@@ -164,7 +166,7 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool
             vault_root,
             old_rel,
             new_rel,
-            source_kind="file",
+            source_kind=kind,
             physical=True,
             rollback=rollback,
         )
@@ -238,7 +240,7 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
     return (page_rel, rel) if (vault_root / page_rel).is_file() else None
 
 
-def _repoint_artifact(old_binary: str, new_binary: str):
+def _repoint_artifact(old_binary: str, new_binary: str, new_page: str):
     """A content transform that repoints a moved page at its moved bytes.
 
     Only the pointer fields change, patched where the YAML parser places them,
@@ -264,6 +266,13 @@ def _repoint_artifact(old_binary: str, new_binary: str):
             changes["governance_companion"] = moved_descriptor
         if frontmatter.get("original_filename") == Path(old_binary).name:
             changes["original_filename"] = Path(new_binary).name
+        if "next_part" in frontmatter:
+            from . import extraction_parts
+
+            # The folder of further parts is named for the page and moves with it.
+            changes["next_part"] = extraction_parts.part_path(Path(new_page), 2).relative_to(
+                Path(new_page).parent
+            ).as_posix()
         protection = frontmatter.get("raw_protection")
         if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
             changes["raw_protection"] = {**protection, "artifact_path": new_binary}
@@ -568,6 +577,9 @@ def _move_file_local(
     # the semantic write machinery below is written for — and the bytes are
     # renamed alongside it inside the same transaction.
     paired_binary: tuple[str, str] | None = None
+    paired_parts: tuple[str, str] | None = None
+    moved_parts: list[Path] = []
+    reconcile_parts = False
     recovering_from_trash = trash_metadata.is_trash_path(old_rel) and not trash_metadata.is_trash_path(new_rel)
     # Recovery owns retirement of a Trash reference companion; it is not a page relocation.
     pair = None if recovering_from_trash else _paired_artifact(vault_root, old_rel)
@@ -602,8 +614,24 @@ def _move_file_local(
                 ),
             )
         content_transform = _compose_transforms(
-            content_transform, _repoint_artifact(*paired_binary)
+            content_transform, _repoint_artifact(*paired_binary, new_rel)
         )
+        # The hidden pages that hold the rest of a long extraction move with their Source.
+        from . import extraction_parts
+
+        old_folder = extraction_parts.folder_for(Path(old_rel))
+        if (vault_root / old_folder).is_dir():
+            moved_parts = sorted(
+                old_folder / entry.name
+                for entry in (vault_root / old_folder).iterdir()
+                if extraction_parts.part_number(entry) is not None
+            )
+            paired_parts = (old_folder.as_posix(), extraction_parts.folder_for(Path(new_rel)).as_posix())
+            if (vault_root / paired_parts[1]).exists():
+                raise MoveFileError(
+                    code="DEST_EXISTS",
+                    reason=f"destination already exists: {paired_parts[1]}. This op refuses to overwrite.",
+                )
 
     try:
         reserved_paths.inspect_generic_path(vault_root, new_rel)
@@ -982,6 +1010,17 @@ def _move_file_local(
                             None,
                         )
                     )
+                part_writes: list[PlannedWrite] = []
+                for old_part in moved_parts:
+                    old_part_rel = old_part.as_posix()
+                    new_part = Path(paired_parts[1]) / old_part.name
+                    part_content, _guard = read_guarded_text(vault_root, vault_root / old_part)
+                    catalog_removals.append(
+                        catalog_publication.CatalogRemoval(old_part_rel, content_hash(part_content))
+                    )
+                    part_writes.append(
+                        PlannedWrite(path=vault_root / new_part, content=part_content, create_only=True)
+                    )
                 catalog_writes = [
                     *lifecycle_writes,
                     PlannedWrite(
@@ -991,6 +1030,7 @@ def _move_file_local(
                     ),
                     *writes,
                     *extra_writes,
+                    *part_writes,
                     *log_plan.writes,
                 ]
                 try:
@@ -1056,6 +1096,14 @@ def _move_file_local(
                         except MoveFileError:
                             _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
+                    if paired_parts is not None:
+                        try:
+                            _held_rename(vault_root, *paired_parts, kind="directory")
+                        except MoveFileError:
+                            if paired_binary is not None:
+                                _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
+                            _held_rename(vault_root, new_rel, old_rel, rollback=True)
+                            raise
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     raise
@@ -1086,6 +1134,8 @@ def _move_file_local(
                         new_rel,
                     )
                     try:
+                        if paired_parts is not None:
+                            _held_rename(vault_root, paired_parts[1], paired_parts[0], rollback=True, kind="directory")
                         if paired_binary is not None:
                             _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                         _held_rename(vault_root, new_rel, old_rel, rollback=True)
@@ -1257,6 +1307,14 @@ def _move_file_local(
                 if isinstance(report, index_sync.IndexSyncReport)
                 else index_sync.unverified_upsert_report(vault_root, [new_abs])
             )
+    if moved_parts:
+        new_parts = [vault_root / paired_parts[1] / old_part.name for old_part in moved_parts]
+        try:
+            index_sync.upsert_after_write(vault_root, new_parts)
+            index_sync.delete_after_remove(vault_root, [old_part.as_posix() for old_part in moved_parts])
+        except Exception:  # noqa: BLE001 — move remains authoritative; reconcile repairs the index
+            log.exception("index update failed for the moved parts of %s", new_rel)
+            reconcile_parts = True
     try:
         raw_delete_report = index_sync.delete_after_remove(vault_root, [old_rel])
     except Exception:  # noqa: BLE001 — move remains authoritative
@@ -1271,7 +1329,8 @@ def _move_file_local(
             else index_sync.observed_delete_report([old_rel], degraded=False)
         )
     reconcile_required = bool(
-        watcher_failures
+        reconcile_parts
+        or watcher_failures
         or delete_report.reconcile_required
         or any(report.reconcile_required for report in upsert_reports)
     )

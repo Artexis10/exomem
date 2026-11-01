@@ -1333,7 +1333,7 @@ class MediaWorker:
             ordinal=ordinal,
             date_iso=date_iso,
             text=old_pieces[0],
-            parts=extraction_parts.layout(self._vault_root, page, old_pieces),
+            parts=extraction_parts.layout(page, old_pieces),
         )
         plan, write = preserve.sidecar_extraction_writes(
             self._vault_root, job.sidecar_path, before, guard, text=text,

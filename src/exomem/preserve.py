@@ -776,7 +776,7 @@ def preserve(
                 date_iso=stamp_iso,
                 description=desc_clean,
                 text=pieces[0] if pieces else None,
-                parts=parts.layout(vault_root, sidecar_path, pieces),
+                parts=parts.layout(sidecar_path, pieces),
                 media_type=media_type,
                 evidence_file=rel_artifact if media_type else None,
                 extracted_by=extracted_by,
@@ -1654,7 +1654,7 @@ def sidecar_extraction_writes(
     content = render_sidecar_extraction(
         before,
         text=pieces[0],
-        parts=parts.layout(vault_root, sidecar_path, pieces),
+        parts=parts.layout(sidecar_path, pieces),
         **fields,
     )
     write = PlannedWrite(
@@ -1674,7 +1674,7 @@ def _part_fields(parts: Layout | None) -> tuple[tuple[str, str], ...]:
         ("extraction_parts", str(len(parts.offsets))),
         ("extraction_chars", str(parts.chars)),
         ("part_offsets", "[" + ", ".join(str(offset) for offset in parts.offsets) + "]"),
-        ("next_part", yaml_scalar(f"[[{parts.links[0]}]]")),
+        ("next_part", yaml_scalar(parts.next_part)),
     )
 
 
