@@ -18,18 +18,19 @@ The replay therefore waits once, under the existing bounds, for the registry to 
 Two limits keep the invariant exact:
 - A delta that needs a source proof defers nothing, because its target comes from a walk, not from observed events.
 - Both scopes share a page's rows, so a page defers only when every scope that covers it either names it after its target or proved the page in its own delta. A scope that proved the page needs no later event, and a replay that waited for one would wait for an event that never comes.
-- A page that is absent at the target never keeps a present row behind the checkpoint. Readers compare the content state of a checkpoint, with no generation. A present page cannot return to an old state, because its ctime is part of the state, but absence can recur exactly. A row that outlived a deletion would then sit behind a checkpoint that readers take as current, and a search would return the deleted page. The replay already guarantees this: it drops the row of every deleted path and never reinserts it. The catch-up stamp checks it (D2).
+- A page that is absent at the target never keeps a row behind the checkpoint. A page is absent at a checkpoint when its delta deletes it, or when the page was created after the checkpoint. Readers compare the content state of a checkpoint, with no generation. A present page cannot return to an old state, because its ctime is part of the state, but absence can recur exactly. A row that outlived such a page would then sit behind a checkpoint that readers take as current, and a search would return the deleted page. The replay already guarantees this for pages deleted in its delta: it drops the row of every deleted path and never reinserts it. The catch-up stamp checks both kinds (D2).
 
 ### D2. A catch-up records the checkpoint it fully applied
 
 A catch-up round today records a checkpoint only when the registry stays still through the round. A round that runs out of steps instead records, per scope, the newest registry checkpoint it planned that the round fully applied. That is usually the checkpoint the round started at. A planned checkpoint qualifies when:
 - the scope lags, so that recording it moves the stored checkpoint;
-- every page of the delta from the stored checkpoint to it was applied by a committed step that read the page after the checkpoint;
-- every page that is absent at the checkpoint has no row in the scope, for the reason in D1.
+- every page of the delta from the stored checkpoint to it was applied by a committed step that read the page after the checkpoint, or that no event has touched since the step began;
+- no page that a step of the round applied and that is absent at the checkpoint has a row in the scope, for the reason in D1. The round records the scope's rows for a page before the first step that can write it, so that a page created after the checkpoint is told from one that existed.
 
-A scope that fails these records nothing. The round counts as advanced only when some stored checkpoint moved. Otherwise it declines as outpaced and the full pass runs. Newer events become a lag-only request, not a full repair, and the worker's finish line reports the result `advanced`. This changes how the live catalogue is stamped, so it ships as its own commit with its own review focus.
+A scope that fails these records nothing. The round counts as advanced only when every lagging scope moved a stored checkpoint. A moved scope does not hide a frozen sibling. Otherwise it declines as outpaced and the full pass runs. Newer events become a lag-only request, not a full repair, and the worker's finish line reports the result `advanced`. This changes how the live catalogue is stamped, so it ships as its own commit with its own review focus.
 
 ## Risks / Trade-offs
 
 - **The barrier replay cap.** The census walk yields to imports, so the delta between the census and the barrier may exceed 32 pages. If the repro shows `delta_unavailable` at the barrier, the next fix is to drop the second source walk of a catch-up retry. Raising the cap is not the fix.
+- **The two scope deltas are read one after the other.** An event between the two reads leaves one scope's plan stamped earlier than the other. Each scope still records only a checkpoint it applied, so this costs a later lag-only catch-up and no wrong row.
 - **A very large deferred set** would mean that most of the catalogue is behind its checkpoint. The repro reports the deferred count. A count in the thousands reopens this design.

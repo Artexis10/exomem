@@ -181,14 +181,15 @@ validation.
 #### Scenario: A deleted page never outlives its deletion behind a current checkpoint
 
 - **WHEN** a page is absent at the checkpoint that a replacement or a catch-up
-  records
+  records, whether the checkpoint's delta deleted it or the page was created
+  after the checkpoint
 - **THEN** the catalogue holds no row for that page in that scope, because
   readers compare the content state of a checkpoint without its generation and
   absence is the one state that can recur exactly
 - **AND** a replay never defers a page that is absent at its target while its
   row holds a present state
-- **AND** a catch-up round records no checkpoint for a scope while such a row
-  exists
+- **AND** a catch-up round records no checkpoint for a scope while a page that
+  one of its steps applied and that is absent at that checkpoint has such a row
 
 #### Scenario: A full repair publishes under a sustained import
 
@@ -204,16 +205,17 @@ validation.
   keep arriving
 - **AND** a scope lags, and a registry checkpoint that the round planned for it
   has every path of its delta applied by a committed step that read the page
-  after that checkpoint
-- **AND** every page that is absent at that checkpoint has no row in the scope
+  after that checkpoint, or that no event has touched since the step began
+- **AND** no page that a step of the round applied and that is absent at that
+  checkpoint has a row in the scope
 - **THEN** the catch-up records the newest such checkpoint for that scope
 - **AND** queues a lag-only catch-up for the newer events instead of a full
   repair
 - **AND** the worker's finish line reports the result `advanced`, not `targeted`
-- **AND** a scope without lag, or without such a checkpoint, records nothing,
-  and the round counts as advanced only when some stored checkpoint moved
-- **AND** a round in which no stored checkpoint moved declines as outpaced, and
-  the full pass runs
+- **AND** a scope without lag records nothing, and the round counts as advanced
+  only when every lagging scope moved a stored checkpoint
+- **AND** a round in which a lagging scope stays frozen declines as outpaced,
+  and the full pass runs
 
 #### Scenario: A write still publishing during the census walk is replayed, not refused
 

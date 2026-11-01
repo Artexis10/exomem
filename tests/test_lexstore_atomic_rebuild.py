@@ -628,12 +628,16 @@ def test_a_replay_that_cannot_prove_a_page_names_what_ended_it(
 
 
 def _publication_barrier_held(store: lexstore.LexicalStore) -> bool:
-    """Whether this thread holds the publication barrier: it cannot take it twice."""
+    """Whether this thread holds the publication barrier: it cannot take it twice.
+
+    Only a nested acquire raises `VAULT_LOCK_NESTED`; a barrier that another
+    thread holds raises a timeout, so a replay on another thread reads false.
+    """
     try:
         with store._publication_lock(timeout=0):
             return False
-    except VaultLockError:
-        return True
+    except VaultLockError as error:
+        return error.code == "VAULT_LOCK_NESTED"
 
 
 def _delta_names(delta: Any, page: Path) -> bool:

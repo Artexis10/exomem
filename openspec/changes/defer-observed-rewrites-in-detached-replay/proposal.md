@@ -15,7 +15,7 @@ A background catch-up fails for a related reason. It records a checkpoint only w
 
 - The detached replay stops chasing rewritten pages. It waits once for the registry to observe the newer write, then records its original target and leaves those pages as ordinary lag for the next replay. Under the publication barrier it never waits, and it defers only pages that the registry already names after its target.
 - A delta that needs a source proof still defers nothing. Drift that no event reports still declines the pass.
-- An off-barrier catch-up that ran out of steps records, per lagging scope, the newest checkpoint it fully applied, and it queues a lag-only catch-up for newer events instead of a full repair. A round that moves no stored checkpoint still declines as outpaced.
+- An off-barrier catch-up that ran out of steps records, per lagging scope, the newest checkpoint it fully applied, and it queues a lag-only catch-up for newer events instead of a full repair. A round in which a lagging scope moves no stored checkpoint still declines as outpaced.
 - Telemetry: `retargets_exhausted` disappears from `declined_for`. `lexical_repair_finished` gains `deferred`, the count of pages that a pass published behind a newer observed write.
 
 ## Capabilities

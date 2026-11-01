@@ -6,7 +6,7 @@
 
 ## 2. Catch-up advances under sustained writes
 
-- [x] 2.1 Record, per lagging scope, the newest checkpoint of an outpaced catch-up round whose delta was applied after it and whose deleted pages hold no row, and queue a lag-only catch-up for newer events. A round that moves no stored checkpoint declines. Evidence: tests where events keep arriving through every step of a round, where the lag sits in one scope, and where a deleted page comes back before its step.
+- [x] 2.1 Record, per lagging scope, the newest checkpoint of an outpaced catch-up round whose delta was applied after it and for whose absent pages the scope holds no row, and queue a lag-only catch-up for newer events. A round in which a lagging scope stays frozen declines. Evidence: tests where events keep arriving through every step of a round, where one scope stays frozen, where a deleted page comes back before its step, and where a page created after the checkpoint is deleted.
 
 ## 3. Proof under sustained writes
 

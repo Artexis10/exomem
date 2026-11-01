@@ -6920,7 +6920,8 @@ class LexicalStore:
 
         self._last_catch_up_advanced = False
         plans: list[dict[str, _CatchUpPlan]] = [{}]
-        lagging = self._lagging_catch_up_paths(plans[0])
+        rows_at_start: dict[str, tuple[bool, bool]] = {}
+        lagging = self._lagging_catch_up_paths(plans[0], rows_at_start)
         if lagging is None:
             return False
         cap = CATALOG_FOREGROUND_DELTA_CAP
@@ -6936,7 +6937,7 @@ class LexicalStore:
                 if taken >= budget:
                     # Writes outran the round, but its steps may still have
                     # applied everything up to a registry checkpoint.
-                    if self._stamp_outpaced_round(plans, steps):
+                    if self._stamp_outpaced_round(plans, steps, rows_at_start):
                         self._last_catch_up_advanced = True
                         log.info(
                             "lexical catch-up advanced (outpaced) paths=%d steps=%d;"
@@ -6967,13 +6968,16 @@ class LexicalStore:
                     return _log_catch_up_decline("replay_failed", paths=len(chunk))
                 steps.append(_CatchUpStep(marks, frozenset(chunk)))
             plans.append({})
-            lagging = self._lagging_catch_up_paths(plans[-1])
+            lagging = self._lagging_catch_up_paths(plans[-1], rows_at_start)
             if lagging is None:
                 return False
         return True
 
     def _stamp_outpaced_round(
-        self, plans: Sequence[Mapping[str, _CatchUpPlan]], steps: Sequence[_CatchUpStep]
+        self,
+        plans: Sequence[Mapping[str, _CatchUpPlan]],
+        steps: Sequence[_CatchUpStep],
+        rows_at_start: Mapping[str, tuple[bool, bool]],
     ) -> bool:
         """Record the newest registry checkpoint an outpaced round fully applied.
 
@@ -6981,23 +6985,34 @@ class LexicalStore:
         every row equals the registry's state there, except pages the registry
         names after it, whose rows hold that state or a newer one. A plan's
         target qualifies per scope when every path of its delta was applied by
-        a committed step whose mark is at or after the target, so the step read
-        the page after the target. A path applied before the target is not
-        enough: an event between that read and the target would leave a stale
-        row under the stamp. A page absent at the target also needs no row in
-        the scope: absence is the one state that can recur exactly, so a row
-        that outlived it would sit behind a checkpoint that readers take as
-        current. Readers that need a current catalogue still compare the stored
+        a committed step that read the page after the target (its mark is at or
+        after the target), or that no event has touched since the step's mark
+        (`_settled_catch_up_paths`). Any other applied path is not enough: an
+        event between that read and the target would leave a stale row under
+        the stamp.
+
+        A page absent at the target also needs no row in the scope, because
+        absence is the one state that can recur exactly: a row that outlived it
+        would sit behind a checkpoint that readers take as current. A page is
+        absent at the target when the delta deletes it, or when the delta does
+        not name it and the scope held no row for it when the round started
+        (`rows_at_start`). So no row may exist for such a page that a step of
+        the round applied.
+
+        Readers that need a current catalogue still compare the stored
         checkpoint with the registry, so the rest of the lag stays visible and
         the next catch-up replays it. A scope without lag has nothing to
-        record. Returns whether a stored checkpoint moved.
+        record. Returns whether every lagging scope moved a stored checkpoint;
+        a scope that stays frozen outpaces the round, whatever its sibling did.
         """
         from . import freshness as freshness_module
         from .vault import VaultLockError, VaultLockTimeout
 
         if not steps or not plans[0]:
             return False
-        advanced = False
+        applied = set().union(*(step.paths for step in steps))
+        moved = False
+        frozen = False
         try:
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
                 conn = self._connect()
@@ -7007,15 +7022,21 @@ class LexicalStore:
                         return False
                     if self._meta_catalog_identity(conn) != identity:
                         return False
+                    settled = self._settled_catch_up_paths(steps)
                     for scope in freshness_module.SCOPES:
+                        column = _scope_column(scope)
                         stored = self._meta_checkpoint(conn, scope)
-                        for plan in reversed(plans):
-                            scope_plan = plan.get(scope)
-                            if scope_plan is None or scope_plan.stored != stored:
-                                continue
-                            if scope_plan.target == stored:
-                                continue  # no lag here: a stamp would move nothing
-                            read_after_target = set().union(
+                        # A plan that targets the stored checkpoint, or that a
+                        # step or another writer outdated, has nothing to record.
+                        candidates = [
+                            plan[scope]
+                            for plan in reversed(plans)
+                            if scope in plan
+                            and plan[scope].stored == stored
+                            and plan[scope].target != stored
+                        ]
+                        for scope_plan in candidates:
+                            proven = settled.union(
                                 *(
                                     step.paths
                                     for step in steps
@@ -7023,15 +7044,22 @@ class LexicalStore:
                                     >= scope_plan.target.generation
                                 )
                             )
-                            if not scope_plan.paths <= read_after_target:
+                            if not scope_plan.paths <= proven:
                                 continue
-                            held = self._held_memberships(conn, scope_plan.deleted)
-                            if any(flags[_scope_column(scope)] for flags in held.values()):
+                            absent = scope_plan.deleted | {
+                                path
+                                for path in applied - scope_plan.paths
+                                if not rows_at_start.get(path, (False, False))[column]
+                            }
+                            held = self._held_memberships(conn, absent)
+                            if any(flags[column] for flags in held.values()):
                                 continue  # a row outlived the page it holds
                             with self._lock:
                                 self._bless(conn, scope, scope_plan.target, identity=identity)
-                            advanced = True
+                            moved = True
                             break
+                        else:
+                            frozen = frozen or bool(candidates)  # it lags; no plan qualified
                 finally:
                     conn.close()
         except VaultLockTimeout:
@@ -7039,17 +7067,21 @@ class LexicalStore:
         except VaultLockError as error:
             log.info("lexical catch-up stamp deferred (%s)", error)
         except sqlite3.Error as error:
-            _log_catch_up_decline("store_error", error=type(error).__name__)
-        return advanced
+            return _log_catch_up_decline("store_error", error=type(error).__name__)
+        return moved and not frozen
 
     def _lagging_catch_up_paths(
-        self, plan: dict[str, _CatchUpPlan] | None = None
+        self,
+        plan: dict[str, _CatchUpPlan] | None = None,
+        rows: dict[str, tuple[bool, bool]] | None = None,
     ) -> set[str] | None:
         """The registry paths both scopes' stored checkpoints miss, or None.
 
         None means a refusal that keeps the full pass; this logs which one.
         A caller that passes `plan` gets each scope's stored checkpoint, target
-        and delta paths recorded in it.
+        and delta paths recorded in it. A caller that passes `rows` gets the
+        scopes that hold a row for each path it has not seen yet, which is read
+        before any step of the round writes that path.
         """
         from . import freshness as freshness_module
 
@@ -7104,6 +7136,11 @@ class LexicalStore:
                             frozenset(delta.changed | delta.deleted),
                             frozenset(delta.deleted),
                         )
+                if rows is not None:
+                    unseen = lagging - rows.keys()
+                    held = self._held_memberships(conn, unseen)
+                    for path in unseen:
+                        rows[path] = held.get(freshness_module._digest_path(path), (False, False))
             finally:
                 conn.close()
         except sqlite3.Error as error:
