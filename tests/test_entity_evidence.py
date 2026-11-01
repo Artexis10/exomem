@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from time import thread_time
@@ -234,6 +235,10 @@ def test_store_path_matches_a_full_sweep_for_every_audience_across_edits(
     expected_cold = len(_stored_pages(vault, kind="rest")) + len(_stored_pages(vault, kind="entities"))
     assert counters["pages_reextracted"] == expected_cold + 1  # the hidden page is the owner's own
     assert counters["pages_volatile"] == 1  # the excluded page is read live, never stored
+    with sqlite3.connect(entity_evidence.store_path(vault)) as conn:
+        stored_paths = {path for (path,) in conn.execute("SELECT path FROM pages")}
+    assert f"{KB}/Private/secret.md" not in stored_paths, "an excluded page stored content"
+    assert f"{NOTES}/cobalt-1.md" in stored_paths
 
     steps: list[tuple[str, Callable[[Path], None], int | Callable[[Path], int]]] = [
         ("edit a page", _rewrite_cobalt_3, 1),
