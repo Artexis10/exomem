@@ -6928,6 +6928,15 @@ def yaml_scalar(value: Any) -> str:
 _yaml_scalar = yaml_scalar
 
 
+def yaml_flow_list(values: Iterable[Any]) -> str:
+    """Render a flow sequence whose items read back as the strings written.
+
+    An unquoted item such as `2026-10-24` or `true` reads back as a date or a
+    boolean, and readers that expect a list of strings then reject the page.
+    """
+    return "[" + ", ".join(yaml_scalar(value) for value in values) + "]"
+
+
 def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
     """Return the scanner protocol's "dir", "md", or None for one entry."""
     try:

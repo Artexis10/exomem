@@ -69,6 +69,7 @@ from .vault import (
     plan_log_writes,
     read_guarded_text,
     render_frontmatter_document,
+    yaml_flow_list,
 )
 
 log = logging.getLogger(__name__)
@@ -266,7 +267,7 @@ def edit(
         tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
-            fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"
+            fm_text = fm_text.rstrip() + "\ntags: " + yaml_flow_list(tags_clean)
         else:
             fm_text = fm_text.rstrip() + "\ntags: []"
 
