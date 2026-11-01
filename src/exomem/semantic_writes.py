@@ -391,6 +391,8 @@ class SemanticWriteError(ValueError):
     reason: str
     validation_findings: tuple[semantic_contract.ContractFinding, ...] = ()
     details: dict[str, Any] | None = None
+    #: The request fields the caller must add, for a refusal that names them.
+    missing: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
@@ -957,6 +959,8 @@ class CreationPreflight:
     #: Where the typed writer filed the page and why; absent for writers that do not place pages.
     placement: dict[str, Any] | None = None
     provenance_server_at: str | None = None
+    #: The review fields a commit of this draft would find missing or ignored.
+    review_fields: relation_review.ReviewFieldCheck = relation_review.ReviewFieldCheck()
 
     @property
     def draft_hash(self) -> str | None:
@@ -990,6 +994,8 @@ class CreationPreflight:
             value["vocabulary_resolution"] = self.vocabulary_binding.as_dict()
         if self.placement is not None:
             value["placement"] = self.placement
+        if fields := self.review_fields.as_dict():
+            value["relation_review_fields"] = fields
         return value
 
 
@@ -1024,6 +1030,12 @@ class CreationCommit:
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, str] | None = None
     vocabulary_resolution: dict[str, str] | None = None
+    #: Review fields the commit dropped because the page needs no relation review.
+    ignored_review_fields: tuple[str, ...] = ()
+
+    def review_field_warnings(self) -> list[str]:
+        """The one warning a commit owes for the review fields it dropped, if any."""
+        return [relation_review.IGNORED_REVIEW_FIELDS_WARNING] if self.ignored_review_fields else []
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -2161,6 +2173,12 @@ def _preflight_existing(
                 "INVALID_RELATION_REVIEW",
                 "reviewed-none applies only to an active compiled result",
             )
+        if not validate_only and relation_review_hash is None:
+            absent = relation_review.missing_review_fields_error(
+                ("relation_review_hash",),
+                hash_source="semantic.relation_review_hash in the validate_only result",
+            )
+            raise SemanticWriteError(absent.code, absent.reason, missing=absent.missing)
         if not validate_only and relation_review_hash != transition_hash:
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
@@ -4432,6 +4450,8 @@ def preflight_creation(
     draft_token: str,
     registrations: tuple[DraftRegistration, ...] = (),
     relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     vocabulary_binding: Any | None = None,
@@ -4452,6 +4472,8 @@ def preflight_creation(
             draft_token=draft_token,
             registrations=registrations,
             relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
             vocabulary_binding=vocabulary_binding,
@@ -4472,6 +4494,8 @@ def _preflight_creation(
     draft_token: str,
     registrations: tuple[DraftRegistration, ...],
     relation_disposition: str | None,
+    relation_review_hash: str | None,
+    relation_review_reason: str | None,
     predecessor_path: str | None,
     predecessor_content_hash: str | None,
     vocabulary_binding: Any | None,
@@ -4487,6 +4511,11 @@ def _preflight_creation(
             "INVALID_RELATION_REVIEW",
             "relation disposition must be 'reviewed_none' or 'reviewed-none'",
         )
+    supplied_review_fields = {
+        "relation_disposition": relation_disposition,
+        "relation_review_hash": relation_review_hash,
+        "relation_review_reason": relation_review_reason,
+    }
     token = DraftToken.decode(draft_token)
     if (
         token.writer != writer
@@ -4587,6 +4616,10 @@ def _preflight_creation(
             origin_inputs,
             relation_review.prevalidated_attempt(attempt, census_token),
             provenance_server_at=provenance_server_at,
+            review_fields=relation_review.check_review_fields(
+                supplied_review_fields,
+                relation_review.review_applies(validation.relation_disposition),
+            ),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4621,6 +4654,7 @@ def _preflight_creation(
             vocabulary_binding.parent_guard,
         ) if vocabulary_binding is not None else (),
         origin_inputs,
+        review_fields=relation_review.check_review_fields(supplied_review_fields, False),
     )
 
 
@@ -5445,7 +5479,12 @@ def _commit_creation(
                 )
             _publish_creation_catalog(catalog_target)
             return CreationCommit(
-                "full", True, committed.written_paths, committed.contract_result, committed
+                "full",
+                True,
+                committed.written_paths,
+                committed.contract_result,
+                committed,
+                ignored_review_fields=committed.ignored_review_fields,
             )
         commits, failure = _commit_structural(
             root,
@@ -5456,4 +5495,13 @@ def _commit_creation(
         )
         if failure is not None:
             raise failure
-        return commits[0]
+        # A page the review never reaches has no use for review fields: drop them too.
+        ignored = relation_review.check_review_fields(
+            {
+                "relation_disposition": relation_disposition,
+                "relation_review_hash": relation_review_hash,
+                "relation_review_reason": relation_review_reason,
+            },
+            False,
+        ).ignored
+        return replace(commits[0], ignored_review_fields=ignored) if ignored else commits[0]

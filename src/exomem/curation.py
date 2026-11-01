@@ -1278,18 +1278,9 @@ def _require_committable(
     """Refuse a create or supersede step the leaf would refuse at commit.
 
     The review is held back from the leaf's validation, so the leaf cannot object
-    to it there; its validation still says whether the page needs one. Only a
-    fully governed page is reviewed at commit; the leaf ignores a review elsewhere.
+    to it there. A review the page does not need is no refusal: the leaf drops it
+    at commit and says so in its warnings.
     """
-    if (
-        review
-        and validation.get("applicability") == "full"
-        and not validation.get("reviewed_none_required")
-    ):
-        raise _error(
-            "RELATION_REVIEW_NOT_APPLICABLE",
-            "the page needs no reviewed-none relation review; drop relation_disposition",
-        )
     _refuse_blocked(
         validation.get("contract_result"), relation_answered=bool(review) or relation_pending
     )

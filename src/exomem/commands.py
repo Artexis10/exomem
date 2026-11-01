@@ -3793,7 +3793,7 @@ def _add_source(
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if result.capture_outcome != "reused":
         query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
     return result.as_dict()
@@ -4799,9 +4799,7 @@ def op_edit(
         set_take_module.SetTakeError,
         set_frontmatter_field_module.SetFrontmatterError,
     ) as e:
-        msg = f"{e.code}: {e.reason}"
-        if getattr(e, "missing", None):
-            msg += f" (missing: {e.missing})"
+        msg = _leaf_error_message(e)
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
         raise ValueError(msg) from e
@@ -5003,10 +5001,10 @@ def op_replace(
             relation_review_hash=effective_relation_review_hash,
         )
     except replace_module.ReplaceError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     except note_module.NoteError as e:
         # New-page validation failed before the supersession could land.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if written_path := getattr(result, "new_path", None):
         query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
         working_set_heat_module.note_citations(vault_root, sources or ())
@@ -5042,6 +5040,14 @@ def _replacement_review_hash(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _leaf_error_message(error: Any) -> str:
+    """`CODE: reason`, plus the request fields the caller must add when the error names any."""
+    message = f"{error.code}: {error.reason}"
+    if missing := getattr(error, "missing", None):
+        message += f" (missing: {list(missing)})"
+    return message
 
 
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
@@ -5182,12 +5188,12 @@ def op_link(
             origin=_creation_origin(vault_root, ref),
         )
     except link_module.LinkError as e:
-        suffix = f" (missing: {e.missing})"
+        msg = _leaf_error_message(e)
         if e.candidates:
-            suffix += f" (candidates: {e.candidates})"
+            msg += f" (candidates: {e.candidates})"
         if e.candidate_fingerprint is not None:
-            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
-        raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
+            msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
+        raise ValueError(msg) from e
     return result.as_dict()
 
 
@@ -5285,7 +5291,7 @@ def op_preserve(
             filename, destination=str(Path(scope) / category), raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     # Same destination-scoped lookup the batch command uses, run before the
     # write: Evidence is append-only, so the same bytes under the same family
     # are one fact, and reporting the copy that is already there beats adding a
@@ -5322,7 +5328,7 @@ def op_preserve(
             raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     payload = result.as_dict()
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
@@ -5587,7 +5593,7 @@ def _invoke_note(
     try:
         result = note_module.note(**arguments.arguments)
     except note_module.NoteError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if written_path := getattr(result, "path", None):
         sources = arguments.arguments["sources"]
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
@@ -5807,7 +5813,7 @@ def op_create_file(
             relation_review_reason=relation_review_reason,
         )
     except create_file_module.CreateFileError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise ValueError(_leaf_error_message(e)) from e
     return result.as_dict()
 
 
@@ -10501,9 +10507,7 @@ def op_connect_memory(
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
-                msg = f"{e.code}: {e.reason}"
-                if getattr(e, "missing", None):
-                    msg += f" (missing: {e.missing})"
+                msg = _leaf_error_message(e)
                 if getattr(e, "candidates", None):
                     msg += f" (candidates: {e.candidates})"
                 raise ValueError(msg) from e

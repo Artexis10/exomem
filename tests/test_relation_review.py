@@ -447,7 +447,7 @@ def test_first_page_bootstrap_persists_null_reason_artifact(tmp_path: Path) -> N
     assert commit.review_state_current
 
 
-def test_qualifying_relation_rejects_unnecessary_review_and_needs_no_artifact(
+def test_qualifying_relation_drops_unnecessary_review_fields_and_needs_no_artifact(
     tmp_path: Path,
 ) -> None:
     _write(
@@ -469,27 +469,23 @@ def test_qualifying_relation_rejects_unnecessary_review_and_needs_no_artifact(
     assert validation.relation_disposition == "qualifying_relation"
     assert validation.relation_candidates[0].qualifies
 
-    with pytest.raises(relation_review.RelationReviewError) as exc:
-        relation_review.commit_creation_draft(
-            tmp_path,
-            path=_PAGE_B,
-            source=source,
-            draft_id=_ID_B,
-            operation="create",
-            relation_disposition="reviewed_none",
-            relation_review_hash=validation.draft_hash,
-            relation_review_reason="unnecessary",
-        )
-    assert exc.value.code == "RELATION_REVIEW_NOT_APPLICABLE"
-
     commit = relation_review.commit_creation_draft(
         tmp_path,
         path=_PAGE_B,
         source=source,
         draft_id=_ID_B,
         operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="unnecessary",
     )
+
     assert commit.review_reference is None
+    assert commit.ignored_review_fields == (
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    )
     receipt = relation_review.load_creation_receipt(tmp_path, _ID_B)
     assert receipt is not None and receipt.kind == "qualifying"
     assert relation_review.load_relation_reviews(tmp_path) == ()
