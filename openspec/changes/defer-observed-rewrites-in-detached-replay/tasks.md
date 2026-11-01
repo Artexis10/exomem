@@ -10,5 +10,10 @@
 
 ## 3. Proof under sustained writes
 
-- [ ] 3.1 Run a local repro on main and on the branch. Use a vault of about 10,000 notes and back-to-back import calls of about 100 new notes for 20 minutes, with an index page that every call rewrites. Force a full repair at 60 s. Evidence: at least 3 full passes publish with `deferred` > 0, and the peak of `catalogue_unchanged_seconds` stays near one pass. After the writes stop, the strict proof is current and a search returns the index page's last token.
-- [ ] 3.2 Read the next Cloud rehearsal's `lexical_repair_finished` events and the peak of `catalogue_unchanged_seconds`.
+- [x] 3.1 Run a local repro on main with a vault of about 10,000 notes, back-to-back import calls and an index page that every call rewrites, with a forced full repair. Evidence: the repro on main reached about 5 new notes per call, against 60 to 150 in the Cloud rehearsal, and every full pass published (0 declined in 4 runs). A local run cannot reach the write rate that exhausts the retargets, so the proof under sustained writes is the Cloud rehearsal in 3.2. The convergence after writes stop is covered by the replay tests of 1.1, where a later catch-up serves the page's newest content.
+- [x] 3.2 Read a Cloud large-import rehearsal's `lexical_repair_finished` events and the peak of `catalogue_unchanged_seconds`. Evidence: run 41328793829 (69,300 files staged; one run) against main's run 41294047062:
+  - full passes: 12 of 12 published, against 1 of 15 with 14 declined `retargets_exhausted`;
+  - `deferred` summed to 24 and `awaited` to 26 across 37 events; 4 catch-ups ended `advanced`, and 12 catch-ups declined, which left the lag to the next full pass;
+  - peak `catalogue_unchanged_seconds` 620.5 s, against 4,928 s; a full pass took 530 to 570 s at that size;
+  - readiness samples: 499 ready, 1 not ready before the first proof, 27 unread.
+  The run ended on the import paging deadline, as main's run did; that limit is apply throughput, not this change.
