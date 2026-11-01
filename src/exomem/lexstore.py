@@ -71,7 +71,7 @@ import threading
 import time
 import uuid
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -297,7 +297,9 @@ def catalog_selection_scope(
         if lagging:
             # Preserve convergence without handing repair an active SQL reader.
             if lag_dispatch is None:
-                _schedule_runtime_catalog_repair(root, lag_only=True)
+                _schedule_runtime_catalog_repair(
+                    root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
             else:
                 lag_dispatch(root)
 
@@ -822,6 +824,9 @@ SCHEMA_VERSION = 15
 #: (the default drops marks, which splits Indic words at every vowel sign).
 _FTS_TOKENIZE = "tokenize=\"unicode61 remove_diacritics 0 categories 'L* N* Co M*'\""
 CATALOG_FOREGROUND_DELTA_CAP = 32
+#: Steps a lagging-delta catch-up may take beyond the ones its first lag needs.
+#: A lag that outgrows them keeps the full pass, which publishes under writes.
+_CATCH_UP_SLACK_STEPS = 2
 #: A rebuild temp untouched this long, and held open by no connection, is the
 #: leftover of a killed build; the next rebuild removes it.
 _ORPHAN_REBUILD_TEMP_AGE_SECONDS = 10 * 60
@@ -916,8 +921,9 @@ _FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
 #: exact live recall generation pair the caller observed. They are acknowledged
 #: only when the pass's promotion proof covers that pair. The sentinel is used
 #: by the explicit event-index rollback, where no live generation exists.
+#: Each observation also keeps whether every request that made it was lag-only.
 _UNKNOWN_REPAIR_GENERATION = object()
-_FULL_REBUILD_REOBSERVED: dict[Path, set[object]] = {}
+_FULL_REBUILD_REOBSERVED: dict[Path, dict[object, bool]] = {}
 # A successful publish+promotion may still preserve one uncovered generation at
 # the bounded idle handoff. The next flight may cheaply prove that a foreground
 # delta already covered it. Failed/unpromoted passes never enter this set.
@@ -977,6 +983,10 @@ class RepairCause(enum.StrEnum):
     TARGETED_UNPROMOTED = "targeted_unpromoted"
     TARGETED_YIELDED = "targeted_yielded"
     STRANDED_SCOPE = "stranded_scope"
+    # Lag-only requests: a read proof found the stored checkpoint behind the
+    # registry, or a bounded apply met a source that moved before its commit.
+    CATALOGUE_LAG = "catalogue_lag"
+    SOURCE_MOVED = "source_moved"
 
 
 class RepairStage(enum.StrEnum):
@@ -1934,7 +1944,7 @@ def runtime_retrieval_catalog_admission(
     admission = _published_catalog_admission(root)
     if admission is not None and schedule_repair:
         # Serving stale is a bridge, not a resting state: keep converging.
-        _schedule_runtime_catalog_repair(root, lag_only=True)
+        _schedule_runtime_catalog_repair(root, lag_only=True, cause=RepairCause.CATALOGUE_LAG)
     return admission
 
 
@@ -2190,7 +2200,7 @@ def request_lag_repair(vault_root: Path) -> None:
     its reads, as `catalog_selection_scope` does, so the repair cannot move
     the catalogue under them.
     """
-    _schedule_runtime_catalog_repair(vault_root, lag_only=True)
+    _schedule_runtime_catalog_repair(vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG)
 
 
 def retry_pending_repair(vault_key: Path) -> bool:
@@ -2452,7 +2462,8 @@ def _schedule_repair(
         elif deferred_paths:
             _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
         elif key in _FULL_REBUILDS_IN_FLIGHT:
-            _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
+            observed = _FULL_REBUILD_REOBSERVED.setdefault(key, {})
+            observed[observation] = observed.get(observation, True) and lag_only
         else:
             _request_full_rebuild(key, lag_only=lag_only)
         if key in _REPAIRS_IN_FLIGHT:
@@ -2625,6 +2636,10 @@ def _schedule_repair(
                         # A failed targeted retry escalates to the same full pass
                         # a queued request asked for. Consume that level here so
                         # it cannot become a redundant pass immediately after.
+                        # The pass stays lag-only only if that request was too.
+                        lag_only = lag_only and (
+                            key not in _FULL_REBUILD_REQUESTED or key in _LAG_ONLY_REBUILDS
+                        )
                         _FULL_REBUILD_REQUESTED.discard(key)
                         _LAG_ONLY_REBUILDS.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
@@ -2693,7 +2708,7 @@ def _schedule_repair(
                         covered_generation = _repair_generation_from_proof(
                             promotion_proof
                         )
-                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, set())
+                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, {})
                         uncovered = {
                             generation
                             for generation in reobserved
@@ -2708,6 +2723,10 @@ def _schedule_repair(
                                 )
                             )
                         }
+                        # A published replacement, or a declined pass that only
+                        # lag asked for, leaves nothing but checkpoint lag, so
+                        # the next flight tries the bounded catch-up first.
+                        residual_lag_only = bool(repaired) or lag_only
                         if not (repaired and promoted):
                             # A consumed full request is acknowledged only after
                             # both publication and the exact-current promotion
@@ -2716,6 +2735,7 @@ def _schedule_repair(
                             # re-observe staleness while it was running.
                             _request_full_rebuild(
                                 key,
+                                lag_only=residual_lag_only,
                                 cause=RepairCause.PUBLISH_UNPROMOTED
                                 if repaired
                                 else RepairCause.PASS_DECLINED,
@@ -2723,7 +2743,12 @@ def _schedule_repair(
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
-                            _request_full_rebuild(key, cause=RepairCause.REOBSERVED_DURING_PASS)
+                            _request_full_rebuild(
+                                key,
+                                lag_only=residual_lag_only
+                                and all(reobserved[generation] for generation in uncovered),
+                                cause=RepairCause.REOBSERVED_DURING_PASS,
+                            )
                         if repaired and key in _FULL_REBUILD_REQUESTED:
                             # Another proof can win admission during promotion.
                             # Re-prove this publication before rebuilding it.
@@ -4594,6 +4619,18 @@ def purge_exact_persisted_rows(
 class _ReconcileSourceProof:
     checkpoint: object
     refutation_epoch: int
+
+
+@dataclass(frozen=True)
+class _CatchUpStep:
+    """One committed step of a lagging-delta catch-up.
+
+    `marks` holds each scope's registry checkpoint, taken before the step read
+    any file; `paths` holds the registry paths the step applied.
+    """
+
+    marks: Mapping[str, object]
+    paths: frozenset[str]
 
 
 class LexicalStore:
@@ -6615,7 +6652,9 @@ class LexicalStore:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
             # A source read moved under the apply; the worker's catch-up must
             # prove the catalogue exactly current, or the full pass runs.
-            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+            _schedule_runtime_catalog_repair(
+                self.vault_root, lag_only=True, cause=RepairCause.SOURCE_MOVED
+            )
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
@@ -6674,7 +6713,9 @@ class LexicalStore:
             source_moved = True
             applied = False
         if not applied and source_moved:
-            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+            _schedule_runtime_catalog_repair(
+                self.vault_root, lag_only=True, cause=RepairCause.SOURCE_MOVED
+            )
         elif not applied:
             _schedule_runtime_catalog_repair(self.vault_root, deferred_paths=deferred_paths)
         else:
@@ -6683,7 +6724,9 @@ class LexicalStore:
             self._note_pending_publication(list(paths), list(rel_paths))
         return applied
 
-    def retry_deferred_upsert(self, paths: list[Path]) -> bool:
+    def retry_deferred_upsert(
+        self, paths: list[Path], *, earlier_steps: Sequence[_CatchUpStep] = ()
+    ) -> bool:
         """Reconcile identities a contended foreground publication declined.
 
         The foreground wait is 50ms because a governed write may not block on
@@ -6696,6 +6739,9 @@ class LexicalStore:
         a sqlite error or a failed read says the store or the disk is wrong,
         and re-applying rows cannot fix either. Source movement and bounded
         publication timeouts raise instead, so the caller keeps the claim.
+
+        `earlier_steps` makes this the last step of a lagging-delta catch-up:
+        what those steps applied counts toward the witness that blesses a scope.
         """
         if self._failed or not paths:
             return False
@@ -6704,7 +6750,9 @@ class LexicalStore:
         try:
             source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
-                return self._apply_paths_locked(paths, [], source_proofs=source_proofs)
+                return self._apply_paths_locked(
+                    paths, [], source_proofs=source_proofs, earlier_steps=earlier_steps
+                )
         except VaultLockTimeout:
             raise
         except VaultLockError as e:
@@ -6721,65 +6769,149 @@ class LexicalStore:
 
         A watcher batch that misses the barrier leaves an uncovered delta that no
         later batch can bless. When this process's registry still bridges each
-        scope's stored checkpoint with a complete, untainted delta, and the
-        union fits the foreground cap, replaying those identities is the
-        watcher's own bounded apply, deletions included. Returns whether that
-        replay committed (trivially, when nothing lags). A retired or stale
-        store, a foreign or adopted origin, lost history, a reconcile-tainted
-        delta or an oversized one returns False, logs which refusal it was and
-        keeps the full pass. A source that moves under the replay raises
-        `_SourceMoved`, and the worker keeps the lag-only claim.
+        scope's stored checkpoint with a complete, untainted delta, replaying
+        those identities is the watcher's own bounded apply, deletions included.
+        Returns whether the catalogue then stores the registry's checkpoints
+        (trivially, when nothing lags). A retired or stale store, a foreign or
+        adopted origin, lost history or a reconcile-tainted delta returns False,
+        logs which refusal it was and keeps the full pass.
+
+        A lag larger than the foreground cap replays in steps of at most the
+        cap, each under its own publication barrier, so writers wait no longer
+        than for one watcher batch. Only a round's last step can stamp the
+        checkpoints, and only when every lagging path is in that step or was
+        settled by an earlier one (`_settled_catch_up_paths`, re-read under the
+        last step's barrier). A step whose source moves rolls back and settles
+        nothing; its paths stay in the lag. Steps beyond the first lag's need
+        come from `_CATCH_UP_SLACK_STEPS`; a lag that outgrows them returns False.
+        """
+        from . import freshness as freshness_module
+
+        lagging = self._lagging_catch_up_paths()
+        if lagging is None:
+            return False
+        cap = CATALOG_FOREGROUND_DELTA_CAP
+        budget = -(-len(lagging) // cap) + _CATCH_UP_SLACK_STEPS
+        taken = 0
+        steps: list[_CatchUpStep] = []
+        while lagging:
+            # A round replays what no earlier step settled. When every path is
+            # settled but unstamped, one more step carries the stamp.
+            pending = sorted(lagging - self._settled_catch_up_paths(steps))
+            pending = pending or sorted(lagging)[:cap]
+            while pending:
+                if taken >= budget:
+                    return _log_catch_up_decline("outpaced", paths=len(lagging), steps=taken)
+                taken += 1
+                chunk, pending = pending[:cap], pending[cap:]
+                # Taken before the step reads any file: an edit after it has an
+                # event after this mark, so the path is not settled by this step.
+                marks = {
+                    scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+                    for scope in freshness_module.SCOPES
+                }
+                try:
+                    applied = self.retry_deferred_upsert(
+                        [Path(path) for path in chunk],
+                        earlier_steps=() if pending else tuple(steps),
+                    )
+                except _SourceMoved:
+                    # The step rolled back, so it settles nothing and its paths
+                    # stay in the lag that the next round re-reads.
+                    continue
+                if not applied:
+                    return _log_catch_up_decline("replay_failed", paths=len(chunk))
+                steps.append(_CatchUpStep(marks, frozenset(chunk)))
+            lagging = self._lagging_catch_up_paths()
+            if lagging is None:
+                return False
+        return True
+
+    def _lagging_catch_up_paths(self) -> set[str] | None:
+        """The registry paths both scopes' stored checkpoints miss, or None.
+
+        None means a refusal that keeps the full pass; this logs which one.
         """
         from . import freshness as freshness_module
 
         if self._failed:
-            return _log_catch_up_decline("store_failed")
+            _log_catch_up_decline("store_failed")
+            return None
         if not self.path.exists():
-            return _log_catch_up_decline("store_missing")
+            _log_catch_up_decline("store_missing")
+            return None
         lagging: set[str] = set()
         try:
             conn = self._connect()
             try:
                 if not self._schema_is_current(conn):
-                    return _log_catch_up_decline("schema")
+                    _log_catch_up_decline("schema")
+                    return None
                 identity = catalog_semantic_identity(self.vault_root)
                 if self._meta_catalog_identity(conn) != identity:
-                    return _log_catch_up_decline("identity")
+                    _log_catch_up_decline("identity")
+                    return None
                 for scope in freshness_module.SCOPES:
                     if not freshness_module.recall_is_live(self.vault_root, scope):
-                        return _log_catch_up_decline("not_live", scope=scope)
+                        _log_catch_up_decline("not_live", scope=scope)
+                        return None
                     stored = self._meta_checkpoint(conn, scope)
                     current = freshness_module.recall_checkpoint(self.vault_root, scope)
                     if stored is None or current is None:
-                        return _log_catch_up_decline("no_checkpoint", scope=scope)
+                        _log_catch_up_decline("no_checkpoint", scope=scope)
+                        return None
                     if stored.instance_id != current.instance_id:
-                        return _log_catch_up_decline("instance", scope=scope)
+                        _log_catch_up_decline("instance", scope=scope)
+                        return None
                     delta = freshness_module.recall_delta_since(
                         self.vault_root, scope, stored
                     )
                     if not delta.complete:
-                        return _log_catch_up_decline("incomplete", scope=scope)
+                        _log_catch_up_decline("incomplete", scope=scope)
+                        return None
                     if delta.requires_source_proof:
-                        return _log_catch_up_decline(
+                        _log_catch_up_decline(
                             "source_proof",
                             scope=scope,
                             changed=len(delta.changed),
                             deleted=len(delta.deleted),
                         )
+                        return None
                     lagging |= delta.changed | delta.deleted
             finally:
                 conn.close()
         except sqlite3.Error as error:
-            return _log_catch_up_decline("store_error", error=type(error).__name__)
-        if len(lagging) > CATALOG_FOREGROUND_DELTA_CAP:
-            return _log_catch_up_decline(
-                "over_cap", paths=len(lagging), cap=CATALOG_FOREGROUND_DELTA_CAP
-            )
-        if not lagging:
-            return True
-        if not self.retry_deferred_upsert([Path(path) for path in sorted(lagging)]):
-            return _log_catch_up_decline("replay_failed", paths=len(lagging))
-        return True
+            _log_catch_up_decline("store_error", error=type(error).__name__)
+            return None
+        return lagging
+
+    def _settled_catch_up_paths(self, steps: Sequence[_CatchUpStep]) -> set[str]:
+        """The paths earlier catch-up steps applied that no later event touched.
+
+        A path stays settled by its step while neither scope's delta since the
+        step's marks names it. A step whose marks no longer bridge (lost
+        history, a restarted registry) settles nothing. The catch-up plans with
+        this off the barrier; the last step re-reads it under the barrier, so
+        an edit while that step waits for the barrier still counts.
+        """
+        from . import freshness as freshness_module
+
+        settled: set[str] = set()
+        for step in steps:
+            touched: set[str] = set()
+            for scope in freshness_module.SCOPES:
+                mark = step.marks.get(scope)
+                delta = (
+                    freshness_module.recall_delta_since(self.vault_root, scope, mark)
+                    if mark is not None
+                    else None
+                )
+                if delta is None or not delta.complete:
+                    break
+                touched |= delta.changed | delta.deleted
+            else:
+                settled |= step.paths - touched
+        return settled
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
@@ -6791,8 +6923,13 @@ class LexicalStore:
         rel_paths: list[str],
         *,
         source_proofs: dict[str, _ReconcileSourceProof] | None = None,
+        earlier_steps: Sequence[_CatchUpStep] = (),
     ) -> bool:
-        """Apply a changed/deleted union with the publication barrier held."""
+        """Apply a changed/deleted union with the publication barrier held.
+
+        Paths that `earlier_steps` applied count as requested for the witness
+        only while no event has touched them since their step's marks.
+        """
         from . import freshness as freshness_module
         from . import recall_policy
 
@@ -6817,6 +6954,8 @@ class LexicalStore:
                 for scope in ("kb", "vault")
             }
             requested_paths = self._requested_event_paths(paths, rel_paths)
+            if earlier_steps:
+                requested_paths |= self._settled_catch_up_paths(earlier_steps)
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
             for path in paths:
@@ -10024,7 +10163,9 @@ class LexicalStore:
                             # letting the mismatch escape this seam.
                             if schedule_repair:
                                 _schedule_runtime_catalog_repair(
-                                    self.vault_root, lag_only=True
+                                    self.vault_root,
+                                    lag_only=True,
+                                    cause=RepairCause.CATALOGUE_LAG,
                                 )
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
@@ -10037,7 +10178,9 @@ class LexicalStore:
             if schedule_repair:
                 # The stored checkpoint differs from the target; the worker's catch-up
                 # must prove it exactly current, or the full pass runs.
-                _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                _schedule_runtime_catalog_repair(
+                    self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
@@ -10734,7 +10877,9 @@ class LexicalStore:
                     # Only metadata disagrees (view, checkpoint, policy, schema or
                     # identity); the worker's catch-up must prove the catalogue
                     # exactly current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                    _schedule_runtime_catalog_repair(
+                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                    )
                     return CatalogQueryResult(None, readiness)
                 return self._query_within_budget(view.connection, query_fn, readiness)
             except RegistryError:
@@ -10782,7 +10927,9 @@ class LexicalStore:
                     # generation; the repair worker reconciles it. Only metadata
                     # disagrees, so its catch-up must prove the catalogue exactly
                     # current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                    _schedule_runtime_catalog_repair(
+                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                    )
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
