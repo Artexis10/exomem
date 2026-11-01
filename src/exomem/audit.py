@@ -117,6 +117,7 @@ from . import (
     source_taxonomy,
     temporal,
 )
+from . import entity_evidence as entity_evidence_module
 from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
@@ -535,7 +536,10 @@ def audit(
 
     kb = kb_root(vault_root)
     projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
-    pages = [] if selected <= projection_checks else _parse_all(kb, vault_root)
+    # An explicit entity-recurrence sweep reads only the pages that changed since the
+    # last one. Every other composition keeps the full parse.
+    from_store = selected == {"entity_recurrence"}
+    pages = [] if from_store or selected <= projection_checks else _parse_all(kb, vault_root)
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
@@ -633,7 +637,11 @@ def audit(
             _check_scope_divergence_semantic(vault_root, pages, status_basis=status_basis)
         )
     if "entity_recurrence" in selected:
-        findings.extend(_check_entity_recurrence(vault_root, pages, status_basis=status_basis))
+        findings.extend(
+            _check_entity_recurrence_from_store(vault_root, kb, status_basis=status_basis)
+            if from_store
+            else _check_entity_recurrence(vault_root, pages, status_basis=status_basis)
+        )
     if "collection_candidate" in selected:
         findings.extend(_check_collection_candidate(vault_root, pages, status_basis=status_basis))
     if "relation_registry" in selected:
@@ -7037,13 +7045,13 @@ def _entity_recurrence_finding(
 
 def _entity_recurrence_resolution_entries(
     vault_root: Path,
-    pages: list[find_module.ParsedPage],
+    titles: Iterable[tuple[str, str]],
 ) -> dict[str, str | None]:
     """Path + title entries for an I/O-FREE wikilink resolver.
 
     `WikilinkResolver(vault_root)` would re-read and YAML-parse every Markdown
     file in the vault, which is precisely the second corpus scan this sweep must
-    not pay. Titles come from the pages the audit already parsed (`parse_page`
+    not pay. `titles` are `(path, title)` of the pages the audit already holds (`parse_page`
     and the resolver derive a title through the same `resolve_display_title`, so
     the title edges are the ones a full build would have produced); the walk adds
     PATHS ONLY, opening no file, so links into curated sibling trees outside the
@@ -7066,8 +7074,8 @@ def _entity_recurrence_resolution_entries(
             entries[md_path.resolve().relative_to(vault_resolved).as_posix()] = None
         except (OSError, ValueError):
             continue
-    for page in pages:
-        entries[str(page.rel_path)] = page.title
+    for rel_path, title in titles:
+        entries[str(rel_path)] = title
     return entries
 
 
@@ -7095,16 +7103,47 @@ def _check_entity_recurrence(
     existence probe per distinct suffixed target. That probe is what stops the
     sensor deciding from punctuation that `Node.js` or `Dr. Ines Roth` is a file.
     """
+    return _entity_recurrence_findings(vault_root, pages, status_basis=status_basis)
+
+
+def _entity_recurrence_findings(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> list[AuditFinding]:
+    """`_check_entity_recurrence` without its span, so the store's fallback adds none."""
     if not pages:
         return []
-    resolver = vault_module.WikilinkResolver.from_entries(
-        vault_root, _entity_recurrence_resolution_entries(vault_root, pages).items()
-    )
-    entity_types = entity_types_module.load_entity_types(vault_root)
-    registry = entity_recurrence_module.registry_index(
-        pages, entity_types=entity_types
-    )
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    return [
+        _entity_recurrence_finding(candidate)
+        for candidate in entity_recurrence_module.collect_pages(
+            pages,
+            vault_root=vault_root,
+            entity_types=entity_types_module.load_entity_types(vault_root),
+            indexable=lambda rel_path: access.is_indexable(vault_root, rel_path),
+            make_resolver=_entity_recurrence_resolver(vault_root),
+            attachment_probe=_entity_recurrence_attachment_probe(vault_root),
+            status_basis=status_basis,
+        )
+    ]
 
+
+def _entity_recurrence_resolver(
+    vault_root: Path,
+) -> Callable[[Iterable[tuple[str, str]]], vault_module.WikilinkResolver]:
+    """The I/O-free resolver over the `(path, title)` of the pages one sweep holds."""
+
+    def make_resolver(titles: Iterable[tuple[str, str]]) -> vault_module.WikilinkResolver:
+        return vault_module.WikilinkResolver.from_entries(
+            vault_root, _entity_recurrence_resolution_entries(vault_root, titles).items()
+        )
+
+    return make_resolver
+
+
+def _entity_recurrence_attachment_probe(vault_root: Path) -> Callable[[str], bool]:
     def attachment_probe(target: str) -> bool:
         """Is an ordinary file standing at this suffixed target?
 
@@ -7117,19 +7156,39 @@ def _check_entity_recurrence(
             vault_root, vault_root / target.lstrip("/")
         ) or _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
 
-    return [
-        _entity_recurrence_finding(candidate)
-        for candidate in entity_recurrence_module.collect(
-            pages,
-            vault_root=vault_root,
-            resolver=resolver,
-            registry=registry,
-            entity_types=entity_types,
-            indexable=lambda rel_path: access.is_indexable(vault_root, rel_path),
-            attachment_probe=attachment_probe,
+    return attachment_probe
+
+
+@call_spans.timed("audit.entity_recurrence")
+def _check_entity_recurrence_from_store(
+    vault_root: Path,
+    kb: Path,
+    *,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> list[AuditFinding]:
+    """`_check_entity_recurrence` over persisted evidence of the pages this audience may see.
+
+    The findings are those of the full sweep over `_parse_all`. A store fault runs
+    that sweep instead for this call. The store is dropped only when the fault says the
+    store itself is bad; a busy store belongs to another worker.
+    """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    try:
+        candidates = entity_evidence_module.sweep(
+            vault_root,
+            entity_types=entity_types_module.load_entity_types(vault_root),
             status_basis=status_basis,
+            make_resolver=_entity_recurrence_resolver(vault_root),
+            attachment_probe=_entity_recurrence_attachment_probe(vault_root),
         )
-    ]
+    except entity_evidence_module.StoreFault as fault:
+        log.debug("entity evidence store unusable; running the full sweep", exc_info=True)
+        if fault.reset:
+            entity_evidence_module.reset(vault_root)
+        return _entity_recurrence_findings(
+            vault_root, _parse_all(kb, vault_root), status_basis=status_basis
+        )
+    return [_entity_recurrence_finding(candidate) for candidate in candidates]
 
 
 #: The last proximity sweep per vault. The sweep multiplies every eligible

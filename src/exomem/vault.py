@@ -6949,7 +6949,7 @@ def yaml_flow_list(values: Iterable[Any]) -> str:
 def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
     """Return the scanner protocol's "dir", "md", or None for one entry."""
     try:
-        relative = child.relative_to(vault_root).as_posix()
+        relative = relative_posix(child, vault_root)
     except ValueError:
         return None
     if reserved_paths.classify_logical(relative).blocked:
@@ -6980,6 +6980,20 @@ def walk_vault_md_admits(
     from .find_corpus import walk_entry_admits
 
     return walk_entry_admits(vault_root, path, listings, _walk_vault_md_entry)
+
+
+def relative_posix(path: Path, anchor: Path) -> str:
+    """`path.relative_to(anchor).as_posix()`, cheaply for a path a walk built under `anchor`.
+
+    `relative_to` builds every parent of `path` to test containment, which dominates
+    a whole-vault walk. A walk's child spells its anchor exactly, so slicing the
+    string gives the same answer; any other path takes `relative_to` itself.
+    """
+    text, base = str(path), str(anchor)
+    if base and not base.endswith(os.sep) and text.startswith(base + os.sep):
+        relative = text[len(base) + 1 :]
+        return relative if os.sep == "/" else relative.replace(os.sep, "/")
+    return path.relative_to(anchor).as_posix()
 
 
 def walk_vault_md(vault_root: Path):

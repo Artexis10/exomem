@@ -8,6 +8,7 @@ substitute for the held-handle operation that consumes the target.
 from __future__ import annotations
 
 import errno
+import functools
 import hashlib
 import io
 import logging
@@ -2575,6 +2576,19 @@ def _normalized_parts(
 def classify_logical(value: object) -> PathClassification:
     """Classify one KB-relative or vault-prefixed spelling without touching disk."""
 
+    if type(value) is str:
+        return _classify_logical_text(value, kb_dirname(), id(_REGISTRY))
+    return _classify_logical(value)
+
+
+# A whole-vault walk classifies every entry, and the answer depends only on the
+# spelling, the KB folder name and the registry, which the key carries.
+@functools.lru_cache(maxsize=65_536)
+def _classify_logical_text(value: str, _kb: str, _registry_id: int) -> PathClassification:
+    return _classify_logical(value)
+
+
+def _classify_logical(value: object) -> PathClassification:
     parts = _normalized_parts(value)
     if isinstance(parts, PathClassification):
         return parts
