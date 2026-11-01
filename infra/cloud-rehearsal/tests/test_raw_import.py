@@ -255,3 +255,23 @@ def test_a_jobs_only_wait_stops_on_an_idle_queue_instead_of_waiting_out_the_dead
     assert (waited["converged"], waited["idle_means"], session.calls) == (True, "jobs", 2)
     full = asyncio.run(raw_import.drive.wait_for_media(_IdleQueueUndrainedIndex(), "first", 0))
     assert (full["converged"], full["idle_means"]) == (False, "jobs-and-index")
+
+
+# --- raw originals: the Cloud copy holds no placed copy of the collection ----------------------
+
+
+def test_a_text_original_is_compared_with_the_generated_collection_when_the_vault_holds_no_copy(tmp_path):
+    import hashlib
+
+    body = b"field log 0042: tide at 3.1 m\n"
+    item = {"path": "dump/log-0042.txt", "sha256": hashlib.sha256(body).hexdigest(), "form": "text", "bytes": len(body)}
+    vault, originals = tmp_path / "vault", tmp_path / "collection"
+    page = "Knowledge Base/Sources/Imported/log-0042.md"
+    (vault / page).parent.mkdir(parents=True)
+    (vault / page).write_bytes(b"# log-0042\n\n" + body)
+    (originals / "dump").mkdir(parents=True)
+    (originals / item["path"]).write_bytes(body)
+    scan = {"media_files": {}}
+    held = raw_import.score.original_bytes_held
+    assert held(item, [page], scan, vault, "_Imports/abc", 4096) == "unknown"
+    assert held(item, [page], scan, vault, "_Imports/abc", 4096, originals) == "text"

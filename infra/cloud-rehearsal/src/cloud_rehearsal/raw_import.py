@@ -392,10 +392,14 @@ def run_scorer(plan: RawImportPlan, script: str, *arguments: str) -> None:
     run([str(plan.python), str(BENCH / script), *arguments], timeout=SCORE_TIMEOUT_S)
 
 
-def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path) -> dict[str, Any] | None:
-    """Run `score.py` on a finished vault. `None` when it did not finish: the arm is then unknown, not zero."""
+def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path, originals: Path | None = None) -> dict[str, Any] | None:
+    """Run `score.py` on a finished vault. `None` when it did not finish: the arm is then unknown, not zero.
+
+    A Cloud copy holds no placed copy of the collection (the import consumes its stage), so `originals` names the
+    generated collection that the scorer compares text originals with."""
     try:
-        run_scorer(plan, "score.py", "--key", str(key), "--drive-log", str(log), "--out", str(out), "--python", str(plan.python))
+        run_scorer(plan, "score.py", "--key", str(key), "--drive-log", str(log), "--out", str(out), "--python", str(plan.python),
+                   *(["--originals", str(originals)] if originals else []))
     except CommandFailed as error:
         out.with_suffix(".failure.txt").write_text(f"{error}\n{error.stdout[-2000:]}\n{error.stderr[-2000:]}")
         return None
@@ -540,7 +544,7 @@ def write_drive_log(plan: RawImportPlan, name: str, session: Any, adopted: Mappi
 
 
 async def score_cloud_vault(ctx: Context, plan: RawImportPlan, tenant: Tenant, session: Any, adopted: Mapping[str, Any],
-                            key: Path, name: str, vault: Path) -> dict[str, Any]:
+                            key: Path, name: str, vault: Path, *, originals: Path) -> dict[str, Any]:
     """Copy the vault out, tell the scorer where the product wrote each original, and score it.
 
     The snapshot is taken before `score.py` runs, because the scorer's own server may still rewrite pages."""
@@ -551,7 +555,7 @@ async def score_cloud_vault(ctx: Context, plan: RawImportPlan, tenant: Tenant, s
     values = [page["front"]["imported_from"] for page in scan["pages"].values() if isinstance(page["front"].get("imported_from"), str)]
     prefix = imported_from_prefix(values, key_paths)
     log = write_drive_log(plan, name, session, adopted, vault, plan.root / f"cloud-{name}-state", prefix or adopted["stage_path"])
-    metrics = await asyncio.to_thread(score_vault, plan, key, log, plan.root / f"cloud-{name}.metrics.json")
+    metrics = await asyncio.to_thread(score_vault, plan, key, log, plan.root / f"cloud-{name}.metrics.json", originals)
     return {"vault_copy": copied, "imported_from_prefix": prefix, "metrics": metrics, "snapshot": snapshot}
 
 
@@ -604,7 +608,8 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         # Target 1: tenant A's fresh vault.
         session = await connect(ctx.a)
         adopted = await adopt(ctx, plan, ctx.a, session, collection, "new", MAIN_LABEL, initialize_kb=True)
-        scored = await score_cloud_vault(ctx, plan, ctx.a, session, adopted, key_path, "new", plan.root / "cloud-new-vault")
+        scored = await score_cloud_vault(ctx, plan, ctx.a, session, adopted, key_path, "new", plan.root / "cloud-new-vault",
+                                           originals=collection)
         cloud_metrics = scored["metrics"] or {}
         groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
         gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], jobs_idle=adopted["jobs_idle"]), *local_gaps]
@@ -624,7 +629,8 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         earlier_gaps = baseline_gaps(earlier_adopted, earlier_landed)
         session.calls.clear()
         adopted = await adopt(ctx, plan, ctx.b, session, collection, "existing", MAIN_LABEL, initialize_kb=False)
-        scored = await score_cloud_vault(ctx, plan, ctx.b, session, adopted, key_path, "existing", plan.root / "cloud-existing-vault")
+        scored = await score_cloud_vault(ctx, plan, ctx.b, session, adopted, key_path, "existing", plan.root / "cloud-existing-vault",
+                                           originals=collection)
         after = scored["snapshot"]
         page_problems = check_existing_pages(before, after) if before.sourced else None
         cloud_metrics = scored["metrics"] or {}
