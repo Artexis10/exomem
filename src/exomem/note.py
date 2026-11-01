@@ -95,6 +95,7 @@ from .vault import (
     rotate_log_if_needed,
     unique_path,
     writer_link_visibility,
+    yaml_flow_list,
     yaml_scalar,
 )
 from .vocabulary.registry import RegistryError
@@ -1531,7 +1532,7 @@ def _render_note(
 
     # Plural projects: insight, failure, pattern, production-log.
     if note_type in ("insight", "failure", "pattern", "production-log") and projects:
-        lines.append("projects: [" + ", ".join(projects) + "]")
+        lines.append("projects: " + yaml_flow_list(projects))
 
     # Optional categorical fields.
     if note_type == "failure" and severity:
@@ -1540,7 +1541,7 @@ def _render_note(
         lines.append(f"pattern_type: {pattern_type}")
 
     if tags:
-        lines.append("tags: [" + ", ".join(tags) + "]")
+        lines.append("tags: " + yaml_flow_list(tags))
     else:
         lines.append("tags: []")
     lines.append("---")

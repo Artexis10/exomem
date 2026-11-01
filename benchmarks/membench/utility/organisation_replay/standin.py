@@ -7,8 +7,9 @@ reads, starts the tapped server and runs the hooks those settings wire at the
 points the client runs them: ``SessionStart`` at startup, ``UserPromptSubmit``
 before each turn, ``Stop`` after each answer and ``SessionEnd`` at exit. It
 reports each hook's lifecycle but never acts on a hook's decision. Per user
-turn it makes a fixed script of calls: one search, and on the second turn one
-governed note write. It prints the stream-json events the executor parses.
+turn it makes a fixed script of calls: one activation, as the shipped workflow
+opens a turn, then one search, and on the second turn one governed note write.
+It prints the stream-json events the executor parses.
 Every answer it gives says it is a stand-in.
 """
 
@@ -130,6 +131,7 @@ def _call(server: _Server, doors, command: str, arguments: dict) -> dict:
 
 
 def _turn(server: _Server, doors, index: int, prompt: str, seen: list[str]) -> str:
+    _call(server, doors, "recall_context", {"turn": prompt})
     found = _call(server, doors, "ask_memory", {"query": prompt})
     hits = (
         (found.get("result") or {}).get("hits")

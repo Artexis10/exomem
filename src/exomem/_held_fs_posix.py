@@ -324,6 +324,9 @@ class PosixHeldFile(HeldFile):
 
 
 class PosixHeldFilesystem(HeldFilesystem):
+    # ``rename`` fsyncs its source and destination parents, ``unlink_directory`` its parent.
+    name_changes_flush_parents = True
+
     def __init__(self, descriptor: int, capabilities: Capabilities) -> None:
         self.descriptor = descriptor
         self.capabilities = capabilities

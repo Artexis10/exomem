@@ -2880,3 +2880,33 @@ def test_switched_off_engine_waits_with_a_pending_sidecar_and_no_job(
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr,documents")
     assert media_worker.MediaWorker(vault, execution_mode="process").scan_pending() == 1
     assert media_jobs.status(vault)["counts"]["pending"] == 1
+
+
+@pytest.mark.parametrize("written_by", ["capture", "hand"])
+def test_a_date_shaped_tag_keeps_the_captured_source_through_processing(
+    vault: Path, source_schema, tmp_path: Path, written_by: str,
+):
+    """A tag such as `2026-10-24` reads back as a date. That used to make reconciliation reject
+    the pending Source and rebuild it as a bare sidecar, losing its title, kind and tags."""
+    from exomem import add, preserve
+
+    staged = tmp_path / "speaker-labelled-transcript.txt"
+    staged.write_text("Speaker 1: the budget review moves to Friday\n")
+    captured = add.add(vault, source_schema, title="Weekly sync transcript", content="",
+                       source_type="session", tags=["meeting", "2026-10-24"],
+                       artifact=add.SourceArtifact(staged, staged.name, "text/plain"))
+    binary, page = vault / captured.artifact_path, vault / captured.path
+    if written_by == "hand":
+        # As a person or another editor writes it: the date-shaped tag without quotes.
+        page.write_text(page.read_text().replace('"2026-10-24"', "2026-10-24"))
+        assert "tags: [meeting, 2026-10-24]" in page.read_text()
+
+    assert _media_processing().reconcile_media(vault, binary, explicit=False).state == "pending"
+    preserve.update_sidecar_extraction(vault, page, text="Speaker 1: the budget review", engine="text")
+
+    fields, body, _ = vault_module.parse_frontmatter(page.read_text())
+    assert fields["title"] == "Weekly sync transcript"
+    assert fields["source_type"] == "session"
+    assert [str(tag) for tag in fields["tags"]] == ["meeting", "2026-10-24"]
+    assert fields["processing_state"] == "completed"
+    assert "Speaker 1: the budget review" in body

@@ -59,6 +59,7 @@ from .vault import (
     resolve_filename_slug,
     split_wikilink_target,
     writer_link_visibility,
+    yaml_flow_list,
     yaml_scalar,
 )
 
@@ -363,7 +364,7 @@ def _render_entity(
         if not value:
             continue
         if isinstance(value, list):
-            lines.append(f"{field}: [" + ", ".join(value) + "]")
+            lines.append(f"{field}: " + yaml_flow_list(value))
         else:
             lines.append(f"{field}: {value}")
     # Declared facets, already validated and normalized: (name, values, multi).
@@ -374,7 +375,7 @@ def _render_entity(
             lines.append(f"{field}: {yaml_scalar(values[0])}")
 
     if tags:
-        lines.append("tags: [" + ", ".join(tags) + "]")
+        lines.append("tags: " + yaml_flow_list(tags))
     else:
         lines.append("tags: []")
     lines.append("---")

@@ -1811,6 +1811,11 @@ def evict_corpus_context(vault_root: Path) -> bool:
         return _forget_corpus_entry_locked(cache_key)
 
 
+# The decline reason for a proof whose checkpoint moved while it ran;
+# `find.writer_resolver_snapshot` retries on it, so it lives in one place.
+CHANGED_DURING_PROOF = "changed_during_proof"
+
+
 def current_reference_identity_snapshot(
     vault_root: Path,
     *,
@@ -1861,7 +1866,7 @@ def current_reference_identity_snapshot(
                 entry[1],
             )
         if not tolerate_external_pending and freshness.external_pending(root):
-            return decline("changed_during_proof")
+            return decline(CHANGED_DURING_PROOF)
         return snapshot
 
 
@@ -1985,7 +1990,7 @@ def current_writer_resolver_entries(
             or not freshness.is_live(root, "vault")
             or freshness.consumer_checkpoint(root, "vault") != checkpoint
         ):
-            return decline("changed_during_proof")
+            return decline(CHANGED_DURING_PROOF)
         with _CORPUS_CONTEXT_CACHE_LOCK:
             current = _CORPUS_CONTEXT_CACHE.get(cache_key)
             if (
@@ -1995,7 +2000,7 @@ def current_writer_resolver_entries(
                 and _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key) == language_hash
             ):
                 return entries
-            return decline("changed_during_proof")
+            return decline(CHANGED_DURING_PROOF)
 
 
 def _resolve_reference_wikilink_from_context(
@@ -5404,6 +5409,10 @@ def _page_rule_findings(
     return findings
 
 
+# The rule that owns a page's relation disposition; a review answers its findings.
+RELATION_DISPOSITION_RULE: tuple[str, str, str] = ("relations", "*", "disposition")
+
+
 def _disposition_finding(
     page: SemanticPageState,
     disposition: RelationDisposition,
@@ -5457,7 +5466,7 @@ def _disposition_finding(
             )
         ),
         governed_element_identity=("relations", "disposition"),
-        resolved_rule=("relations", "*", "disposition"),
+        resolved_rule=RELATION_DISPOSITION_RULE,
     )
 
 
@@ -5788,7 +5797,7 @@ def evaluate(
         blocking = tuple(item for item in errors if item.key in new_error_keys)
     if invalidated_disposition:
         disposition_errors = tuple(
-            item for item in errors if item.resolved_rule == ("relations", "*", "disposition")
+            item for item in errors if item.resolved_rule == RELATION_DISPOSITION_RULE
         )
         blocking = tuple(sorted({*blocking, *disposition_errors}, key=_finding_sort_key))
     if mode == "posthoc":

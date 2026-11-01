@@ -3015,6 +3015,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "work-item": True,
             "propose": False,
             "apply-proposal": False,
+            "acknowledge": False,
         },
         ("process_media", "operation"): {
             "process": False,

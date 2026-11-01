@@ -283,3 +283,34 @@ def test_quiet_cold_find_matches_warm_cache_find(vault: Path, monkeypatch) -> No
     warm = find_module.find(vault, query="metabolism", mode="hybrid", limit=10)
 
     assert [h.path for h in cold] == [h.path for h in warm]
+
+
+def test_recall_projection_paths_relativize_as_path_does(tmp_path: Path) -> None:
+    """The string slice of a normalised spelling gives what `Path` gives for every spelling, and a path
+    outside the vault stays out of the allowlist: a divergence would admit or drop a semantic-search parent."""
+    root = (tmp_path / "vault").absolute()
+    base = str(root)
+    spellings = [
+        f"{base}/Knowledge Base/note.md",
+        f"{base}/Knowledge Base/a b/ü.md",
+        f"{base}//Knowledge Base/note.md",
+        f"{base}/Knowledge Base/./note.md",
+        f"{base}/Knowledge Base/../Knowledge Base/note.md",
+        f"{base}/Knowledge Base/.hidden.md",
+        f"{base}/Knowledge Base/dir/",
+        f"{base}/Knowledge Base/back\\slash.md",
+        f"{base}x/Knowledge Base/note.md",
+        f"{base}/",
+        base,
+        str(tmp_path / "elsewhere" / "note.md"),
+        "Knowledge Base/relative.md",
+    ]
+
+    def by_path(raw: str) -> set[str]:
+        try:
+            return {Path(raw).absolute().relative_to(root).as_posix()}
+        except (OSError, ValueError):
+            return set()
+
+    assert find_module._relative_to_root(spellings, root) == set().union(*map(by_path, spellings))
+    assert find_module._relative_to_root(["/x/note.md", "/note.md"], Path("/")) == {"x/note.md", "note.md"}

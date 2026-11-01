@@ -868,6 +868,78 @@ def test_a_commit_that_stays_busy_is_committed_again_by_the_server_under_the_tra
     assert [(seen.surface, seen.resolved) for seen in principals] == [("transfer", False)]
 
 
+def test_a_session_commit_waiting_on_the_boundary_does_not_refuse_a_request_write(
+    vault, monkeypatch
+) -> None:
+    """One waiting upload commit filled the only waiter slot, so a request's keyed write was refused."""
+    from exomem import commands, mutation_lock, writer_lease
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "2")  # one waiter slot for request workers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "30")
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 120.0)  # never fires here
+    client = _client(vault, monkeypatch)
+    data = b'{"samples": [{"heart_rate": 62}]}'
+    episode = next(c for c in commands.product_commands_for("mcp") if c.name == "episode_memory")
+    results: list = []
+    failures: list[BaseException] = []
+
+    def keyed_write() -> None:
+        try:
+            with request_scope(owner_principal(surface="mcp")):
+                results.append(
+                    writer_lease.get_manager().invoke(
+                        episode,
+                        (vault, schema_module.load_source_schema(vault)),
+                        {
+                            "action": "record",
+                            "episode": "ep-" + "ab" * 16,
+                            "subject": "Harbor Lamp purchase",
+                            "summary": "Chose the brass lamp; delivery date still open.",
+                            "decided": ["Buy the brass Harbor Lamp"],
+                        },
+                        idempotency_key="request-write-key",
+                    )
+                )
+        except BaseException as error:  # noqa: BLE001 - the code of the refusal is the finding
+            failures.append(error)
+
+    with held_boundary(vault, monkeypatch, release_when_refused=False) as held:
+        refusals: dict[int, int] = {}
+        counted = mutation_lock.VaultMutationCoordinator._refused
+
+        def count_by_thread(coordinator, wait_start):
+            refusals[threading.get_ident()] = refusals.get(threading.get_ident(), 0) + 1
+            return counted(coordinator, wait_start)
+
+        monkeypatch.setattr(mutation_lock.VaultMutationCoordinator, "_refused", count_by_thread)
+        location, secret = _create(client, data)
+        assert _patch(client, location, secret, 0, data).status_code == 204
+        # Two refusals on one thread: the session commit holds its place in line.
+        _wait_for(lambda: any(count >= 2 for count in list(refusals.values())), "the commit waiting in line")
+        commit_thread = next(ident for ident, count in list(refusals.items()) if count >= 2)
+        writer = threading.Thread(target=keyed_write)
+        writer.start()
+        # Without a slot the writer is refused as full and ends at once; with one it waits in line.
+        deadline = time.monotonic() + 10
+        while writer.is_alive() and time.monotonic() < deadline:
+            if any(ident not in (commit_thread,) and count for ident, count in list(refusals.items())):
+                break
+            time.sleep(0.05)
+        held.release.set()
+        writer.join(30)
+
+    assert failures == [], f"the request's write was refused instead of waiting: {failures!r}"
+    assert len(results) == 1
+    session_id = location.rsplit("/", 1)[1]
+    _wait_for(
+        lambda: upload_sessions.open_session(vault, session_id, secret).record["state"]
+        == upload_sessions.COMMITTED,
+        "the session commit",
+    )
+
+
 def test_a_busy_session_has_one_re_attempt_waiting_and_a_cancelled_one_has_none(vault, monkeypatch) -> None:
     """Two waiting timers would each commit again; a cancelled session must not be committed."""
     monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 120.0)  # never fires here

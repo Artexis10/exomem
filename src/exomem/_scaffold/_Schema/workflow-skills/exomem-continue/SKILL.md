@@ -2,7 +2,7 @@
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
 metadata:
-  skill_contract: ff271b5f9d4b47c4b7edc6704f7aba75a30697657b7feeef09bf74a01adab35a
+  skill_contract: 9ecee323901d7b4e9af30b448d78e4bfefc13f8867a04bd3755bc9457ef50ec5
   version: "0.1.0"
 ---
 
@@ -48,9 +48,7 @@ identity after an uncertain commit.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
-joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
-them), or choose no edge. Durable recurring
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
 meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 

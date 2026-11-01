@@ -93,6 +93,7 @@ from . import (
 )
 from . import freshness as freshness_module
 from . import get_page as get_page_module
+from . import import_windows as import_windows_module
 from . import knowledge_packs as knowledge_packs_module
 from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
@@ -7472,13 +7473,18 @@ def _op_activate_context_body(
         if working_set_module.budget_exhausted("working_set.catalogue"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
 
-        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
-            """What the turn's own words reached: the guarded anchors compile, run for the user turn alone,
-            over the map's caller view.
+        # What the slice's compile read of the request's conversation; `absent` until one does.
+        slice_conversation = working_set_conversation_module.ABSENT
 
-            It carries no thread and no `anchor`, and mints, learns and records nothing: the map's
-            continuity token encodes no anchor. A stage it cannot run is a state of the slice.
+        def slice_leads(caller: context_views_module.CallerView) -> context_views_module.TurnLeads:
+            """What the turn and its conversation reached: the guarded anchors compile, run for the user turn
+            and the request's conversation over the map's caller view.
+
+            It carries no continuity refs, no thread, no `anchor` and no attribution, and mints, learns and
+            records nothing: the map's continuity token encodes no anchor. A stage it cannot run is a state of
+            the slice.
             """
+            nonlocal slice_conversation
             if not turn.strip():
                 return context_views_module.TurnLeads(context_views_module.SLICE_EMPTY)
             # The resolver weighs a name against every anchor it is given, so a restricted caller is given
@@ -7502,10 +7508,14 @@ def _op_activate_context_body(
                         evidence_stamp=evidence_stamp,
                     ),
                     abstain=_abstain,
+                    trigger=trigger,
+                    conversation=conversation,
                     caller=caller,
                 )
             # Served or abstained, before `serve` or inside it: `turn_leads` alone turns the outcome into a state.
-            return context_views_module.turn_leads(compiled.packet)
+            leads = context_views_module.turn_leads(compiled.packet)
+            slice_conversation = leads.conversation
+            return leads
 
         # The map generation the caller holds. A token from anchors mode, an older one or a malformed one
         # carries none, and the caller then gets the whole map.
@@ -7536,7 +7546,13 @@ def _op_activate_context_body(
             return _abstain(activation_result_module.UNAVAILABLE)
         _withhold_vault_generation(vault_root, packet)
         packet["generation"]["continuity_thread"] = "absent"
-        packet["generation"]["conversation"] = working_set_conversation_module.ABSENT
+        packet["generation"]["conversation"] = slice_conversation
+        if not packet.get("abstained"):
+            packet["generation"]["continuity"] = working_set_runtime_module.maps_continuity_state(
+                continuity,
+                roles_hash=packet["generation"]["roles_hash"],
+                conventions_hash=packet["generation"]["conventions_hash"],
+            )
         map_generation = packet["generation"].get("map_generation")
         if map_generation is not None and not packet.get("abstained"):
             # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
@@ -10670,7 +10686,7 @@ def op_adopt_vault(
     return _carrying_batch_advisories(vault_root, result)
 
 
-_ADOPTION_STUDIO_ACTIONS = (
+_ADOPTION_STUDIO_ACTIONS = (  # nosemgrep: ep-word-set -- the CLI's own action names, a closed set that this module implements
     "start",
     "status",
     "select",
@@ -10681,6 +10697,7 @@ _ADOPTION_STUDIO_ACTIONS = (
     "work-item",
     "propose",
     "apply-proposal",
+    "acknowledge",
 )
 
 
@@ -10724,6 +10741,10 @@ def op_adoption_studio(
     expected_hash: str | None = None,
     after: str | None = None,
     consume: bool = True,
+    series_id: str | None = None,
+    next_window_bytes: int | None = None,
+    import_id: str | None = None,
+    paths: list[str] | None = None,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -10734,15 +10755,17 @@ def op_adoption_studio(
     drafts notes under own-note rules; cancel closes pre-apply; finish reports
     recall and coverage. Resume plan/apply with `continuation`.
     work-item reads context; propose submits; apply-proposal approves.
+    acknowledge is the person's decision: it ends the keep-source warning for paths
+    of a window's "discarded, not filed" record; no tool undoes it.
+    Status without run_id reports windows, budgets and the file limit (`unknown`
+    is not zero); keep the source while `keep_source.keep` is true.
     Details: references/operations.md.
 
     Args:
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
-        path: For `start`, scan subtree (default: whole vault; ask which folder).
-            For run-listing
-            `status`, count distinct filed originals under it (null with
-            `complete=false` if incomplete). Omit for legacy listing.
+        path: For `start`, subtree (default: whole vault; ask which folder).
+            For `status`, count filed originals under it.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
@@ -10762,14 +10785,20 @@ def op_adoption_studio(
         expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
-        after: For `start`, a reply's `next_after`.
+        after: For `start` or `status`, the last same-action reply's `next_after`.
         consume: For `start`, false keeps staged copies.
+        series_id: Sender only: for `status`, a series needing room.
+        next_window_bytes: Sender only: that window's bytes.
+        import_id: For `acknowledge`, the discarded window.
+        paths: For `acknowledge`: only paths the person confirmed they need no
+            longer keep. Ends their keep-source warning; no tool undoes it. A call
+            with none is refused.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
         raise ValueError(
             "INVALID_MODE: adoption_studio action must be start, status, select, "
-            "plan, apply, cancel, finish, work-item, propose, or apply-proposal"
+            "plan, apply, cancel, finish, work-item, propose, apply-proposal, or acknowledge"
         )
     try:
         if action == "start":
@@ -10778,7 +10807,16 @@ def op_adoption_studio(
                 initialize_kb=initialize_kb, collection=collection, after=after, consume=consume,
             )
         if action == "status":
-            return adoption_run_module.status(vault_root, run_id=run_id, path=path)
+            if run_id and (after is not None or series_id is not None or next_window_bytes is not None):
+                raise adoption_run_module.AdoptionRunError(
+                    "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
+            listing = adoption_run_module.status(vault_root, run_id=run_id, path=path)
+            if run_id:
+                return listing
+            return {**listing, **import_windows_module.report(
+                vault_root, after=after, series_id=series_id, next_window_bytes=next_window_bytes)}
+        if action == "acknowledge":
+            return import_windows_module.acknowledge(vault_root, import_id, paths)
         if action == "select":
             return adoption_run_module.select(
                 vault_root,
@@ -10855,7 +10893,7 @@ def op_observe_transfer(
     action: Literal["status", "import_handoff"] = "status",
     import_id: str | None = None,
 ) -> dict:
-    """Check or start moving material into or out of this Exomem Cloud memory.
+    """Check imports into and exports out of this Exomem Cloud memory, and how to send files.
 
     Read-only. The Cloud gateway answers from your account, not this vault. It never
     returns file bytes, upload URLs or download links.
@@ -14113,7 +14151,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _M,
         (),
         {
-            "public_title": "Check or start an import or export",
+            "public_title": "Check an import or export",
             "surface": "advanced",
             "actions": ("adopt",),
             "first_run_safe": True,

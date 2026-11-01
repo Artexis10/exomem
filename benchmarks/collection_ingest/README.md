@@ -80,7 +80,7 @@ Every raw file is a key item with `kind: raw`, a class, the form the contract gi
 sha256 and a probe phrase. The key states one outcome per item:
 
 - `filed`: the item has a page. The Source page is the page that the scorer counts, also when an include rule makes an own note.
-- `filed-or-refused`: the item has a page, or a refusal that carries a code. The key names no code. The scorer accepts any code and reports the one it saw in `raw.by_class.<class>.refused_by_code`. Only the backslash name has this outcome.
+- `filed-or-refused`: the item has a page, or a refusal that carries a code. The key names no code. The scorer accepts any code and reports the one it saw in `raw.by_class.<class>.refused_by_code`. The backslash name and the name in a folder that ends with a space have this outcome.
 
 An item with neither is `lost`. "Readable" means that `search_memory` with the probe phrase
 returns the item's own page in the top 5. The key marks a probe `promised` when the contract

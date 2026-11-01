@@ -40,9 +40,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Remote maintenance jobs add the fix, backfill-ids and reconcile write variants, the job status and cancel
 # variants, the receipt's page cursor, and the adopt-local write variant, so the budget rises 2,000 B and
 # remote clients keep the maintenance that local clients have.
+# The windows status adds `series_id`, `next_window_bytes` and the `after` cursor to read_import, and the
+# acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
 # The generic-relation wording on the write tools needs 50 B more once both changes are in, so the budget
 # rises 50 B.
-TOTAL_BUDGET = 164_550
+TOTAL_BUDGET = 165_300
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -51,7 +53,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3350,
-    "import_memory": 5850,
+    "import_memory": 6100,
     "change_connections": 3250,
     "change_files": 7100,
     "change_governance": 4650,
@@ -81,7 +83,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_import": 2150,
+    "read_import": 2550,
     "read_connections": 3300,
     "read_episode": 1500,
     "read_governance": 2250,

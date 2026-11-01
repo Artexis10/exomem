@@ -14,6 +14,7 @@ def test_hosted_infrastructure_surfaces_and_ownership_are_explicit() -> None:
     required = (
         "terraform/foundation",
         "terraform/durability",
+        "terraform/cell-data",
         "terraform/bootstrap",
         "ansible",
         "helm/platform",
@@ -37,7 +38,7 @@ def test_tool_versions_are_exact_and_required_provider_versions_are_exact() -> N
     assert versions["HCLOUD_CSI_CHART_VERSION"] == "2.21.1"
     assert all(value and not any(token in value for token in ("latest", "*", ">", "~")) for value in versions.values())
 
-    for root in ("foundation", "durability"):
+    for root in ("foundation", "durability", "cell-data"):
         required = (INFRA / "terraform" / root / "versions.tf").read_text(encoding="utf-8")
         assert 'required_version = "= 1.15.8"' in required
         assert "~>" not in required

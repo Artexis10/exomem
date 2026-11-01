@@ -46,6 +46,27 @@ resource "tfe_workspace_settings" "durability" {
   assessments_enabled  = false
 }
 
+resource "tfe_workspace" "cell_data" {
+  name                  = "exomem-hosted-cell-data"
+  organization          = var.hcp_organization
+  project_id            = tfe_project.hosted.id
+  description           = "Local-execution state authority for B2 cell-data member account resources."
+  terraform_version     = var.terraform_version
+  queue_all_runs        = false
+  file_triggers_enabled = false
+  allow_destroy_plan    = false
+  force_delete          = false
+}
+
+resource "tfe_workspace_settings" "cell_data" {
+  workspace_id         = tfe_workspace.cell_data.id
+  execution_mode       = "local"
+  global_remote_state  = false
+  project_remote_state = false
+  auto_apply           = false
+  assessments_enabled  = false
+}
+
 resource "tfe_workspace" "backend_proof" {
   name                  = "exomem-hosted-backend-proof"
   organization          = var.hcp_organization

@@ -1474,6 +1474,41 @@ def recheck_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> None:
         guard.recheck(vault_root, verified)
 
 
+def any_guard_changed(
+    vault_root: Path, guards: Iterable[PathGuard | DirectoryCensusGuard]
+) -> bool:
+    """Whether any of `guards` no longer holds."""
+    try:
+        for guard in guards:
+            guard.recheck(vault_root)
+    except PathGuardError:
+        return True
+    return False
+
+
+def refuse_busy_if_planned_write_moved(
+    vault_root: Path,
+    basis: Iterable[PathGuard | DirectoryCensusGuard],
+    planned: Iterable[PlannedWrite],
+) -> None:
+    """After a refused batch, report a moved planned auxiliary as retryable busy.
+
+    Navigation auxiliaries (index, subindexes, log) are planned before the boundary is
+    taken, so a writer outside the line can change one while this write waits. The refused
+    batch rolled back and the boundary is still held. Raise busy only on positive evidence:
+    no guard of the write's own `basis` changed and a guard of a `planned` auxiliary no
+    longer holds. Otherwise return, so the caller keeps its own error: a refusal with no
+    moved guard (a full disk, a read-only folder, a residue limit) is not a race.
+    """
+    basis = tuple(basis)
+    if any_guard_changed(vault_root, basis):
+        return
+    if any_guard_changed(vault_root, (w.guard for w in planned if w.guard is not None)):
+        from .mutation_lock import planned_write_moved_busy
+
+        raise planned_write_moved_busy()
+
+
 def stat_generation(info: os.stat_result) -> tuple[int, int, int]:
     """The (size, mtime, ctime) triple that moves whenever a file's bytes are written."""
     return info.st_size, info.st_mtime_ns, info.st_ctime_ns
@@ -6893,6 +6928,15 @@ def yaml_scalar(value: Any) -> str:
 _yaml_scalar = yaml_scalar
 
 
+def yaml_flow_list(values: Iterable[Any]) -> str:
+    """Render a flow sequence whose items read back as the strings written.
+
+    An unquoted item such as `2026-10-24` or `true` reads back as a date or a
+    boolean, and readers that expect a list of strings then reject the page.
+    """
+    return "[" + ", ".join(yaml_scalar(value) for value in values) + "]"
+
+
 def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
     """Return the scanner protocol's "dir", "md", or None for one entry."""
     try:
@@ -7882,7 +7926,7 @@ class WikilinkResolver:
 
         Mirrors `_build`'s historical per-file body exactly: the path + stem
         edges are added even for an unreadable file (title read failed), the
-        title edge only when a non-empty frontmatter `title:` was read.
+        title edge only when a display title (`resolve_display_title`) was read.
         """
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)

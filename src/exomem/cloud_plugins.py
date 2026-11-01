@@ -97,8 +97,9 @@ def _claude_hooks(root: Path, target: Path) -> None:
         # are unused here and their computed paths block directory validation.
         filename = f"exomem_{stem.replace('-', '_')}.py"
         shutil.copyfile(root / "src/exomem/_hooks" / filename, hooks / filename)
-    # Local credential readers are a separate self-hosted dependency. Native-MCP
-    # hook paths never load it, so it has no place in the Cloud archive.
+    # The self-hosted credential module reads local credentials and builds the
+    # authenticated REST requests. The hooks load it only when it is deployed,
+    # so the Cloud archive omits it.
     events = (
         ("UserPromptSubmit", "retrieve-nudge", None),
         ("Stop", "capture-nudge", None),
@@ -170,9 +171,10 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "MCP tool arguments, including user turns sent to `recall_context`, reach "
             "the authenticated Exomem Cloud service. Reads return authorized account "
             "content; successful writes persist governed memory in that account. OAuth "
-            "selects the account. This package does not import a local vault, read local "
-            "service credentials, or share authorization between accounts. Your AI "
-            "provider also processes the conversation and tool results under its policies.\n\n"
+            "selects the account, and this package reaches Exomem only through that "
+            "admitted MCP connection. It does not import a local vault or share "
+            "authorization between accounts. Your AI provider also processes the "
+            "conversation and tool results under its policies.\n\n"
             "## Surface support\n\n"
             "Skills and the remote MCP connector carry the portable operating contract. "
             + (
@@ -200,8 +202,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     "hooks through the normal client approval flow. They invoke canonical "
                     "Python scripts directly and require a real `python3` executable on "
                     "the execution host; Python dependencies are not installed "
-                    "by this package. Hooks use the admitted MCP connection, never a local "
-                    "service credential. Retrieval requests context activation; capture "
+                    "by this package. Hooks use only the admitted MCP connection. "
+                    "Retrieval requests context activation; capture "
                     "asks the assistant to preserve governed outcomes. Neither bypasses "
                     "the live server's write policy. Local hooks inspect the client "
                     "transcript and workspace metadata for cadence and structural "

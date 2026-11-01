@@ -17,6 +17,6 @@
 
 ## 4. Proof and closure
 
-- [ ] 4.1 On a disposable vault copy with its own state root, a second process holds the boundary for 4 s while clients write over MCP, REST, `/upload` and tus: no busy refusal, every write committed once, and a blind unkeyed REST resend after a dropped reply attaches.
+- [ ] 4.1 On a disposable vault with its own state root, a second process holds the boundary for 4 s while clients write over MCP (no explicit key), REST with an `Idempotency-Key`, a Studio action, the CLI, `/upload` and tus: no busy refusal, and every write committed once. A REST write without a key is refused with a retryable `MUTATION_BUSY` after one bounded acquire wait, and the refusal journal holds one row for it.
 - [ ] 4.2 After release, the caller-visible refusal journal shows no busy refusals caused by ordinary contention on the personal service.
 - [ ] 4.3 Sync the delta into `openspec/specs/hosted-mutation-safety/spec.md`, archive with `openspec archive absorb-transient-write-busy`, and run `openspec validate --all --strict` before and after.
