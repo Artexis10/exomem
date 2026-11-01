@@ -33,6 +33,8 @@ class Scenario:
     checks: tuple[dict, ...]
     criteria: tuple[dict, ...]
     fake_commands: dict[str, str] = field(default_factory=dict)
+    # A folder the prompt names, created in the run's working directory so a shell agent finds it.
+    source_folder: str | None = None
 
 
 def load_scenario(path: Path) -> Scenario:
@@ -48,6 +50,7 @@ def load_scenario(path: Path) -> Scenario:
         checks=tuple(raw.get("checks", ())),
         criteria=tuple(raw.get("criteria", ())),
         fake_commands=dict(raw.get("fake_commands", {})),
+        source_folder=raw.get("source_folder"),
     )
 
 

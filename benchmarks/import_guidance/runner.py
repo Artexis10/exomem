@@ -196,6 +196,10 @@ def run_once(
     empty_mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
     bin_dir = work / "bin"
     install_fake_commands(scenario, bin_dir)
+    if scenario.source_folder:
+        folder = work / scenario.source_folder
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "notes.md").write_text("A note in the folder to import.\n", encoding="utf-8")
     env = child_env(os.environ, bin_dir, shell_log)
 
     row: dict = {"scenario": scenario.id, "repeat": repeat, "model": model, "error": None}
