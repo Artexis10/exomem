@@ -18,7 +18,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="run scenarios through a real headless agent")
     run.add_argument("--model", required=True)
-    run.add_argument("--judge-model", help="default: --model")
+    run.add_argument(
+        "--judge-model", default="opus", help="the judge's model; not the agent's by default"
+    )
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument(
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
@@ -57,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = runner.run_all(
         scenarios,
         model=args.model,
-        judge_model=args.judge_model or args.model,
+        judge_model=args.judge_model,
         repeats=args.repeats,
         out=args.out,
     )

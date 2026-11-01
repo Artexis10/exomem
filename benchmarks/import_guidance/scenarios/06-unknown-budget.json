@@ -11,36 +11,27 @@
  "builtin_tools": [],
  "replies": {
   "read_import.status": {
-   "runs": [],
-   "import_windows": {
-    "counts": {
-     "landed": 0,
-     "discarded": 0,
-     "unreadable": 0
-    },
-    "windows": [],
-    "keep_source": {
-     "keep": false,
-     "message": null
-    },
-    "next_after": null
-   },
-   "window_budget": {
-    "window_budget": 15032385536,
-    "reachable_budget": 21474836480,
-    "job_pinned": 0,
-    "effective_file_limit": {
-     "unknown": "the volume's size and use cannot be read"
-    },
-    "classification": "cloud",
-    "media_allowance": {
-     "unknown": "the media store policy sets no allowance"
+   "$status": {
+    "budget": {
+     "reachable_budget": {
+      "unknown": "the media ledger cannot be read: unable to open database file"
+     },
+     "job_pinned": {
+      "unknown": "the media ledger cannot be read: unable to open database file"
+     },
+     "effective_file_limit": {
+      "unknown": "the media ledger cannot be read: unable to open database file"
+     },
+     "media_allowance": {
+      "unknown": "the media store policy sets no allowance"
+     }
     }
    }
   },
   "observe_transfer.status": {
-   "import": null,
-   "export": null
+   "$transfer_status": {
+    "import": null
+   }
   }
  },
  "default_reply": {

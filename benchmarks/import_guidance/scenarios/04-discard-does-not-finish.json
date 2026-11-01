@@ -16,55 +16,31 @@
       "state": "cleanup_pending"
     },
     "observe_transfer.status": {
-      "import": {
-        "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
-        "state": "cleanup_pending",
-        "error_code": "IMPORT_RENAMES_PENDING"
-      },
-      "export": null
+      "$transfer_status": {
+        "import": {
+          "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+          "state": "cleanup_pending",
+          "error_code": "IMPORT_RENAMES_PENDING"
+        }
+      }
     },
     "read_import.status": {
-      "runs": [],
-      "import_windows": {
-        "counts": {
-          "landed": 0,
-          "discarded": 0,
-          "unreadable": 0
-        },
+      "$status": {
         "windows": [
           {
             "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
             "state": "landed",
+            "members": [
+              {
+                "path": "Field Notes/clip.mov",
+                "bytes": 52428800
+              }
+            ],
             "renames_pending": [
               "Field Notes/clip.mov"
-            ],
-            "unfiled": {
-              "count": 0,
-              "bytes": 0
-            },
-            "unfiled_staged": {
-              "count": 0,
-              "bytes": 0
-            },
-            "members": []
+            ]
           }
-        ],
-        "keep_source": {
-          "keep": false,
-          "message": null
-        },
-        "next_after": null
-      },
-      "window_budget": {
-        "window_budget": 15032385536,
-        "reachable_budget": 21474836480,
-        "job_pinned": 0,
-        "effective_file_limit": 9663676416,
-        "classification": "cloud",
-        "media_allowance": {
-          "allowance_bytes": 214748364800,
-          "used_bytes": 33285996544
-        }
+        ]
       }
     },
     "import_memory.plan": {

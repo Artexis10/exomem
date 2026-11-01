@@ -1,20 +1,23 @@
-"""Scenario files and the scripted-reply choice. Standard library only: the
-scripted server loads it by file path, outside the package."""
+"""Scenario files and the scripted-reply choice."""
 
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import status_shape
 
 SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios"
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 SCHEMA_FILES = ("mcp_tool_schemas.json", "mcp_cloud_only_tool_schemas.json")
 
 
+@functools.cache
 def tool_specs() -> dict[str, dict]:
-    """Every tool's shipped description and input schema, from the two test fixtures."""
+    """Every tool's shipped description and input schema, from the two test fixtures. Read-only: it is cached."""
     specs: dict[str, dict] = {}
     for name in SCHEMA_FILES:
         specs.update(json.loads((FIXTURES / name).read_text(encoding="utf-8")))
@@ -45,7 +48,7 @@ def load_scenario(path: Path) -> Scenario:
         prompt=raw["prompt"],
         served_tools=tuple(raw["served_tools"]),
         builtin_tools=tuple(raw.get("builtin_tools", ())),
-        replies=raw["replies"],
+        replies={key: status_shape.expand(reply) for key, reply in raw["replies"].items()},
         default_reply=raw["default_reply"],
         checks=tuple(raw.get("checks", ())),
         criteria=tuple(raw.get("criteria", ())),
@@ -54,12 +57,15 @@ def load_scenario(path: Path) -> Scenario:
     )
 
 
-def call_kind(arguments: dict) -> str | None:
-    """The operation a call selects: `operation.kind`, else `action`."""
+def call_kind(tool: str, arguments: dict) -> str | None:
+    """The operation a call selects: `operation.kind`, else `action`, else the tool schema's default action."""
     operation = arguments.get("operation")
     if isinstance(operation, dict) and isinstance(operation.get("kind"), str):
         return operation["kind"]
     action = arguments.get("action")
+    if action is None:
+        schema = tool_specs().get(tool, {}).get("inputSchema", {})
+        action = schema.get("properties", {}).get("action", {}).get("default")
     return action if isinstance(action, str) else None
 
 
@@ -69,7 +75,7 @@ def pick_reply(scenario: Scenario, tool: str, arguments: dict, prior_calls: int)
     Key order: `tool.kind`, then `tool`, then the scenario default. A list is a
     sequence: the nth call gets the nth item and the last item repeats.
     """
-    kind = call_kind(arguments)
+    kind = call_kind(tool, arguments)
     for key in (f"{tool}.{kind}" if kind else None, tool):
         if key is not None and key in scenario.replies:
             entry = scenario.replies[key]

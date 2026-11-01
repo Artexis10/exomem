@@ -1,6 +1,6 @@
 """Run scenarios through a real headless agent, or dry-run them without one.
 
-Reused by import: the isolation floor, the unsafe-cwd refusal and the CLI discovery from
+Reused by import: the isolation floor, the unsafe-cwd refusal, the CLI discovery and the run-fault reasons from
 `epistemic.journeys.f27_replay`, and the stream-json reader from `membench.trackc.witness_join`.
 Their `build_turn_argv` is not reused: it takes an f27 `Arm` and a seeded vault this probe has not.
 """
@@ -8,8 +8,10 @@ Their `build_turn_argv` is not reused: it takes an f27 `Arm` and a seeded vault 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,6 +22,7 @@ from epistemic.journeys.f27_replay import (
     REPO_ROOT,
     discover_agent_envelope,
     environment_floor,
+    fault_reason,
     refuse_unsafe_out_dir,
 )
 from membench.trackc.witness_join import parse_stream_json_transcript
@@ -168,11 +171,63 @@ def read_shell_events(path: Path) -> dict[str, float]:
 
 
 def child_env(parent: Mapping[str, str], bin_dir: Path, shell_log: Path) -> dict[str, str]:
-    """The f27 floor (session markers dropped, HOME kept), the fake commands first on PATH."""
+    """The f27 floor (session markers dropped, HOME kept) without `EXOMEM_*`, the fake commands first on PATH.
+
+    f27's `arm_environment` drops `EXOMEM_*` for the same reason: the agent's shell must not reach a real vault.
+    """
     floor, _removed = environment_floor(parent)
+    floor = {key: value for key, value in floor.items() if not key.startswith("EXOMEM_")}
     floor["PATH"] = f"{bin_dir}{os.pathsep}{floor.get('PATH', '')}"
     floor["IG_SHELL_LOG"] = str(shell_log)
     return floor
+
+
+def server_fault(stdout: str) -> str | None:
+    """Why the scripted server cannot have served this run, or None. As `f33_referent_replay.session_fault` does:
+    a run counts only when every `init` event shows the server `connected`. A failed server gives the agent no tool,
+    and a scenario that the skill text alone answers would then pass without ever seeing the scripted states."""
+    inits = []
+    for raw in stdout.splitlines():
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("type") == "system"
+            and event.get("subtype") == "init"
+        ):
+            inits.append(event)
+    if not inits:
+        return "the stream has no init event, so the scripted server's connection is unknown"
+    for init in inits:
+        servers = {
+            s.get("name"): s.get("status")
+            for s in init.get("mcp_servers") or ()
+            if isinstance(s, dict)
+        }
+        if servers.get(checks.SERVER) != "connected":
+            return f"the {checks.SERVER} server is not connected: {servers.get(checks.SERVER)!r}"
+    return None
+
+
+def text_under_test(scenario: Scenario) -> dict[str, str]:
+    """Digests of what the agent was shown, so a row ties to a revision of the skill and the tool text."""
+    served = {name: tool_specs()[name] for name in scenario.served_tools}
+    return {
+        "skill_sha256": hashlib.sha256(skill_text().encode("utf-8")).hexdigest(),
+        "tool_schemas_sha256": hashlib.sha256(
+            json.dumps(served, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def repo_sha() -> str:
+    """The checkout's commit, or `unknown` when git cannot say."""
+    done = subprocess.run(  # noqa: S603,S607
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    return done.stdout.strip() if done.returncode == 0 and done.stdout.strip() else "unknown"
 
 
 def run_once(
@@ -183,12 +238,22 @@ def run_once(
     judge_model: str,
     out: Path,
     executable: Path,
+    stamp: Mapping[str, str] | None = None,
     run: Runner = _subprocess_runner,
 ) -> dict:
+    """One run. `stamp` adds fields to the row (`run_all` gives the repo SHA and the CLI version)."""
     scenario_path = SCENARIO_DIR / f"{scenario.id}.json"
     work = out / "work" / f"{scenario.id}-{repeat}"
     work.mkdir(parents=True, exist_ok=True)
     call_log, shell_log = work / "calls.jsonl", work / "shell.log"
+    stream_path = work / "stream.jsonl"
+    # The server and the fake command append, so a log from an earlier run into the same folder would read as this
+    # run's. The agent's folder starts empty for the same reason.
+    for stale in (call_log, shell_log, stream_path):
+        stale.unlink(missing_ok=True)
+    cwd = work / "cwd"
+    shutil.rmtree(cwd, ignore_errors=True)
+    cwd.mkdir()
     skill = work / "skill.md"
     skill.write_text(skill_text(), encoding="utf-8")
     mcp = mcp_config(work / "mcp.json", scenario_path, call_log)
@@ -197,26 +262,34 @@ def run_once(
     bin_dir = work / "bin"
     install_fake_commands(scenario, bin_dir)
     if scenario.source_folder:
-        folder = work / scenario.source_folder
+        folder = cwd / scenario.source_folder
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "notes.md").write_text("A note in the folder to import.\n", encoding="utf-8")
     env = child_env(os.environ, bin_dir, shell_log)
 
-    row: dict = {"scenario": scenario.id, "repeat": repeat, "model": model, "error": None}
-    stream_path = work / "stream.jsonl"
+    row: dict = {
+        "scenario": scenario.id,
+        "repeat": repeat,
+        "model": model,
+        "judge_model": judge_model,
+        **text_under_test(scenario),
+        **(stamp or {}),
+        "error": None,
+    }
     try:
         proc = run(
             agent_argv(executable, scenario, mcp=mcp, skill=skill, model=model),
-            work,
+            cwd,
             env,
             RUN_TIMEOUT_SECONDS,
         )
         stream_path.write_text(proc.stdout, encoding="utf-8")
         transcript = parse_stream_json_transcript(proc.stdout.splitlines())
-        if proc.returncode != 0 or transcript.is_error or not transcript.result_text:
-            row["error"] = (
-                f"agent exit {proc.returncode}, is_error={transcript.is_error}: {proc.stderr[-300:]}"
-            )
+        row["error"] = (
+            fault_reason(proc, transcript)
+            or server_fault(proc.stdout)
+            or (None if transcript.result_text else "the agent returned no text")
+        )
     except (subprocess.TimeoutExpired, OSError) as error:
         row["error"] = f"{type(error).__name__}: {error}"
         transcript = parse_stream_json_transcript(())
@@ -243,7 +316,7 @@ def run_once(
                     empty_mcp=empty_mcp,
                     model=judge_model,
                 ),
-                work,
+                cwd,
                 env,
                 JUDGE_TIMEOUT_SECONDS,
             )
@@ -277,7 +350,9 @@ def run_all(
 ) -> list[dict]:
     out = refuse_unsafe_out_dir(out)
     out.mkdir(parents=True, exist_ok=True)
-    executable = discover_agent_envelope().executable
+    envelope = discover_agent_envelope()
+    executable = envelope.executable
+    stamp = {"repo_sha": repo_sha(), "cli_version": envelope.version}
     rows = []
     with (out / "runs.jsonl").open("a", encoding="utf-8") as sink:
         for scenario in scenarios:
@@ -289,6 +364,7 @@ def run_all(
                     judge_model=judge_model,
                     out=out,
                     executable=executable,
+                    stamp=stamp,
                 )
                 sink.write(json.dumps(row) + "\n")
                 sink.flush()

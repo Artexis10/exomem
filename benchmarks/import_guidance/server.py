@@ -9,12 +9,13 @@ import sys
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+# Started by path, outside the package, so put `benchmarks/` on the path to import `import_guidance`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import scripted_replies as sr  # noqa: E402
 from fastmcp import FastMCP  # noqa: E402
 from fastmcp.tools import Tool, ToolResult  # noqa: E402
+
+from import_guidance import scripted_replies as sr  # noqa: E402
 
 
 class ScriptedTool(Tool):
@@ -25,7 +26,7 @@ class ScriptedTool(Tool):
     counts: dict
 
     async def run(self, arguments: dict) -> ToolResult:
-        kind = sr.call_kind(arguments)
+        kind = sr.call_kind(self.name, arguments)
         count_key = f"{self.name}.{kind}"
         prior = self.counts.get(count_key, 0)
         self.counts[count_key] = prior + 1

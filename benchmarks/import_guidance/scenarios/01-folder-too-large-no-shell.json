@@ -11,42 +11,26 @@
   "builtin_tools": [],
   "replies": {
     "read_import.status": {
-      "runs": [],
-      "import_windows": {
-        "counts": {
-          "landed": 0,
-          "discarded": 0,
-          "unreadable": 0
-        },
-        "windows": [],
-        "keep_source": {
-          "keep": false,
-          "message": null
-        },
-        "next_after": null
-      },
-      "window_budget": {
-        "window_budget": 15032385536,
-        "reachable_budget": 21474836480,
-        "job_pinned": 0,
-        "effective_file_limit": 9663676416,
-        "classification": "cloud",
-        "media_allowance": {
-          "allowance_bytes": 214748364800,
-          "used_bytes": 33285996544
-        }
-      }
+      "$status": {}
     },
     "observe_transfer.import_handoff": {
-      "import": null,
-      "routes": {
-        "cli": "with a shell: exomem cloud import <folder>",
-        "browser": "Home link: https://cloud.exomem.example/home/import (desktop only, folders only, one page session)"
+      "$import_handoff": {
+        "routes": [
+          {
+            "route": "cli",
+            "detail": "with a shell: exomem cloud import <folder>"
+          },
+          {
+            "route": "browser",
+            "detail": "Home link: https://cloud.exomem.example/home/import (desktop only, folders only, one page session)"
+          }
+        ]
       }
     },
     "observe_transfer.status": {
-      "import": null,
-      "export": null
+      "$transfer_status": {
+        "import": null
+      }
     }
   },
   "default_reply": {
