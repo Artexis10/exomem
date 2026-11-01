@@ -6,6 +6,8 @@ The system SHALL acquire the vault mutation boundary before invoking a write-cap
 
 A direct `/upload` commit that finds the boundary held by a holder still inside its allowance SHALL wait it out within the request's budget, under the same arrival-order queue, waiter cap and refusal causes (`holder_overdue`, `capture_wait_exhausted`, `capture_waiters_full`) as a keyed command write, because the handler has read or written no vault byte before it holds the boundary. A source capture of client artifacts SHALL wait out the boundary the same way, because it stages its bytes outside the vault before it holds the boundary, and its body SHALL run once. A tus upload session whose commit ends retryable with a busy or warming code SHALL be committed again by the server, with backoff and before the session expires, without waiting for the client's next read of the session. A background session commit waits in line like any keyed write but takes no waiter slot, because the waiter cap protects request workers and a commit thread is not one.
 
+A credential issuance (`transfer_artifact` upload or download, and `govern_memory` session open or rotate) SHALL NOT take the vault mutation boundary and SHALL NOT be refused as busy, because it writes no vault-owned file: it mints a token over a private store or copy, or writes only its own authorization-session transaction.
+
 A write whose server-planned navigation auxiliary (index, subindex or log) changed while it waited for the boundary SHALL be run again by the server within its wait, or refused with a retryable `MUTATION_BUSY` whose `cause` is `auxiliary_changed` for a caller that does not wait. It SHALL NOT be refused with `STALE_SEMANTIC_WRITE`. The refusal needs positive evidence that an auxiliary's guard no longer holds. A write whose own basis changed (its page, source, vocabulary or retained input) keeps its staleness error, and a refusal with no moved guard keeps its own error and is not run again.
 
 #### Scenario: Lock wait exceeds its bound
@@ -33,6 +35,13 @@ A write whose server-planned navigation auxiliary (index, subindex or log) chang
 - **AND** the holder releases within the capture's wait budget
 - **THEN** the source capture stores its file once and the client receives its stored outcome
 - **AND** no busy refusal reaches the client
+
+#### Scenario: A credential issuance meets a held boundary
+
+- **WHEN** another process holds the vault mutation boundary
+- **AND** a caller opens or rotates an authorization session, or requests a `transfer_artifact` upload or download
+- **THEN** the credential is issued at once
+- **AND** no busy refusal reaches the caller
 
 #### Scenario: Navigation changes while a keyed write waits
 

@@ -6591,6 +6591,9 @@ class LeaseManager:
             or narrow_maintenance_job
             or narrow_curation_proposal
             or narrow_episode_record
+            # Issuance writes no vault-owned file: upload and download mint a token over a private
+            # copy or store, and a session open or rotate writes only its own SQLite transaction.
+            or authorization_issuance
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
