@@ -286,7 +286,8 @@ class Series:
             raise Stopped(PREFLIGHT, "SERIES_RECORD_DAMAGED", (
                 f"the series record {path.name} is damaged: window {damaged[0]} does not name its folder as the CLI does, "
                 f"{WINDOW_DIR} and hex, so the run stops before it sends or removes anything. Restore the record from a "
-                f"backup, or put back the window's folder name. {not_sent_notice(series.not_landed())}"), resume=False)
+                f"backup, or put back the window's folder name. Do not delete the checkpoint folder: a new series sends "
+                f"every landed window again. {not_sent_notice(series.not_landed())}"), resume=False)
         return series
 
     def write(self, path: Path) -> None:
