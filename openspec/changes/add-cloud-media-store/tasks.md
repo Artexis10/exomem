@@ -220,6 +220,10 @@
     - cancel the CLI's own never-uploaded (`key_ready`) attempt itself when its member set changed, instead of asking the person to press Cancel in Home;
     - treat a `done` own attempt as over when a known receipt listing holds none of the window's import IDs, so a window whose receipt a restore lost is sent again; until then, name the discard route in that stop.
     Verify: a member change after a stopped attempt lands once with the new member set and no manual Cancel, and a restored cell that lost a window's receipt sends that window again once.
+  - [ ] 5.4.21 Follow-up: report a changed member that lands with its old content. A window can land its declared member set instead of the current files. That happens when a rerun resumes the window's checkpoint after a stop in the middle of the parts, and when the window's attempt is past upload. The run then lists a member that changed at the source as not sent, although its old content landed. When the change empties a window whose attempt is past upload, the record also drops the window. Make these changes:
+    - keep such a window in the record with its declared paths, also when a member change empties it;
+    - report each changed member of such a window as sent with the content from before the change, not as not sent.
+    Verify: a member change after a stop in the middle of the parts, and a member change that empties a window whose attempt is past upload, each land the old content once, and the run reports those members as sent with the content from before the change.
 - [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, with its network and admission rules (the Job and its policy do not exist before this task), and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.
 
 ## 6. Rollout (D11)

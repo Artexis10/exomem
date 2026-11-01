@@ -1103,6 +1103,7 @@ def test_rule_b_a_window_gets_one_new_import_per_ended_attempt_and_retries_its_s
         with pytest.raises(CloudImportError) as stop:
             rig.run(poll_seconds=0.001)
         assert "another import is open" in stop.value.message and stop.value.resume
+        assert old not in stop.value.message  # The failed attempt no longer holds the cell, so the stop never names it as the open import.
         assert rig.cloud.creates == creates and _first_window(rig)["attempts"] == [old]
 
 
@@ -1290,3 +1291,15 @@ def test_rule_c_a_home_cancel_of_an_importing_attempt_whose_discard_leaves_a_rec
     # The old import carries both members and its discard files neither, so the resend files each member once.
     assert rig.cloud.all_sent() == ["a01.bin", "a01.bin", "a02.bin", "a02.bin"]
     assert _first_window(rig)["import_id"] == old and _first_window(rig)["attempts"] == []
+
+
+def test_a_window_that_lands_on_the_cells_record_at_a_rerun_leaves_no_encrypted_copy(rig):
+    """Catches a window that lands on the cell's record without the client, which keeps a full encrypted copy on disk."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    assert list(rig.tmp.glob("checkpoint/window-*/archive.age"))  # The stall keeps the copy for the rerun.
+    rig.cloud.release()  # Cloud finishes the import, and the cell lists its receipt.
+
+    result = rig.run()
+
+    assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+    assert not list(rig.tmp.glob("checkpoint/window-*/archive.age")) and not _checkpoints(rig)
