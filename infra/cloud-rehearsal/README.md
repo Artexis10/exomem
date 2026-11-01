@@ -144,6 +144,15 @@ Runners differ in CPU speed by 2 to 2.4 times, so a timing from one run does not
 
 To run it from a workstation with Docker, sudo and enough free disk, use the `--large-import` flag of `exomem-cloud-rehearsal run`. Dispatch it on GitHub with `gh workflow run cloud-rehearsal.yml -f mode=large-import`.
 
+## Raw-data import
+
+`--raw-import` proves that messy input survives a Cloud import as well as a local one, and runs only on demand as the `raw-import` mode of the `Cloud rehearsal` workflow.
+The run generates a collection and its answer key with `benchmarks/collection_ingest/generate.py` (`--profile standard --seed 7`), so new raw-data cases in the generator need no change here.
+It sends the collection through `exomem cloud import` and the cell's MCP tools to a new vault, and to a second vault that first adopted another collection (`--profile small --seed 8`).
+It copies each vault out with one read-only `tar` of the pod's volume, which costs less than the owner export, and scores the copy with `score.py`.
+It runs the same journey locally with `drive.py --profile personal`, then compares each key item between the two arms: a loss is an item that local kept and Cloud did not.
+The exit code is 0 only when there is no loss, no unknown read and no changed, missing or copied pre-existing page; run it with `--raw-import-python <interpreter with the server installed>`.
+
 ## Owner export
 
 The optional owner-export stage connects the real Substrate owner endpoints to C6,

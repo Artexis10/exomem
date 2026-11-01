@@ -28,7 +28,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp_session import McpSession, isolated_env  # noqa: E402
+from mcp_session import LedgerSession, McpSession, isolated_env  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_FORMAT = 1
@@ -44,6 +44,21 @@ RULE_PROBE = {
     "areas/travel": ("manual-documentation", "travel"),
 }
 PROFILE_ENV = {"personal": {}, "cloud-like": {"EXOMEM_MEDIA_ENGINES": "documents,ocr"}}
+# A hosted cell serves the same journey as ``import_memory`` and ``read_import`` operations. The product's tool
+# schema fixes which of the journey's actions are reads, so this is a closed set, not a vocabulary.
+READ_ACTIONS = frozenset({"status", "work-item"})
+
+
+def local_request(action: str, fields: dict[str, Any], detail: str) -> tuple[str, dict[str, Any]]:
+    """The stdio server's one ``adoption_studio`` tool, selected by ``action``."""
+    return "adoption_studio", {"action": action, "response_detail": detail, **fields}
+
+
+def hosted_request(action: str, fields: dict[str, Any], detail: str) -> tuple[str, dict[str, Any]]:
+    """A hosted cell's operation tools; ``response_detail`` is a top-level argument of the write tool only."""
+    if action in READ_ACTIONS:
+        return "read_import", {"operation": {"kind": action, **fields}}
+    return "import_memory", {"operation": {"kind": action, **fields}, "response_detail": detail}
 
 
 def place_collection(source: Path, target: Path) -> int:
@@ -112,15 +127,28 @@ def counts_by_code(rows: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+def local_media_status() -> tuple[str, dict[str, Any]]:
+    return "process_media", {"operation": "status"}
+
+
+def hosted_media_status() -> tuple[str, dict[str, Any]]:
+    return "read_media", {"operation": {"kind": "status"}}
+
+
 class Journey:
     """One start->finish pass; accumulates what the product refused along the way."""
 
-    def __init__(self, session: McpSession, name: str, collection: str, collection_dir: Path,
-                 overrides: list[str]):
+    def __init__(self, session: LedgerSession, name: str, collection: str, collection_dir: Path,
+                 overrides: list[str], *, path: str | None = None, request: Any = local_request,
+                 initialize_kb: bool = True):
+        """``collection`` is the label; ``path`` is where the product reads it, vault-relative (default: the label)."""
         self.session = session
         self.overrides = overrides
+        self.request = request
+        self.initialize_kb = initialize_kb
         self.name = name
         self.collection = collection
+        self.path = path or collection
         self.collection_dir = collection_dir
         self.run_id: str | None = None
         self.phase_ms: dict[str, float] = {}
@@ -133,11 +161,9 @@ class Journey:
         """Call one action. ``full`` carries the whole run, megabytes on a large collection,
         so only the steps that read the run ask for it."""
         started = time.perf_counter()
-        request = {"action": step.split(":")[0], "response_detail": detail, **args}
-        outcome, data, record = await self.session.call(
-            "adoption_studio", request, journey=self.name, step=step
-        )
         key = step.split(":")[0]
+        tool, request = self.request(key, args, detail)
+        outcome, data, record = await self.session.call(tool, request, journey=self.name, step=step)
         self.phase_ms[key] = round(
             self.phase_ms.get(key, 0.0) + (time.perf_counter() - started) * 1000.0, 1
         )
@@ -192,8 +218,8 @@ class Journey:
     async def run(self, *, collection_label: str, rules_state: dict[str, Any],
                   probe_rules: bool, include_rules: list[dict[str, Any]]) -> dict[str, Any]:
         """Execute the five steps; every step's raw outcome is in the session ledger."""
-        include = [self.collection]
-        start_args: dict[str, Any] = {"path": self.collection, "initialize_kb": True}
+        include = [self.path]
+        start_args: dict[str, Any] = {"path": self.path, "initialize_kb": self.initialize_kb}
         if collection_label != "unsupported":
             start_args["collection"] = self.collection
         outcome, data, record = await self.adoption("start", start_args)
@@ -223,11 +249,11 @@ class Journey:
             selected = True
         elif probe_rules and rules_state.get("folder_kind_rules") != "unsupported":
             rules = [
-                {"path": f"{self.collection}/{folder}", "source_kind": kind, "domain": domain}
+                {"path": f"{self.path}/{folder}", "source_kind": kind, "domain": domain}
                 for folder, (kind, domain) in RULE_PROBE.items()
                 if (self.collection_dir / folder).is_dir()
             ]
-            rule_args = {"run_id": self.run_id, "include": [*rules, {"path": self.collection}],
+            rule_args = {"run_id": self.run_id, "include": [*rules, {"path": self.path}],
                          "include_junk": False, **self._override_args()}
             outcome, data, record = await self.adoption("select:rules", rule_args, detail="full")
             if outcome == "ok":
@@ -317,15 +343,16 @@ def counts_by_status(outcomes: dict[str, Any]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
-async def wait_for_media(session: McpSession, journey: str, deadline_s: float) -> dict[str, Any]:
+async def wait_for_media(session: LedgerSession, journey: str, deadline_s: float,
+                         status_request: Any = local_media_status) -> dict[str, Any]:
     """Poll ``process_media status`` until the job queue and index refresh drain, or time runs out."""
     started = time.perf_counter()
     polls: list[dict[str, Any]] = []
     quiet = 0
     data: Any = None
     while True:
-        outcome, data, _ = await session.call(
-            "process_media", {"operation": "status"}, journey=journey, step="media-status")
+        tool, request = status_request()
+        outcome, data, _ = await session.call(tool, request, journey=journey, step="media-status")
         counts = data.get("counts") if isinstance(data, dict) else None
         refresh = (data.get("index_refresh") or {}).get("count") if isinstance(data, dict) else None
         polls.append({"t_s": round(time.perf_counter() - started, 1), "outcome": outcome,

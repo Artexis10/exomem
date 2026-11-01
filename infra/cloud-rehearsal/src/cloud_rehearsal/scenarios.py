@@ -63,6 +63,7 @@ from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
     from .large_import import LargeImportPlan
+    from .raw_import import RawImportPlan
 
 WARM_ITERATIONS = 20
 LATENCY_ITERATIONS = 10
@@ -141,6 +142,8 @@ class Context:
     # The large-import mode (large_import.py): the plan to run after provisioning, which
     # also sets the cell's volume size on the local storage class.
     large_import: LargeImportPlan | None = None
+    # The raw-data import mode (raw_import.py): what to run after provisioning.
+    raw_import: RawImportPlan | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -1219,6 +1222,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the large import needs the provisioned cell, and step 2 did not pass")
                 await run_large_import(ctx, ctx.large_import)
+        if number == 2 and ctx.raw_import is not None:
+            from .raw_import import run_raw_import
+
+            with stage(ctx.report, "raw_import"):
+                if record.status != PASSED:
+                    raise StepFailure("the raw-data import needs the provisioned cell, and step 2 did not pass")
+                await run_raw_import(ctx, ctx.raw_import)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
@@ -1228,6 +1238,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.large_import is not None and "large_import" not in ctx.report.stages:
         with stage(ctx.report, "large_import"):
             raise StepFailure("the requested large import stage requires provisioning at step 2")
+    if ctx.raw_import is not None and "raw_import" not in ctx.report.stages:
+        with stage(ctx.report, "raw_import"):
+            raise StepFailure("the requested raw-data import stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

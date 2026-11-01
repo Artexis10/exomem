@@ -377,16 +377,17 @@ class Agent:
 # --- reading the cell ----------------------------------------------------------------------
 
 
-def exec_json(ctx: Context, script: str, *args: str, attempts: int = 4) -> Any:
-    """Run a script in the cell's pod and parse its one line of JSON. The pod may be replaced
-    between attempts, for a backup or a discard, so each attempt looks it up again."""
+def exec_json(ctx: Context, script: str, *args: str, attempts: int = 4, cell_id: str | None = None) -> Any:
+    """Run a script in the pod of a cell (default: the owner's) and parse its one line of JSON. The pod may be
+    replaced between attempts, for a backup or a discard, so each attempt looks it up again."""
+    cell_id = cell_id or ctx.a.cell_id
     last: Exception | None = None
     for attempt in range(attempts):
-        pod = ctx.runtime_pod(ctx.a.cell_id)
+        pod = ctx.runtime_pod(cell_id)
         try:
             if pod is None:
                 raise RuntimeError("the cell has no runtime pod")
-            result = ctx.exec_in(namespace_name(ctx.a.cell_id), pod["metadata"]["name"], "python3", "-c", script, *args)
+            result = ctx.exec_in(namespace_name(cell_id), pod["metadata"]["name"], "python3", "-c", script, *args)
             return json.loads(result.stdout)
         except (CommandFailed, RuntimeError, ValueError) as error:
             last = error

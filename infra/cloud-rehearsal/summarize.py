@@ -15,6 +15,9 @@ def main(path: str) -> None:
     if "large_import" in report["stages"]:
         large_import(report)
         return
+    if "raw_import" in report["stages"]:
+        raw_import(report)
+        return
     outcome = report["outcome"]
     print("## Exomem Cloud P3 rehearsal\n")
     print(f"- valid rehearsal: **{report['valid_rehearsal']}** {'; '.join(report['invalid_reasons'])}")
@@ -97,6 +100,31 @@ def large_import(report: dict) -> None:
         print(f"| {phase} | {seconds} |")
     for name, value in run.get("measurements", {}).items():
         print(f"\n**{name}**\n\n```json\n{json.dumps(value, indent=2)}\n```")
+
+
+def raw_import(report: dict) -> None:
+    run = report["stages"]["raw_import"]
+    print("## Raw-data import against the local journey (task 5.1)\n")
+    print(f"- verdict: **{run.get('verdict', 'none: the run did not finish')}**")
+    print(f"- re-run duplicates: {run.get('rerun_duplicates', 'not recorded')}")
+    local = run.get("local") or {}
+    print(f"- local arm: {'scored' if local.get('scored') else 'not scored: ' + str(local.get('failure', 'no reason recorded'))[:300]}")
+    for finding in run.get("findings", []):
+        print(f"- **finding:** {finding.get('message', '')[:600]}")
+    for name, target in run.get("targets", {}).items():
+        print(f"\n### {name} vault: {target.get('verdict')}\n")
+        pages = target.get("existing_pages")
+        if pages:
+            print(f"- pre-existing pages: {pages['before']} before, {pages['after']} after, problems {pages['problem_count']}")
+        print("\n| group | items | kept by both | loss | cloud only | unknown |\n|---|---|---|---|---|---|")
+        for group, row in (target.get("groups") or {}).items():
+            print(f"| {group} | {row['items']} | {row['kept_by_both']} | {row['loss']['count']} | "
+                  f"{row['cloud_extra']['count']} | {row['unknown']['count']} |")
+        for group, row in (target.get("groups") or {}).items():
+            if row["loss"]["listed"]:
+                print(f"\n**losses in {group}** (first {len(row['loss']['listed'])}): " + "; ".join(row["loss"]["listed"][:10]))
+    for name, value in (("local arm", local.get("headline")), *((f"cloud arm, {k} vault", (v or {}).get("cloud")) for k, v in run.get("targets", {}).items())):
+        print(f"\n**{name}**\n\n```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```")
 
 
 if __name__ == "__main__":

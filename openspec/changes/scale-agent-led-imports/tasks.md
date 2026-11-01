@@ -35,4 +35,8 @@
   - the residual equals the expected set;
   - no write fails for lack of space;
   - the report gives the peak volume use as a lower bound, the cell's peak memory during the index build, and the time per call of `read_import_index` at the final Source count.
+  - [ ] 5.1.1 Add the on-demand `raw-import` mode of the Cloud rehearsal for messy, unstructured input. It sends the collection that `benchmarks/collection_ingest/generate.py --profile standard --seed 7` makes to a new vault and to a vault that first adopted `--profile small --seed 8`. It files each through the CLI and the cell's MCP tools with the journey of `drive.py`, and scores the finished vault copy with `score.py`. Run the same journey locally with `drive.py --profile personal`. Verify:
+    - a key item that the local run kept and the Cloud run did not is a loss, and any loss fails the mode;
+    - a Cloud-only extra and an unknown each get their own state, and an unknown never passes;
+    - any pre-existing page that changed, went missing or was copied fails the existing-vault target.
 - [ ] 5.2 Run the full corpus at the batch boundary, run the independent review, and merge.
