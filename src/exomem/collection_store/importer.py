@@ -3216,8 +3216,9 @@ def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) 
         )
     ]
     for job_id in running:
+        # The deadline bounds further batches, not the first: a stall before it must not idle a tick.
         while (max_batches is None or summary["batches"] < max_batches) and (
-            deadline is None or time.monotonic() < deadline
+            deadline is None or not summary["batches"] or time.monotonic() < deadline
         ):
             job = _load(writer.connection, job_id)
             sequence = job.checkpoint["batch"] if job is not None else None

@@ -80,7 +80,7 @@ FIRST_BATCH_ROWS = 50
 #: Rows one rebuild batch takes at most. A batch cannot stop part-way, and on a loaded host the
 #: writer thread can wait in the run queue far longer than the last batch's pace predicts, so
 #: the step loop checks its deadline between small batches instead. 32 rows is about 10 ms of
-#: row work at a typical 0.3 ms per row, so a stalled batch still ends well inside the budget.
+#: row work at a typical 0.3 ms per row, so a batch overruns the budget only under a severe stall.
 REBUILD_BATCH_ROWS = 32
 #: Rows one import batch takes at most, for the same reason. It is larger than a rebuild batch
 #: because each import batch pays tens of milliseconds of setup outside the hold.

@@ -760,9 +760,12 @@ def test_vault_rollback_survives_restart_and_keeps_file_collections_usable(servi
     root = service.root
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 1)
     write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(60)), SOURCE)
-    imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
-    monkeypatch.setattr(capability, "RELEASED", frozenset())
-    service.stop()
+    with monkeypatch.context() as pending:
+        # One import tick may finish a small import; this service must leave it pending.
+        pending.setattr(runtime.StoreServer, "_import_tick", lambda self: runtime.IMPORT_IDLE_SECONDS)
+        imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+        monkeypatch.setattr(capability, "RELEASED", frozenset())
+        service.stop()
     marker = authority.read_marker(root)
     monkeypatch.setenv(OPERATOR, "operator")
     assert cli._collections_main(["rollback", "--vault", str(root)]) == 0, capsys.readouterr().err
@@ -1345,9 +1348,12 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 5)
     monkeypatch.setattr(capability, "RELEASED", ON)
     write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(60)), SOURCE)
-    job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
-    monkeypatch.setattr(capability, "RELEASED", frozenset())  # this service stops advancing it
-    service.stop()
+    with monkeypatch.context() as pending:
+        # One import tick may finish a small import; this service must leave it running.
+        pending.setattr(runtime.StoreServer, "_import_tick", lambda self: runtime.IMPORT_IDLE_SECONDS)
+        job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+        monkeypatch.setattr(capability, "RELEASED", frozenset())  # this service stops advancing it
+        service.stop()
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         state, progress = reader.execute("SELECT state,progress_json FROM import_jobs").fetchone()
     assert state == "running" and json.loads(progress)["imported"] < 60
