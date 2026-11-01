@@ -65,7 +65,7 @@ Field meanings:
 - `planned_paths` are the targets that preflight resolved. The final path of a creation can still change through uniquify. The terminal names the final path.
 - `operation_id` keeps its meaning as the draft correlation (`mutation_terminal._operation_id`). The intent identifier is `intent_id`.
 
-The accept wait reuses today's bound: `EXOMEM_CAPTURE_WAIT_SECONDS` (40 s) from the arrival of the request, capped by the request budget less the delivery reserve. The wait is 0 when no waiter slot is free. It is also 0 for a remote write without a retry identity, which keeps its client's resend window short. The request thread waits on a condition that the applier signals, not on the lock. It polls every 250 ms when the applier runs in another process.
+The accept wait is short: 2.0 s from the arrival of the request, capped by the request budget less the delivery reserve. The owner chose it on 2026-11-01 so that a contended write answers at once. It is a constant, not a knob, like the post-canonical budget of `durable-write-acknowledgement`. The wait is 0 when no waiter slot is free. It is also 0 for a remote write without a retry identity, which keeps its client's resend window short. The request thread waits on a condition that the applier signals, not on the lock. It polls every 250 ms when the applier runs in another process.
 
 REST returns HTTP 202 with the success envelope for an accepted write. MCP returns a normal tool result. The CLI waits with no bound, because an in-process caller loses no reply. Ctrl-C leaves the intent queued and prints its reference.
 
@@ -241,7 +241,7 @@ What would change this: oldest-intent age above 30 s at p90 under normal load af
 
 ## Risks / Trade-offs
 
-- [Risk] Agents mishandle `accepted` and resend the write with a new identity. → The accept wait stays at 40 s, so most callers never see `accepted`. Tool instructions and the scaffold reference describe the state. A real-model run checks it before the default changes.
+- [Risk] Agents mishandle `accepted` and resend the write with a new identity. → Tool instructions and the scaffold reference describe `accepted` as success. A real-model run with a held boundary checks that agents treat it so before `EXOMEM_WRITE_INTENTS=on` becomes the default.
 - [Risk] Two execution paths, inline and applier. → The applier path runs for every contended write. `EXOMEM_WRITE_INTENTS=always` runs the write-path integration suites through the applier.
 - [Risk] A stalled applier makes every contended write wait. → Doctor and metrics raise alarms. Setting the flag to `off` stops new intents while the applier keeps draining.
 - [Risk] Content sits in machine-local state until apply. → Private paths, deletion at the terminal state, content-free telemetry, and a hosted cell keeps the journal in the cell.
@@ -272,5 +272,4 @@ What would change this: oldest-intent age above 30 s at p90 under normal load af
 
 ## Open Questions
 
-- Should the accept wait stay at 40 s, or drop to about 5 s once the real-model run shows that agents handle `accepted`? Recommendation: keep 40 s until that evidence exists.
 - Who may retry an `outcome_unknown` conflict? Recommendation: the owner principal only.

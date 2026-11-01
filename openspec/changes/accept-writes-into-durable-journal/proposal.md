@@ -12,7 +12,7 @@ A busy refusal gives the caller nothing to act on except to send the write again
 
 ## What Changes
 
-- **Accept instead of refuse.** Some writes meet a held boundary, a full waiting line, an overdue holder or a warming component. The server records each such write as an intent in a durable per-vault intent journal. The caller gets the committed result when the intent commits within the existing wait. Otherwise the caller gets `state: "accepted"` and an `intent_id`.
+- **Accept instead of refuse.** Some writes meet a held boundary, a full waiting line, an overdue holder or a warming component. The server records each such write as an intent in a durable per-vault intent journal. The caller gets the committed result when the intent commits within about 2 seconds. Otherwise the caller gets `state: "accepted"` and an `intent_id`.
 - **Uncontended writes do not change.** A write that finds the journal empty and the boundary free runs inline, as today.
 - **Accept checks everything that the caller controls.** Authorization, arguments, size limits, reserved paths, idempotency, file fetches and the command's own semantic validation run before accept. A failed check returns its existing error, and the server records nothing.
 - **One applier per vault.** The applier applies intents in arrival order when the boundary is free. It sends each intent through the existing command path with the intent's retry identity. Existing receipts then commit each intent once, also across a crash.
