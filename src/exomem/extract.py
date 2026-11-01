@@ -103,6 +103,10 @@ WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
 _PDF_OCR_MIN_CHARS = 16
 
 
+#: What `## Extracted text` holds when an extraction found no text at all.
+NO_TEXT_DETECTED = "(no text detected)"
+
+
 @dataclass
 class ExtractResult:
     text: str
@@ -123,6 +127,19 @@ class ExtractResult:
     # What image OCR measured and kept out of `text`: the mean word confidence and the words
     # under the floor. None for every other media type, and for PDF pages, which keep whole text.
     ocr: OcrFacts | None = None
+
+    @property
+    def sidecar_text(self) -> str:
+        """What the sidecar's `## Extracted text` holds for this result.
+
+        An empty extraction takes a placeholder, so that it is not read as unfinished. When OCR read
+        words and every one fell under the floor, the section that holds them is the record, and the
+        text stays empty.
+        """
+        text = self.text.strip()
+        if text or (self.ocr is not None and self.ocr.low_confidence_text):
+            return text
+        return NO_TEXT_DETECTED
 
 
 class ExtractionUnavailable(Exception):

@@ -823,7 +823,7 @@ class MediaWorker:
                 next_action=_FAILED_ACTION,
             )
             return self._publication_outcome(committed, FAILED, error)
-        text = result.text.strip() or "(no text detected)"
+        text = result.sidecar_text
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
                 BLOCKED,
