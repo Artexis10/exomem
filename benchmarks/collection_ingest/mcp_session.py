@@ -93,6 +93,11 @@ def decode(result: Any) -> tuple[str, Any, str | None, str | None]:
             except json.JSONDecodeError:
                 continue
             break
+    return classify(data)
+
+
+def classify(data: Any) -> tuple[str, Any, str | None, str | None]:
+    """Return ``(outcome, data, error_code, error_message)`` for a tool's decoded reply object."""
     if isinstance(data, dict) and set(data) == {"result"}:
         data = data["result"]
     if isinstance(data, dict):
@@ -114,17 +119,79 @@ def retry_hint_ms(data: Any) -> int | None:
     return None
 
 
-class McpSession:
+class LedgerSession:
+    """The call ledger over any transport: a subclass supplies ``invoke``, one raw tool call.
+
+    ``call`` repeats a call while the product asks for a retry and records every logical call
+    in ``self.calls``, so a drive log reads the same whichever transport carried it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.tools: list[str] = []
+        self.tool_schemas: dict[str, Any] = {}
+
+    async def invoke(self, tool: str, args: dict[str, Any]) -> tuple[str, Any, str | None, str | None]:
+        raise NotImplementedError
+
+    async def call(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        journey: str,
+        step: str,
+        retry_deadline_s: float = DEFAULT_RETRY_DEADLINE_S,
+    ) -> tuple[str, Any, dict[str, Any]]:
+        """Run one logical call, repeating it while the product asks for a retry.
+
+        Returns ``(outcome, data, record)``; the record is also appended to ``self.calls``.
+        """
+        started = time.perf_counter()
+        attempts = 0
+        waited_ms = 0
+        warming_codes: list[str] = []
+        outcome, data, code, message = "transport_error", None, None, None
+        while True:
+            attempts += 1
+            try:
+                outcome, data, code, message = await self.invoke(tool, args)
+            except Exception as exc:  # noqa: BLE001 - a measurement harness keeps every failure verbatim
+                outcome, data, code, message = "transport_error", None, type(exc).__name__, str(exc)[:800]
+                break
+            hint = retry_hint_ms(data) if outcome == "refused" else None
+            if hint is None or (time.perf_counter() - started) > retry_deadline_s:
+                break
+            warming_codes.append(code or "")
+            waited_ms += hint
+            await asyncio.sleep(hint / 1000.0)
+        record = {
+            "n": len(self.calls) + 1,
+            "journey": journey,
+            "step": step,
+            "tool": tool,
+            "args": summarise_args(args),
+            "outcome": outcome,
+            "error_code": code,
+            "error_message": message,
+            "attempts": attempts,
+            "retried_codes": sorted(set(warming_codes)),
+            "retry_wait_ms": waited_ms,
+            "wall_ms": round((time.perf_counter() - started) * 1000.0, 1),
+        }
+        self.calls.append(record)
+        return outcome, data, record
+
+
+class McpSession(LedgerSession):
     """Async context manager over one server process; ``call`` records into ``self.calls``."""
 
     def __init__(self, *, python: Path, state: Path, env: dict[str, str], timeout: float = 600.0):
+        super().__init__()
         self.python = python
         self.state = state
         self.env = env
         self.timeout = timeout
-        self.calls: list[dict[str, Any]] = []
-        self.tools: list[str] = []
-        self.tool_schemas: dict[str, Any] = {}
         self._client: Any = None
 
     async def __aenter__(self) -> McpSession:
@@ -156,51 +223,6 @@ class McpSession:
     async def __aexit__(self, *exc_info: object) -> None:
         await self._client.__aexit__(*exc_info)
 
-    async def call(
-        self,
-        tool: str,
-        args: dict[str, Any],
-        *,
-        journey: str,
-        step: str,
-        retry_deadline_s: float = DEFAULT_RETRY_DEADLINE_S,
-    ) -> tuple[str, Any, dict[str, Any]]:
-        """Run one logical call, repeating it while the product asks for a retry.
+    async def invoke(self, tool: str, args: dict[str, Any]) -> tuple[str, Any, str | None, str | None]:
+        return decode(await self._client.call_tool_mcp(tool, args))
 
-        Returns ``(outcome, data, record)``; the record is also appended to ``self.calls``.
-        """
-        started = time.perf_counter()
-        attempts = 0
-        waited_ms = 0
-        warming_codes: list[str] = []
-        outcome, data, code, message = "transport_error", None, None, None
-        while True:
-            attempts += 1
-            try:
-                result = await self._client.call_tool_mcp(tool, args)
-                outcome, data, code, message = decode(result)
-            except Exception as exc:  # noqa: BLE001 - a measurement harness keeps every failure verbatim
-                outcome, data, code, message = "transport_error", None, type(exc).__name__, str(exc)[:800]
-                break
-            hint = retry_hint_ms(data) if outcome == "refused" else None
-            if hint is None or (time.perf_counter() - started) > retry_deadline_s:
-                break
-            warming_codes.append(code or "")
-            waited_ms += hint
-            await asyncio.sleep(hint / 1000.0)
-        record = {
-            "n": len(self.calls) + 1,
-            "journey": journey,
-            "step": step,
-            "tool": tool,
-            "args": summarise_args(args),
-            "outcome": outcome,
-            "error_code": code,
-            "error_message": message,
-            "attempts": attempts,
-            "retried_codes": sorted(set(warming_codes)),
-            "retry_wait_ms": waited_ms,
-            "wall_ms": round((time.perf_counter() - started) * 1000.0, 1),
-        }
-        self.calls.append(record)
-        return outcome, data, record

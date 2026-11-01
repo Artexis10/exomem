@@ -24,7 +24,7 @@ from pathlib import Path
 import asyncpg
 from kubernetes.client.rest import ApiException
 
-from . import alerts, db
+from . import alerts, cell_readiness, db
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -83,6 +83,7 @@ from .manifests import (
     render_backup_family_secret,
     render_backup_job,
     render_cell_manifests,
+    render_cell_namespace,
     render_clone_claim,
     render_export_job,
     render_export_verification_secret,
@@ -127,6 +128,7 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    MediaCensus,
     row_hold_kind,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
@@ -138,7 +140,13 @@ from .storage.topolvm import (
     protocol_integer,
     target_reserved,
 )
-from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
+from .storage_config import (
+    DEFAULT_STORAGE,
+    GROWTH_THRESHOLD_PERCENT,
+    LEGACY_CLASS,
+    LocalStorage,
+    StorageConfig,
+)
 
 logger = logging.getLogger("cellctl")
 
@@ -321,6 +329,14 @@ class LoopMemory:
     free_bytes: dict[str, int] = field(default_factory=dict)
     unavailable_cells: list[str] = field(default_factory=list)
     low_disk_cells: list[str] = field(default_factory=list)
+    # The cell-recall-lagging alert: when the cells' readiness was last read,
+    # each serving cell's last definite verdict (cell_readiness.recall_lag_verdict),
+    # kept through answers that cannot be judged, and the (lagging, unjudged)
+    # cells last logged. A restart forgets them, and the alert sends no
+    # resolution until every serving cell is judged again.
+    recall_read_at: datetime | None = None
+    recall_verdicts: dict[str, bool] = field(default_factory=dict)
+    recall_logged: tuple[list[str], list[str]] = field(default_factory=lambda: ([], []))
     # D10: what each local cell's latest measured hourly backup found (a
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
@@ -627,6 +643,7 @@ class ClusterGateway:
     def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation: ...  # pragma: no cover
     def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
     def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]: ...  # pragma: no cover
+    def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]: ...  # pragma: no cover
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
@@ -1041,16 +1058,19 @@ def _compute_render_digest(
         # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
     edge = cluster_config.media_edge
+    media_mode = _media_mode(cluster_config, row)
     if edge is not None and media_credential_version is not None:
-        # A rotated credential or changed policy restarts one cell; an unchanged set restarts none.
+        # A rotated credential, changed policy or turn-off restarts one cell; an unchanged set restarts none.
         material["media_edge"] = {
             "url": edge.url,
             "key_version": row.media_key_version,
             "credential_version": media_credential_version,
             "max_object_bytes": edge.max_object_bytes,
             "policy": dict(edge.store_policy),
+            "enabled": media_mode == MEDIA_SERVED,
+            "growth_threshold": GROWTH_THRESHOLD_PERCENT,
         }
-    elif _media_store_retained(cluster_config, row):
+    elif media_mode == MEDIA_RETAINED:
         material["media_store_retained"] = True
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on
@@ -1301,33 +1321,83 @@ def _log_orphan_namespaces(cluster: ClusterGateway, rows: list[CellRow], now: da
             logger.warning("cellctl: orphan namespace %s is labelled for cell %s, which has no row; left in place", namespace, cell_id)
 
 
-def _media_store_retained(cluster_config: ClusterConfig, row: CellRow) -> bool:
-    """A live cell that holds a media key bundle but that the edge does not serve. It keeps its
-    store identity, disabled: without it the runtime would read every evicted original as deleted."""
+# add-cloud-media-store D12: how a live cell's media store renders, a closed set this module implements.
+# Served: the edge selects it. Draining: the edge no longer selects it, and it keeps its key, credential,
+# egress and active-set entry, with offload off, until it drains. Retained: its store identity alone.
+MEDIA_SERVED, MEDIA_DRAINING, MEDIA_RETAINED = "served", "draining", "retained"
+MEDIA_KEYED = (MEDIA_SERVED, MEDIA_DRAINING)
+# D12: the custody observation's key for a turned-off store's record. Substrate has no column for it,
+# and a new one needs a Substrate migration; the observation is cellctl's to write (simplest choice).
+MEDIA_STORE_RECORD = "media_store"
+
+
+def _media_store_of(row: CellRow) -> object:
+    """D12: the row's turned-off store record, or None. A custody observation that is not an object,
+    such as a jsonb null, holds none; the pass-wide active set reads every row, so it must not raise."""
+    custody = json.loads(row.custody_observation or "{}")
+    return custody.get(MEDIA_STORE_RECORD) if isinstance(custody, dict) else None
+
+
+def _media_store_drained(record: object) -> bool:
+    """D12: a report that the cell captured after cellctl turned its store off shows no evicted
+    original. No report, an unknown count and an earlier capture each keep the store."""
+    try:
+        return (type(record["evicted"]) is int and record["evicted"] == 0
+                and datetime.fromisoformat(record["captured_at"]) > datetime.fromisoformat(record["turned_off_at"]))
+    except (KeyError, TypeError, ValueError):
+        # No report, or a record cellctl cannot read: keep the store, as an unreadable report does.
+        # The pass-wide active set reads every row's record, so one bad record must not stop the pass.
+        return False
+
+
+def _media_mode(cluster_config: ClusterConfig, row: CellRow) -> str | None:
+    """D12: the cell's media store mode, or None when it has no store. A deleted row has none:
+    deletion removes it from the active set and retires its keys without a report."""
+    if row.desired_state == "deleted":
+        return None
     edge = cluster_config.media_edge
-    served = edge is not None and edge.selects(row.cell_id)
-    return row.desired_state != "deleted" and row.media_key_wrapped is not None and not served
+    if edge is not None and edge.selects(row.cell_id):
+        return MEDIA_SERVED
+    if row.media_key_wrapped is None:
+        return None
+    # Without edge settings cellctl can sign no credential, so the store identity alone is left. The chart's
+    # upgrade refuses to turn the edge off while the active set lists a cell; a rollback skips that check.
+    if edge is not None and not _media_store_drained(_media_store_of(row)):
+        return MEDIA_DRAINING
+    # The identity alone keeps an evicted original evicted; without it the runtime reads it as deleted.
+    return MEDIA_RETAINED
+
+
+def _media_store_record(cluster_config: ClusterConfig, row: CellRow, census: MediaCensus | None) -> dict | None:
+    """D12: a turned-off store's record, with the newest report the cell captured since. A cell the
+    edge serves again forgets it, so a report from while it was served never counts for a later turn-off."""
+    record = _media_store_of(row)
+    if not isinstance(record, dict) or _media_mode(cluster_config, row) == MEDIA_SERVED:
+        return None
+    if census is None:
+        return record
+    known = {"evicted": census.evicted, "evicted_bytes": census.evicted_bytes}
+    return {**record, **{key: "unknown" if value is None else value for key, value in known.items()},
+            "captured_at": census.captured_at.isoformat()}
 
 
 def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
-    """The credential version the edge admits for this cell; None when the edge does not serve it."""
-    edge = cluster_config.media_edge
-    if edge is None or active is None or row.desired_state == "deleted" or not edge.selects(row.cell_id):
+    """The credential version the edge admits for this cell; None when the cell holds no credential."""
+    if active is None or _media_mode(cluster_config, row) not in MEDIA_KEYED:
         return None
     return active.cells.get(row.cell_id)
 
 
-def _publish_media_edge_set(
-    cluster: ClusterGateway, edge: MediaEdgeConfig, cell_ids: list[str], now: datetime
-) -> ActiveSet | None:
+def _publish_media_edge_set(cluster: ClusterGateway, cells: Mapping[str, int], now: datetime) -> ActiveSet | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
-    Returns the set the edge is to load, or None when the cluster would not say, in which case
-    no selected cell renders this pass. An unchanged set writes nothing."""
+    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is
+    to load, or None when the cluster would not say, in which case no keyed cell renders this pass.
+    An unchanged set writes nothing."""
     try:
         current = cluster.read_media_edge_active_set()
         published = read_active_set(current)
-        planned = plan_active_set(published, edge.selection(cell_ids), int(now.timestamp() * 1000))
+        planned = plan_active_set(published, cells, int(now.timestamp() * 1000))
         manifest = render_active_set(planned, GATEWAY_NAMESPACE)
         if current != manifest["data"]:
             cluster.apply_media_edge_active_set(manifest)
@@ -1337,6 +1407,26 @@ def _publish_media_edge_set(
     except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
         logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
         return None
+
+
+def _label_media_edge_namespaces(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: Mapping[str, ClusterObservation],
+) -> None:
+    """D12: the edge's network wall admits a namespace by its label. A served or draining cell whose live
+    namespace lacks it gets it on this pass, whatever its restart or digest cadence: the chart keys the wall
+    on the label as it rolls out, before any re-apply has carried it. A namespace another cell owns is left."""
+    for row in rows:
+        observation = observations[row.cell_id]
+        if (_media_mode(cluster_config, row) not in MEDIA_KEYED or not observation.namespace_exists
+                or observation.namespace_cell_label != row.cell_id or observation.namespace_media_edge_access):
+            continue
+        try:
+            cluster.apply_all([render_cell_namespace(row.cell_id, media_edge_access=True)])
+        except Exception as error:  # noqa: BLE001 - one cell's namespace must not stop the pass; the next one retries
+            logger.error("cellctl could not label cell %s for the media edge: %s", row.cell_id, _describe_error(error))
 
 
 def _media_edge_settled(
@@ -1423,9 +1513,10 @@ async def reconcile_once(
     media_active: ActiveSet | None = None
     media_unsettled = False
     if cluster_config.media_edge is not None:
-        media_active = _publish_media_edge_set(
-            cluster, cluster_config.media_edge, [row.cell_id for row in rows if row.desired_state != "deleted"],
-            now)
+        # D12: a draining cell keeps its entry although the edge no longer selects it.
+        media_active = _publish_media_edge_set(cluster, {
+            row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
+            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now)
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
@@ -1462,6 +1553,7 @@ async def reconcile_once(
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
+    _label_media_edge_namespaces(cluster, cluster_config, rows, observations)
 
     non_deleted_rows = [row for row in rows if row.desired_state != "deleted"]
     # H1/H9: an upgrade or a restore hold blocks new candidates; a deleted
@@ -1713,6 +1805,8 @@ async def _growth_alert(
 # The dedicated hosts change slowly and each read is a pod listing and one HTTP
 # request per node, so they are read at most this often, not on every pass.
 HOST_ALERT_INTERVAL = timedelta(minutes=1)
+# How often the cell-recall-lagging alert reads the cells' readiness answers.
+RECALL_LAG_INTERVAL = timedelta(minutes=1)
 
 
 async def _host_alerts(
@@ -1799,11 +1893,13 @@ async def _cell_health_alerts(
     now: datetime,
     memory: LoopMemory,
 ) -> None:
-    """Two platform alerts with the observability contract's thresholds: a
+    """Three platform alerts with the observability contract's thresholds: a
     serving cell that stayed unready for pending_operation_warn_seconds
-    (cell-unavailable), and one whose volume has less than
-    pvc_reserved_free_bytes free (cell-disk-low). The cells go to the log, by
-    id, because the email names none."""
+    (cell-unavailable), one whose volume has less than
+    pvc_reserved_free_bytes free (cell-disk-low), and one whose recall has
+    served an unchanged, lagging catalogue for recall_lag_warn_seconds
+    (cell-recall-lagging). The cells go to the log, by id, because the email
+    names none."""
 
     thresholds = cluster_config.alert_thresholds
     if thresholds is None:
@@ -1835,6 +1931,77 @@ async def _cell_health_alerts(
     firing = alerts.disk_low(rows, memory.free_bytes, floor=floor)
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.DISK_LOW_ALERT, firing, now)
+
+    await _recall_lag_alert(cluster, cluster_config, rows, observations, now, memory, after=thresholds.recall_lag_after)
+
+
+async def _recall_lag_alert(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    now: datetime,
+    memory: LoopMemory,
+    *,
+    after: timedelta,
+) -> None:
+    """cell-recall-lagging: each serving cell's readiness answer, read from
+    its health-only port at most once a RECALL_LAG_INTERVAL, says whether its
+    recall serves a catalogue that has stayed unchanged and behind for
+    `after`. The age is the cell's own, so a cellctl restart restarts no
+    clock. An answer that cannot be judged (none, or a lag too young) keeps
+    the cell's last definite verdict: it says nothing new, and a stalled cell's
+    last verdict is the stall. A cell that leaves service forgets its verdict.
+    Nothing is read with no receiver to tell."""
+
+    if cluster_config.alert_delivery_secret is None:
+        return
+    if memory.recall_read_at is None or now - memory.recall_read_at >= RECALL_LAG_INTERVAL:
+        memory.recall_read_at = now
+        serving = {row.cell_id for row in rows if row.desired_state in alerts.SERVING_STATES}
+        # A cell with no ready pod, or not observed this pass, is not read: unjudged on this read.
+        addresses = {
+            row.cell_id: observation.ready_pod_ip
+            for row in rows
+            if row.cell_id in serving
+            and (observation := observations.get(row.cell_id)) is not None
+            and observation.ready_pod_ip
+        }
+        answers: dict[str, bytes] = {}
+        if addresses:
+            try:
+                answers = await asyncio.to_thread(cluster.read_cell_readiness, addresses)
+            except Exception as error:  # noqa: BLE001 - every cell then reads as unjudged
+                logger.error("cellctl: %s: no cell readiness could be read: %s", alerts.RECALL_LAG_ALERT,
+                             _describe_error(error))
+        latest: dict[str, bool | None] = {}
+        for cell in addresses:
+            try:
+                latest[cell] = cell_readiness.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
+            except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
+                logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
+                             alerts.RECALL_LAG_ALERT, cell, _describe_error(error))
+                latest[cell] = None
+        verdicts = {cell: verdict for cell, verdict in memory.recall_verdicts.items() if cell in serving}
+        verdicts.update((cell, verdict) for cell, verdict in latest.items() if verdict is not None)
+        memory.recall_verdicts = verdicts
+        lagging = alerts.recall_lagging_cells(rows, verdicts)
+        unjudged = sorted(cell for cell in serving if latest.get(cell) is None)
+        if (lagging, unjudged) != memory.recall_logged:
+            memory.recall_logged = (lagging, unjudged)
+            seconds = int(after.total_seconds())
+            if lagging:
+                logger.warning("cellctl: %s: %d serving cell(s) have served an unchanged, lagging catalogue for %d "
+                               "seconds or more: %s", alerts.RECALL_LAG_ALERT, len(lagging), seconds,
+                               ", ".join(lagging))
+            if unjudged:
+                # Info: a busy catalogue lags briefly and often, and is no fault.
+                logger.info("cellctl: %s: %d serving cell(s) could not be read, or lag for less than %d seconds; "
+                            "each keeps its last verdict: %s", alerts.RECALL_LAG_ALERT, len(unjudged), seconds,
+                            ", ".join(unjudged))
+    firing = alerts.recall_lagging(rows, memory.recall_verdicts)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.RECALL_LAG_ALERT, firing, now)
 
 
 def _note_cell_health(
@@ -2131,6 +2298,9 @@ async def _reconcile_row(
             "source": "controller-manifest-and-pvc",
             "core_dumps": "configured" if observation.statefulset_render_digest == render_digest else "unknown",
         }
+        media_store = _media_store_record(cluster_config, row, observation.backup_job_media_census)
+        if media_store is not None:
+            custody[MEDIA_STORE_RECORD] = media_store
         previous = json.loads(row.custody_observation or "{}")
         previous.pop("observed_at", None)
         if custody != previous:
@@ -2432,13 +2602,13 @@ async def _reconcile_row(
     applied_cleanly = False
     if decision.apply_manifests and decision.image:
         edge = cluster_config.media_edge
-        media_selected = edge is not None and row.desired_state != "deleted" and edge.selects(row.cell_id)
+        media_mode = _media_mode(cluster_config, row)
         media_version = _media_credential_version(cluster_config, media_active, row)
-        if media_selected and media_version is None:
+        if media_mode in MEDIA_KEYED and media_version is None:
             # Fail closed: rendering without the edge would strip a running cell's store and read evicted originals as deleted.
             raise ValueError("the media edge active set does not admit this cell")
         secret_material, backup_key_version = await _resolve_secret_material(
-            connection, row, secrets_config, media=media_selected)
+            connection, row, secrets_config, media=media_mode in MEDIA_KEYED)
         # A hold's Jobs read the key from the Secret, so it is only checked
         # and replaced outside a hold, including the pass that starts one.
         key_id, key_secret, b2_key_version = await _resolve_object_storage_key(
@@ -2484,14 +2654,15 @@ async def _reconcile_row(
         resources, placement = cluster_config.workload_for_cell(row.cell_id)
         local_volume = cluster_config.storage.is_local(storage_class)
         media_fields: dict[str, object] = {}
-        if media_selected:
+        if media_mode in MEDIA_KEYED:
             media_fields = {
                 "media_edge_url": edge.url,
                 "media_edge_credential": sign_credential(edge.signing_key, cell_id=row.cell_id, version=media_version),
                 "media_max_object_bytes": edge.max_object_bytes,
                 "media_store_policy": dict(edge.store_policy),
+                "media_store_enabled": media_mode == MEDIA_SERVED,
             }
-        elif _media_store_retained(cluster_config, row):
+        elif media_mode == MEDIA_RETAINED:
             media_fields = {"media_store_retained": True}
         spec = CellManifestSpec(
             cell_id=row.cell_id,
@@ -2605,6 +2776,15 @@ async def _reconcile_row(
             _record_refusal(memory, row.cell_id, refusal_key, now, statefulset_blocked=True)
             changed = {"last_error_code": MANIFEST_IMMUTABLE} if row.last_error_code != MANIFEST_IMMUTABLE else {}
             return await _write_observed(connection, row, changed, now)
+        custody = json.loads(row.custody_observation or "{}")
+        if (media_mode == MEDIA_DRAINING and MEDIA_STORE_RECORD not in custody
+                and not any(kind == "Secret" for kind, _ in refused)):
+            # D12: cellctl turned the store off when the Secret with offload off landed. Only a report
+            # captured after this counts; whether the cell ran it yet is not known (configuration-generation seam).
+            custody[MEDIA_STORE_RECORD] = {"turned_off_at": now.isoformat()}
+            turned_off = {"custody_observation": json.dumps(custody, sort_keys=True)}
+            await db.write_observed(connection, row.cell_id, turned_off)
+            row = dataclass_replace(row, **turned_off)
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []

@@ -601,6 +601,25 @@ def test_abort_only_renders_the_shipped_break_glass_binding(monkeypatch, tmp_pat
     assert rendered[1:] == ([binding] if requested else [])
 
 
+def test_the_chart_value_for_the_transfer_tools_follows_the_setting_the_large_import_run_reads(monkeypatch, tmp_path) -> None:
+    """The run tolerates a gateway refusal only while the chart leaves the tools off, so both must read one setting."""
+    from types import SimpleNamespace
+
+    values = {}
+
+    def render(_stack, rendered_values, **_kwargs):
+        values.update(rendered_values)
+        return [("templates/cloud-storage-class.yaml", {"kind": "StorageClass", "metadata": {"name": "test-storage"}})]
+
+    monkeypatch.setattr(platform, "render_chart", render)
+    monkeypatch.setattr(platform, "TRANSFER_TOOLS_ENABLED", True)
+    config = platform.PlatformConfig("controller", "gateway", "cell", "0-1", "https://example.test", "/mcp", "source")
+    stack = SimpleNamespace(postgres=SimpleNamespace(ip="192.0.2.3"), workdir=tmp_path,
+                            object_store=SimpleNamespace(endpoint=lambda **_kwargs: "https://192.0.2.4"))
+    platform._render(stack, config)
+    assert values["cloudGateway"]["transferTools"] == {"enabled": True}
+
+
 def test_requested_operator_abort_cannot_be_silently_skipped() -> None:
     """A subset without provisioning must not report success for an unexecuted requested stage."""
     import asyncio

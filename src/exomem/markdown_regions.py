@@ -275,3 +275,32 @@ def local_links(text: str) -> tuple[LocalLink, ...]:
 
     visit(_LINK_PARSER.parse(text))
     return tuple(links)
+
+
+# Obsidian's inline tag token: `#` opened at a line start or after whitespace, then
+# letters, digits, `_`, `-` and `/`. This checks a token's shape inside text the
+# CommonMark scan has already cleared of code and comments; it reads no meaning.
+_INLINE_TAG = re.compile(r"(?<!\S)#([\w/-]+)")
+
+
+def inline_tags(text: str) -> tuple[str, ...]:
+    """Inline `#tags` outside code, comments and escapes, in first-seen order.
+
+    A token of digits alone is not a tag (`#1984`), and a heading needs a space after
+    its marks, so `# Title` never matches. Normalization stays with the caller.
+    """
+    if "#" not in text:
+        return ()
+    regions = scan_markdown(text)
+    comments = regions.comment_spans
+    tags: dict[str, None] = {}
+    for match in _INLINE_TAG.finditer(text):
+        start = match.start()
+        if not outside(text, start, regions.code_spans):
+            continue
+        if any(open_ <= start < close for open_, close in comments):
+            continue
+        token = match.group(1)
+        if not token.isdigit():
+            tags.setdefault(token, None)
+    return tuple(tags)

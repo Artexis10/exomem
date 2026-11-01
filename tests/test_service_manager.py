@@ -234,6 +234,141 @@ def test_supervisor_start_with_receipt_does_not_launch_a_worker(tmp_path):
     asyncio.run(scenario())
 
 
+class _ExitedRuntime(_Runtime):
+    """A serving worker that exited on its own."""
+
+    def __init__(self, replacement_fails=False):
+        super().__init__()
+        self.pid = 0
+        self.returncode = -11
+        self.replacement_fails = replacement_fails
+
+    async def stop(self, timeout):
+        self.events.append("stop")
+        self.returncode = None
+
+    async def start(self, target, timeout):
+        self.events.append("start")
+        if self.replacement_fails:
+            self.returncode = 2
+            raise RuntimeError("candidate worker exited before readiness")
+        self.pid = 200
+        return "new-upstream"
+
+
+def _restarting_supervisor(tmp_path, runtime, clock):
+    module = _manager()
+    ingress = _Ingress()
+    manager = module.Supervisor(
+        module.private_directory(tmp_path / "managed"),
+        initial_target={"python": sys.executable, "version": "1.2.3"},
+        ingress=ingress,
+        runtime=runtime,
+        identity={"unit": "sample.service", "invocation": "abc", "boot": "boot"},
+        clock=clock,
+    )
+    manager.phase = "ready"
+    return manager, ingress
+
+
+def test_crashes_minutes_apart_are_each_restarted_in_place(tmp_path):
+    # The 2026-10-30 incident: five native crashes about six minutes apart.
+    async def scenario():
+        now = [0.0]
+        runtime = _ExitedRuntime()
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: now[0])
+        for _ in range(5):
+            runtime.pid, runtime.returncode = 0, -11
+            assert await manager.restart_worker() is None
+            assert manager.phase == "ready"
+            now[0] += 360.0
+        assert runtime.events == ["stop", "start"] * 5
+        assert ingress.events == ["pause", ("resume", "new-upstream")] * 5
+
+    asyncio.run(scenario())
+
+
+def test_a_fourth_crash_inside_the_window_stops_the_supervisor(tmp_path):
+    async def scenario():
+        now = [0.0]
+        runtime = _ExitedRuntime()
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: now[0])
+        for _ in range(3):
+            runtime.pid, runtime.returncode = 0, -11
+            assert await manager.restart_worker() is None
+            now[0] += 60.0
+        runtime.pid, runtime.returncode = 0, -11
+        assert await manager.restart_worker() is not None
+        assert runtime.events == ["stop", "start"] * 3
+        assert ingress.events == ["pause", ("resume", "new-upstream")] * 3
+        status = manager.status()
+        assert status["phase"] == "unavailable"
+        assert status["worker_restarts"] == {
+            "in_window": 3,
+            "limit": 3,
+            "window_seconds": 600.0,
+            "last_exit_code": -11,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_a_replacement_that_never_reports_ready_stops_the_supervisor(tmp_path):
+    # A worker that cannot start, or hangs past the cold-start window, gets a
+    # full unit restart rather than a loop that never spends the budget.
+    async def scenario():
+        runtime = _ExitedRuntime(replacement_fails=True)
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        assert await manager.restart_worker() is not None
+        assert runtime.events == ["stop", "start"]
+        assert ingress.events == ["pause"]
+        assert manager.phase == "unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_a_descendant_that_outlives_the_stop_allowance_blocks_the_restart(tmp_path):
+    async def scenario():
+        runtime = _ExitedRuntime()
+
+        async def stop(timeout):
+            runtime.events.append("stop")
+            raise TimeoutError("managed upgrade deadline expired")
+
+        runtime.stop = stop
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        assert await manager.restart_worker() is not None
+        # No second worker beside a surviving descendant; the unit cleans it.
+        assert runtime.events == ["stop"]
+        assert ingress.events == ["pause"]
+        assert manager.phase == "unavailable"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("phase", "worker_pid"),
+    [("ready", 200), ("recovery-required", 0)],
+    ids=["transition-replaced-the-worker", "transition-failed-into-recovery"],
+)
+def test_a_restart_queued_behind_a_transition_keeps_its_outcome(tmp_path, phase, worker_pid):
+    # The monitor saw the exit while an upgrade held the lock; the upgrade
+    # then either served a new worker or recorded a failed transition.
+    async def scenario():
+        runtime = _ExitedRuntime()
+        manager, ingress = _restarting_supervisor(tmp_path, runtime, lambda: 0.0)
+        async with manager.lock:
+            restart = asyncio.create_task(manager.restart_worker())
+            await asyncio.sleep(0)
+            manager.phase, runtime.pid = phase, worker_pid
+        assert await restart is None
+        assert runtime.events == []
+        assert ingress.events == []
+        assert manager.phase == phase
+
+    asyncio.run(scenario())
+
+
 class _ColdRuntime(_Runtime):
     def __init__(self):
         super().__init__()
@@ -444,7 +579,10 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
                 assert serving.pid == 0
                 assert manager.phase == "unavailable"
         if not compatible:
-            assert serving.events == ingress.events == []
+            assert serving.events == []
+            # A refused upgrade leaves admission alone; a cold start refuses
+            # calls from its first step, because no worker is serving yet.
+            assert ingress.events == ([] if entrypoint == "upgrade" else ["unavailable"])
         assert not state.exists()
 
     asyncio.run(scenario())
@@ -1103,6 +1241,24 @@ def test_a_child_reads_the_current_service_environment_file(tmp_path, monkeypatc
     assert "9INVALID" not in environment
     # The supervisor's own environment is never mutated by reading the file.
     assert os.environ["EXOMEM_PRELOAD_MODELS"] == "0"
+
+
+def test_an_owned_worker_sees_no_cuda_device_and_the_media_child_gets_the_deployments_list(tmp_path, monkeypatch):
+    from exomem import asr_runtime
+
+    module = _manager()
+    env_file = tmp_path / "service.env"
+    env_file.write_text("CUDA_VISIBLE_DEVICES=1\n")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_file=env_file
+    )
+
+    worker_environment = runtime._owned_child_environment({"EXOMEM_TEST_OVERLAY": "1"})
+
+    assert worker_environment["CUDA_VISIBLE_DEVICES"] == ""
+    assert worker_environment["EXOMEM_TEST_OVERLAY"] == "1"
+    assert asr_runtime.cuda_runtime_child_env(worker_environment)["CUDA_VISIBLE_DEVICES"] == "1"
 
 
 def test_a_missing_service_environment_file_leaves_the_child_inheriting(tmp_path):

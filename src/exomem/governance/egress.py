@@ -6305,6 +6305,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "work-item": "structure",
         "propose": "mutation",
         "apply-proposal": "mutation",
+        "acknowledge": "mutation",
     },
     ("process_media", "operation"): {
         "process": "mutation",
@@ -6323,6 +6324,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "fix": "dry-run-default",
         "reconcile": "dry-run-opt-in",
         "backfill-ids": "dry-run-default",
+        "maintenance-job": "structure",
+        "maintenance-job-cancel": "mutation",
         "structured-files": "apply-conditional",
         "curation": "mutation",
         "tag-variants": "apply-conditional",

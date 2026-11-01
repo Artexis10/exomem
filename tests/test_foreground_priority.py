@@ -474,6 +474,62 @@ def test_the_lexical_repair_rebuild_yields_and_never_under_a_lock(
     assert held_while_yielding == []
 
 
+def test_a_lexical_repair_beside_a_held_apply_parks_within_its_floor_and_reports_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Large-import rehearsals, 2026-10-31: an apply holds the mutation boundary
+    for 97% of every call, with sub-second gaps between calls. At the default
+    floor the repair took half the process's time and slowed the apply; a repair
+    that waited for a gap would leave the catalogue lagging for the whole import.
+    A full repair beside a boundary that stays held parks at its yields for most
+    of its time, within its own floor, still publishes while the boundary is
+    held, and reports how long it parked, so a rehearsal can tell parking from
+    work."""
+    import logging
+
+    from exomem import lexstore
+
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index in range(40):
+        (notes / f"page-{index}.md").write_text(
+            f"---\ntype: note\n---\n\n# Page {index}\n\nharbour lantern {index}\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "state").mkdir()
+    coordinator = mutation_lock.VaultMutationCoordinator(tmp_path / "state", tmp_path)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def apply() -> None:
+        with coordinator.hold(request_id="apply", operation="apply_probe"):
+            holding.set()
+            release.wait(60.0)
+
+    holder = threading.Thread(target=apply, daemon=True)
+    holder.start()
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    try:
+        assert holding.wait(5.0)
+        lexstore._schedule_repair(tmp_path)
+        # Unparked well under 1 s. Bound: the repair's own floor (below), with slack.
+        assert lexstore.await_repairs_idle(tmp_path, timeout=60.0), "the repair starved behind the apply"
+    finally:
+        release.set()
+        holder.join(5.0)
+    finished = [
+        record.fields
+        for record in caplog.records
+        if getattr(record, "event", None) == "lexical_repair_finished"
+    ]
+    assert [(fields["kind"], fields["result"]) for fields in finished] == [("full", "published")]
+    parked, worked = finished[0]["parked_s"], finished[0]["duration_s"] - finished[0]["parked_s"]
+    grace, share = foreground_priority.MAX_YIELD_SECONDS, lexstore._REPAIR_WAIT_SHARE
+    # Past the default floor (the grace wait plus as long as the work), within
+    # the repair's own (the grace wait plus `share` of the pass's time), with slack.
+    assert grace + worked < parked <= grace + share / (1 - share) * worked + 0.5
+
+
 def _overlapping_requests(stop: threading.Event, *, hold: float = 0.4) -> list[threading.Thread]:
     """Two request streams offset by half a hold: `in_flight` never reaches 0."""
 
@@ -546,6 +602,34 @@ def test_overlapping_requests_receive_only_one_bulk_grace_wait(monkeypatch) -> N
     # One second of useful work permits one second of additional waiting at
     # the 50% share, after the single initial grace.
     assert clock[0] <= foreground_priority.MAX_YIELD_SECONDS + 2.0
+
+
+def test_a_pass_with_its_own_floor_waits_past_the_default_share_but_never_past_its_ceiling(
+    monkeypatch,
+) -> None:
+    """A full lexical repair gives most of its time to an import's apply, which
+    holds the boundary between sub-second gaps. Its ceiling still ends the
+    waiting, so a repair that never meets a gap finishes within a fixed delay
+    beyond its work, and the catalogue cannot lag for the whole import."""
+    clock = [0.0]
+
+    def capped_wait(predicate, *, timeout):
+        clock[0] += timeout
+        return False
+
+    monkeypatch.setattr(
+        foreground_priority, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(foreground_priority._condition, "wait_for", capped_wait)
+    monkeypatch.setattr(foreground_priority, "_in_flight", 1)
+    budget = foreground_priority.PassBudget(wait_share=0.9, max_waited=6.0)
+    with foreground_priority.bulk(budget=budget):
+        for _ in foreground_priority.yielding_in_bulk(range(100)):
+            clock[0] += 0.01
+
+    # One second of work. The default share stops at the grace plus one second
+    # (3 s), this share at the grace plus nine (11 s), and the ceiling at 6 s.
+    assert 4.0 < budget.waited <= 6.0 + 1e-6
 
 
 def test_a_lone_request_mid_pass_still_holds_the_pass() -> None:

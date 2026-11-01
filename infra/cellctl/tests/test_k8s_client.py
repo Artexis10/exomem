@@ -243,6 +243,28 @@ def test_a_failed_backup_reports_only_its_value_free_code(message: str, reported
     assert (observation.backup_job_failed, observation.backup_job_failure_code) == (True, reported)
 
 
+@pytest.mark.parametrize("census", [
+    "",
+    "3 unknown",
+    "-1 0 2026-01-01T00:04:00+00:00",
+    "0 0 yesterday",
+    "0 0 2026-01-01T00:04:00",
+    "0 unknown 2026-01-01T00:04:00+00:00",
+], ids=["absent", "no capture time", "a negative count", "an unreadable time", "a time with no zone", "a mixed census"])
+def test_an_unreadable_media_census_counts_as_no_report_and_the_backup_still_counts(census: str) -> None:
+    # A census read as 0 evicted would let cellctl remove a turned-off cell's key and edge access.
+    current_backup = hold_job_name("cell-backup", CURRENT_HOLD)
+    snapshot = "a" * 64
+    pod = _job_pod(current_backup, snapshot_id=f"{snapshot} 900 1000\n{census}")
+
+    observation = _client(hold_started_at=CURRENT_HOLD, jobs={current_backup: _job(succeeded=True)},
+                          pods=[pod]).observe(CELL_ID, NAMESPACE)
+
+    assert observation.backup_job_media_census is None
+    assert (observation.backup_job_snapshot_id, observation.backup_job_used_bytes,
+            observation.backup_job_total_bytes) == (snapshot, 900, 1000)
+
+
 def test_the_current_holds_failed_backup_is_observed() -> None:
     jobs = {
         hold_job_name("cell-backup", EARLIER_HOLD): _job(succeeded=True),
@@ -272,6 +294,7 @@ def _cell_pod(
             conditions=[NS(type="Ready", status="False")],
             init_container_statuses=[NS(name="cell-init", state=init_state, last_state=last_state)],
             container_statuses=[],
+            pod_ip="10.42.0.9",
         ),
     )
 
@@ -382,6 +405,22 @@ def test_update_revision_is_trusted_only_once_the_controller_observed_the_genera
 
     client._apps = _Apps(None, generation=3, observed_generation=3)
     assert client.observe(CELL_ID, NAMESPACE).pod_ready is True
+
+
+def test_observe_reports_the_address_of_a_ready_pod_on_the_update_revision_only() -> None:
+    # The cell-recall-lagging alert reads the cell at this address. A pod that
+    # is not ready, or runs the previous revision, answers for no serving cell.
+    stale_revision = _client(hold_started_at=None, jobs={}, pods=[_ready_cell_pod()])
+    stale_revision._apps = _Apps(None, generation=3, observed_generation=2)
+    current = _client(hold_started_at=None, jobs={}, pods=[_ready_cell_pod()])
+    current._apps = _Apps(None, generation=3, observed_generation=3)
+    not_ready = _client(hold_started_at=None, jobs={}, pods=[
+        _cell_pod(init_state=NS(terminated=NS(exit_code=0, message=None), running=None, waiting=None))])
+    not_ready._apps = _Apps(None, generation=3, observed_generation=3)
+
+    assert current.observe(CELL_ID, NAMESPACE).ready_pod_ip == "10.42.0.9"
+    assert stale_revision.observe(CELL_ID, NAMESPACE).ready_pod_ip is None
+    assert not_ready.observe(CELL_ID, NAMESPACE).ready_pod_ip is None
 
 
 def test_observe_reads_the_row_generation_annotation() -> None:

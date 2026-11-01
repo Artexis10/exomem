@@ -1304,7 +1304,7 @@ def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
     scope's skip set. Stat-free, so it works for already-deleted paths.
     """
     from .find import EXCLUDED_DIR_NAMES
-    from .vault import VAULT_SCAN_SKIP_DIRS
+    from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
 
     if path.suffix.lower() != ".md" or ".sync-conflict-" in path.name:
         return (False, False)
@@ -1313,7 +1313,9 @@ def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
         vault_parts = path.relative_to(vault_root).parts
     except ValueError:
         return (False, False)
-    in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in vault_parts[:-1])
+    in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in vault_parts[:-1]) and not in_import_stage(
+        "/".join(vault_parts[:-1])
+    )
 
     in_kb = False
     try:

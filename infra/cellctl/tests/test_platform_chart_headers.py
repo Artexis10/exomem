@@ -245,7 +245,8 @@ def test_exomem_cloud_is_default_deny_and_each_workload_policy_allows_its_own_tr
     assert cellctl["ingress"] == []
     # Local storage is on in the validation values: 8080 and 9100 are the host
     # alerts' metrics ports (tasks 5.5, 5.6), asserted in full further down.
-    assert _ports(cellctl["egress"]) == {443, 6443, 5432, 53, 8080, 9100}
+    # 8766 is the cells' health-only port, asserted in full further down too.
+    assert _ports(cellctl["egress"]) == {443, 6443, 5432, 53, 8080, 9100, 8766}
 
 
 def _selects(selector: dict[str, Any], labels: dict[str, str]) -> bool:
@@ -297,6 +298,40 @@ def test_the_gateway_egresses_on_8765_only_to_cell_pods_in_cell_namespaces() -> 
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_reaches_cell_runtime_pods_only_on_the_health_port() -> None:
+    # cellctl derives every cell bearer. It may read a cell's readiness on the
+    # health-only port, and must never reach the cell port, which carries MCP.
+    from cellctl.manifests import (
+        CELL_HEALTH_PORT,
+        CELL_PORT,
+        CellManifestSpec,
+        render_backup_job,
+        render_namespace,
+        render_statefulset,
+    )
+
+    egress = _find(_helm_template(), "NetworkPolicy", "cellctl")["spec"]["egress"]
+    assert CELL_PORT not in _ports(egress)
+    health_rules = [rule for rule in egress if CELL_HEALTH_PORT in _ports([rule])]
+    assert len(health_rules) == 1 and _ports(health_rules) == {CELL_HEALTH_PORT}
+    assert len(health_rules[0]["to"]) == 1
+    peer = health_rules[0]["to"][0]
+
+    spec = CellManifestSpec(
+        cell_id="aaaaaaaaaaaaaaaa", image="registry.example/cell@sha256:" + "a" * 64, replicas=0, read_only=False,
+        hold_kind="backup", hold_started_at="2026-01-01T02:00:00+00:00",
+    )
+    cell_namespace = render_namespace(spec)["metadata"]["labels"]
+    cell_pod = render_statefulset(spec)["spec"]["template"]["metadata"]["labels"]
+    job_pod = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example")["spec"]["template"]["metadata"]["labels"]
+
+    assert _selects(peer["namespaceSelector"], cell_namespace)
+    assert not _selects(peer["namespaceSelector"], {"kubernetes.io/metadata.name": "exomem-cloud"})
+    assert _selects(peer["podSelector"], cell_pod)
+    assert not _selects(peer["podSelector"], job_pod)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_transfer_tools_open_gateway_443_to_public_addresses_only_when_switched_on() -> None:
     # add-cloud-transfer-tools: default off, the gateway keeps exactly its D5
     # egress and env. On, it also reaches the web API on 443, never a private range.
@@ -333,7 +368,9 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
     # cellctl deletes only namespaces and Jobs. Its literals must match the
     # renderer's constants, or every cell's apply would be refused.
     from cellctl.manifests import (
+        CELL_HEALTH_PORT,
         CELL_PORT,
+        CELLCTL_POD_LABEL_VALUE,
         GATEWAY_NAMESPACE,
         GATEWAY_POD_LABEL,
         GATEWAY_POD_LABEL_VALUE,
@@ -354,6 +391,8 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
         f"{{'kubernetes.io/metadata.name': '{GATEWAY_NAMESPACE}'}}",
         f"{{'{GATEWAY_POD_LABEL}': '{GATEWAY_POD_LABEL_VALUE}'}}",
         f"port == {CELL_PORT}",
+        f"{{'{GATEWAY_POD_LABEL}': '{CELLCTL_POD_LABEL_VALUE}'}}",
+        f"port == {CELL_HEALTH_PORT}",
         "'cell-quota'",
         "['default-deny', 'runtime-ingress', 'job-egress']",
         "request.resource.resource in ['namespaces', 'jobs']",
@@ -1416,7 +1455,7 @@ def test_with_local_storage_off_production_renders_no_part_of_it(monkeypatch: py
     assert "snapshot.storage.k8s.io" not in scope["spec"]["matchConstraints"]["resourceRules"][0]["apiGroups"]
     _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-retained-delete")
     # Tasks 5.5 and 5.6: no egress opens to a metrics port nothing serves.
-    assert _ports(_find(documents, "NetworkPolicy", "cellctl")["spec"]["egress"]) == {443, 6443, 5432, 53}
+    assert _ports(_find(documents, "NetworkPolicy", "cellctl")["spec"]["egress"]) == {443, 6443, 5432, 53, 8766}
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1575,13 +1614,15 @@ def test_cellctl_is_given_the_cell_alert_thresholds_the_observability_contract_d
 
     alerts = json.loads((REPO_ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8"))["alerts"]
     env = _cellctl_env(_helm_template())
-    for name in ("CELLCTL_PENDING_OPERATION_WARN_SECONDS", "CELLCTL_PVC_RESERVED_FREE_BYTES"):
+    for name in ("CELLCTL_PENDING_OPERATION_WARN_SECONDS", "CELLCTL_PVC_RESERVED_FREE_BYTES",
+                 "CELLCTL_RECALL_LAG_WARN_SECONDS"):
         monkeypatch.setenv(name, env[name])
 
     thresholds = build_alert_thresholds()
 
     assert thresholds.unavailable_after.total_seconds() == alerts["pending_operation_warn_seconds"]
     assert thresholds.disk_free_floor_bytes == alerts["pvc_reserved_free_bytes"]
+    assert thresholds.recall_lag_after.total_seconds() == alerts["recall_lag_warn_seconds"]
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1592,6 +1633,7 @@ def test_a_changed_contract_value_changes_what_cellctl_is_given(tmp_path: Path) 
     contract = json.loads(contract_file.read_text(encoding="utf-8"))
     contract["alerts"]["pending_operation_warn_seconds"] = 1800
     contract["alerts"]["pvc_reserved_free_bytes"] = 3 * 1024**3
+    contract["alerts"]["recall_lag_warn_seconds"] = 1200
     changed = json.dumps(contract, indent=2) + "\n"
     contract_file.write_text(changed, encoding="utf-8")
 
@@ -1600,6 +1642,7 @@ def test_a_changed_contract_value_changes_what_cellctl_is_given(tmp_path: Path) 
 
     assert env["CELLCTL_PENDING_OPERATION_WARN_SECONDS"] == "1800"
     assert env["CELLCTL_PVC_RESERVED_FREE_BYTES"] == str(3 * 1024**3)
+    assert env["CELLCTL_RECALL_LAG_WARN_SECONDS"] == "1200"
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

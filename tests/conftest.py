@@ -480,6 +480,22 @@ def _stop_leaked_graph_drain():
     graph_drain._DEBT.clear()
 
 
+@pytest.fixture(autouse=True)
+def _cancel_upload_reattempts():
+    """No upload session's re-attempt timer fires inside a later test.
+
+    A session left parked on a busy vault keeps a timer that would commit the
+    old vault under the next test's log directory and writer state.
+    """
+    yield
+    from exomem import upload_sessions
+
+    with upload_sessions._RUNNING_LOCK:
+        session_ids = list(upload_sessions._RUNNING)
+    for session_id in session_ids:
+        upload_sessions._forget(session_id)
+
+
 #: Captured before any test can instrument the filesystem primitives: the
 #: guard below runs in autouse teardown, after test-scoped patches of
 #: `os.scandir`/`os.lstat` may still be mid-unwind, and the guard's own probe

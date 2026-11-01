@@ -17,7 +17,7 @@ import httpx2
 import pytest
 from test_cloud_upload_bridge import LOGIN_A, TOKEN, _mcp_origin, _run, _sign, _tool
 from test_cloud_upload_bridge import cell as cell
-from test_media_store import _offload, _preserved
+from test_media_store import _configure, _offload, _preserved
 from test_media_store import selected_store as selected_store
 
 from exomem import cloud_download_client, media_store
@@ -100,6 +100,20 @@ def test_an_unreachable_store_answers_retryable_unavailable(cell, selected_store
     response = _run(app, lambda client: _get(client, path, _headers(key, path)))
     assert response.status_code == 503
     assert response.json()["code"] == "ORIGINAL_UNAVAILABLE"
+
+
+def test_an_original_larger_than_the_hydration_capacity_is_refused_with_no_retry_hint(cell, selected_store):
+    """Catches the route answering 503 ORIGINAL_UNAVAILABLE, which tells the gateway to retry a file that never fits."""
+    key, app, vault = cell
+    original, path = _preserved_original(vault)
+    _offload(vault, original)
+    assert media_store.evict(vault, original)
+    _configure(selected_store, vault, max_temporary_bytes=10)
+
+    response = _run(app, lambda client: _get(client, path, _headers(key, path)))
+
+    assert response.json()["code"] == "MEDIA_HYDRATION_TOO_LARGE"
+    assert response.status_code < 500 and "retry-after" not in response.headers
 
 
 def test_a_range_request_returns_the_slice_with_the_whole_files_identity(cell):

@@ -126,8 +126,9 @@ Natural routing stays simple:
 - “Give me a template for logging these sessions.” → `inspect`, then use the ordinary template directly
 
 Use remote `maintain_memory(mode="reconcile", dry_run=true)` to preview derived-index
-repair, then have the host operator run `exomem maintain --reconcile`; never use it as a
-way to rewrite or reinterpret a person's canonical history.
+repair, then start it as a maintenance job with the preview's `plan_id` and a `why` (the
+host CLI is `exomem maintain --reconcile`); never use it as a way to rewrite or
+reinterpret a person's canonical history.
 
 ## Human-owned storage
 

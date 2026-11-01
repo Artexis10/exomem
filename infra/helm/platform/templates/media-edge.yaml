@@ -1,3 +1,25 @@
+{{- if not .Values.mediaEdge.enabled }}
+{{- /*
+add-cloud-media-store D12: with the edge off, cellctl signs no credential, so a
+cell the edge still serves or drains keeps its store identity alone and every
+evicted original becomes unreadable. Draining cells stay in cellctl's active
+set until their record shows no evicted original, so an upgrade that turns the
+edge off reads the live set and refuses while it lists any cell. A set that
+exists but cannot be read refuses too: it proves nothing drained.
+
+`lookup` returns nothing in `helm template`, in a client-side dry run and in
+`helm rollback`, so those three skip this check.
+*/ -}}
+{{- $published := lookup "v1" "ConfigMap" .Values.cellctl.namespace "exomem-media-edge-active-set" }}
+{{- if $published }}
+{{- $set := fromJson (index (default dict $published.data) "active-set.json" | default "") }}
+{{- if not (kindIs "map" $set.cells) }}
+{{- fail "mediaEdge.enabled=false: the media edge active set cannot be read, so no cell is known to have drained. Turn the edge on until cellctl publishes it again (runbook: Turn the edge off)" }}
+{{- else if $set.cells }}
+{{- fail (printf "mediaEdge.enabled=false: the media edge active set still lists %s. Take each cell off mediaEdge.cellIds with the edge on, and turn the edge off once the set lists no cell (runbook: Turn the edge off)" (keys $set.cells | sortAlpha | join ", ")) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.mediaEdge.enabled }}
 {{- include "exomem.requirePrivateRangesDenied" (dict "root" . "feature" "mediaEdge") }}
 {{- if not (regexMatch "^[^\\s]+@sha256:[a-f0-9]{64}$" .Values.artifactBroker.image) }}
@@ -181,9 +203,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: cellctl
-        {{- if $edge.allCells }}
-        # Every cell runtime, including cells created later; the listed cells are a subset.
+        # D12, decided by the operator on 2026-10-31: the runtime of every cell namespace that cellctl
+        # labels while the cell's store is served or draining. mediaEdge.cellIds only chooses the served
+        # cells, so a cell taken off that list keeps its access until it drains.
         - namespaceSelector:
+            matchLabels:
+              exomem.io/media-edge-access: "true"
             matchExpressions:
               - key: exomem.io/cloud-cell
                 operator: Exists
@@ -193,21 +218,6 @@ spec:
             matchExpressions:
               - key: exomem.io/cell-job
                 operator: DoesNotExist
-        {{- else }}
-        {{- range $edge.cellIds }}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ printf "exo-cell-%s" . }}
-              exomem.io/cloud-cell: {{ . }}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: exomem-cell
-              exomem.io/cell: {{ . }}
-            matchExpressions:
-              - key: exomem.io/cell-job
-                operator: DoesNotExist
-        {{- end }}
-        {{- end }}
       ports:
         - protocol: TCP
           port: 8769

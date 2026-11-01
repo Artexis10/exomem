@@ -158,7 +158,7 @@ _RETRY_OR_RECONCILE = f"Retry the same mutation identity, or {_RECONCILE_HINT}"
 #: operator to a recovery that cannot fix the condition they have.
 _LINEAGE_UNAVAILABLE_REMEDIATION = (
     'Run maintain_memory(mode="reconcile", dry_run=false, rebuild_graph=true) '
-    "to recover the derived graph."
+    "to recover the derived graph; a remote client adds the preview's plan_id and a why."
 )
 _COORDINATORS: dict[str, GraphRebuildCoordinator] = {}
 _COORDINATORS_LOCK = threading.Lock()

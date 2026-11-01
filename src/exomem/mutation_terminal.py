@@ -345,6 +345,27 @@ def _path_projection(result: Any) -> dict[str, Any]:
     return {"paths": []}
 
 
+def _adoption_control_projection(leaf: Mapping[str, Any]) -> dict[str, Any]:
+    """The import flow's control signals, which the compact reply must not hide.
+
+    Without them the reply that must stop (`apply_stop`), that has a next page (`next_after`)
+    or that leaves staged files with the person (`finish.residual`) has the shape of ordinary
+    progress. Each field is built by `adoption_run` and is small: `apply_stop` has five keys,
+    `next_actions` holds at most five entries of three strings, and `residual` counts files by a
+    closed set of reasons. The inventory and the plan items are not copied. `residual` stays under
+    `finish` because the next actions name it as `finish.residual`.
+    """
+    kept: dict[str, Any] = {
+        key: leaf[key]
+        for key, kind in (("next_after", str), ("apply_stop", Mapping), ("next_actions", list))
+        if isinstance(leaf.get(key), kind)
+    }
+    finish = leaf.get("finish")
+    if isinstance(finish, Mapping) and isinstance(finish.get("residual"), Mapping):
+        kept["finish"] = {"residual": finish["residual"]}
+    return kept
+
+
 def _media_result_projection(result: Any) -> dict[str, Any]:
     """Keep selected-media outcomes bounded without copying leaf diagnostics."""
     if not isinstance(result, Mapping):
@@ -2020,6 +2041,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         plan = leaf.get("plan")
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
             compact["plan_id"] = plan["plan_id"]
+        compact.update(_adoption_control_projection(leaf))
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
     if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):

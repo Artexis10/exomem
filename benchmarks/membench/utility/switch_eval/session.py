@@ -554,7 +554,12 @@ def classify(
         for e in events
         if e.get("type") == "system" and e.get("subtype") in ("hook_started", "hook_response")
     ]
-    foreign = [e for e in hooks if spec.hook_mode is None or e.get("hook_event") != PUSH_HOOK_EVENT]
+    foreign = [
+        e
+        for e in hooks
+        if e.get("hook_event") not in spec.wired_hooks
+        and (spec.hook_mode is None or e.get("hook_event") != PUSH_HOOK_EVENT)
+    ]
     pushes = [record.get("hook_responses") or [] for record in turn_records]
     if foreign or any(len(responses) > 1 for responses in pushes):
         return AttemptResult(

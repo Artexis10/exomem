@@ -7874,6 +7874,7 @@ def writer_resolver_snapshot(
     vault_root: Path,
     *,
     freshness_key: tuple[int, int, str] | None = None,
+    allow_disk: bool = True,
 ):
     """Return a detached resolver snapshot without warming the shared cache.
 
@@ -7882,29 +7883,47 @@ def writer_resolver_snapshot(
     that already measured direct disk freshness may supply that key to bypass
     potentially stale event-registry state. When the corpus route declines,
     the span records why as one closed `declined_<reason>` field.
+
+    A caller that cannot afford a walk of the vault passes `allow_disk=False`:
+    when both cheap routes decline it gets None and the span records
+    `disk_declined`, instead of a resolver built from disk.
     """
     from . import semantic_contract
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
+    # A write published during the corpus proof's vault walk moves the
+    # checkpoint, and the proof declines. The publication advances the corpus
+    # with the checkpoint, so one fresh attempt costs one walk instead of a
+    # disk build (on 2026-11-01, 9 of 11 disk builds were this race). A
+    # caller-supplied key names one exact state, so it gets one attempt.
+    attempts = 2 if freshness_key is None else 1
     # A fixed phase label; its one field names the route taken, a count.
     with call_spans.span("writer.resolver_snapshot", {}) as measured:
-        current_freshness = (
-            freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
-        )
-        with _RESOLVER_LOCK:
-            cached = _RESOLVER_CACHE.get(root)
-            if cached and cached[0] == current_freshness:
-                measured["forked"] = 1
-                return cached[1].fork()
-        entries = semantic_contract.current_writer_resolver_entries(
-            root,
-            freshness_key=current_freshness,
-            declined=measured,
-        )
-        if entries is not None:
-            measured["corpus_entries"] = 1
-            return WikilinkResolver.from_entries(root, entries)
+        for _attempt in range(attempts):
+            current_freshness = (
+                freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
+            )
+            with _RESOLVER_LOCK:
+                cached = _RESOLVER_CACHE.get(root)
+                if cached and cached[0] == current_freshness:
+                    measured["forked"] = 1
+                    return cached[1].fork()
+            declined: dict[str, int] = {}
+            entries = semantic_contract.current_writer_resolver_entries(
+                root,
+                freshness_key=current_freshness,
+                declined=declined,
+            )
+            measured.update(declined)
+            if entries is not None:
+                measured["corpus_entries"] = 1
+                return WikilinkResolver.from_entries(root, entries)
+            if f"declined_{semantic_contract.CHANGED_DURING_PROOF}" not in declined:
+                break
+        if not allow_disk:
+            measured["disk_declined"] = 1
+            return None
         measured["disk"] = 1
         return WikilinkResolver(root)
 

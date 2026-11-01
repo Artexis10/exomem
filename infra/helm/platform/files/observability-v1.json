@@ -37,6 +37,7 @@
     "backup_block_age_seconds": 108000,
     "pending_operation_warn_seconds": 900,
     "pvc_reserved_free_bytes": 1073741824,
+    "recall_lag_warn_seconds": 900,
     "cell_log_cap_bytes": 134217728,
     "safe_volume_attachments_remaining": 10
   },
