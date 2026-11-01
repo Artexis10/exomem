@@ -840,6 +840,28 @@ def run_paired(args: argparse.Namespace) -> dict:
         "base_commit": base_commit, "reduced": reduced})
 
 
+def place_arm_state(golden_state: Path, root: Path) -> None:
+    """Copy the golden's one vault-state leaf under the key of this arm's own vault.
+
+    A vault's state lives under a key derived from the vault's absolute path, so each arm's copy
+    of the golden vault finds no state under the golden's key. Rename the leaf to the arm's key and
+    match the migration manifest's vault identity, as a rehearsal copy does.
+    """
+    from exomem.state_paths import vault_state_key
+
+    leaves = [path for path in golden_state.iterdir() if path.is_dir()]
+    if len(leaves) != 1:
+        raise MeasurementRefused("golden-state-not-one-vault", phase="arm-preparation")
+    key = vault_state_key(root / "vault")
+    leaf = root / "state" / key
+    shutil.copytree(leaves[0], leaf, symlinks=True)
+    manifest = leaf / ".state-migration.json"
+    if manifest.is_file():
+        record = json.loads(manifest.read_text())
+        record["vault_identity"] = key
+        manifest.write_text(json.dumps(record))
+
+
 def run_private(args: argparse.Namespace) -> dict:
     """Time a private prepared vault on both arms; its inputs never leave the operator's host."""
     from exomem.recall_canary import load_cases
@@ -859,9 +881,13 @@ def run_private(args: argparse.Namespace) -> dict:
                 if root.exists():
                     raise MeasurementRefused("arm-root-exists", phase="arm-preparation")
                 root.mkdir(parents=True)
-                for part in ("vault", "state", "lease"):
-                    shutil.copytree(args.golden / part, root / part, symlinks=True)
-                shutil.copy2(args.golden / "coordinator.sqlite", root / "coordinator.sqlite")
+                shutil.copytree(args.golden / "vault", root / "vault", symlinks=True)
+                place_arm_state(args.golden / "state", root)
+                # A golden copied from a live vault has no gate lease or coordinator; the arm starts its own.
+                if (args.golden / "lease").is_dir():
+                    shutil.copytree(args.golden / "lease", root / "lease", symlinks=True)
+                if (args.golden / "coordinator.sqlite").is_file():
+                    shutil.copy2(args.golden / "coordinator.sqlite", root / "coordinator.sqlite")
         elif not all((root / "prepared.json").is_file() for root in roots.values()):
             raise MeasurementRefused("arm-not-prepared", phase="arm-preparation")
         arms = build_arms(roots, {"head": sys.executable, "base": base_python},
