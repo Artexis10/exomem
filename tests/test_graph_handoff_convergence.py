@@ -236,8 +236,8 @@ def test_a_page_still_on_disk_but_no_longer_indexed_still_declines(
     root = handoff_vault
     real = EpistemicGraphIndex._indexed_recall_membership
 
-    def without_removed(self):
-        membership = real(self)
+    def without_removed(self, **kwargs):
+        membership = real(self, **kwargs)
         return None if membership is None else membership - {REMOVED}
 
     monkeypatch.setattr(
