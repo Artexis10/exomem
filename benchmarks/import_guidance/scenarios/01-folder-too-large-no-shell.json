@@ -1,0 +1,82 @@
+{
+  "id": "01-folder-too-large-no-shell",
+  "title": "Folder too large, no shell",
+  "prompt": "Please import my ~/Archive folder into my memory. It is about 120 GB.",
+  "served_tools": [
+    "import_memory",
+    "read_import",
+    "observe_transfer",
+    "transfer_memory"
+  ],
+  "builtin_tools": [],
+  "replies": {
+    "read_import.status": {
+      "runs": [],
+      "import_windows": {
+        "counts": {
+          "landed": 0,
+          "discarded": 0,
+          "unreadable": 0
+        },
+        "windows": [],
+        "keep_source": {
+          "keep": false,
+          "message": null
+        },
+        "next_after": null
+      },
+      "window_budget": {
+        "window_budget": 15032385536,
+        "reachable_budget": 21474836480,
+        "job_pinned": 0,
+        "effective_file_limit": 9663676416,
+        "classification": "cloud",
+        "media_allowance": {
+          "allowance_bytes": 214748364800,
+          "used_bytes": 33285996544
+        }
+      }
+    },
+    "observe_transfer.import_handoff": {
+      "import": null,
+      "routes": {
+        "cli": "with a shell: exomem cloud import <folder>",
+        "browser": "Home link: https://cloud.exomem.example/home/import (desktop only, folders only, one page session)"
+      }
+    },
+    "observe_transfer.status": {
+      "import": null,
+      "export": null
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "checks": [
+    {
+      "type": "only_scripted_tools"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "gives_cli_command",
+      "expect": true,
+      "text": "The agent gives the person the literal command `exomem cloud import ~/Archive` (or the same command with the folder path) to run themselves."
+    },
+    {
+      "id": "keeps_source",
+      "expect": true,
+      "text": "The agent tells the person to keep the source folder (not delete it) until the import is finished."
+    },
+    {
+      "id": "offers_home_link_for_folder",
+      "expect": false,
+      "text": "The agent offers the Home link or browser upload as a way to send this 120 GB folder."
+    },
+    {
+      "id": "tries_upload_or_paste",
+      "expect": false,
+      "text": "The agent tries to upload, paste, retype or attach file contents itself, or names a tool that does not exist to upload files."
+    }
+  ]
+}

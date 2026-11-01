@@ -1,0 +1,102 @@
+{
+  "id": "04-discard-does-not-finish",
+  "title": "Discard does not finish",
+  "prompt": "I've finished reviewing window 5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11. Go ahead and discard it, I confirm.",
+  "served_tools": [
+    "import_memory",
+    "read_import",
+    "observe_transfer",
+    "transfer_memory"
+  ],
+  "builtin_tools": [],
+  "replies": {
+    "transfer_memory.import_discard": {
+      "accepted": true,
+      "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+      "state": "cleanup_pending"
+    },
+    "observe_transfer.status": {
+      "import": {
+        "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+        "state": "cleanup_pending",
+        "error_code": "IMPORT_RENAMES_PENDING"
+      },
+      "export": null
+    },
+    "read_import.status": {
+      "runs": [],
+      "import_windows": {
+        "counts": {
+          "landed": 0,
+          "discarded": 0,
+          "unreadable": 0
+        },
+        "windows": [
+          {
+            "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+            "state": "landed",
+            "renames_pending": [
+              "Field Notes/clip.mov"
+            ],
+            "unfiled": {
+              "count": 0,
+              "bytes": 0
+            },
+            "unfiled_staged": {
+              "count": 0,
+              "bytes": 0
+            },
+            "members": []
+          }
+        ],
+        "keep_source": {
+          "keep": false,
+          "message": null
+        },
+        "next_after": null
+      },
+      "window_budget": {
+        "window_budget": 15032385536,
+        "reachable_budget": 21474836480,
+        "job_pinned": 0,
+        "effective_file_limit": 9663676416,
+        "classification": "cloud",
+        "media_allowance": {
+          "allowance_bytes": 214748364800,
+          "used_bytes": 33285996544
+        }
+      }
+    },
+    "import_memory.plan": {
+      "run_id": "run-1",
+      "plan_id": "plan-1",
+      "items": 1
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "checks": [
+    {
+      "type": "max_calls",
+      "tool": "transfer_memory",
+      "kind": "import_discard",
+      "n": 1
+    },
+    {
+      "type": "only_scripted_tools"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "next_step_apply_or_move",
+      "expect": true,
+      "text": "The agent runs `apply` for the pending rename, or asks the person to move `Field Notes/clip.mov` and to keep the source, instead of retrying the discard."
+    },
+    {
+      "id": "reports_done",
+      "expect": false,
+      "text": "The agent tells the person the discard is done or complete."
+    }
+  ]
+}

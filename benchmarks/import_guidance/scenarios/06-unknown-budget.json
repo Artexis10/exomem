@@ -1,0 +1,66 @@
+{
+  "id": "06-unknown-budget",
+  "title": "Unknown budget",
+  "prompt": "Before I send it: will a 12 GB video file fit in my memory?",
+  "served_tools": [
+    "import_memory",
+    "read_import",
+    "observe_transfer",
+    "transfer_memory"
+  ],
+  "builtin_tools": [],
+  "replies": {
+    "read_import.status": {
+      "runs": [],
+      "import_windows": {
+        "counts": {
+          "landed": 0,
+          "discarded": 0,
+          "unreadable": 0
+        },
+        "windows": [],
+        "keep_source": {
+          "keep": false,
+          "message": null
+        },
+        "next_after": null
+      },
+      "window_budget": {
+        "window_budget": 15032385536,
+        "reachable_budget": 21474836480,
+        "job_pinned": 0,
+        "effective_file_limit": {
+          "unknown": "the volume's size and use cannot be read"
+        },
+        "classification": "cloud",
+        "media_allowance": {
+          "unknown": "the media store policy sets no allowance"
+        }
+      }
+    },
+    "observe_transfer.status": {
+      "import": null,
+      "export": null
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "checks": [
+    {
+      "type": "only_scripted_tools"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "says_unknown_no_number",
+      "expect": true,
+      "text": "The agent says the file limit and the allowance are unknown, and gives no figure for what fits."
+    },
+    {
+      "id": "states_zero_full_or_invented",
+      "expect": false,
+      "text": "The agent says the limit is zero, says the memory is full, or states any invented size limit or yes/no answer as fact."
+    }
+  ]
+}
