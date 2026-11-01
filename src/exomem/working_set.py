@@ -38,6 +38,7 @@ from . import (
     activation_conventions,
     activation_result,
     call_spans,
+    chance_band,
     context_intents,
     context_roles,
     lifecycle_statuses,
@@ -2982,7 +2983,7 @@ def related_pages(
     current row of the title query's `window` (the lexical reading), and one of
     its stored recall chunks clears the corpus-relative band over every chunk
     of the resident matrix against the turn vector the anchor lane already
-    encoded (the semantic reading, `working_set_resolve.semantic_band`
+    encoded (the semantic reading, `chance_band.semantic_band`
     unchanged). Listed, never served: the caller adds no unit, anchor or ref.
 
     Owner only, decided before any similarity is computed, since the band's
@@ -3030,7 +3031,7 @@ def related_pages(
                 return (), (), "unavailable"
             similarities = resident.matrix @ (query / norm)
             config = ranking_config.DEFAULT_RANKING
-            cleared = working_set_resolve.semantic_band(
+            cleared = chance_band.semantic_band(
                 similarities,
                 alpha=float(config.working_set_semantic_alpha),
                 min_population=int(config.working_set_semantic_min_population),

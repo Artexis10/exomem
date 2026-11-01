@@ -83,7 +83,7 @@ class RankingConfig:
     # rather than in the compiler for the same reason every other threshold is:
     # so the eval harness can sweep them without editing retrieval code.
     #
-    # `vector_band` is corpus-relative (`working_set_resolve.semantic_band`): a
+    # `vector_band` is corpus-relative (`chance_band.semantic_band`): a
     # signature bands when its similarity to the turn clears the level the
     # largest of N unrelated similarities exceeds with probability
     # `working_set_semantic_alpha`, measured from the catalogue's own median and
