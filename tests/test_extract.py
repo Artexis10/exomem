@@ -274,16 +274,30 @@ def test_extract_textfile_decodes_latin1_accents(tmp_path) -> None:
     assert r.engine == "text:cp1252"
 
 
-def test_extract_textfile_keeps_valid_characters_of_utf8_with_a_stray_byte(tmp_path) -> None:
-    # A single-byte guess would read every valid multi-byte character of this text as two wrong ones.
-    line = "Brève réunion à la côte; señor Müller prévoit ½ prix, 20°C, façade ouverte. Les élèves écoutent.\n"
-    data = bytearray((line * 30).encode("utf-8"))
-    data[len(data) // 2] = 0xFF
-    f = tmp_path / "stray.txt"
-    f.write_bytes(bytes(data))
+def test_extract_textfile_keeps_valid_characters_of_utf8_whose_last_character_is_cut_off(tmp_path) -> None:
+    # A detector reads this French text as ISO-8859-10 with high confidence, which turns every valid
+    # multi-byte character into two wrong ones; only the cut-off byte should become a replacement.
+    data = ("La réunion de l'équipe a lieu à Genève.\n" * 20).encode() + "é".encode()[:1]
+    f = tmp_path / "cut.txt"
+    f.write_bytes(data)
     r = extract.extract_text(f)
     assert r.text == f.read_text(encoding="utf-8", errors="replace").strip()
-    assert r.text.count("Brève réunion") >= 29 and r.engine == "text"
+    assert r.text.count("La réunion de l'équipe a lieu à Genève.") == 20 and r.engine == "text"
+
+
+def test_extract_textfile_keeps_the_ascii_words_of_a_short_legacy_file(tmp_path) -> None:
+    # Ten bytes are too few to tell encodings apart; a detector read this phrase as UTF-16 CJK.
+    f = tmp_path / "label.txt"
+    f.write_bytes("river café".encode("latin-1"))
+    r = extract.extract_text(f)
+    assert r.text.startswith("river caf") and r.engine == "text"
+
+
+def test_extract_textfile_keeps_a_utf16_file_whose_last_character_is_cut_off(tmp_path) -> None:
+    f = tmp_path / "cut.txt"
+    f.write_bytes(codecs.BOM_UTF16_LE + "Réunion cobalt-kettle-15851".encode("utf-16-le") + b"R")
+    r = extract.extract_text(f)
+    assert r.text.startswith("Réunion cobalt-kettle-15851") and r.engine == "text:utf-16"
 
 
 def test_extract_textfile_replaces_what_no_codec_explains_as_before(tmp_path) -> None:

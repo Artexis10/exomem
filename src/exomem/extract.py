@@ -1577,12 +1577,21 @@ _BYTE_ORDER_MARKS = (
     (codecs.BOM_UTF16_BE, "utf-16"),
 )
 # charset-normalizer scores a guess as 1 minus the share of the text that reads as mess. A probe
-# found 1.0 for most correct guesses and 0.82-0.90 for UTF-8 text with stray bytes, which a
-# single-byte guess turns into mojibake where replacement characters would keep every valid one.
+# found 1.0 for most correct guesses and 0.82-0.90 for wrong ones on mixed Western text.
 _DETECTION_CONFIDENCE = 0.9
+# Under this many bytes a file gives the detector too little to tell encodings apart: a probe read a
+# 10-byte Latin-1 phrase as UTF-16 and lost its ASCII words. Such a file reads as UTF-8 with replacements.
+_DETECTION_MIN_BYTES = 32
+# The detector reads this prefix only: its cost grows with the input, and a probe took ten seconds and
+# a quarter of a gigabyte on a 30 MB log. The prefix already shows which encoding the file uses.
+_DETECTION_PREFIX_BYTES = 64 * 1024
+# Without a byte-order mark the detector can read any even-length bytes as UTF-16 or UTF-32, and
+# those readings turn ASCII words into CJK characters. Only a mark names those codecs.
+_UNMARKED_EXCLUDED = ["utf_16", "utf_16_be", "utf_16_le", "utf_32", "utf_32_be", "utf_32_le"]
 # Equally clean single-byte guesses differ only in how they read accented letters. Windows-1252 is
 # the Encoding Standard's default for legacy Western text; the library's own ranking read Latin-1
-# French, Swedish and Portuguese as Windows-1250, which turns a grave "e" into a "c" with a caron.
+# French, Swedish and Portuguese as Windows-1250 at the same score, which turns a grave "e" into a
+# "c" with a caron. It wins only a tie, so text the library scores better as another code page keeps it.
 _LEGACY_WESTERN_ENCODING = "cp1252"
 
 
@@ -1595,9 +1604,10 @@ class DecodedText:
 def decode_plain_text(data: bytes) -> DecodedText:
     """The text of a plain-text file's bytes, and the encoding that read it.
 
-    A byte-order mark names the codec. Without one, strict UTF-8 reads it, then a confident
-    charset-normalizer guess, and last UTF-8 with replacement characters. Every line ending
-    reads as one newline, as `Path.read_text` reads it.
+    A byte-order mark names the codec. Without one, UTF-8 reads it when its valid multi-byte
+    sequences outnumber its invalid bytes, then a confident charset-normalizer guess, and last
+    UTF-8 with replacement characters. Every line ending reads as one newline, as
+    `Path.read_text` reads it.
     """
     text, encoding = _decode_by_evidence(data)
     return DecodedText(text.replace("\r\n", "\n").replace("\r", "\n"), encoding)
@@ -1606,27 +1616,41 @@ def decode_plain_text(data: bytes) -> DecodedText:
 def _decode_by_evidence(data: bytes) -> tuple[str, str]:
     for mark, codec in _BYTE_ORDER_MARKS:
         if data.startswith(mark):
-            try:
-                return data.decode(codec), codec
-            except UnicodeDecodeError:
-                break  # the mark opens bytes that are not that encoding; read them as any other
-    try:
-        return data.decode("utf-8"), "utf-8"
-    except UnicodeDecodeError:
-        pass
-    guess = _confident_guess(data)
+            # The mark names the codec; a cut-off last character becomes one replacement character.
+            return data.decode(codec, errors="replace"), codec
+    replaced = data.decode("utf-8", errors="replace")
+    if _mostly_utf8(data, replaced):
+        return replaced, "utf-8"
+    guess = _confident_guess(data) if len(data) >= _DETECTION_MIN_BYTES else None
     if guess is not None:
         return data.decode(guess, errors="replace"), guess
-    return data.decode("utf-8", errors="replace"), "utf-8"
+    return replaced, "utf-8"
+
+
+def _mostly_utf8(data: bytes, replaced: str) -> bool:
+    """Whether `replaced`, the UTF-8 reading of `data` with replacement characters, comes from UTF-8
+    with a few stray bytes: it holds more valid multi-byte characters than replacement characters.
+    Pure ASCII counts, because it is valid UTF-8."""
+    invalid = replaced.count("\ufffd")
+    if not invalid:
+        return True
+    ascii_count = len(data) - len(data.translate(None, bytes(range(0x80))))
+    multibyte = len(replaced) - ascii_count - invalid
+    return multibyte > invalid
 
 
 def _confident_guess(data: bytes) -> str | None:
     from charset_normalizer import from_bytes
 
-    accepted = [m.encoding for m in from_bytes(data) if 1.0 - m.chaos >= _DETECTION_CONFIDENCE]
-    if _LEGACY_WESTERN_ENCODING in accepted:
+    matches = from_bytes(data[:_DETECTION_PREFIX_BYTES], cp_exclusion=_UNMARKED_EXCLUDED)
+    accepted = [(m.encoding, m.chaos) for m in matches if 1.0 - m.chaos >= _DETECTION_CONFIDENCE]
+    if not accepted:
+        return None
+    best_chaos = min(chaos for _encoding, chaos in accepted)
+    tied = [encoding for encoding, chaos in accepted if chaos == best_chaos]
+    if _LEGACY_WESTERN_ENCODING in tied:
         return _LEGACY_WESTERN_ENCODING
-    return accepted[0] if accepted else None
+    return tied[0]
 
 
 def _extract_textfile(path: Path) -> ExtractResult:

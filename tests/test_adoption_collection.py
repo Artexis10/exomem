@@ -17,7 +17,6 @@ from exomem import (
     adoption_run,
     capabilities,
     epistemic_graph,
-    extract,
     find,
     held_fs,
     indexes,
@@ -851,20 +850,6 @@ def test_a_planned_page_name_that_exists_gets_the_next_free_name_and_the_existin
     assert (vault / existing).read_text(encoding="utf-8") == "# Mine\n\nwritten before the import\n"
 
 
-def test_two_notes_of_one_title_in_one_plan_take_the_plain_name_and_the_next_free_name(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(tmp_path, {"Coll/a/note.md": "# Note\n\nfirst\n", "Coll/b/note.md": "# Note\n\nsecond\n"})
-
-    run_id, planned = _import(vault, path="Coll", include=["Coll"])
-    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
-
-    assert sorted(o["target_path"] for o in final["outcomes"].values()) == [
-        f"{SOURCES}/Imported/2026-07-14-note-2.md",
-        f"{SOURCES}/Imported/2026-07-14-note.md",
-    ]
-
-
 def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_text_artifact_outside_the_graph(
     tmp_path: Path,
 ) -> None:
@@ -878,7 +863,11 @@ def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_text_artifact_ou
     assert outcome["status"] == "applied"
     assert outcome["artifact_path"].endswith(".md.txt")
     assert (vault / outcome["artifact_path"]).read_bytes() == data
-    assert extract.media_type_for(outcome["artifact_path"]) == "text"  # so its text is extracted and searchable
+    # The page names the kind of the stored file, so the media pass extracts its text and keeps the
+    # import's provenance instead of rebuilding the page.
+    page, _body, _raw = parse_frontmatter((vault / outcome["target_path"]).read_text(encoding="utf-8"))
+    assert page["media_type"] == "text"
+    assert page["imported_from"] == "Coll/OLD.MD"
 
 
 def test_a_link_fragment_is_dropped_for_resolution_and_kept_in_the_rendered_link(

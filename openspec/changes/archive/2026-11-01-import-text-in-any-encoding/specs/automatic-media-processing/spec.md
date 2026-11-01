@@ -2,7 +2,7 @@
 
 ### Requirement: Plain-Text Artifacts Are Read In The Encoding Their Bytes Show
 
-The system SHALL decode the bytes of a plain-text, RTF or calendar artifact with one rule. A byte-order mark (UTF-8, UTF-16 or UTF-32) SHALL name the codec. Without one, valid UTF-8 SHALL be read as UTF-8. Otherwise a detected encoding SHALL be used only when the detector's confidence is at least 0.9, and Windows-1252 SHALL win among equally confident single-byte guesses. Bytes that no rule explains SHALL be read as UTF-8 with replacement characters. The original bytes of the artifact SHALL NOT change. The sidecar's `extracted_by` SHALL name a non-UTF-8 encoding as `text:<codec>`.
+The system SHALL decode the bytes of a plain-text, RTF or calendar artifact with one rule. A byte-order mark (UTF-8, UTF-16 or UTF-32) SHALL name the codec, and a cut-off last character SHALL become one replacement character. Without a mark, bytes whose valid multi-byte UTF-8 characters outnumber their invalid bytes SHALL be read as UTF-8 with replacement characters; valid UTF-8 and pure ASCII are this case. Otherwise, for at least 32 bytes, a detected encoding SHALL be used only when the detector's confidence on the first 64 KiB is at least 0.9. The detector SHALL NOT choose UTF-16 or UTF-32 without a byte-order mark, and Windows-1252 SHALL win only among guesses with the best confidence. Bytes that no rule explains SHALL be read as UTF-8 with replacement characters. The original bytes of the artifact SHALL NOT change. The sidecar's `extracted_by` SHALL name a non-UTF-8 encoding as `text:<codec>`.
 
 #### Scenario: A UTF-16 file with a byte-order mark is searchable
 
@@ -22,7 +22,12 @@ The system SHALL decode the bytes of a plain-text, RTF or calendar artifact with
 - **THEN** the extracted text is the UTF-8 reading with replacement characters
 - **AND** `extracted_by` is `text`
 
+#### Scenario: A short file keeps its ASCII words
+
+- **WHEN** a `.txt` artifact holds fewer than 32 bytes that are not valid UTF-8
+- **THEN** the extracted text is the UTF-8 reading with replacement characters, so every ASCII word is kept
+
 #### Scenario: UTF-8 with a stray byte keeps its valid characters
 
-- **WHEN** a `.txt` artifact holds mostly valid UTF-8 text with one invalid byte
+- **WHEN** a `.txt` artifact holds mostly valid UTF-8 text with one invalid byte, such as a cut-off last character
 - **THEN** every valid character is kept and only the invalid byte becomes a replacement character
