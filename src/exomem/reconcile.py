@@ -364,6 +364,8 @@ class _Census:
     plan_id: str
     isolation: audit_module.SemanticRecallIsolationCensus
     posthoc_inputs: dict[str, Any]
+    #: Each removal or quarantine as (what it names, its kind), for a preview job's receipt.
+    planned: tuple[tuple[str, str], ...]
 
 
 def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
@@ -407,6 +409,8 @@ def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
         plan_id=maintenance_jobs.plan_identity("reconcile", {"rebuild_graph": bool(rebuild_graph)}, entries),
         isolation=isolation,
         posthoc_inputs={"corpus": corpus, "language_registry": language, "status_basis": status_basis},
+        # Every entry reads [kind, what it names, ...].
+        planned=tuple((entry[1], entry[0]) for entry in entries),
     )
 
 
@@ -429,6 +433,8 @@ def reconcile(
         maintenance_jobs.checkpoint("planning")
         census = _plan_census(vault_root, rebuild_graph)
         report.plan_id = census.plan_id
+        if dry_run:
+            maintenance_jobs.record_planned(census.planned)
         if plan_id is not None:
             maintenance_jobs.require_current_plan(
                 "reconcile", plan_id, census.plan_id, "what reconcile would remove or quarantine"

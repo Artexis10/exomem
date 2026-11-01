@@ -38,8 +38,8 @@
 
 ## 7. Remote previews as jobs
 
-- [ ] 7.1 Start a read-only job for an owner's remote preview of `fix`, `backfill-ids` or `reconcile`, and return its handle.
-- [ ] 7.2 Keep the preview report and its `plan_id` in the receipt, and page the planned pages by cursor.
-- [ ] 7.3 Prove preview, poll, receipt and start with the receipt's `plan_id` for each mode through the in-process MCP client.
-- [ ] 7.4 Teach the preview job in the guidance, then regenerate the tool surfaces.
+- [x] 7.1 Start a read-only job for an owner's remote preview of `fix`, `backfill-ids` or `reconcile`, and return its handle.
+- [x] 7.2 Keep the preview report and its `plan_id` in the receipt, and page the planned pages by cursor.
+- [x] 7.3 Prove preview, poll, receipt and start with the receipt's `plan_id` for each mode through the in-process MCP client.
+- [x] 7.4 Teach the preview job in the guidance, then regenerate the tool surfaces.
 - [ ] 7.5 Repeat task 6.5 on the personal vault after the release.

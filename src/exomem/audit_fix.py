@@ -736,6 +736,8 @@ def audit_fix(
         maintenance_jobs.checkpoint("planning")
     rewrites = _plan_content(vault_root, report, today_iso)
     report.plan_id = _plan_id(rewrites, rebuild_embeddings)
+    if dry_run:
+        maintenance_jobs.record_planned((rewrite.rel, None) for rewrite in rewrites)
     if reviewed:
         maintenance_jobs.require_current_plan("fix", plan_id, report.plan_id, "the content rewrites of fix")
         _commit_in_chunks(vault_root, kb, rewrites, report)

@@ -8519,6 +8519,21 @@ def invoke_command(
             )
 
     if (
+        command.name == "maintain_memory"
+        and read_only
+        and active_surface is not None
+        and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
+    ):
+        from . import maintenance_jobs
+
+        # A preview reads every page, which outlasts a request on a large vault: the owner's preview
+        # starts a read-only job and returns its handle. Any other caller keeps the synchronous preview.
+        if maintenance_jobs.is_job_preview(kwargs) and maintenance_jobs.is_owner(injected[0]):
+            job_start = True
+            # A fix or backfill-ids preview may omit `dry_run`: the job's dispatch is explicit.
+            kwargs = {**kwargs, "dry_run": True}
+
+    if (
         not read_only
         and selector_error is None
         and active_surface is not None
