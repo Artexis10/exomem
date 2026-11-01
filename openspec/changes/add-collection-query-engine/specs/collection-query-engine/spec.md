@@ -62,9 +62,9 @@ Legacy requests and saved views SHALL preserve Python-evaluator behavior for eve
 - **THEN** SQL and Python return equal authorized rows, order, totals, aggregate values and bounded rendered results
 
 #### Scenario: A declared string field is not compared by its leading number
-- **WHEN** a collection declares `pace: {type: string}`, holds `4:39.4/km` and `4:19.8/km`, and a legacy query filters `pace` with `eq` `4:39.4/km`
-- **THEN** exactly the row whose whole value is `4:39.4/km` matches
-- **AND** an `eq` filter on a field declared as an integer still matches `4` for the operand `4.0`
+- **WHEN** a collection declares `pace: {type: string}`, holds `5:12.0/km` and `5:47.3/km`, and a legacy query filters `pace` with `eq` `5:12.0/km`
+- **THEN** exactly the row whose whole value is `5:12.0/km` matches
+- **AND** an `eq` filter on a field declared as an integer still matches `5` for the operand `5.0`
 
 #### Scenario: An unproved operator cannot push down
 - **WHEN** an operator lacks a passing parity/reference test
