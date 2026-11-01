@@ -238,9 +238,7 @@ def test_a_busy_raised_after_a_files_commit_is_not_reported_as_a_failed_item(
 
     monkeypatch.setattr(add_module, "add", add_that_ends_busy_after_committing_file_b)
     writer, _holder = _managers(vault.parent / "state")
-    try:
-        result = _capture_command(writer, vault, ("file-a", "file-b"))
-    except OpError:
-        return
+    with pytest.raises(OpError) as raised:
+        _capture_command(writer, vault, ("file-a", "file-b"))
+    assert raised.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
     assert "file-b.bin" in calls
-    assert all(file.get("code") != "MUTATION_BUSY" for file in result.get("files", [])), result
