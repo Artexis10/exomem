@@ -275,6 +275,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
     probe_of = {p.item: p for p in probes if p.kind == "raw"}
     classes: dict[str, Counter[str]] = {}
     problems: list[dict[str, Any]] = []
+    meets_by_item: dict[str, bool] = {}
     for item in raw:
         pages = pages_of[item["path"]]
         code = refused.get(nfc(item["path"]))
@@ -282,6 +283,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
         # The key names no refusal code: any coded refusal meets a filed-or-refused item, and the code seen is reported.
         allowed = item["outcome"] == "filed-or-refused" and code != NO_CODE
         meets = state == "filed" or (state == "refused" and allowed)
+        meets_by_item[item["path"]] = meets
         row = classes.setdefault(item["raw_class"], Counter())
         row["items"] += 1
         row[state] += 1
@@ -338,6 +340,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
                      for name, row in sorted(classes.items())},
         "not_meeting_key": problems[:LOST_SAMPLES],
         "not_meeting_key_count": len(problems),
+        "meets_key_by_item": meets_by_item,
     }
 
 
@@ -670,6 +673,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
     scorer_calls = session.calls
     scorer_wall = round(time.perf_counter() - started, 1)
     raw_metrics = raw_section(key, raw, raw_pages_of, refused_codes, probes, scan, vault, collection)
+    raw_meets_key = raw_metrics.pop("meets_key_by_item", {})  # reported once, under per_item
     existing_metrics = existing_vault_section(key, log, vault, raw_pages_of, probes)
     ranked = [p for p in probes if p.kind in ("note", "media")]  # the samples below stay as they were
 
@@ -745,6 +749,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             "junk_pages": {i["path"]: len(pages_of[i["path"]]) for i in junk},
             "links_kept": edge_kept,
             "embeds_kept": embed_edge_kept,
+            "raw_meets_key": raw_meets_key,
         },
         "fidelity": fidelity,
         "homes": homes,
