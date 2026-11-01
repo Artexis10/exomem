@@ -19,6 +19,7 @@ import yaml
 from . import freshness, privacy_log
 from .find_types import ParsedPage
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
+from .vault import relative_posix
 
 log = logging.getLogger(__name__)
 
@@ -360,7 +361,7 @@ def _classify_walk_entry(
 ) -> tuple[str | None, os.stat_result | None]:
     """`_walk_md_entry`'s answer, with the `lstat` that decided it when there was one."""
     try:
-        relative = child.absolute().relative_to(anchor.absolute()).as_posix()
+        relative = relative_posix(child.absolute(), anchor.absolute())
     except ValueError:
         return None, None
     if reserved_paths.classify_logical(relative).blocked:

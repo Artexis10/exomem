@@ -48,7 +48,13 @@ from .entity_recurrence import (
 )
 from .entity_types import EntityTypeRegistry
 from .kbdir import kb_prefix
-from .vault import WikilinkResolver, kb_root, yaml_safe_dump_for_parse, yaml_safe_load
+from .vault import (
+    WikilinkResolver,
+    kb_root,
+    relative_posix,
+    yaml_safe_dump_for_parse,
+    yaml_safe_load,
+)
 
 log = logging.getLogger(__name__)
 
@@ -387,7 +393,7 @@ def _walk(
     seen: set[str] = set()
     with call_spans.span("entity_evidence.walk", {"pages_walked": 0}) as fields:
         for path, info in find_corpus.walk_md_with_stat(kb_root(vault_root), on_error=errors.append):
-            rel = path.relative_to(vault_root).as_posix()
+            rel = relative_posix(path, vault_root)
             seen.add(rel)
             # The same two checks, in the same order, as the full sweep's page walk.
             if not egress.content_permits(vault_root, rel, who):
