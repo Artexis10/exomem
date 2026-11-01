@@ -94,7 +94,7 @@ The admission policy therefore accepts a cell StatefulSet or Job only when its w
 - there is no `lifecycle`, and probes are `httpGet` on the cell's own fixed ports and paths;
 - `volumeMounts` are exactly the known (name, mountPath) pairs for that subcommand, with no `subPath` and no `volumeDevices`;
 - `workingDir` is unset;
-- there is no `envFrom`. Every environment entry's name is on the allowlist for that subcommand. A `valueFrom` names only an allowlisted key of `cell-credentials`, and a trust anchor is always a literal `value` (D2).
+- there is no `envFrom`. Every environment entry's name is on the allowlist for that subcommand. A `valueFrom` names only an allowlisted key of `cell-credentials`, and a trust anchor is always a literal `value` (D2). The one exception is `cell-export-verify`: it may also read the URL key of the Secret named for its own export ID, which stays per export so that cleanup removes only that export's Secret.
 
 Pod Security `restricted` does not cover every security field, so admission also pins these on every container:
 - `readOnlyRootFilesystem: true` and the full container security context;

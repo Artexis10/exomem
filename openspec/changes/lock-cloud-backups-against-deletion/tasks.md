@@ -8,14 +8,15 @@
   - A key minted from the parent cannot carry `writeBuckets` or a bypass capability.
 - [ ] 1.2 Measure the cost on a real cell's repository. Evidence: the bytes, the call counts and the monthly cost at the provider's published prices.
   - 30 days of hidden-version storage from its churn.
-  - Lock extensions at fleet scale, for versions within 7 days of expiry.
+  - Lock extensions at fleet scale, for versions within 24 days of expiry.
+  - A per-cell storage-growth alert, because a key that writes the locked bucket adds objects that no one can remove for 30 days.
   - The age distribution of its packs.
 
 ## 2. Bucket and keys
 
 - [ ] 2.1 Add the locked backup bucket, its noncurrent-only lifecycle rule, and a parent key with no `deleteFiles` in Terraform.
 - [ ] 2.2 Scope new per-cell keys to the locked bucket, and point new cells' repositories at it.
-- [ ] 2.3 Add the lock-extension CronJob in its own namespace, with its own extend-only key and service account, the 31-day guard and an alert on a missed run.
+- [ ] 2.3 Add the lock-extension CronJob in its own namespace, with its own extend-only key and service account, the 31-day guard checked against the provider's time, and an alert on a missed run.
 
 ## 3. Migration and recovery
 
