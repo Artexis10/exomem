@@ -375,6 +375,15 @@ therefore records its real commit instant and still writes exactly the
 approved change. Creates keep their reviewed render instant, because it can
 decide the destination path.
 
+Proposal also refuses (`SEMANTIC_CONTRACT_BLOCKED`) a step whose leaf
+validation already reports a blocking finding, so a plan the leaf would stop
+at commit is never sealed. Curation holds a create or supersede step's review
+back from that validation, so the step's review answers a relation-disposition
+finding there. A link to a page an earlier step creates answers it too: the
+semantic checks read the vault as it is, so the leaf can judge that relation
+only at execution. The finding is matched by the contract's element identity,
+not by its code or wording.
+
 ## Risks / Trade-offs
 
 - **[Risk] Plan files duplicate pre-change content for compensation.** → Keep
