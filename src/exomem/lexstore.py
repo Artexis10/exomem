@@ -4913,13 +4913,16 @@ class LexicalStore:
                             return self._connect_owned(path, create=False)
                     except FileNotFoundError:
                         pass
-                with call_spans.entered(
-                    "lexical.connect.guard",
-                    reserved_paths._identity_coordination_scope(
-                        self.vault_root,
-                        descriptor_ids=descriptor_ids,
-                    ),
-                ):
+                # The guard span above already covered a missing live store's connect; only a
+                # connect that has not been spanned yet gets one here.
+                fallback = reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=descriptor_ids,
+                )
+                if descriptor_id == "lexical-store":
+                    with fallback:
+                        return self._connect_owned(path)
+                with call_spans.entered("lexical.connect.guard", fallback):
                     return self._connect_owned(path)
 
     def _connect_owned(

@@ -5223,15 +5223,6 @@ class LeaseManager:
                 )
             )
 
-        def enter_free_domains(stack: ExitStack) -> VaultMutationCoordinator | None:
-            """Hold every domain in order unless one is busy; return the busy one, holding none."""
-            for domain, mutation in domain_locks:
-                held = stack.enter_context(mutation.try_hold(**hold_args(domain)))
-                if not held:
-                    stack.close()
-                    return mutation
-            return None
-
         if exclusive:
             with ExitStack() as gate_stack:
                 enter(gate_stack, gate, "gate")
@@ -5252,25 +5243,45 @@ class LeaseManager:
                 yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
             return
 
+        # Admission order matches the exclusive scanner: gate first, then domains. Only a wait for
+        # one lock is ever blocking, and it starts with nothing held; every other lock is tried.
+        # A try never waits, so holding one lock while trying the next adds no wait-for edge. The
+        # lock won by waiting is kept, so a stream of short owners cannot take it back at release.
+        admission = [("gate", gate), *domain_locks]
         with ExitStack() as domains_stack:
-            while True:
-                with ExitStack() as gate_stack:
-                    # Admission order matches the exclusive scanner: gate first, then domains.
-                    # The domain stack outlives the gate so exact owners still release admission
-                    # before doing their work. The gate is never held across a wait: a busy
-                    # domain is tried, not waited for, so a scanner never waits behind an owner
-                    # that waits, and owners of free domains pass through.
-                    enter(gate_stack, gate, "gate")
-                    busy = enter_free_domains(domains_stack)
-                    if busy is None:
-                        generation = _bump_reserved_identity_generation(
-                            self.config.state_dir, vault_root
+            gate_stack = ExitStack()
+            with gate_stack:
+                held: set[str] = set()
+                won: tuple[str, VaultMutationCoordinator] | None = None
+                while True:
+                    if won is not None:
+                        # The deadline is checked here, not only inside the wait, so the retry
+                        # loop cannot outlive it; a lock still busy then is refused by name.
+                        label, mutation = won
+                        remaining = max(0.0, deadline - time.monotonic())
+                        stack = gate_stack if label == "gate" else domains_stack
+                        stack.enter_context(
+                            mutation.hold(timeout_seconds=remaining, **hold_args(label))
                         )
+                        held.add(label)
+                        won = None
+                    for label, mutation in admission:
+                        if label in held:
+                            continue
+                        stack = gate_stack if label == "gate" else domains_stack
+                        if stack.enter_context(mutation.try_hold(**hold_args(label))):
+                            held.add(label)
+                            continue
+                        # Busy: release everything and wait for this lock alone.
+                        gate_stack.close()
+                        domains_stack.close()
+                        held.clear()
+                        won = (label, mutation)
                         break
-                # Gate released and no domain held: wait for the busy domain alone, then retry
-                # the whole admission in order. A wait past the deadline names that domain.
-                with ExitStack() as wait_stack:
-                    enter(wait_stack, busy, str(busy.name))
+                    else:
+                        break
+                generation = _bump_reserved_identity_generation(self.config.state_dir, vault_root)
+                gate_stack.close()
             yield generation
 
     @contextmanager

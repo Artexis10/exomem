@@ -109,7 +109,7 @@ def test_a_writer_of_a_free_domain_does_not_queue_behind_an_owner_waiting_on_a_b
             assert b_inside.wait(PROMPT_SECONDS)
 
 
-def test_the_exclusive_scanner_waits_for_a_domain_holder_and_then_sees_its_generation(
+def test_the_exclusive_scanner_waits_for_a_domain_holder_and_then_runs(
     tmp_path: Path, vault: Path
 ) -> None:
     """The scanner still takes gate then every domain: it cannot run beside an open owner."""
@@ -132,6 +132,35 @@ def test_the_exclusive_scanner_waits_for_a_domain_holder_and_then_sees_its_gener
         scanner.join(PROMPT_SECONDS * 2)
 
     assert len(scanned) == 1
+
+
+def test_an_identity_changing_owner_is_admitted_while_readers_keep_taking_its_domain(
+    tmp_path: Path, vault: Path
+) -> None:
+    """A stream of short readers of its domain must not starve an owner that changes identity."""
+    manager = _manager(tmp_path, timeout=3.0)
+    stop = threading.Event()
+
+    def read_loop() -> None:
+        while not stop.is_set():
+            with manager.reserved_identity_guard(
+                vault, domains={"claims-store"}, exclusive=False, advance_generation=False
+            ):
+                time.sleep(0.005)
+            time.sleep(0.0005)
+
+    readers = [threading.Thread(target=read_loop, daemon=True) for _ in range(4)]
+    for reader in readers:
+        reader.start()
+    try:
+        time.sleep(0.1)
+        seconds = _seconds_to_enter(manager, vault, "claims-store", advance=True)
+    finally:
+        stop.set()
+        for reader in readers:
+            reader.join(TIMEOUT_SECONDS)
+
+    assert seconds < 1.5
 
 
 def test_an_owner_that_waits_past_its_deadline_is_refused_naming_its_domain(
