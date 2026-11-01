@@ -313,3 +313,64 @@ def iter_texts(vault_root: Path, page: Path, content: str) -> Iterator[str]:
 
 def whole_text(vault_root: Path, page: Path, content: str) -> str:
     return "".join(iter_texts(vault_root, page, content))
+
+
+#: Characters of extracted text one `read_memory` window returns. About 8 thousand tokens: inside
+#: the 20 to 50 KB an agent can take in at once, and far below one 512 KB part.
+WINDOW_CHARS = 32 * 1024
+
+
+@dataclass(frozen=True)
+class Window:
+    """One window of the whole extracted text of a Source, and where it sits."""
+
+    text: str
+    offset: int
+    #: Where the next window starts; None when this one reaches the end of the text.
+    next_offset: int | None
+    total_chars: int
+    part: int
+    parts: int
+
+
+def _window_end(text: str, start: int) -> int:
+    """Where a window that starts at `start` in `text` ends: at a paragraph or line break when it must be cut."""
+    end = start + WINDOW_CHARS
+    if end >= len(text):
+        return len(text)
+    window = text[start:end]
+    for mark in ("\n\n", "\n"):
+        cut = window.rfind(mark)
+        if cut > 0:
+            return start + cut + len(mark)
+    return end
+
+
+def read_window(
+    vault_root: Path, page: Path, frontmatter: Mapping[str, object], first: str, offset: int
+) -> Window:
+    """The window of the extracted text of `page` that starts at character `offset`.
+
+    `frontmatter` and `first` are the Source page's front matter and its own part of the text.
+    A window stays inside one part, so a read never opens more
+    than one part page. A window ends at a paragraph or line break; walking `next_offset` from
+    0 to None returns the whole text, in order, exactly. Raises `ValueError` for an `offset`
+    outside the text and `OSError` for a part page that is missing.
+    """
+    offsets = offsets_of(frontmatter)
+    total = frontmatter.get("extraction_chars") if offsets else len(first)
+    if not isinstance(total, int):
+        raise ValueError("the page records no length for its extracted text")
+    if not 0 <= offset < max(total, 1):
+        raise ValueError(f"offset {offset} is outside the extracted text of {total} characters")
+    starts = offsets or (0,)
+    number = max(index for index, start in enumerate(starts, 1) if start <= offset)
+    if number == 1:
+        text = first
+    else:
+        raw, _guard = read_guarded_text(vault_root, part_path(page, number))
+        text = text_of_part(raw)
+    local = offset - starts[number - 1]
+    end = _window_end(text, local)
+    reached = starts[number - 1] + end
+    return Window(text[local:end], offset, reached if reached < total else None, total, number, len(starts))

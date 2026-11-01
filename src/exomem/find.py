@@ -30,10 +30,8 @@ from typing import Any
 from . import (
     call_spans,
     cli_ops,
-    extraction_parts,
     find_candidates,
     find_corpus,
-    find_parts,
     find_policy,
     find_results,
     find_types,
@@ -5516,6 +5514,8 @@ def _part_match(
 
     `matched` is the page whose text matched: a part page, or `page` itself for part 1.
     """
+    from . import extraction_parts, find_parts
+
     offsets = extraction_parts.offsets_of(page.frontmatter)
     number = matched.frontmatter.get("part") if matched.part_of else 1
     if offsets is None or not isinstance(number, int) or not 1 <= number <= len(offsets):
