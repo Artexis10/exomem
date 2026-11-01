@@ -101,6 +101,7 @@ tests/test_membench_negation.py
 tests/test_membench_null_floor.py
 tests/test_membench_oracle.py
 tests/test_membench_oracle_ceiling.py
+tests/test_membench_organisation_replay.py
 tests/test_membench_preference.py
 tests/test_membench_privacy.py
 tests/test_membench_private_format.py

@@ -1333,6 +1333,237 @@ def test_a_standalone_late_refresh_that_cannot_prove_its_no_op_still_converges(
     _assert_matches_a_fresh_rebuild(vault)
 
 
+# --- A write's own refresh proves a topology change in proportion to it ---------
+
+BARE_LINKERS = [f"Knowledge Base/Notes/Insights/queue-bare-linker-{i:02d}.md" for i in range(12)]
+BYSTANDERS = [f"Knowledge Base/Notes/Insights/queue-bystander-{i:02d}.md" for i in range(12)]
+
+
+def _seed_linkers_and_bystanders(root: Path, cited: str) -> None:
+    """Twelve pages that cite `cited` by name beside twelve that cite nothing that moves."""
+    pages = {
+        rel: _titled(f"Linker {i:02d}", f"Cites [[{cited}]].")
+        for i, rel in enumerate(BARE_LINKERS)
+    }
+    pages.update(
+        {
+            rel: _titled(f"Bystander {i:02d}", "Cites [[queue-b]].")
+            for i, rel in enumerate(BYSTANDERS)
+        }
+    )
+    _publish_with_a_resident_resolver(root, pages)
+
+
+def _rederived_pages(root: Path, monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    """The pages every pass of this test rewrites; the set fills as the write runs."""
+    rederived: set[str] = set()
+    real_pass = EpistemicGraphIndex._refresh_paths_pass
+
+    def spy(self: Any, paths: Any, *args: Any, **kwargs: Any) -> Any:
+        rederived.update(Path(path).relative_to(root).as_posix() for path in paths)
+        return real_pass(self, paths, *args, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_refresh_paths_pass", spy)
+    return rederived
+
+
+def _forbid_vault_wide_proofs(patch: pytest.MonkeyPatch) -> None:
+    """The create's refresh must not walk or reread the vault to prove its topology."""
+    for name in ("_recall_membership", "_resolver_source_versions"):
+        patch.setattr(
+            EpistemicGraphIndex,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"a created page's refresh called {_name}"
+            ),
+        )
+    patch.setattr(
+        epistemic_graph,
+        "_disk_vault_freshness",
+        lambda *_args: pytest.fail("a created page's refresh walked the disk"),
+    )
+
+
+def test_a_created_page_that_names_an_unresolved_link_re_derives_only_its_linkers(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+) -> None:
+    """The write returns with a converged graph that rewrote the moved linkers alone.
+
+    Deferring the topology proof to the drain left the graph warming when the
+    write returned, so the same write's entity lookup found no graph. Proving it
+    over the whole vault held the boundary for minutes. The proof reads the
+    dependency index for the created page's names instead.
+    """
+    _seed_linkers_and_bystanders(vault, "Fresh Title")
+    whole_vault_passes.clear()
+    rederived = _rederived_pages(vault, monkeypatch)
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+
+    with monkeypatch.context() as patch:
+        _forbid_vault_wide_proofs(patch)
+        index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert EpistemicGraphIndex(vault).available(), "the write returned a graph still warming"
+    assert whole_vault_passes == []
+    assert rederived == {CREATED, *BARE_LINKERS}
+    # The write's receipts are still queued; the drain finds them current.
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_created_page_that_makes_a_stem_ambiguous_re_derives_the_pages_citing_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+) -> None:
+    """A second page with the same stem changes what `[[queue-b]]` means for every citer."""
+    _seed_linkers_and_bystanders(vault, "queue-b")
+    whole_vault_passes.clear()
+    rederived = _rederived_pages(vault, monkeypatch)
+    twin = "Knowledge Base/Other/queue-b.md"
+    (vault / "Knowledge Base/Other").mkdir()
+    _commit_before_its_fanout(vault, {twin: _titled("Twin", "A second page with the stem.")})
+
+    with monkeypatch.context() as patch:
+        _forbid_vault_wide_proofs(patch)
+        index_sync.upsert_after_write(vault, [vault / twin], created_paths=[vault / twin])
+
+    assert EpistemicGraphIndex(vault).available(), "the write returned a graph still warming"
+    assert whole_vault_passes == []
+    assert {twin, *BARE_LINKERS, *BYSTANDERS, PAGE_A} <= rederived
+    assert rederived <= {twin, *BARE_LINKERS, *BYSTANDERS, PAGE_A}
+    # The write's receipts are still queued; the drain finds them current.
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_retitled_page_re_derives_the_pages_citing_its_old_and_new_titles(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+) -> None:
+    """The old title's citer loses its edge and the new title's citer gains one."""
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            RETITLED: _titled("Old Title", "A page about to be renamed."),
+            OLD_LINKER: _titled("Old Linker", "Cites [[Old Title]]."),
+            NEW_LINKER: _titled("New Linker", "Cites [[New Title]]."),
+            **{
+                rel: _titled(f"Bystander {i:02d}", "Cites [[queue-b]].")
+                for i, rel in enumerate(BYSTANDERS)
+            },
+        },
+    )
+    whole_vault_passes.clear()
+    rederived = _rederived_pages(vault, monkeypatch)
+    _commit_before_its_fanout(vault, {RETITLED: _titled("New Title", "A page renamed.")})
+
+    with monkeypatch.context() as patch:
+        _forbid_vault_wide_proofs(patch)
+        index_sync.upsert_after_write(vault, [vault / RETITLED])
+
+    assert EpistemicGraphIndex(vault).available(), "the write returned a graph still warming"
+    assert whole_vault_passes == []
+    assert rederived == {RETITLED, OLD_LINKER, NEW_LINKER}
+    # The write's receipts are still queued; the drain finds them current.
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def _edge_between(root: Path, source: str, target: str) -> bool:
+    return any(
+        edge[1] == f"file:{source}" and edge[2] == f"file:{target}"
+        for edge in _graph_contents(root)["edges"]
+    )
+
+
+def _publish_an_edit(root: Path, rel: str, text: str) -> None:
+    """Write one page and publish its corpus delta and resolver patch, with no graph fan-out."""
+    (root / rel).write_text(text, encoding="utf-8")
+    assert index_sync.publish_corpus_delta(root, changed=[root / rel])
+    find_module.on_resolver_files_changed(root, [rel], [])
+
+
+@pytest.mark.parametrize("settle", ["refresh", "drain"])
+def test_a_page_retitled_twice_loses_the_edge_a_drain_gave_it_under_the_first_title(
+    vault: Path, settle: str
+) -> None:
+    """A stored edge to a moved page is re-derived, whatever name produced it.
+
+    The first retitle publishes only its corpus delta. A drain of another page
+    then re-derives the linker under the page's new title, so the linker gains
+    an edge that the page's own stored row (still the first title) does not
+    explain. A second retitle must re-derive that linker: the dependency keys
+    of the page's stored and live titles name neither the middle title nor
+    the linker.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            RETITLED: _titled("Title One", "A page renamed twice."),
+            NEW_LINKER: _titled("Linker", "Cites [[Title Two]] and [[queue-b]]."),
+        },
+    )
+    _publish_an_edit(vault, RETITLED, _titled("Title Two", "A page renamed twice."))
+    _publish_an_edit(vault, PAGE_B, _page("B", "B is an edited claim."))
+    EpistemicGraphIndex(vault).drain_paths([vault / PAGE_B])
+    assert _edge_between(vault, NEW_LINKER, RETITLED), "the premise: the drain linked the page"
+
+    _publish_an_edit(vault, RETITLED, _titled("Title Three", "A page renamed twice."))
+    index = EpistemicGraphIndex(vault)
+    if settle == "refresh":
+        index.refresh_paths([vault / RETITLED])
+    else:
+        index.drain_paths([vault / RETITLED])
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert not _edge_between(vault, NEW_LINKER, RETITLED)
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_create_does_not_publish_a_citer_derived_from_bytes_the_resolver_has_not_seen(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editor outside the writers' boundary retitles a citer after the write's first check.
+
+    The citer is outside the write's delta, so only the proof of the affected
+    pages stands between its unrecorded bytes and a graph that is stale for a
+    third page: that one cites the new title, which the write's resolver never
+    saw, and nothing widens to it. The pass is refused and the graph the write
+    leaves still equals a rebuild.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]]."),
+            NEW_LINKER: _titled("New Linker", "Cites [[Edited Linker]]."),
+        },
+    )
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+    real_pass = EpistemicGraphIndex._refresh_paths_pass
+    edits: list[int] = []
+
+    def edit_then_pass(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not edits:
+            edits.append(1)
+            (vault / CREATE_LINKER).write_text(
+                _titled("Edited Linker", "Cites [[Fresh Title]]."), encoding="utf-8"
+            )
+        return real_pass(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(EpistemicGraphIndex, "_refresh_paths_pass", edit_then_pass)
+        index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert edits
+    _assert_matches_a_fresh_rebuild(vault)
+
+
 # --- Background callers stop at queued ------------------------------------------
 
 
@@ -1907,7 +2138,10 @@ def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
         monkeypatch,
         {
             PAGE_A: _page("A", "A is revised against [[queue-b]]."),
-            PAGE_B: _page("B", "B is revised and cites nothing."),
+            # Retitled, so that the drain of B widens to A. A's replay was
+            # withheld while B was queued, and only a batch that holds A
+            # covers the committed generation and acknowledges it.
+            PAGE_B: _page("B renamed", "B is revised and cites nothing."),
         },
     )
     real_drain = EpistemicGraphIndex.drain_paths

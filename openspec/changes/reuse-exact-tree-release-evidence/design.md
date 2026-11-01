@@ -2,27 +2,31 @@
 
 ## Context
 
-See proposal.md for the problem. CI currently runs a reduced PR tier and a full scheduled or dispatched tier. The latter also covers Python 3.11 and specialized jobs. The normal PR tier cannot supply historical full evidence.
+See proposal.md for the problem. CI currently runs a reduced PR tier and a full scheduled or dispatched tier. The PR tier runs the supported floor, Python 3.11; the Full tier adds Python 3.13 and specialized jobs. The normal PR tier cannot supply historical full evidence.
 
 The publisher already runs Python publication separately from image builds. The missing boundary is scoped qualification with an explicit producer. Existing distribution parsers and download helpers live in `infra/scripts/release_recovery.py`.
 
 ## Goals / Non-Goals
 
-The release shall reuse full source proof across squash commits with identical trees. Ready source PRs run historical Full coverage; drafts retain partial feedback. Release metadata keeps its targeted checks. This change does not alter service installation authority.
+The release shall reuse full source proof across squash commits with identical trees. Pull requests, draft or ready, run the partial tier; Full runs on schedule and dispatch and supplies release evidence. Release metadata keeps its targeted checks. This change does not alter service installation authority.
 
 ## Decisions
 
 ### Retain full scope and record the tested tree
 
-Compute Full scope once in an unconditional CI job. Select Full for schedules, manual runs, and ready non-release PRs. Feed that output to runtime matrices, specialized jobs, docs scoping, the required gate, and receipt recording. Ordinary and Full-only jobs start together after this small dependency. A draft-to-ready event starts Full; readiness changes supersede older runs.
+Compute Full scope once in an unconditional CI job. Select Full for schedules and manual runs only. Feed that output to runtime matrices, specialized jobs, the required gate, and receipt recording. Pull requests run the partial tier on Python 3.11, the supported floor; Python 3.13 joins in Full. Docs-only narrowing applies to every non-release pull request.
 
-Pass Full scope into reusable workflows. The K3s workflow must bypass PR path reduction for Full and distinguish caller workflow concurrency groups. The standalone K3s workflow retains draft feedback; CI owns ready Full execution. Make release evidence a trivial success outside release PRs so the strict Full gate cannot accept unexpected skips.
+A reusable workflow keeps its caller's schedule or dispatch event, so the K3s workflow already bypasses PR path reduction for Full; its concurrency groups carry the caller workflow name. The standalone K3s workflow runs on every non-release PR that touches its paths, draft or ready. Make release evidence a trivial success outside release PRs so the strict Full gate cannot accept unexpected skips.
 
-Record a receipt after the required gate. Bind the actual checkout commit and tree, run, issuing attempt, event, and scope. For PRs, retain the synthetic merge commit and its head/base identities. The source head association is not the tested commit. Verify the receipt against its producer and compare its tested tree with merged main.
+Record a receipt after the required gate. Bind the actual checkout commit and tree, run, issuing attempt, event, and scope. Only a schedule or dispatch run issues a receipt. Verify the receipt against its producer and compare its tested tree with merged main.
 
 Use one `scripts/release_evidence.py` helper for evidence selection and release merge. Reuse `gh`, Git, Actions artifacts, and the existing release file checker. The helper adds identity checks that those maintained tools do not combine. Keep the implementation bounded; it does not become a second CI scheduler.
 
-Select runs for the current source commit and its merged PR head. Require a successful latest run and a valid receipt from its successful issuing gate. A retry may retain an earlier receipt; report its original attempt separately from the successful retry. Existing successful full runs on the exact main commit remain usable under their original event contract. An unavailable or mismatched receipt chooses the existing full fallback.
+Select runs for the current source commit and its merged PR head; the head qualifies through a Full run dispatched on the source branch. Require a successful latest run and a valid receipt from its successful issuing gate. A retry may retain an earlier receipt; report its original attempt separately from the successful retry. Existing successful full runs on the exact main commit remain usable under their original event contract. An unavailable or mismatched receipt chooses the existing full fallback.
+
+### Run advisory measurement outside the evidence run
+
+The MCP read latency comparison gates nothing: every allowance is null, and its jobs continue on error. It ran inside the Full run, so the run could end well after its gate passed, and release evidence reads only a completed run. It now runs nightly and on dispatch in its own workflow with read-only repository access. Its advisory status is unchanged; ending it belongs to the change that owns that measurement.
 
 ### Balance the measured K3s work
 
@@ -76,6 +80,6 @@ The [baseline publisher](https://github.com/Artexis10/exomem/actions/runs/403082
 ## Migration Plan
 
 1. Ship the helpers, workflow changes, and runbook in one reviewed batch; expect the new receipt contract.
-2. Run parallel Full CI on the ready PR and verify the merged tree; expect reusable source evidence.
+2. Dispatch Full CI on the source branch, or rely on the main run, and verify the merged tree; expect reusable source evidence.
 3. Release through the guarded command and Python qualification job; expect explicit producer and timing receipts.
 4. Revert the batch if evidence selection fails; expect the prior full-on-main path to remain available.

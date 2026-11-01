@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 6440c83f69d3f442aeb8a7afbb8b4a0f73bf510edc03ed2379794b9101e25f32
+  skill_contract: 88bc9963b95f07f4bf7883fb79b7d06c7e12fb571d308672de59b6fc2c27081c
   version: "0.32.0"
 ---
 
@@ -66,6 +66,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Save intent or observed events; interpret an ambiguous action | `read_plans`, `change_plans`, `read_records`, `change_records`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `record_episode/read_episode` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
+| Bring a folder, ZIP or notes export into the Knowledge Base | `read_import` and `import_memory`; on Cloud also `observe_transfer` and `transfer_memory` | [importing](references/importing.md); [operation details](references/operations.md); [mutation results](references/mutation-results.md) before any mutation |
 | Review, adopt, audit, restructure, or maintain a vault | `read_review/triage_memory`, `triage_memory`, `read_import` and `import_memory`, `check_memory/repair_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `read_schema/change_schema` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Give maps topics, or file unfiled pages under topics | `read_review(operation={'kind': 'vocabulary'})` topic-carrier items, then `read_schema/change_schema` with `subject="topic-carriers"` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
@@ -295,6 +296,7 @@ target; use a plain title-first citation. Never invent, copy, or edit an
 
 Legacy pages are not rewritten automatically. To add IDs, first run
 `check_memory(operation={'kind': 'backfill-ids'})` in its default dry-run mode, inspect the
-proposed files, and write only after explicit confirmation with `dry_run=false`.
+proposed files, and write only after explicit confirmation with `dry_run=false`. A remote
+write starts a maintenance job with the preview's `plan_id` and a `why` ([vault care](references/vault-care.md)).
 Duplicate or malformed IDs are audit findings; do not guess which duplicate a
 reference means.

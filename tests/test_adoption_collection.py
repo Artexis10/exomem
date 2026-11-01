@@ -15,6 +15,7 @@ from exomem import (
     adopt,
     adoption_plan,
     adoption_run,
+    capabilities,
     epistemic_graph,
     find,
     held_fs,
@@ -23,6 +24,7 @@ from exomem import (
     request_budget,
     reserved_paths,
     source_taxonomy,
+    writer_lease,
 )
 from exomem import (
     vault as vault_module,
@@ -149,6 +151,8 @@ def test_a_ruled_folder_lands_in_its_kind_directory_and_an_unregistered_kind_cha
             include=[{"path": "Coll/books", "source_kind": "no-such-kind"}, "Coll"],
         )
     assert refused.value.code.startswith("SOURCE_KIND_")
+    # The refusal offers the safe route first and gates registering on the person.
+    assert "without source_kind" in str(refused.value) and "after they confirm" in str(refused.value)
     assert adoption_run.status(vault, run_id=run_id)["selection"] == before["selection"]
 
     ruled = adoption_run.select(
@@ -277,6 +281,8 @@ def test_a_tiny_budget_needs_several_calls_writes_each_item_once_and_replays_a_r
     first = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
     assert first["phase"] == "applying"
     assert first["progress"] == {"applied": 1, "failed": 0, "remaining": 3, "total": 4}
+    (resume,) = first["next_actions"]  # an agent that stops here must report the counts, not "underway"
+    assert "background worker" in resume["description"] and "unfinished" in resume["description"]
     mid = adoption_run.status(vault, run_id=run_id)
     assert mid["interrupted"] is False
     assert mid["remaining"] == 3
@@ -421,6 +427,69 @@ def test_recall_check_accepts_only_the_exact_target_page(
     wrong = adoption_run.finish(vault, run_id=run_id, today=TODAY)
     assert wrong["finish"]["recall_check"]["ok"] is False
     assert wrong["coverage"]["recall"] == {"sampled": 1, "found": 0, "missed": [target]}
+    # The search answered without the page, so a question about it is not ready.
+    assert "first_question" not in wrong["finish"]
+    assert wrong["finish"]["indexing"]["state"] == "missed"
+
+
+def test_a_finished_run_names_the_reconcile_tool_of_the_surface_that_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/one/plan.md": "# Plan\n\ntext\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/one/plan.md"]["target_path"]
+
+    class Hit:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    # The search answers without the imported page, so finish names a reconcile.
+    monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+    with capabilities.active_surface(nested):
+        finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    read_later = adoption_run.status(vault, run_id=run_id)
+
+    assert finished["finish"]["recall_check"]["next_action"] == {
+        "tool": "repair_memory", "args": {"operation": {"kind": "reconcile"}},
+    }
+    assert read_later["finish"]["recall_check"]["next_action"] == {
+        "tool": "maintain_memory", "args": {"mode": "reconcile"},
+    }
+
+
+def test_a_stored_route_that_no_longer_spells_still_lets_the_run_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/one/plan.md": "# Plan\n\ntext\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/one/plan.md"]["target_path"]
+
+    class Hit:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
+    adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    # A later release retires the operation that the stored route names.
+    store = adoption_run.AdoptionRunStore(vault)
+    run = store.load(run_id)
+    retired = {"tool": "maintain_memory", "args": {"mode": "retired-mode"}}
+    run["finish"]["recall_check"]["next_action"] = retired
+    store.save(run)
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+
+    with capabilities.active_surface(nested):
+        read = adoption_run.status(vault, run_id=run_id)
+
+    assert read["phase"] == "done"
+    assert read["finish"]["recall_check"]["next_action"] == retired
 
 
 @pytest.mark.parametrize("read_state", ["pending", "failed"])
@@ -455,6 +524,32 @@ def test_finish_does_not_report_incomplete_recall_as_missing(
     assert "- Recall check: needs attention" not in manifest
     if read_state == "pending":
         assert recall["warming"]["components"] == ["pending_visibility"]
+
+
+def test_finish_offers_no_first_question_while_the_imported_pages_are_not_yet_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {
+        "Coll/alpha.md": "# Alpha\n\nAn alpha observation.\n",
+        "Coll/beta.md": "# Beta\n\nA beta observation.\n",
+    })
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    def index_still_catching_up(*_args, degraded_out=None, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+        if degraded_out is not None:
+            degraded_out.append("pending_visibility")
+        return []
+
+    monkeypatch.setattr(find, "find", index_still_catching_up)
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert finished["phase"] == "done"
+    assert "first_question" not in finished["finish"]
+    assert "route" not in finished["finish"]
+    assert finished["finish"]["indexing"] == {
+        "state": "pending", "sampled": 2, "found": None, "missed": 0, "pending": 2, "failed": 0,
+    }
 
 
 def test_finish_retains_confirmed_hits_when_other_recall_is_pending(
@@ -930,9 +1025,110 @@ def test_an_apply_call_reads_the_sources_tree_once_however_many_chunks_it_commit
     )
 
     assert applied["phase"] == "applied"
-    assert walks == {"index": 1, "counts": 1}
+    assert walks == {"index": 0, "counts": 1}
     sources_index = (vault / SOURCES / "index.md").read_text(encoding="utf-8")
     assert "copied legacy-vault material with provenance (5)" in sources_index
+
+
+def test_a_continuing_apply_call_does_not_open_the_sources_an_earlier_run_filed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tiny_budget: None
+) -> None:
+    """Opening every Source page on each call made a late call of a long import file one chunk."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)
+    files = {f"Old/old-{n}.md": f"# Old {n}\n\ntext {n}\n" for n in range(4)}
+    files.update({f"New/new-{n}.md": f"# New {n}\n\ntext {n}\n" for n in range(3)})
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Old", include=["Old"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    run_id, planned = _import(vault, path="New", include=["New"])
+    own_pages = {item["target_path"] for item in planned["plan"]["items"]}
+    opened: list[str] = []
+    real_entry = adoption_plan.read_import_entry
+
+    def recording_entry(root: Path, page: Path):
+        opened.append(page.relative_to(root).as_posix())
+        return real_entry(root, page)
+
+    monkeypatch.setattr(adoption_plan, "read_import_entry", recording_entry)
+
+    applied, calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert (applied["phase"], calls) == ("applied", 3)
+    assert set(opened) <= own_pages
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 7
+
+
+def test_an_apply_finds_a_source_another_run_filed_since_the_plan_and_files_no_duplicate(
+    tmp_path: Path
+) -> None:
+    """A plan made before another run filed the same files must not file them again."""
+    vault = _vault(tmp_path, {"Coll/a.md": "# A\n\none\n", "Coll/b.md": "# B\n\ntwo\n"})
+    stale_run, stale = _import(vault, path="Coll", include=["Coll"])
+    later = TODAY + dt.timedelta(days=1)  # another day, so its Sources are named differently
+    other_run = adoption_run.start(vault, path="Coll", today=later)["run_id"]
+    adoption_run.select(vault, run_id=other_run, include=["Coll"])
+    other = adoption_run.plan(vault, run_id=other_run, today=later)
+    adoption_run.apply(vault, run_id=other_run, plan_id=other["plan"]["plan_id"], today=later)
+    filed = sorted(p.name for p in (vault / SOURCES / "Imported").glob("*.md"))
+
+    applied = adoption_run.apply(
+        vault, run_id=stale_run, plan_id=stale["plan"]["plan_id"], today=TODAY
+    )
+
+    assert {o["status"] for o in applied["outcomes"].values()} == {"already-applied"}
+    assert sorted(p.name for p in (vault / SOURCES / "Imported").glob("*.md")) == filed
+    assert len(filed) == 2
+
+
+def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_between_a_floor_and_a_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flat 20 s reserve cost a call that hands off custody in about a second most of its budget."""
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", fake_time.monotonic)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 5.0)
+    monkeypatch.setattr(adoption_run, "INITIAL_ITEM_SECONDS", 1.0)
+    monkeypatch.setattr(adoption_run, "REPLY_SECONDS_PER_ITEM", 0.0)
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_BUDGET_SHARE", 1.0)
+    vault = _vault(tmp_path, {})
+    batch = types.SimpleNamespace(handoff_outcome=None, handoff_error=None)
+    session = writer_lease._FastAcknowledgementSession(
+        vault_root=vault, request_id="r", mutation_attempt_digest="d",
+        terminal_replay_until=0.0, advisory_required=False, batches=[batch],
+    )
+    pending = [{"original_bytes": 0, "form": "note"} for _ in range(10)]
+
+    def items_admitted(budget_seconds: float) -> int:
+        budget = request_budget.RequestBudget(seconds=budget_seconds, entry=clock["now"])
+        return len(adoption_run._ApplyPacer(vault, budget).next_chunk(pending, first=False))
+
+    def measure_handoff(seconds: float) -> None:
+        def handoff(_session) -> int:
+            clock["now"] += seconds
+            batch.handoff_outcome = "ready"
+            return 1
+
+        monkeypatch.setattr(writer_lease, "_handoff_derived_batches", handoff)
+        batch.handoff_outcome = None
+        writer_lease._timed_handoff(session)
+
+    token = writer_lease._ACTIVE_FAST_ACK_SESSION.set(session)
+    try:
+        # Nothing measured yet: the whole 20 s reserve stands.
+        assert (items_admitted(12), items_admitted(27)) == (0, 2)
+        # A handoff near zero still reserves the floor (2 s), not nothing.
+        measure_handoff(0.0)
+        assert items_admitted(12) == 5
+        # A 1.5 s handoff per batch reserves 3 s: the session's batch and the chunk's.
+        measure_handoff(1.5)
+        assert items_admitted(12) == 4
+        # A 100 s handoff reserves no more than the ceiling (20 s).
+        measure_handoff(100.0)
+        assert (items_admitted(12), items_admitted(27)) == (0, 2)
+    finally:
+        writer_lease._ACTIVE_FAST_ACK_SESSION.reset(token)
 
 
 def test_a_call_leaves_a_byte_heavy_artifact_to_the_next_call_when_it_does_not_fit_in_the_time_left(

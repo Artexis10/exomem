@@ -116,6 +116,7 @@ def test_corrupt_ciphertext_never_places_an_original(vault: Path, selected_store
         with media_store.open_original(vault, path):
             pytest.fail("corruption must not yield an original")
     assert not path.exists()
+    assert [entry.name for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")] == []
 
 
 def test_a_vault_taken_off_its_store_reads_an_evicted_original_as_unavailable(vault: Path, selected_store):
@@ -195,7 +196,8 @@ def test_offload_runs_without_changing_an_extraction_verdict(vault: Path, select
     ledger.complete(offload_job)
     assert originals.original_state(vault, path).state == "cached"
     assert ledger.get(processing.id) == verdict
-    assert not media_store.evict(vault, path)
+    # A failed or blocked job, an engine wait included, keeps no original (D3, M4).
+    assert media_store.evict(vault, path)
 
 
 @pytest.mark.parametrize("kind", ["file", "directory"])
@@ -364,7 +366,7 @@ def test_store_failure_keeps_offload_demand_retryable_through_the_worker(vault: 
 
 @pytest.mark.parametrize("new_bound", [None, 100_000])
 def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, selected_store, new_bound):
-    """A size refusal must park repeated discovery and recover when its bound changes."""
+    """An original above the object bound stays resident through discovery and offloads once the bound allows it."""
     import os
 
     from exomem import media_jobs, media_store, media_worker
@@ -376,9 +378,6 @@ def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, 
     assert originals.original_state(vault, path).state == "local"
     assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
     assert media_store.enqueue_offloads(vault) == 0
-    [refusal] = media_jobs.tool_status(vault)["offload_refusals"]
-    assert refusal["path"] == path.relative_to(vault).as_posix()
-    assert refusal["code"] == "MEDIA_OBJECT_TOO_LARGE" and refusal["ciphertext_size"] > 64
     assert not list((Path(values["root"])).rglob("*"))
     updated = values if new_bound is None else {**values, "max_object_bytes": new_bound}
     config.write_text(json.dumps({"vaults": {str(vault): updated}}))
@@ -438,38 +437,41 @@ def test_a_new_sidecar_digest_releases_only_its_old_verification_refusal(vault: 
 
 
 def test_hydration_reports_local_disk_exhaustion_as_local(vault: Path, selected_store, monkeypatch):
-    """A local staging write must not become a misleading remote-store outage."""
+    """A full volume must not become a misleading remote-store outage, and leaves no temporary file."""
     import errno
-    from contextlib import contextmanager
+    import os
 
     from exomem import media_store
 
     path = _preserved(vault)
     _offload(vault, path)
     assert media_store.evict(vault, path)
-    temporary_file = media_store.tempfile.TemporaryFile
+    fdopen = os.fdopen
 
     class FullDisk:
         def __init__(self, stream):
             self.stream = stream
 
-        def __getattr__(self, name):
-            return getattr(self.stream, name)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.stream.close()
 
         def write(self, _chunk):
-            raise OSError(errno.ENOSPC, "staging disk is full")
+            raise OSError(errno.ENOSPC, "the volume is full")
 
-    @contextmanager
-    def full_staging(*args, **kwargs):
-        with temporary_file(*args, **kwargs) as stream:
-            yield FullDisk(stream)
+    def full_volume(descriptor, mode="r", *args, **kwargs):
+        stream = fdopen(descriptor, mode, *args, **kwargs)
+        return FullDisk(stream) if "w" in mode else stream
 
-    monkeypatch.setattr(media_store.tempfile, "TemporaryFile", full_staging)
+    monkeypatch.setattr(media_store.os, "fdopen", full_volume)
     with pytest.raises(OSError) as error:
         with media_store.open_original(vault, path):
-            pytest.fail("a full staging disk cannot hydrate an original")
+            pytest.fail("a full volume cannot hydrate an original")
     assert error.value.errno == errno.ENOSPC
     assert originals.original_state(vault, path).state == "evicted"
+    assert [entry.name for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")] == []
 
 
 def test_page_move_refuses_the_catalog_before_hydrating(vault: Path, selected_store, monkeypatch):
@@ -543,10 +545,12 @@ def test_idle_pins_do_not_spend_hydration_capacity_or_block_unrelated_eviction(v
     values, config = selected_store
     config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_hydrations": 1}}}))
     with sqlite3.connect(ledger.path) as connection:
-        connection.executemany("INSERT INTO media_access VALUES (?, ?, ?, 0, 0)",
+        connection.executemany("INSERT INTO media_access(token, binary_rel, pid) VALUES (?, ?, ?)",
                                [(f"idle-{i}", "Knowledge Base/Evidence/other.bin", os.getpid()) for i in range(100)])
-        connection.execute("INSERT INTO media_access VALUES ('dead', ?, ?, 1024, 1)", (relative, dead_pid))
-        connection.execute("INSERT INTO media_access VALUES ('live', ?, ?, 1024, 1)", (relative, os.getpid()))
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('dead', ?, ?, 1024, 1)", (relative, dead_pid))
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('live', ?, ?, 1024, 1)", (relative, os.getpid()))
     with pytest.raises(media_store.MediaStoreError) as busy:
         with media_store.open_original(vault, path):
             pytest.fail("a live reservation must retain its capacity")
@@ -571,7 +575,8 @@ def test_stored_status_is_partial_and_exact_paths_survive_custody_loss(vault: Pa
     relative = path.relative_to(vault).as_posix()
     ledger = media_jobs.MediaJobStore(vault)
     with sqlite3.connect(ledger.path) as connection:
-        connection.executemany("INSERT INTO media_cache VALUES (?, 'stale', ?, 'stale', 0)",
+        connection.executemany("INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read) "
+                               "VALUES (?, 'stale', ?, 'stale', 0)",
             [(f"Knowledge Base/zz-stale/{i:04}.bin", "a" * 64) for i in range(media_jobs.STATUS_JOB_LIMIT + 2)])
     result = media_jobs.tool_status(vault)
     assert len(result["stored_originals"]) == media_jobs.STATUS_JOB_LIMIT
@@ -651,7 +656,8 @@ def test_withheld_candidates_do_not_change_status_coverage(vault: Path, selected
             target.parent.mkdir(parents=True, exist_ok=True)
             copy = {**fields, "evidence_file": relative}
             target.write_text(render_frontmatter_document(serialize_frontmatter(copy), body))
-            connection.execute("INSERT INTO media_cache VALUES (?, 'candidate', ?, 'evicted', 0)",
+            connection.execute("INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read) "
+                               "VALUES (?, 'candidate', ?, 'evicted', 0)",
                                (relative, fields["binary_sha256"]))
     with request_scope(_external()):
         after = writer_lease.invoke_command(command, vault, operation="status")
@@ -827,17 +833,6 @@ def test_disabled_store_retains_identity_and_hydration(vault: Path, selected_sto
     assert not media_store.evict(vault, path)
 
 
-def test_pending_processing_excludes_eviction(vault: Path, selected_store):
-    from exomem import media_jobs, media_store
-
-    path = _preserved(vault)
-    _offload(vault, path)
-    ledger = media_jobs.MediaJobStore(vault)
-    ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
-    assert not media_store.evict(vault, path)
-    assert path.exists()
-
-
 def test_unsupported_bound_binary_offloads_without_extraction(vault: Path, selected_store):
     from exomem import media_jobs, media_store, media_worker, preserve
 
@@ -954,14 +949,14 @@ def test_hydration_does_not_overwrite_an_external_create(vault: Path, selected_s
     path = _preserved(vault)
     _offload(vault, path)
     assert media_store.evict(vault, path)
-    publish = held_fs.publish_bytes
+    install = held_fs.install_temporary
 
-    def external_create(filesystem, parent, leaf, data, **kwargs):
+    def external_create(filesystem, parent, temporary, leaf, **kwargs):
         if leaf == path.name:
             path.write_bytes(b"external edit")
-        return publish(filesystem, parent, leaf, data, **kwargs)
+        return install(filesystem, parent, temporary, leaf, **kwargs)
 
-    monkeypatch.setattr(held_fs, "publish_bytes", external_create)
+    monkeypatch.setattr(held_fs, "install_temporary", external_create)
     with pytest.raises(held_fs.HeldFsError):
         with media_store.open_original(vault, path):
             pytest.fail("an external create must retain its bytes")
@@ -1632,3 +1627,905 @@ def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Pat
     assert path.exists() and originals.original_state(vault, path).reference is None
     with sqlite3.connect(ledger.path) as connection:
         assert connection.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 1
+
+
+def test_a_resident_original_gets_no_offload_job(vault: Path, selected_store):
+    """Catches filing that queues an offload the store must refuse after encrypting the whole file."""
+    from exomem import media_jobs
+
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_temporary_bytes": 1000}}}))
+
+    path = _preserved(vault)
+
+    assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    assert originals.original_state(vault, path).state == "local"
+
+
+def test_offload_refuses_a_resident_original_before_it_encrypts(vault: Path, selected_store, monkeypatch):
+    """Catches offload writing a ciphertext temporary file for an original that can never leave the volume."""
+    import tempfile
+
+    from exomem import media_store
+
+    path = _preserved(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_temporary_bytes": 1000}}}))
+    monkeypatch.setattr(tempfile, "TemporaryFile", lambda *a, **k: pytest.fail("a resident original needs no temporary file"))
+    monkeypatch.setattr(media_store.subprocess, "run", lambda *a, **k: pytest.fail("a resident original is never encrypted"))
+
+    assert _offload(vault, path) is None
+
+    refusals, _coverage = media_store.offload_refusals(vault)
+    assert [(row["path"], row["code"]) for row in refusals] == [(path.relative_to(vault).as_posix(), "MEDIA_ORIGINAL_RESIDENT")]
+    assert originals.original_state(vault, path).state == "local"
+
+
+def test_eviction_skips_an_original_whose_plaintext_exceeds_the_hydration_capacity(vault: Path, selected_store):
+    """Catches eviction of an original that no hydration could bring back after the capacity shrank."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "max_temporary_bytes": path.stat().st_size - 1}}}))
+
+    assert not media_store.evict(vault, path)
+    assert path.exists()
+
+
+def _stored(vault: Path, category: str, size: int) -> Path:
+    """A filed original of `size` bytes whose stored copy is confirmed and cached, with no job left."""
+    from exomem import media_jobs, preserve
+
+    captured = preserve.preserve(vault, scope="Test", category=category, filename="sample.txt", content="x" * size)
+    path = vault / captured.path
+    preserve.update_sidecar_extraction(vault, vault / captured.sidecar_path, text="An observation.", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    assert originals.original_state(vault, path).state == "cached"
+    return path
+
+
+def _volume(total: int, base: int, *paths: Path):
+    """Disk usage in which only `paths` that are still on the volume add to `base`."""
+    from types import SimpleNamespace
+
+    def usage(_path):
+        used = base + sum(path.stat().st_size for path in paths if path.exists())
+        return SimpleNamespace(total=total, used=used, free=total - used)
+
+    return usage
+
+
+def _configure(selected_store, vault: Path, **changes):
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, **changes}}}))
+
+
+def test_an_original_cached_before_the_size_column_still_leaves_under_pressure(vault: Path, selected_store, monkeypatch):
+    """Catches an upgrade that keeps every original cached before it on the volume for good."""
+    from exomem import media_jobs, media_store
+
+    path = _stored(vault, "cached-before-the-upgrade", 300)
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_cache SET size = NULL")
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, path))
+
+    assert media_store.evict_to_target(vault) == 1
+    assert originals.original_state(vault, path).state == "evicted"
+
+
+def test_a_never_read_original_leaves_under_pressure_and_an_owner_read_one_stays(vault: Path, selected_store, monkeypatch):
+    """Catches idle time that counts processing as a read, or that ignores an owner's recent read."""
+    from exomem import media_store
+
+    unread = _stored(vault, "unread", 300)
+    played = _stored(vault, "played", 600)
+    _configure(selected_store, vault, minimum_idle_seconds=3600)
+    with media_store.open_original(vault, played, read=True):
+        pass
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 7_000, unread, played))
+
+    media_store.evict_to_target(vault)
+
+    assert originals.original_state(vault, unread).state == "evicted"
+    assert originals.original_state(vault, played).state == "cached"
+
+
+def test_an_original_whose_cache_identity_drifted_keeps_its_row_and_owner_read(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that drops the cache row of an original still on its path, which loses the owner's last read."""
+    from exomem import media_jobs, media_store
+
+    played = _stored(vault, "played", 600)
+    with media_store.open_original(vault, played, read=True):
+        pass
+    played.chmod(0o640)
+    assert not media_store.cache_matches(vault, played)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 7_000, played))
+
+    media_store.evict_to_target(vault)
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        rows = connection.execute("SELECT owner_read FROM media_cache WHERE binary_rel = ?",
+                                  (played.relative_to(vault).as_posix(),)).fetchall()
+    assert len(rows) == 1 and rows[0][0] is not None
+    assert originals.original_state(vault, played).state == "cached"
+
+
+def test_eviction_takes_unread_originals_first_and_among_them_those_with_no_pending_job(vault: Path, selected_store, monkeypatch):
+    """Catches eviction in plain size order, which takes an owner's old video before an unread recording."""
+    from exomem import media_jobs, media_store
+
+    played = _stored(vault, "played", 900)
+    queued = _stored(vault, "queued", 600)
+    idle = _stored(vault, "idle", 300)
+    with media_store.open_original(vault, played, read=True):
+        pass
+    media_jobs.MediaJobStore(vault).enqueue(media_jobs.MediaJob(queued, queued.with_name(queued.name + ".md"), "text"))
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 7_500, played, queued, idle))
+    # Each eviction confirms its stored copy once, so the store's reads give the order.
+    order: list[Path] = []
+    paths = {originals.original_state(vault, path).reference.object: path for path in (played, queued, idle)}
+    head = media_store.FilesystemStore.head
+    monkeypatch.setattr(media_store.FilesystemStore, "head",
+                        lambda store, name, version: order.append(paths[name]) or head(store, name, version))
+
+    media_store.evict_to_target(vault)
+
+    assert order == [idle, queued, played]
+
+
+def test_a_pending_job_that_no_worker_claimed_does_not_keep_its_original(vault: Path, selected_store):
+    """Catches the old rule under which every queued transcription kept its recording on the volume."""
+    from exomem import media_jobs, media_store
+
+    path = _stored(vault, "recording", 300)
+    media_jobs.MediaJobStore(vault).enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    assert media_store.evict(vault, path)
+
+
+def test_a_claimed_job_keeps_its_original_across_a_timeout_slice_and_a_memory_stop(vault: Path, selected_store):
+    """Catches a long recording that is evicted and hydrated again for each slice."""
+    from exomem import media_brakes, media_jobs, media_store
+
+    path = _stored(vault, "recording", 300)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    sliced = ledger.claim_next()
+    assert ledger.record_timeout_stop(sliced, stop_limit=5, context="slice") == media_jobs.PENDING
+    assert not media_store.evict(vault, path)
+    stopped = ledger.claim_next()
+    assert ledger.record_memory_stop(stopped, kind=media_brakes.HARD_LIMIT, stop_limit=5, context="stop") == media_jobs.PENDING
+    assert not media_store.evict(vault, path)
+    ledger.complete(ledger.claim_next())
+    assert media_store.evict(vault, path)
+
+
+@pytest.mark.parametrize("state, reason", [("failed", None), ("blocked", "engine_unavailable")])
+def test_failed_and_blocked_jobs_do_not_keep_their_originals(vault: Path, selected_store, state, reason):
+    """Catches a pin left by a job that ended without completing, an engine wait included."""
+    from exomem import media_jobs, media_store
+
+    path = _stored(vault, "recording", 300)
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    claimed = ledger.claim_next()
+
+    assert ledger.mark(claimed, state, "stopped", blocked_reason=reason)
+    assert media_store.evict(vault, path)
+
+
+def test_a_demand_evicts_below_the_everyday_stop_point_until_the_budget_covers_it(vault: Path, selected_store, monkeypatch):
+    """Catches eviction that waits for the everyday target while an import series stalls."""
+    from exomem import media_store
+
+    large, middle, small = _stored(vault, "large", 3_000), _stored(vault, "middle", 2_000), _stored(vault, "small", 1_000)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, middle, small))
+    assert media_store.evict_to_target(vault) == 0
+
+    assert media_store.record_demand(vault, "series-a", 4_000, budget=0, reachable_budget=6_000)
+    assert media_store.evict_to_target(vault) == 2
+
+    assert not large.exists() and not middle.exists() and small.exists()
+
+
+def test_a_lapsed_demand_evicts_nothing(vault: Path, selected_store, monkeypatch):
+    """Catches a demand that keeps the owner's cache cold after its sender stopped renewing it."""
+    import time
+
+    from exomem import media_store
+
+    path = _stored(vault, "recording", 3_000)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, path))
+    assert media_store.record_demand(vault, "series-a", 2_000, budget=0, reachable_budget=6_000)
+    renewed = time.time()
+    monkeypatch.setattr(media_store.time, "time", lambda: renewed + media_store.DEMAND_LEASE_SECONDS + 1)
+
+    assert media_store.evict_to_target(vault) == 0
+    assert path.exists()
+
+
+def test_a_demand_that_eviction_cannot_meet_and_one_above_the_reachable_budget_evict_nothing(vault: Path, selected_store, monkeypatch):
+    """Catches eviction that empties the cache for a demand it cannot meet, or trusts any status caller."""
+    from exomem import media_store
+
+    first, second = _stored(vault, "first", 2_000), _stored(vault, "second", 1_000)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, first, second))
+
+    assert media_store.record_demand(vault, "short", 4_000, budget=500, reachable_budget=6_000)
+    assert media_store.evict_to_target(vault) == 0
+    assert not media_store.record_demand(vault, "short", 40_000, budget=0, reachable_budget=9_000)
+    assert media_store.evict_to_target(vault) == 0
+    assert first.exists() and second.exists()
+
+
+def test_two_series_keep_separate_demands_and_eviction_serves_the_larger(vault: Path, selected_store, monkeypatch):
+    """Catches one demand per cell, where a later small demand would replace a waiting larger one."""
+    from exomem import media_jobs, media_store
+
+    large, middle, small = _stored(vault, "large", 2_000), _stored(vault, "middle", 1_000), _stored(vault, "small", 500)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, middle, small))
+
+    assert media_store.record_demand(vault, "series-b", 2_500, budget=0, reachable_budget=6_000)
+    assert media_store.record_demand(vault, "series-a", 1_500, budget=0, reachable_budget=6_000)
+    assert media_store.evict_to_target(vault) == 2
+
+    assert not large.exists() and not middle.exists() and small.exists()
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        assert {row[0] for row in connection.execute("SELECT series FROM media_demands")} == {"series-a", "series-b"}
+
+
+def _rows_of_moved_originals(vault: Path, *sizes: int) -> None:
+    """Cache rows that a move or a deletion left behind: the path no longer holds an original."""
+    from exomem import media_jobs
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.executemany(
+            "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size) VALUES (?, '{}', ?, '', 0, ?)",
+            [(f"Knowledge Base/Evidence/moved-{index}.bin", "0" * 64, size) for index, size in enumerate(sizes)])
+
+
+def test_rows_of_moved_originals_neither_stop_eviction_nor_stay(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that ends at candidates it cannot evict, so rows that moves left keep a real original
+    cached for good, or eviction that walks every sidecar."""
+    from exomem import media_jobs, media_store
+
+    real = _stored(vault, "real", 50)
+    _rows_of_moved_originals(vault, *[100] * 200)
+    monkeypatch.setattr(media_store, "bound_originals", lambda *a, **k: pytest.fail("eviction walks no sidecars"))
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, real))
+
+    assert media_store.evict_to_target(vault) == 1
+
+    assert originals.original_state(vault, real).state == "evicted"
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM media_cache WHERE binary_rel LIKE '%moved-%'").fetchone()[0] == 0
+
+
+def test_eviction_reads_past_a_candidate_it_keeps(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that ends at a page of originals it must keep, here one whose stored copy fails verification."""
+    from exomem import media_store
+
+    damaged, sound = _stored(vault, "damaged", 1_000), _stored(vault, "sound", 500)
+    reference = originals.original_state(vault, damaged).reference
+    (Path(selected_store[0]["root"]) / reference.object / reference.version).write_bytes(b"corrupt")
+    monkeypatch.setattr(media_store, "_EVICTION_BATCH", 1)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, damaged, sound))
+
+    assert media_store.evict_to_target(vault) == 1
+
+    assert damaged.exists() and not sound.exists()
+
+
+def test_a_store_outage_ends_the_eviction_pass_at_its_first_head(vault: Path, selected_store, monkeypatch):
+    """Catches a pass that asks an unreachable store once per candidate, which holds its caller for one timeout each."""
+    from exomem import media_store
+
+    stored = [_stored(vault, f"recording-{index}", 100 + index) for index in range(3)]
+    heads = []
+
+    def unreachable(self, name, version):
+        heads.append(name)
+        raise OSError("the store is unreachable")
+
+    monkeypatch.setattr(media_store.FilesystemStore, "head", unreachable)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, *stored))
+
+    assert media_store.evict_to_target(vault) == 0
+
+    assert len(heads) == 1
+    assert all(path.exists() for path in stored)
+
+
+def test_a_demand_that_only_rows_of_moved_originals_could_meet_evicts_nothing(vault: Path, selected_store, monkeypatch):
+    """Catches room counted from rows that moves left, which evicts real originals for a demand eviction cannot meet."""
+    from exomem import media_store
+
+    large, small = _stored(vault, "large", 1_000), _stored(vault, "small", 500)
+    _rows_of_moved_originals(vault, 3_000)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, small))
+
+    assert media_store.record_demand(vault, "series-a", 4_000, budget=0, reachable_budget=6_000)
+    assert media_store.evict_to_target(vault) == 0
+
+    assert large.exists() and small.exists()
+
+
+def test_eviction_follows_an_offload_without_a_restart_and_offload_records_no_read(vault: Path, selected_store, monkeypatch):
+    """Catches eviction that waits for the start-up scan, or an offload that stamps the original as read."""
+    import os
+
+    from exomem import media_worker
+
+    _configure(selected_store, vault, minimum_idle_seconds=3600)
+    path = _preserved(vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 7_500, path))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    assert originals.original_state(vault, path).state == "evicted"
+
+
+def test_an_offload_is_claimed_before_queued_transcription(vault: Path, selected_store):
+    """Catches a claim in plain queue order, where a long transcription queue delays the room an offload frees."""
+    from exomem import media_jobs
+
+    ledger = media_jobs.MediaJobStore(vault)
+    queued = vault / "queued.mp3"
+    ledger.enqueue(media_jobs.MediaJob(queued, queued.with_name("queued.mp3.md"), "audio"))
+    filed = _preserved(vault)
+
+    claimed = ledger.claim_next()
+
+    assert claimed.do_offload and claimed.binary_path == filed
+
+
+def test_a_fresh_job_whose_original_is_on_the_volume_runs_before_an_older_evicted_one(vault: Path, selected_store):
+    """Catches a claim that hydrates the oldest job first while a capture waits with its bytes on the volume."""
+    from exomem import media_jobs, media_store
+
+    evicted = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, evicted)
+    local = _stored(vault, "local", 300)
+    ledger = media_jobs.MediaJobStore(vault)
+    for path in (evicted, local):
+        ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    assert ledger.claim_next().binary_path == local
+    assert ledger.claim_next().binary_path == evicted
+
+
+def test_jobs_whose_originals_stayed_on_the_volume_do_not_fill_the_hydration_cap(vault: Path, selected_store):
+    """Catches a cap that counts every claimed job, so long local recordings stall every hydration."""
+    from exomem import media_jobs, media_store
+
+    first, second = _stored(vault, "first", 300), _stored(vault, "second", 300)
+    evicted = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, evicted)
+    ledger = media_jobs.MediaJobStore(vault)
+    for path in (first, second, evicted):
+        ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    claimed = [ledger.claim_next() for _ in range(3)]
+
+    assert [job.binary_path for job in claimed] == [first, second, evicted]
+    with sqlite3.connect(ledger.path) as connection:
+        recorded = dict(connection.execute("SELECT binary_rel, hydrated FROM jobs"))
+    assert recorded == {path.relative_to(vault).as_posix(): int(path == evicted) for path in (first, second, evicted)}
+
+
+def test_at_the_cap_the_worker_claims_no_job_that_needs_a_hydration_and_still_claims_a_local_one(vault: Path, selected_store):
+    """Catches hydrated jobs that pin more than the volume holds, or a cap that also stalls local captures."""
+    from exomem import media_jobs, media_store
+
+    hydrated = [_stored(vault, f"hydrated-{index}", 300) for index in range(3)]
+    for path in hydrated:
+        assert media_store.evict(vault, path)
+    ledger = media_jobs.MediaJobStore(vault)
+    for path in hydrated[:2]:
+        ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    running = [ledger.claim_next(), ledger.claim_next()]
+    local = _stored(vault, "local", 300)
+    for path in (hydrated[2], local):
+        ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    assert ledger.claim_next().binary_path == local
+    assert ledger.claim_next() is None
+    ledger.complete(running[0])
+    assert ledger.claim_next().binary_path == hydrated[2]
+
+
+def test_a_speech_job_that_waits_for_a_busy_gpu_keeps_its_original_and_gives_up_its_hydration_slot(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a GPU wait that keeps the hydration slot, so every image whose original is in the store waits for
+    the GPU too, or that drops the pin, so on a full volume each GPU recheck downloads the recording again. Also
+    catches a claim that skips speech work only among local originals, so a child that knows the GPU is busy
+    still downloads the next recording from the store for nothing."""
+    import os
+
+    from exomem import (
+        asr_runtime,
+        extract,
+        media_jobs,
+        media_processing,
+        media_store,
+        media_worker,
+        preserve,
+    )
+
+    _configure(selected_store, vault, max_hydrations=1)
+    # Only a transcribed original goes to the store, so the jobs that hydrate one are requests to process it again.
+    speech, later = (preserve.preserve_bytes(vault, scope="Test", category="audio", filename=name, data=name.encode(),
+                                             text="[0:00] earlier words") for name in ("meeting.m4a", "call.m4a"))
+    image = preserve.preserve_bytes(vault, scope="Test", category="photos", filename="receipt.png",
+                                    data=b"\x89PNG fake", text="RECEIPT 41")
+    for captured in (speech, later, image):
+        _offload(vault, vault / captured.path)
+        media_processing.reprocess_media(vault, captured.path)
+        # A queued job that no worker claimed yet does not keep its original on the volume.
+        assert media_store.evict(vault, vault / captured.path)
+    stored = {captured.path: originals.original_state(vault, vault / captured.path).reference.object
+              for captured in (speech, later, image)}
+    downloads = []
+    store_open = media_store.FilesystemStore.open
+
+    def counted_open(self, name, version):
+        downloads.append(name)
+        return store_open(self, name, version)
+
+    def extract_text(path, **_kwargs):
+        if extract.media_type_for(Path(path)) == "image":
+            return extract.ExtractResult(text="RECEIPT 42", media_type="image", engine="tesseract")
+        raise asr_runtime.ASRGpuBusy("the GPU has 512 MiB free, 2048 MiB needed")
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", counted_open)
+    monkeypatch.setattr(extract, "extract_text", extract_text)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    # The volume stays above the eviction target, so each timer pass evicts every original that no job pins.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 8_000))
+
+    for _recheck in range(3):  # the supervisor starts a child for each GPU recheck, and it has not seen the busy GPU
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == media_worker._GPU_BUSY_EXIT_CODE
+        media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+        media_store.evict_to_target(vault)
+
+    assert "RECEIPT 42" in (vault / image.sidecar_path).read_text(encoding="utf-8")
+    assert [downloads.count(stored[captured.path]) for captured in (speech, later)] == [1, 0]
+    assert originals.original_state(vault, vault / speech.path).state == "cached"
+    waiting = media_jobs.MediaJobStore(vault).get_by_binary(vault / speech.path)
+    assert (waiting.state, waiting.attempts) == (media_jobs.PENDING, 0)
+
+
+@pytest.mark.parametrize(("cause", "code"), [("transport", "MEDIA_STORE_UNAVAILABLE"), ("capacity", "MEDIA_STORE_BUSY")])
+def test_a_hydration_that_cannot_run_now_returns_the_job_with_no_attempt_spent_and_its_progress_kept(
+        vault: Path, selected_store, cause, code):
+    """Catches a hydration outage that fails the job, which no scan queues again, that drops its transcript progress,
+    or that status shows as plain pending with no reason."""
+    import os
+    import time
+
+    from exomem import media_jobs, media_store, media_worker
+
+    path = _stored(vault, "recording", 300)
+    assert media_store.evict(vault, path)
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("INSERT INTO speech_progress(job_id, stop_offset) VALUES (?, 1234)", (job_id,))
+        if cause == "capacity":
+            connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                               "VALUES ('other', 'elsewhere', ?, 10000000, 1)", (os.getpid(),))
+    if cause == "transport":
+        root = Path(selected_store[0]["root"])
+        root.rename(root.with_name("offline-objects"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    returned = ledger.get(job_id)
+    assert returned.state == media_jobs.PENDING and returned.attempts == 0
+    [shown] = [job for job in media_jobs.status(vault)["jobs"] if job["id"] == job_id]
+    assert shown["state"] == media_jobs.PENDING and shown["error"].startswith(code)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT stop_offset FROM speech_progress WHERE job_id = ?", (job_id,)).fetchone() == (1234,)
+        retry_at = connection.execute("SELECT retry_at FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+    assert retry_at > time.time() + 50
+    assert originals.original_state(vault, path).state == "evicted"
+
+
+def test_a_returned_job_waits_a_retry_time_that_doubles_from_one_minute_to_fifteen(vault: Path, monkeypatch):
+    """Catches a fixed retry time, which polls a down store every minute for hours, or an unbounded one."""
+    import time
+
+    from exomem import media_jobs
+
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(vault / "recording.mp3", vault / "recording.mp3.md", "audio"))
+    now = time.time()
+    waits = []
+    for _ in range(6):
+        monkeypatch.setattr(media_jobs.time, "time", lambda moment=now: moment)
+        assert ledger.return_for_retry(ledger.claim_next())
+        assert ledger.claim_next() is None
+        with sqlite3.connect(ledger.path) as connection:
+            retry_at = connection.execute("SELECT retry_at FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+        waits.append(round(retry_at - now))
+        now = retry_at
+
+    assert waits == [60, 120, 240, 480, 900, 900]
+
+
+def test_a_persons_retry_starts_the_return_wait_again_at_one_minute(vault: Path, monkeypatch):
+    """Catches a retry that keeps the earlier returns, so a job that a person retried waits 15 minutes at its next return."""
+    import time
+
+    from exomem import media_jobs
+
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(vault / "recording.mp3", vault / "recording.mp3.md", "audio"))
+    now = time.time()
+    monkeypatch.setattr(media_jobs.time, "time", lambda: now)
+    for _ in range(4):
+        assert ledger.return_for_retry(ledger.claim_next())
+        now += media_jobs.RETRY_LIMIT_SECONDS
+    assert ledger.mark(ledger.claim_next(), media_jobs.FAILED, "MEDIA_ORIGINAL_UNVERIFIED: the stored copy differs")
+    assert ledger.retry(include_failed=True) == 1
+
+    assert ledger.return_for_retry(ledger.claim_next())
+
+    with sqlite3.connect(ledger.path) as connection:
+        retry_at = connection.execute("SELECT retry_at FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+    assert round(retry_at - now) == media_jobs.RETRY_FIRST_SECONDS
+
+
+def test_an_original_larger_than_the_whole_hydration_capacity_blocks_its_job(vault: Path, selected_store):
+    """Catches a capacity check that reports a file that can never fit as busy, which retries it forever."""
+    import os
+
+    from exomem import media_jobs, media_store, media_worker
+
+    path = _stored(vault, "recording", 3_000)
+    assert media_store.evict(vault, path)
+    _configure(selected_store, vault, max_temporary_bytes=2_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    blocked = ledger.get(job_id)
+    assert blocked.state == media_jobs.BLOCKED and blocked.last_error.startswith("MEDIA_HYDRATION_TOO_LARGE")
+    assert ledger.claim_next() is None
+
+
+@pytest.mark.parametrize("cloud", [False, True])
+def test_a_job_blocked_on_a_too_large_original_names_the_hydration_capacity(vault: Path, selected_store, monkeypatch,
+                                                                             cloud):
+    """Catches the engine-unavailable guidance on a block that only a larger hydration capacity clears."""
+    import os
+
+    from exomem import media_engines, media_jobs, media_store, media_worker
+
+    path = _stored(vault, "recording", 3_000)
+    assert media_store.evict(vault, path)
+    _configure(selected_store, vault, max_temporary_bytes=2_000)
+    job_id = media_jobs.MediaJobStore(vault).enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+    if cloud:
+        monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+
+    [job] = [job for job in media_jobs.status(vault)["jobs"] if job["id"] == job_id]
+
+    assert job["state"] == media_jobs.BLOCKED and job["retryable"]
+    assert job["next_action"] != media_engines.unavailable_next_action()
+    assert "hydration capacity" in job["next_action"]
+
+
+def test_a_corrupt_stored_object_fails_its_job_as_unverified(vault: Path, selected_store):
+    """Catches a verification mismatch treated as an outage, which hydrates a corrupt object again and again."""
+    import os
+
+    from exomem import media_jobs, media_store, media_worker
+
+    path = _stored(vault, "recording", 300)
+    assert media_store.evict(vault, path)
+    for stored in Path(selected_store[0]["root"]).rglob("*"):
+        if stored.is_file():
+            stored.write_bytes(b"x" * stored.stat().st_size)
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    failed = ledger.get(job_id)
+    assert failed.state == media_jobs.FAILED and "MEDIA_ORIGINAL_UNVERIFIED" in failed.last_error
+    assert not path.exists()
+
+
+def test_the_path_download_refuses_an_original_larger_than_the_hydration_capacity_with_no_retry_hint(
+        vault: Path, selected_store, monkeypatch):
+    """Catches the download answering 503 ORIGINAL_UNAVAILABLE, which tells the owner to retry a file that never fits."""
+    from starlette.testclient import TestClient
+
+    from exomem import media_store, server, upload_tokens
+
+    path = _stored(vault, "recording", 3_000)
+    assert media_store.evict(vault, path)
+    _configure(selected_store, vault, max_temporary_bytes=2_000)
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "test-secret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    token = upload_tokens.mint_bound("test-secret", audience="owner")
+
+    response = client.get("/download", params={"path": path.relative_to(vault).as_posix()},
+                          headers={"Authorization": f"Bearer {token}"})
+
+    assert response.json()["code"] == "MEDIA_HYDRATION_TOO_LARGE"
+    assert response.status_code < 500 and "retry-after" not in response.headers
+
+
+_STALLED_HYDRATION = """
+import sys
+import time
+from pathlib import Path
+
+from exomem import media_store
+
+vault, path, signal = (Path(argument) for argument in sys.argv[1:4])
+stream = media_store._stored_chunks
+
+
+def stalled(backend, reference):
+    # Everything but the last byte, so age writes its first chunks and then waits.
+    data = b"".join(stream(backend, reference))
+    for start in range(0, len(data) - 1, 65536):
+        yield data[start:min(start + 65536, len(data) - 1)]
+    signal.touch()
+    time.sleep(120)
+    yield data[-1:]
+
+
+media_store._stored_chunks = stalled
+with media_store.open_original(vault, path):
+    pass
+"""
+
+
+@pytest.mark.parametrize("restart", ["runtime start", "next reservation"])
+def test_a_hydration_killed_mid_write_leaves_nothing_at_the_path_and_its_row_and_file_clear_after(
+        vault: Path, selected_store, tmp_path: Path, monkeypatch, restart):
+    """Catches a stop that leaves a partial original at its path, or a temporary file and reservation that stay for good."""
+    import signal
+    import sys
+    import time
+
+    from exomem import media_jobs, media_store, server_runtime
+
+    path = _stored(vault, "recording", 300_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    stalled = tmp_path / "stalled"
+    child = subprocess.Popen([sys.executable, "-c", _STALLED_HYDRATION, str(vault), str(path), str(stalled)])
+
+    def temporaries():
+        return [entry for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")]
+
+    try:
+        deadline = time.monotonic() + 30
+        while not (stalled.exists() and temporaries() and temporaries()[0].stat().st_size > 0):
+            assert child.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        assert not path.exists()
+    finally:
+        child.send_signal(signal.SIGKILL)
+        child.wait()
+    assert not path.exists()
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT pid, temporary_name, temporary_bytes FROM media_access").fetchall() == [
+            (child.pid, temporaries()[0].name, len(expected))]
+
+    if restart == "runtime start":
+        monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+        server_runtime._start_media_worker(vault)
+    else:
+        with media_store.open_original(vault, path) as original:
+            assert original.stream.read() == expected
+
+    assert temporaries() == []
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT count(*) FROM media_access").fetchone()[0] == 0
+
+
+def test_a_reused_process_id_does_not_keep_a_dead_reservation(vault: Path, selected_store):
+    """Catches a liveness check by process ID alone: a restarted container gives the same ID to a new process."""
+    import os
+
+    from exomem import media_jobs, media_store
+
+    if media_jobs.process_start(os.getpid()) is None:
+        pytest.skip("this platform exposes no process start time")
+    path = _stored(vault, "recording", 3_000)
+    ledger = media_jobs.MediaJobStore(vault)
+    relative = path.relative_to(vault).as_posix()
+    residue = path.with_name(".exomem-held-publish-" + "a" * 32)
+    residue.write_bytes(b"part of an earlier hydration")
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start, temporary_bytes, hydrating, "
+                           "temporary_name) VALUES ('earlier', ?, ?, '1', 3000, 1, ?)",
+                           (relative, os.getpid(), residue.name))
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start) VALUES ('current', ?, ?, ?)",
+                           (relative, os.getpid(), media_jobs.process_start(os.getpid())))
+
+    assert media_store.clear_dead_reservations(vault) == 1
+
+    assert not residue.exists()
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute("SELECT token FROM media_access").fetchall() == [("current",)]
+
+
+@pytest.mark.parametrize("unset", [("max_temporary_bytes", "max_hydrations"), ("max_hydrations",)])
+def test_a_policy_without_hydration_limits_offloads_and_evicts_nothing(vault: Path, selected_store, monkeypatch, unset):
+    """Catches a policy without hydration limits, the chart default, that fails every offload,
+    or a half-set one that evicts an original no hydration could bring back."""
+    from exomem import media_store
+
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {k: v for k, v in values.items() if k not in unset}}}))
+    path = _preserved(vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, path))
+
+    assert _offload(vault, path) is not None
+    assert originals.original_state(vault, path).state == "cached"
+    assert media_store.evict_to_target(vault) == 0
+    assert path.exists()
+
+
+def test_a_zero_hydration_limit_turns_the_capacity_off_and_local_work_still_runs(vault: Path, selected_store):
+    """Catches a non-positive hydration limit that raises into every claim, which stops all local media work."""
+    from exomem import media_jobs
+
+    _configure(selected_store, vault, max_hydrations=0)
+    ledger = media_jobs.MediaJobStore(vault)
+    job_id = ledger.enqueue(media_jobs.MediaJob(vault / "recording.mp3", vault / "recording.mp3.md", "audio"))
+
+    assert ledger.next_pending().id == job_id
+    assert ledger.claim_next().id == job_id
+    assert "max_hydrations" in media_jobs.status(vault)["hydration_policy_problem"]
+
+
+def test_an_original_as_large_as_the_whole_hydration_capacity_hydrates(vault: Path, selected_store):
+    """Catches a reservation that also counts the ciphertext, so a file that fits the capacity never hydrates."""
+    from exomem import media_store
+
+    path = _stored(vault, "recording", 3_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    _configure(selected_store, vault, max_temporary_bytes=3_000)
+
+    with media_store.open_original(vault, path) as original:
+        assert original.stream.read() == expected
+
+
+def test_an_offload_waits_with_no_attempt_spent_while_a_hydration_holds_the_capacity(vault: Path, selected_store):
+    """Catches an offload that writes its ciphertext beside a hydration that holds the capacity, or fails while it waits."""
+    import os
+    import time
+
+    from exomem import media_jobs, media_worker
+
+    path = _preserved(vault)
+    ledger = media_jobs.MediaJobStore(vault)
+    assert ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).state == media_jobs.PENDING
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('hydration', 'elsewhere', ?, ?, 1)",
+                           (os.getpid(), selected_store[0]["max_temporary_bytes"] - 10))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    waiting = ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
+    assert waiting.state == media_jobs.PENDING and waiting.attempts == 0
+    assert originals.original_state(vault, path).state == "local"
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM media_access WHERE token = 'hydration'")
+        connection.execute("UPDATE jobs SET retry_at = ? WHERE id = ?", (time.time() - 1, waiting.id))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    assert originals.original_state(vault, path).state == "cached"
+
+
+def test_a_busy_capacity_keeps_the_offload_of_a_row_whose_other_stages_ran(vault: Path, selected_store):
+    """Catches a busy capacity that fails a row from before offload had rows of its own, after its other stages ran."""
+    import os
+
+    from exomem import media_jobs, media_worker
+
+    path = _preserved(vault)
+    ledger = media_jobs.MediaJobStore(vault)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM jobs")
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, temporary_bytes, hydrating) "
+                           "VALUES ('hydration', 'elsewhere', ?, ?, 1)",
+                           (os.getpid(), selected_store[0]["max_temporary_bytes"] - 10))
+    job_id = ledger.enqueue(media_jobs.MediaJob(path, originals.original_state(vault, path).sidecar_path, "text",
+                                                do_ocr=False, do_reembed=True, do_offload=True))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    waiting = ledger.get(job_id)
+    assert waiting.state == media_jobs.PENDING and waiting.do_offload and not waiting.do_reembed
+    assert originals.original_state(vault, path).state == "local"
+
+
+def test_a_reservation_of_a_reused_process_id_does_not_defer_the_watcher(vault: Path, selected_store):
+    """Catches a liveness check by process ID alone, which defers a path's events after its holder died."""
+    import os
+
+    from exomem import media_jobs, media_store
+
+    if media_jobs.process_start(os.getpid()) is None:
+        pytest.skip("this platform exposes no process start time")
+    path = _stored(vault, "recording", 300)
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start) VALUES ('earlier', ?, ?, '1')",
+                           (path.relative_to(vault).as_posix(), os.getpid()))
+
+    assert media_store.managed_event(vault, path) == "suppress"
+
+
+def test_a_failed_hydration_removes_its_temporary_after_its_folder_moved(vault: Path, selected_store, monkeypatch):
+    """Catches a temporary removed by its path, which leaves a partial original in a folder that moved meanwhile."""
+    from exomem import held_fs, media_store
+
+    path = _stored(vault, "recording", 3_000)
+    assert media_store.evict(vault, path)
+    moved = path.parent.with_name(path.parent.name + "-moved")
+
+    def interrupted(backend, reference, identity, sink):
+        sink.write(b"part of the original")
+        sink.flush()
+        path.parent.rename(moved)
+        raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the download stopped")
+
+    monkeypatch.setattr(media_store, "_decrypt_into", interrupted)
+    with pytest.raises(media_store.MediaStoreError, match="the download stopped"):
+        with media_store.open_original(vault, path):
+            pytest.fail("an interrupted hydration yields no original")
+
+    assert [entry.name for entry in moved.iterdir() if held_fs.is_publish_temporary(entry.name)] == []
+
+
+def test_an_offload_takes_no_hydration_slot(vault: Path, selected_store, monkeypatch):
+    """Catches an offload that takes a hydration slot, so an owner's playback waits for every upload."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import media_store
+
+    evicted = _stored(vault, "playback", 3_000)
+    expected = evicted.read_bytes()
+    assert media_store.evict(vault, evicted)
+    local = _preserved(vault, category="upload")
+    _configure(selected_store, vault, max_hydrations=1)
+    uploading, release = threading.Event(), threading.Event()
+    upload = media_store.FilesystemStore.upload
+
+    def paused(self, name, stream, *, size, sha256):
+        uploading.set()
+        assert release.wait(10)
+        return upload(self, name, stream, size=size, sha256=sha256)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", paused)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(media_store.offload, vault, local)
+        try:
+            assert uploading.wait(10)
+            with media_store.open_original(vault, evicted) as original:
+                assert original.stream.read() == expected
+        finally:
+            release.set()
+        assert pending.result(timeout=10) is not None

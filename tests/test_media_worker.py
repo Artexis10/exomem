@@ -13,6 +13,7 @@ import yaml
 
 from exomem import (
     asr_runtime,
+    cuda_containment,
     deferred_index,
     embeddings,
     epistemic_graph,
@@ -24,6 +25,7 @@ from exomem import (
     media_processing,
     media_worker,
     preserve,
+    resource_status,
     runtime_resources,
     server_runtime,
 )
@@ -3144,6 +3146,362 @@ def test_child_marks_explicit_cuda_refusal_blocked_with_runtime_remediation(
     assert "runtime" in status["next_action"]
 
 
+def _gpu_with_free_vram(monkeypatch: pytest.MonkeyPatch, free_mib: int, *, cuda_devices: int = 1) -> dict[str, int]:
+    """An explicit-CUDA install whose GPU has `free_mib` free; change `["free"]` to free or fill it.
+
+    The real probe and selection run; only CTranslate2 and nvidia-smi are faked. Fake extraction
+    selects the runtime like the engine does at model load, then returns a transcript.
+    """
+    import sys
+    import types
+
+    vram = {"free": free_mib}
+    fake_ctranslate2 = types.SimpleNamespace(
+        get_supported_compute_types=lambda device, index=0: {"float16"} if device == "cuda" else {"int8"},
+        get_cuda_device_count=lambda: cuda_devices,
+    )
+    monkeypatch.setitem(sys.modules, "ctranslate2", fake_ctranslate2)
+    monkeypatch.setattr(asr_runtime, "_nvidia_headroom", lambda: ((8, 9), vram["free"], 24576))
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+    def transcribe(path, **_kwargs):
+        if extract.media_type_for(Path(path)) == "image":
+            return extract.ExtractResult(text="RECEIPT 42", media_type="image", engine="tesseract")
+        asr_runtime.select_asr_runtime()
+        return extract.ExtractResult(text="[0:00] spoken words", media_type="audio", engine="faster-whisper:test")
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    return vram
+
+
+def test_busy_gpu_defers_speech_jobs_and_a_later_attempt_runs_them(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vram = _gpu_with_free_vram(monkeypatch, free_mib=512)
+    results = [_preserve_media_stub(vault, filename=name) for name in ("first.m4a", "second.m4a")]
+    store = media_jobs.MediaJobStore(vault)
+    for result in results:
+        store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == media_worker._GPU_BUSY_EXIT_CODE
+
+    statuses = media_jobs.status(vault)["jobs"]
+    assert [(job["state"], job["attempts"], job["error"]) for job in statuses] == [(media_jobs.PENDING, 0, None)] * 2
+    # The wait is visible: a pending job alone would not say why it does not run.
+    waiting = media_jobs.status(vault)
+    assert waiting["gpu_waiting_count"] == 2
+    assert "512 MiB free, 2048 MiB needed" in waiting["gpu_wait"]["reason"]
+
+    vram["free"] = 8192
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert media_jobs.status(vault)["gpu_wait"] is None
+    assert store.counts()[media_jobs.BLOCKED] == 0
+    assert store.counts()[media_jobs.PENDING] == 0
+    for result in results:
+        assert "spoken words" in (vault / result.sidecar_path).read_text(encoding="utf-8")
+
+
+def test_busy_gpu_does_not_hold_back_an_image_queued_behind_the_speech_job(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _gpu_with_free_vram(monkeypatch, free_mib=512)
+    speech = _preserve_media_stub(vault, filename="waits-for-gpu.m4a")
+    image = preserve.preserve_bytes(vault, scope="Rental", category="photos", filename="receipt.png", data=b"\x89PNG fake")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / speech.path, sidecar_path=vault / speech.sidecar_path, media_type="audio"))
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / image.path, sidecar_path=vault / image.sidecar_path, media_type="image"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == media_worker._GPU_BUSY_EXIT_CODE
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert "RECEIPT 42" in (vault / image.sidecar_path).read_text(encoding="utf-8")
+    [waiting] = media_jobs.status(vault)["jobs"]
+    assert (waiting["state"], waiting["attempts"]) == (media_jobs.PENDING, 0)
+
+
+def _gpu_host(monkeypatch: pytest.MonkeyPatch, preflight_program: str) -> dict[str, str]:
+    """The serving worker's environment on a host whose deployment lists device 0.
+
+    The preflight subprocess is real and only its program is replaced, since CI has no CUDA stack to fault.
+    """
+    monkeypatch.setattr(cuda_containment, "_PREFLIGHT_CODE", preflight_program)
+    monkeypatch.setattr(resource_status, "find_nvidia_smi", lambda: "nvidia-smi")
+    return cuda_containment.hide_from_worker({**os.environ, "CUDA_VISIBLE_DEVICES": "0"})
+
+
+def test_a_crashing_gpu_preflight_leaves_the_media_child_without_the_gpu_and_the_speech_job_blocked(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_env = _gpu_host(
+        monkeypatch, "import os, signal; print('torch CUDA initialization', flush=True); os.kill(os.getpid(), signal.SIGSEGV)"
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    child_env = worker._guard_gpu(asr_runtime.cuda_runtime_child_env(worker_env))
+
+    assert child_env["CUDA_VISIBLE_DEVICES"] == ""
+    recorded = media_jobs.status(vault)["gpu_preflight"]
+    assert (recorded["result"], "SIGSEGV during torch CUDA initialization" in recorded["reason"]) == ("failed", True)
+    # A child started with that environment blocks an explicit-CUDA speech job and says why.
+    monkeypatch.setenv(cuda_containment.PREFLIGHT_FAILURE_ENV, child_env[cuda_containment.PREFLIGHT_FAILURE_ENV])
+    _gpu_with_free_vram(monkeypatch, free_mib=8192, cuda_devices=0)  # the hidden device list leaves CTranslate2 no GPU
+    result = _preserve_media_stub(vault, filename="meeting.m4a")
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    )
+
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.BLOCKED
+    assert "GPU preflight died with SIGSEGV during torch CUDA initialization" in job["error"]
+
+
+def test_a_healthy_gpu_preflight_gives_the_media_child_the_deployments_device_list(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_env = _gpu_host(monkeypatch, "print('torch CUDA initialization', flush=True)")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    child_env = worker._guard_gpu(asr_runtime.cuda_runtime_child_env(worker_env))
+
+    assert worker_env["CUDA_VISIBLE_DEVICES"] == ""  # the serving worker still sees no device
+    assert child_env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert cuda_containment.PREFLIGHT_FAILURE_ENV not in child_env
+    assert media_jobs.status(vault)["gpu_preflight"]["result"] == "passed"
+
+
+def test_a_host_with_no_cuda_device_to_initialize_records_the_gpu_as_not_tested(vault) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    child_env = worker._guard_gpu({"CUDA_VISIBLE_DEVICES": ""})
+
+    assert child_env["CUDA_VISIBLE_DEVICES"] == ""
+    status = media_jobs.status(vault)
+    recorded = status["gpu_preflight"]
+    assert (recorded["result"], recorded["reason"]) == ("not tested", "no CUDA device visible")
+    assert status["serving_worker_cuda_hidden"] is False  # recorded with the first launch, not before
+
+
+def test_an_idle_supervisor_start_records_no_gpu_fact(vault) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._stop_event.set()
+
+    worker._supervise()
+
+    status = media_jobs.status(vault)
+    assert (status["gpu_preflight"], status["serving_worker_cuda_hidden"], status["child_crashes"]) == (None, None, None)
+
+
+def test_a_restarted_supervisor_drops_the_last_lifetimes_gpu_verdict_and_corrects_whether_cuda_is_hidden(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.record_gpu_preflight(
+        "failed", "died with SIGSEGV during torch CUDA initialization", serving_worker_cuda_hidden=False
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv(cuda_containment.CHILD_DEVICES_ENV, '"0"')
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._stop_event.set()
+
+    worker._supervise()
+
+    status = media_jobs.status(vault)
+    assert (status["gpu_preflight"], status["serving_worker_cuda_hidden"]) == (None, True)
+
+
+def test_a_restart_ends_the_record_of_a_gpu_wait_whose_waiting_work_is_gone(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="deleted-while-waiting.m4a")
+    job = media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(job)
+    store.note_gpu_wait("insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed")
+    assert media_jobs.status(vault)["gpu_wait"] is not None
+    store.discard(job)  # the recording is deleted while it waits
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker._wake, "wait", lambda _timeout: worker._stop_event.set() or False)
+
+    worker._supervise()
+    store.enqueue(job)  # a later recording
+
+    assert media_jobs.status(vault)["gpu_wait"] is None  # the old record would still report the first wait
+
+
+def test_an_idle_pass_ends_the_record_of_a_gpu_wait_whose_waiting_work_is_gone_without_a_restart(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="deleted-while-waiting.m4a")
+    job = media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(job)
+    store.note_gpu_wait("insufficient free GPU memory for ASR: 512 MiB free, 2048 MiB needed")  # what a busy child records
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    now = [1000.0]
+
+    class _BusyChild:
+        pid = 2_147_483_645
+        returncode = media_worker._GPU_BUSY_EXIT_CODE
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: _BusyChild())
+
+    def poll(_timeout):
+        if worker._child is None:  # the busy child was handled and the supervisor waits to ask again
+            now[0] += 10
+            if now[0] == 1010.0:
+                store.discard(job)  # the recording is deleted while it waits
+            if now[0] >= 1100.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+    store.enqueue(job)  # a later recording
+
+    assert media_jobs.status(vault)["gpu_wait"] is None  # the old record would still report the first wait
+
+
+def test_a_gpu_that_fills_up_before_the_model_loads_defers_the_job_instead_of_failing_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    _gpu_with_free_vram(monkeypatch, free_mib=8192)  # the cheap pre-check admits the card
+
+    class _FullCard:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError("CUDA failed with error out of memory")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FullCard))
+    monkeypatch.setattr(extract, "_WHISPER", None)
+    monkeypatch.setattr(extract, "extract_text", lambda _path, **_kwargs: extract._get_whisper())
+    result = _preserve_media_stub(vault, filename="meeting.m4a")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == media_worker._GPU_BUSY_EXIT_CODE
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert (job["state"], job["attempts"], job["error"]) == (media_jobs.PENDING, 0, None)
+    assert "out of memory" in media_jobs.status(vault)["gpu_wait"]["reason"]
+
+
+def test_a_gpu_that_fills_up_while_automatic_mode_loads_the_speech_model_runs_it_on_the_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    _gpu_with_free_vram(monkeypatch, free_mib=8192)
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "auto")
+    devices: list[str] = []
+
+    class _Model:
+        def __init__(self, _name, *, device, **_kwargs):
+            devices.append(device)
+            if device == "cuda":
+                raise RuntimeError("CUDA failed with error out of memory")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_Model))
+    monkeypatch.setattr(extract, "_WHISPER", None)
+
+    assert isinstance(extract._get_whisper(), _Model)
+    assert devices == ["cuda", "cpu"]
+
+
+def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    speech = _preserve_media_stub(vault, filename="waits-for-gpu.m4a")
+    image = preserve.preserve_bytes(vault, scope="Rental", category="photos", filename="receipt.png", data=b"\x89PNG fake")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(binary_path=vault / speech.path, sidecar_path=vault / speech.sidecar_path, media_type="audio")
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _BusyChild:
+        pid = 2_147_483_645
+        returncode = media_worker._GPU_BUSY_EXIT_CODE
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        return _BusyChild()
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:  # the busy child was handled and the supervisor now waits
+            now[0] += 10
+            if now[0] == 1010.0:
+                # The way a watcher or an upload queues media: through the store, not through this worker.
+                media_processing.reconcile_media(vault, vault / image.path, explicit=False)
+            if now[0] >= 1030.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    # The image arrived at 1010, inside the 60 s wait, and its child started then, not at 1060.
+    assert launches == [1000.0, 1010.0]
+
+
+def test_supervisor_backs_off_while_children_keep_dying_by_a_signal(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _preserve_media_stub(vault, filename="kills-its-child.m4a")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio")
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _CrashedChild:
+        pid = 2_147_483_645
+        returncode = -11  # SIGSEGV
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        return _CrashedChild()
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:  # the crashed child was handled
+            now[0] += 1
+            if now[0] >= 1020.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    # The delay doubles from 2 s; a flat 2 s delay would start a child at every second step.
+    assert launches == [1000.0, 1002.0, 1006.0, 1014.0]
+    # Status shows the loop and the job at the head of the queue, so a stuck queue explains itself.
+    crashes = media_jobs.status(vault)["child_crashes"]
+    assert (crashes["signal"], crashes["count"], crashes["head_job"]) == ("SIGSEGV", len(launches), result.path)
+
+
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3979,6 +4337,7 @@ def test_the_boolean_probe_is_derived_from_the_code_probe(monkeypatch) -> None:
 
 def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypatch) -> None:
     worker = media_worker.MediaWorker(tmp_path, execution_mode="process")
+    worker._gpu_preflight = cuda_containment.Preflight(True)  # the verdict is not this test's subject
     captured = {}
 
     monkeypatch.setattr(
@@ -4073,7 +4432,8 @@ def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
     _run_supervisor_for(worker, 2.0)
 
     boundary = [op for op in taken if op and op.startswith("reserved_identity")]
-    assert len(boundary) <= 4, (
+    # Two reads as before, plus the one open at the start of a supervisor lifetime, which writes only what is stale.
+    assert len(boundary) <= 6, (
         f"an idle supervisor took the mutation boundary {len(boundary)} times in "
         f"two seconds ({boundary}); this is the log flood"
     )
@@ -4604,6 +4964,51 @@ def test_an_idle_supervisor_backs_off_its_forced_store_recheck(
     # The ceiling keeps it a backstop: a write the signature misses still starts
     # a worker within about a minute.
     assert max(gaps) <= 70.0, f"the re-check outgrew its ceiling: {gaps}"
+
+
+def test_a_slow_eviction_pass_leaves_the_supervisor_watching(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches timer eviction inside the watchdog loop, where a store outage stops its memory and timeout checks."""
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+    now = 0.0
+    entered, released = threading.Event(), threading.Event()
+    inside = False
+    polls_while_evicting = 0
+
+    def slow_pass(_vault_root):
+        nonlocal inside
+        inside = True
+        entered.set()
+        released.wait(2)
+        inside = False
+
+    def poll(_timeout):
+        nonlocal now, polls_while_evicting
+        now += 0.5
+        if now > media_worker._EVICTION_INTERVAL_SECONDS:
+            assert entered.wait(5), "the eviction timer never ran"
+        if inside:
+            polls_while_evicting += 1
+            if polls_while_evicting == 3:
+                released.set()
+                worker._stop_event.set()
+        if now >= 3 * media_worker._EVICTION_INTERVAL_SECONDS:
+            worker._stop_event.set()
+        return False
+
+    # The clock only has to pass the eviction interval; the pass itself blocks on a real event.
+    monkeypatch.setattr(media_worker, "_clock", lambda: now)
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    monkeypatch.setattr(media_worker, "_evict", slow_pass)
+
+    worker._supervise()
+    released.set()
+
+    assert polls_while_evicting == 3
 
 
 def test_a_store_change_puts_the_backed_off_recheck_back_at_five_seconds(

@@ -12,6 +12,10 @@ from dataclasses import dataclass
 
 # The Hetzner Cloud Volume class every cell used before local storage.
 LEGACY_CLASS = "exomem-cloud-encrypted"
+# move-cloud-cells-to-local-storage D10: a local cell grows once its backup
+# finds the filesystem past this share of its size. The media store policy
+# carries it to the cell, which sizes import windows below it (add-cloud-media-store D12).
+GROWTH_THRESHOLD_PERCENT = 80
 
 _NAME = re.compile(r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?")
 

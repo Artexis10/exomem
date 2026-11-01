@@ -8,6 +8,7 @@
 - [x] 1.4 Balance K3s shards with measured case durations; prove complete disjoint collection and record actual CI job times.
 - [x] 1.5 Partition paired recall sampling without changing its cases or statistics; prove complete provenance-bound aggregation and record actual CI job times.
 - [x] 1.6 Separate bounded package downloads from one installation; prove failure propagation and caller budgets, then observe hosted setup reaching pytest.
+- [x] 1.7 Run Full only on schedule and dispatch; ready PRs return to the partial tier on py3.11 (operator, 2026-10-30; reverses 1.1).
 
 CI run 40366767047 passed all six K3s shards and all 24 recall samplers. The longest jobs took 681 seconds and 570 seconds, respectively.
 The longest K3s job included 338 seconds of image building and 311 seconds of tests.

@@ -1092,12 +1092,52 @@ def mcp_idempotency_key() -> str | None:
     return key
 
 
+#: The one session identity of a stdio connection. One stdio server process serves
+#: exactly one client, but `mcp` builds a new `Connection` for every stdio request,
+#: so FastMCP's own `session_id` (cached on that connection) is a new uuid per call.
+#: A uuid4 per process cannot collide with a concurrent stdio server.
+_STDIO_SESSION_ID = str(uuid.uuid4())
+
+
+def _mcp_transport(headers: Mapping[str, str]) -> str:
+    """`http` or `stdio` for one MCP call: request headers exist only on the HTTP transports.
+
+    The single transport signal; `mcp_caller_identity` and `mcp_session_id` both read it,
+    and both pass `get_http_headers(include_all=True)`. FastMCP's default call strips
+    `host` and `accept` among others, so a request carrying only those would read as
+    stdio and share the process-wide session id.
+    """
+    return "http" if headers else "stdio"
+
+
+def mcp_session_id() -> str | None:
+    """The conversation session of the active MCP call, or None outside one.
+
+    HTTP keeps FastMCP's `session_id` unchanged. stdio returns the process-wide
+    `_STDIO_SESSION_ID`, so every call on one connection shares one session. The
+    shared id needs both FastMCP's explicit stdio transport (set only by the stdio
+    runner) and no request headers; any other combination keeps the per-call id, so
+    an unexpected transport shares nothing.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context, get_http_headers
+
+        context = get_context()
+        if (
+            getattr(context, "transport", None) == "stdio"
+            and _mcp_transport(get_http_headers(include_all=True)) == "stdio"
+        ):
+            return _STDIO_SESSION_ID
+        return str(context.session_id)
+    except (AttributeError, ImportError, LookupError, RuntimeError, ValueError):
+        return None
+
+
 def mcp_retry_scope() -> str | None:
     """Return a stable, privacy-safe principal scope for bounded MCP replay."""
     try:
         from fastmcp.server.dependencies import (
             get_access_token,
-            get_context,
             get_http_headers,
         )
 
@@ -1115,7 +1155,8 @@ def mcp_retry_scope() -> str | None:
         if separator and scheme.lower() == "bearer" and credential.strip():
             digest = hashlib.sha256(credential.strip().encode("utf-8")).hexdigest()
             return f"bearer:{digest}"
-        return f"session:{get_context().session_id}"
+        session_id = mcp_session_id()
+        return f"session:{session_id}" if session_id else None
     except (LookupError, RuntimeError):
         return None
 
@@ -1184,15 +1225,10 @@ def mcp_caller_identity() -> dict[str, str | None]:
             identity["client_version"] = str(getattr(info, "version", "") or "") or None
     except (AttributeError, LookupError, RuntimeError, ValueError):
         pass
+    identity["session_id"] = mcp_session_id()
     try:
-        identity["session_id"] = str(context.session_id)
-    except (AttributeError, LookupError, RuntimeError, ValueError):
-        pass
-    try:
-        # Headers exist only on the HTTP transports, so their presence *is* the
-        # transport signal; there is no separate flag to read.
-        headers = get_http_headers()
-        identity["transport"] = "http" if headers else "stdio"
+        headers = get_http_headers(include_all=True)
+        identity["transport"] = _mcp_transport(headers)
         from . import cloud_cell
 
         if cloud_cell.cloud_mode_enabled():

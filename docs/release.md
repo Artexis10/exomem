@@ -204,28 +204,29 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 
 ## Release flow
 
-A ready source PR runs historical Full coverage in parallel with ordinary
-checks. This includes Python 3.11 and 3.13, every specialized Full job, and the
-latency gate. Draft PRs retain partial feedback. Becoming ready starts Full
-coverage; a later source or readiness change supersedes the prior PR run.
-Ready docs-only PRs also run the complete corpus. Paired recall uses four
+Pull requests, draft or ready, run the partial tier on Python 3.11, the
+supported floor. Docs-only pull requests narrow it to the tests that read docs.
+Full coverage runs only on schedule or dispatch, on main or on a source branch
+on request. It covers Python 3.11 and 3.13, every specialized Full job, and the
+latency gate. Paired recall uses four
 raw case shards per series and one complete-series comparison. Each shard
 retains the full corpus and both arms of every assigned case. Discovery pins
 the release baseline once; aggregation refuses incomplete or mixed fragments.
 The instrument check runs once before fan-out, and sampler elapsed records
 remain distinct from complete-series verdicts. New CI timing remains unverified.
- Release metadata keeps its
-targeted checks backed by source evidence.
+The advisory MCP read latency comparison runs nightly in its own workflow
+(`mcp-read-latency.yml`), so a Full run ends when its required gate passes.
+Release metadata keeps its targeted checks backed by source evidence.
 
-One scope job selects the CI policy. Full CI also runs on schedule or dispatch.
-After its required gate passes, it retains `full-ci-evidence-RUN-ATTEMPT` with
-the actual checkout commit and Git tree. For a PR, this is the synthetic merge
-commit, with its source head and base recorded separately.
-The selector verifies repository, workflow, issuer gate, full scope, and merge
-parents. It compares that tested tree with merged main. Identical trees reuse
-proof after squash; a changed tree, expired receipt, or incomplete proof uses
-the Full fallback. Legacy receipt-free evidence remains eligible only for a
-scheduled or dispatched Full run at its exact main commit.
+One scope job selects the CI policy: Full runs only on schedule or dispatch.
+After its required gate passes, a Full run retains `full-ci-evidence-RUN-ATTEMPT`
+with the actual checkout commit and Git tree. The selector verifies repository,
+workflow, issuer gate, full scope, and the tested commit. It compares that tested
+tree with merged main. Release evidence is a Full run on main, or a Full run
+dispatched on the source branch whose tree equals the merged tree. Identical
+trees reuse proof after squash; a changed tree, expired receipt, or incomplete
+proof uses the Full fallback. Legacy receipt-free evidence remains eligible only
+for a scheduled or dispatched Full run at its exact main commit.
 
 A retry can inherit an earlier successful gate. The receipt keeps its issuing
 attempt and names the latest successful attempt separately. Qualification does

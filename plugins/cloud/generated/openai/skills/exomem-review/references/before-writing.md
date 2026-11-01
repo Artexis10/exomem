@@ -62,8 +62,9 @@ registration does not itself complete a separately proposed entity or edge.
 Review scans bounded private windows: an empty pass does not prove the queue
 exhausted. A later review advances the pass; an opaque continuation retrieves
 already available visible work. A missing or stale projection names the
-operator-only recovery command, `exomem maintain --reconcile`; remote agents
-report that requirement rather than retrying it through the maintenance tool.
+recovery command, `exomem maintain --reconcile`. A remote agent previews
+`reconcile`, starts it as a maintenance job with the `plan_id` and a `why`, and
+follows it to a terminal state (see vault care).
 
 Planning captures intended future state; Records capture observed state/history.
 Resolve workflow posture and the relevant collection before proactive capture;

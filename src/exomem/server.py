@@ -726,13 +726,18 @@ SERVER_INSTRUCTIONS = (
 )
 
 
-def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> FastMCP:
+def build_server(
+    *, require_auth: bool, worker_socket: Path | None = None, http_host: str | None = None
+) -> FastMCP:
     """Construct and return the FastMCP app, ready to run.
 
     ``worker_socket`` is the supervisor-owned private socket a managed worker
     binds. The promotion control route is registered only for such a worker: it
     is reachable exactly where `/health` already is, and never on a process that
     serves a public bind.
+
+    ``http_host`` is the HTTP bind host. A Cloud cell given a health-only port
+    binds that port on the same host.
     """
     from . import runtime_resources, service_standby
 
@@ -770,12 +775,24 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             # Only a supervisor-owned worker can receive the local stamp.
             local_ingress=worker_socket is not None,
         )
+    lifespan = runtime_resources.lifespan(runtime_activation.lifespan())
+    health_listener = None
+    health_port = cloud_cell.health_port() if cloud else None
+    if health_port is not None:
+        if http_host is None:
+            raise cloud_cell.CloudConfigError(
+                "CLOUD_HEALTH_PORT_INVALID", "a health-only port needs the HTTP transport"
+            )
+        from .cloud_health import HealthListener
+
+        health_listener = HealthListener(host=http_host, port=health_port)
+        lifespan = health_listener.lifespan(lifespan)
     mcp = ExomemFastMCP(
         "exomem",
         instructions=SERVER_INSTRUCTIONS,
         auth=auth,
         icons=server_icons(),
-        lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
+        lifespan=lifespan,
     )
     mcp.add_middleware(RefusalFloorMiddleware())
 
@@ -787,7 +804,9 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         # configured for gateway upload handoffs adds only the private ticket
         # receiver (bridge-cloud-agent-uploads) and the gateway-proved
         # `/download` for exact originals.
-        register_health_routes(mcp, on_liveness=runtime_activation.start)
+        readiness = register_health_routes(mcp, on_liveness=runtime_activation.start)
+        if health_listener is not None:
+            health_listener.serve(readiness)
         from . import cloud_origin
 
         cloud_origin.validate_configuration()
@@ -1291,7 +1310,12 @@ def run(
     standby: bool = False,
 ) -> None:
     """CLI entry: configure logging, build the server, run it."""
-    from . import service_standby
+    from . import cuda_containment, service_standby
+
+    # First, before any model can initialize CUDA: a CUDA library can crash the process that loads it, and
+    # this process serves requests. The service manager hides the devices of the workers it starts; this
+    # covers a foreground or stdio serve too. The media child gets the deployment's list back.
+    cuda_containment.hide_in_process()
     from .collection_store import connection
 
     # Serving threads import store modules lazily; load their libraries before any thread starts.
@@ -1320,7 +1344,11 @@ def run(
             "and the GitHub OAuth block for a remote connector.",
             resolved_host,
         )
-    mcp = build_server(require_auth=require_auth, worker_socket=worker_socket)
+    mcp = build_server(
+        require_auth=require_auth,
+        worker_socket=worker_socket,
+        http_host=None if transport == "stdio" else resolved_host,
+    )
 
     if transport == "stdio":
         log.info("exomem starting on stdio")
@@ -1331,10 +1359,14 @@ def run(
         # A managed worker binds privately, but its authentication decision
         # above must still use the public bind intent. UDS is not permission
         # to turn a remote endpoint into unauthenticated local MCP.
-        worker_options = (
-            {"uvicorn_config": {"uds": str(worker_socket)}}
-            if worker_socket is not None else {}
-        )
+        # Every request starts from an empty context: uvicorn otherwise runs a
+        # request in whatever context the connection's reader last kept, which
+        # can be an earlier request's (CPython issue 140947). No Exomem lifespan
+        # sets a context variable, and FastMCP sets its own again per request.
+        uvicorn_config: dict[str, object] = {"reset_contextvars": True}
+        if worker_socket is not None:
+            uvicorn_config["uds"] = str(worker_socket)
+        worker_options = {"uvicorn_config": uvicorn_config}
         mcp.run(
             transport=transport,
             host=host,

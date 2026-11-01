@@ -357,6 +357,7 @@ def warming(*, unavailable: bool = False) -> dict[str, Any]:
         "recovery": {
             "operator_required": True,
             "command": "exomem maintain --reconcile",
+            "remote": 'check_memory operation.kind="reconcile" dry_run=true, then repair_memory with the plan_id and a why',
         },
         "items": [],
         "continuation": None,

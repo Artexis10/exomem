@@ -1942,14 +1942,16 @@ class Batch:
 _GAP = "TIME_LOCAL_GAP"
 
 
-def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold | None) -> Batch:
+def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold | None, *,
+                limit: int | None = None) -> Batch:
+    limit = MAX_BATCH_ROWS if limit is None else limit
     begin = reader.position()["byte"] if not pending else pending[0].start
     rows: list[tuple[Row, dict[str, Any]]] = []
     rejections: list[tuple[Row, str, str]] = []
     checkpoint = reader.position() if not pending else None
     eof = ended = False
     spent = 0
-    while len(rows) + len(rejections) < MAX_BATCH_ROWS:
+    while len(rows) + len(rejections) < limit:
         row = pending.pop() if pending else reader.next()
         if row is None or row is _MEMBER_END:
             eof, ended = row is None, True
@@ -3066,7 +3068,7 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     plan = compile_mapping(job.binding["mapping"]["declared"], manifest, job.binding["mapping"]["format"])
     order = import_time.Fold(current.checkpoint.get("fold")) if plan.ordered else None
     reader = _live(writer, current, proof, plan)
-    batch = _next_batch(reader, plan, reader.pending, order)
+    batch = _next_batch(reader, plan, reader.pending, order, limit=store.batch_rows(cid, MAX_BATCH_ROWS))
     batch.members = reader.taken(batch.checkpoint)
     reader.marked = _cursor(batch.checkpoint)
     guards = reader.guards()
@@ -3084,7 +3086,9 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
 
     def work(conn):
         undo = None if "row_floor" not in record else derived_rows.Undo(record["row_floor"])
+        started = time.perf_counter()
         applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas, scope=store.write_scope, undo=undo)
+        store.paced(cid, len(batch.rows) + len(batch.rejections), time.perf_counter() - started)
         tally, counts = dict(record["tally"]), dict(record["counts"])
         for _, key, payload in applied.entries:
             _extend(tally, key, payload)

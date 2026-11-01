@@ -28,7 +28,7 @@ import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import images, tls
+from . import host_speed, images, tls
 from .shell import run, wait_for
 
 K3S_POD_CIDR = "10.42.0.0/16"
@@ -88,6 +88,16 @@ class K3s:
         )
 
 
+@dataclass(frozen=True)
+class NodeStorage:
+    """A K3s node that serves cell volumes from TopoLVM: the image that adds LVM to the
+    pinned K3s, and the lvm.conf that limits LVM to the node's loop device
+    (drill_cluster.prepare_node_storage builds both)."""
+
+    image: str
+    lvm_conf: Path
+
+
 @dataclass
 class Stack:
     run_id: str
@@ -132,7 +142,8 @@ def _host_port(name: str, port: str) -> int:
     return int(published.rsplit(":", 1)[1])
 
 
-def create_stack(run_id: str, workdir: Path, *, tls_storage: bool = False) -> Stack:
+def create_stack(run_id: str, workdir: Path, *, tls_storage: bool = False,
+                 node_storage: NodeStorage | None = None) -> Stack:
     network = f"exo-rehearsal-{run_id}"
     stack = Stack(
         run_id=run_id,
@@ -152,7 +163,7 @@ def create_stack(run_id: str, workdir: Path, *, tls_storage: bool = False) -> St
             run(["docker", "network", "create", *docker_labels(run_id), "--internal", stack.sealed_network])
             stack.networks.append(stack.sealed_network)
         stack.object_store = _start_object_store(stack)
-        stack.k3s = _start_k3s(stack)
+        stack.k3s = _start_k3s(stack, node_storage)
         if stack.sealed_network:
             run(["docker", "network", "connect", stack.sealed_network, stack.k3s.container])
     except BaseException:
@@ -350,12 +361,24 @@ def image_data_mounts(stack: Stack, image: str, prefix: str, *, temporary: bool 
     return mounts
 
 
-def _start_k3s(stack: Stack) -> K3s:
+def _start_k3s(stack: Stack, node_storage: NodeStorage | None = None) -> K3s:
     name = f"exo-rehearsal-k3s-{stack.run_id}"
     mount = containerd_mount(stack)
     args = ["server", *SERVER_ARGS, *node_args(stack)]
-    mounts = image_data_mounts(stack, images.K3S, "node")
+    image = node_storage.image if node_storage else images.K3S
+    mounts = image_data_mounts(stack, image, "node")
     stack.containers.append(name)
+    if node_storage:
+        # As the drill's agents run: LVM sees only the node's disk, and TopoLVM's node
+        # plugin mounts volumes with Bidirectional propagation, which needs / shared.
+        mounts += ["--mount", f"type=bind,source={node_storage.lvm_conf},target=/etc/lvm/lvm.conf,readonly"]
+        entry = ["--entrypoint", "/bin/sh", image, "-c", 'mount --make-rshared / && exec /bin/k3s "$@"', "k3s-server"]
+        stack.adaptations.append(
+            "the K3s node runs the pinned image plus LVM with `mount --make-rshared /`, and serves cell volumes "
+            "from a loop-device thin pool through TopoLVM (the drill's agent adaptation, on the server)"
+        )
+    else:
+        entry = [image]
     run(
         [
             "docker", "run", "--privileged", "--detach", *docker_labels(stack.run_id), "--name", name,
@@ -363,7 +386,7 @@ def _start_k3s(stack: Stack) -> K3s:
             "--publish", "127.0.0.1::6443",
             "--publish", "127.0.0.1::30443",
             *mounts, "--mount", mount,
-            images.K3S, *args,
+            *entry, *args,
         ]
     )
     wait_api_server(name)
@@ -455,5 +478,6 @@ def environment_facts() -> dict[str, object]:
         "cpus": docker.get("NCPU"),
         "memory_bytes": docker.get("MemTotal"),
         "kernel": docker.get("KernelVersion"),
+        **host_speed.cpu_facts(),
         "ci": bool(os.environ.get("CI")),
     }

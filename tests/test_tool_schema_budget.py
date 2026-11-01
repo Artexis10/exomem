@@ -33,7 +33,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # can be redone without losing the old text.
 # The multilingual flag on change_media process and reprocess adds 170 B, so a recording that mixes
 # languages is read in each of them.
-TOTAL_BUDGET = 162_400
+# Paged, consuming imports add `after` and `consume` to import_memory, so the budget rises 100 B after the
+# import text was trimmed.
+# Remote maintenance jobs add the fix, backfill-ids and reconcile write variants, the job status and cancel
+# variants, the receipt's page cursor, and the adopt-local write variant, so the budget rises 2,000 B and
+# remote clients keep the maintenance that local clients have.
+TOTAL_BUDGET = 164_500
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -42,7 +47,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3350,
-    "import_memory": 5650,
+    "import_memory": 5850,
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
@@ -53,7 +58,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_schema": 9450,
     "change_session_access": 1700,
     "change_settings": 1500,
-    "check_memory": 6600,
+    "check_memory": 6850,
     "configure_memory": 1400,
     "connect_memory": 4500,
     "coordination_status": 500,
@@ -85,7 +90,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "recall_context": 2950,
     "record_episode": 4150,
     "record_memory": 4600,
-    "repair_memory": 4350,
+    "repair_memory": 6050,
     "review_item_context": 1300,
     "review_memory": 3500,
     "schema_memory": 4200,
@@ -100,7 +105,7 @@ TOOL_CEILINGS: dict[str, int] = {
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 1600,
+    "observe_transfer": 1850,
     "transfer_memory": 1650,
 }
 

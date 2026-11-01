@@ -268,6 +268,37 @@ def test_a_deferred_availability_seal_does_not_request_a_full_rebuild(tmp_path, 
     assert graph_drain._work_once(tmp_path) == 0
 
 
+def test_a_watcher_held_external_change_is_rebuilt_only_after_it_has_stood_the_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher repairs an external change; the drain backstops a dead watcher.
+
+    A pending external change makes republication defer, which the availability
+    arm read as a declined proof: it queued a whole-vault rebuild on the first
+    pass, while the watcher was still about to repair the change. The same
+    change standing for the whole stall means nobody is repairing it. A newer
+    change is a live watcher's input and restarts the wait.
+    """
+    vault = _published_vault(tmp_path)
+    page = vault / "Knowledge Base/Notes/Insights/a.md"
+    EpistemicGraphIndex(vault).withdraw_availability()
+    freshness.mark_external_pending(vault, paths=[page])
+    now = [1000.0]
+    monkeypatch.setattr(graph_drain, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(graph_drain, "stall_seconds", lambda: 30.0)
+
+    def rebuild_queued_after(seconds: float) -> bool:
+        now[0] += seconds
+        graph_drain._work_once(vault)
+        return deferred_index.graph_full_rebuild_pending(vault) is not None
+
+    assert not rebuild_queued_after(0.0)
+    assert not rebuild_queued_after(29.0)
+    freshness.mark_external_pending(vault, paths=[page])
+    assert not rebuild_queued_after(2.0), "a newer external change did not restart the wait"
+    assert rebuild_queued_after(30.0), "an external change nobody repaired never got its backstop"
+
+
 @pytest.mark.parametrize("change", ["source", "policy", "sidecar"])
 def test_availability_rejects_changes_after_its_source_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
@@ -1044,6 +1075,123 @@ def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waite
     assert EpistemicGraphIndex(vault).available(), (
         "a receipt that never drains held the barrier past the stall threshold"
     )
+
+
+def test_a_queue_that_only_loses_races_to_commits_is_never_rebuilt_whole(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """A bulk import's commits must not push the graph repair into a whole-vault rebuild.
+
+    The writer commits a page whenever the drain reaches `drain_paths`, after
+    the drain sampled its checkpoint and before it holds the lock, and every
+    other pass finds the boundary held: the drain returns `moved_before_pass`
+    or is refused MUTATION_BUSY, and clears nothing. Once the oldest receipt
+    crossed the stall limit, the drain escalated to a whole-vault pass that the
+    same writer made far slower to lose. The queue was unlucky, not stuck: once
+    the writer stops, one pass clears it.
+
+    Simulated time, as in the stall-ladder test: each wait returns at the next
+    write signal, or at its own timeout when that comes first.
+    """
+    vault = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(vault)
+    page = vault / "Knowledge Base/Notes/Insights/imported.md"
+    rel = page.relative_to(vault).as_posix()
+    commits = 0
+    drains = 0
+    writing = True
+
+    def commit() -> None:
+        nonlocal commits
+        commits += 1
+        page.write_text(_page("Imported", f"Revision {commits} links to [[a]]."), encoding="utf-8")
+        freshness.on_files_changed(vault, changed=[page])
+        deferred_index.add_graph_receipts(vault, [rel])
+
+    commit()
+    index.suspend_reads()
+
+    real_snapshot = find_module.recall_resolver_snapshot
+    real_drain = EpistemicGraphIndex.drain_paths
+
+    def racing_snapshot(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        resolver = real_snapshot(*args, **kwargs)
+        if writing:
+            commit()
+        return resolver
+
+    def refused_or_raced(self: EpistemicGraphIndex, paths: list[Path]) -> dict[str, Any]:
+        nonlocal drains
+        # One receipt queued, so a pass is a batch call and then one replay. This
+        # cycle makes the passes: batch refused; batch raced, replay raced;
+        # batch raced, replay refused.
+        busy = writing and ("busy", "race", "race", "race", "busy")[drains % 5] == "busy"
+        drains += 1
+        if busy:
+            raise OpError(
+                "MUTATION_BUSY",
+                "an import commit holds the vault mutation boundary",
+                details={"status": "retryable"},
+            )
+        return real_drain(self, paths)
+
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", racing_snapshot)
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", refused_or_raced)
+
+    now = [1000.0]
+    signal_every = 1.0
+    stall = 10.0
+    horizon = now[0] + 3 * stall
+    stop = threading.Event()
+
+    def wait(timeout: float | None = None) -> bool:
+        if now[0] >= horizon:
+            stop.set()
+            return True
+        signalled = timeout is None or signal_every < timeout
+        now[0] += signal_every if signalled else timeout
+        return signalled
+
+    started = time.time()
+    monkeypatch.setattr(graph_drain, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(
+        deferred_index, "time", SimpleNamespace(time=lambda: started + now[0] - 1000.0)
+    )
+    monkeypatch.setattr(graph_drain._DEBT, "wait", wait)
+    monkeypatch.setattr(graph_drain, "_stop", stop)
+    monkeypatch.setattr(graph_drain, "_PROGRESS", threading.Event())
+    monkeypatch.setattr(graph_drain, "_last_debt", 0.0)
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 1.0)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 4.0)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 1.0)
+    monkeypatch.setattr(graph_drain, "stall_seconds", lambda: stall)
+    monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: None)
+    rebuilds: list[str] = []
+    real_rebuild = EpistemicGraphIndex.rebuild_all
+
+    def counted(self: EpistemicGraphIndex) -> dict[str, int]:
+        rebuilds.append("rebuild_all")
+        stop.set()  # one whole-vault pass is the failure; do not wait out the rest
+        return real_rebuild(self)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "rebuild_all", counted)
+
+    graph_drain._run_owned(vault)
+
+    assert commits > 3, "the writer never raced the drain"
+    assert rebuilds == [], "a queue that only lost races to commits was rebuilt whole"
+    assert deferred_index.graph_full_rebuild_pending(vault) is None, (
+        "a queue that only lost races to commits queued whole-vault debt"
+    )
+
+    writing = False
+    graph_drain._work_once(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
 
 
 def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(

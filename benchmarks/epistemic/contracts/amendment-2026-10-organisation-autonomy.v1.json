@@ -1,0 +1,18 @@
+{
+  "acknowledged_on": null,
+  "affected_sections": [
+    "\u00a71 Scenario families",
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-10-30",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "e3a119c85569765a624404e458c889deb825c46820acce1bf7da2ce9f8678d5e",
+  "effective_policy": "Applies after founder acknowledgment. Until then f34 cannot support comparative runs, scores or claims, and the acceptance of promote-referents-without-nudges PR B reads as open. f33 stays filed, sealed and unrun. A harness fault is retried, struck or voids the run under the entry's rules and is never scored.",
+  "parent_contract_sha256": "4144d9b96e7d9a5ab39e52d91bdc1a0696e54ddbb201371e71b824d58cf4ea2a",
+  "ratifier": null,
+  "rationale": "Register f34 organisation_autonomy_replay, which supersedes f33 for the acceptance of promote-referents-without-nudges under design decision 8. Freezes 40 independently authored held-out situations (16 relation, 12 referent, 6 placement, 6 vocabulary freshness; 20 hooked and 20 hookless) and their keys by SHA-256, held in evaluator custody outside the repository. States the arms (main with organisation PR A against the same base plus PR B), one run per arm with a capture and a fresh-recall session, the category-level success and false-precision definitions, the diagnostics, residual blind judging, the Newcombe method-10 paired interval, the merge rule (lower bound above zero and at most one more false-precision situation), fault handling and the run holds. No assertion, operation kind, catastrophic assertion or budget constant changes.",
+  "repository_revision": null,
+  "schema_version": 1,
+  "sequence": 8
+}

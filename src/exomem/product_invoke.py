@@ -147,7 +147,11 @@ def invoke_prepared(
     with capabilities.active_surface(descriptor), principal_module.request_scope(
         principal
     ):
-        return invoke_command(cmd, *injected, idempotency_key=idempotency_key, **kwargs)
+        # An in-process caller loses no reply, so with no key it still waits out ordinary
+        # contention; no key is minted, and so nothing is stored for a later call to replay.
+        return invoke_command(
+            cmd, *injected, idempotency_key=idempotency_key, absorb_unkeyed=True, **kwargs
+        )
 
 
 def prepare_local_authorization(

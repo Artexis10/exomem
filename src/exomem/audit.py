@@ -100,6 +100,7 @@ import yaml
 
 from . import (
     access,
+    call_spans,
     capabilities,
     contradiction_stance,
     homes,
@@ -545,11 +546,14 @@ def audit(
         from . import artifact_role_state
         from .governance import egress
         try:
-            role_state = artifact_role_state.build(vault_root, pages)
-            authorize = (
-                egress.release_walk_filter(vault_root) if role_state["origins"] else None
-            ) or (lambda _path: True)
-            role_findings, coverage = artifact_role_state.inspect(vault_root, role_state, authorize, status_basis=status_basis)
+            with call_spans.span("audit.artifact_roles"):
+                role_state = artifact_role_state.build(vault_root, pages)
+                authorize = (
+                    egress.release_walk_filter(vault_root) if role_state["origins"] else None
+                ) or (lambda _path: True)
+                role_findings, coverage = artifact_role_state.inspect(
+                    vault_root, role_state, authorize, status_basis=status_basis
+                )
             findings.extend(f for f in role_findings if f.category in role_families)
             metadata["coverage"] = {key: coverage[key] for key in sorted(role_families)}
         except Exception:  # noqa: BLE001 - measurement failure is explicit, never a write failure
@@ -692,6 +696,7 @@ def audit(
     )
 
 
+@call_spans.timed("audit.collection_view_corrections")
 def _check_collection_view_corrections(vault_root: Path) -> tuple[list[AuditFinding], str | None]:
     """Held corrections of store collection views (OpenSpec move-structured-collections-to-sqlite §6).
 
@@ -708,6 +713,7 @@ def _check_collection_view_corrections(vault_root: Path) -> tuple[list[AuditFind
     return edit_back.attention_findings(vault_root)
 
 
+@call_spans.timed("audit.bridge_review")
 def _check_bridge_review(
     vault_root: Path,
     *,
@@ -759,6 +765,7 @@ def _check_bridge_review(
     )
 
 
+@call_spans.timed("audit.path_variants")
 def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     """Report sibling names that one portable filesystem would hold as a single entry.
 
@@ -824,6 +831,7 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     return findings
 
 
+@call_spans.timed("audit.duplicated_sidecars")
 def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
     """Report media sidecars carrying nested copies of themselves.
 
@@ -1846,6 +1854,7 @@ def purge_corrupt_semantic_recall_isolation_rows(
     return deleted
 
 
+@call_spans.timed("audit.semantic_recall_isolation")
 def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     census = semantic_recall_isolation_census(vault_root)
@@ -1912,6 +1921,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
     return findings
 
 
+@call_spans.timed("audit.governance_receipts")
 def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
     """Project receipt-chain evidence problems without touching its sidecar."""
     from .governance import receipts
@@ -1929,6 +1939,7 @@ def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
     ]
 
 
+@call_spans.timed("audit.semantic_contract_drift")
 def _check_semantic_contract_drift(
     vault_root: Path,
     *,
@@ -2057,6 +2068,7 @@ def _complete_semantic_category_summary(
 # ---------------- vault walk ----------------
 
 
+@call_spans.timed("audit.parse_corpus")
 def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
     """Parse the admitted Markdown pages in the knowledge base."""
     from .governance import egress
@@ -2087,6 +2099,7 @@ def _page_signal_version(page: find_module.ParsedPage) -> str:
     return content_hash(frontmatter + "\n" + page.body)[:16]
 
 
+@call_spans.timed("audit.unregistered_entity_types")
 def _check_unregistered_entity_types(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -2365,6 +2378,7 @@ def _check_unregistered_entity_types(
 # ---------------- checks: broken_wikilink / forward_reference ----------------
 
 
+@call_spans.timed("audit.wikilinks")
 def _check_wikilinks(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -2510,6 +2524,7 @@ def _check_wikilinks(
     return findings
 
 
+@call_spans.timed("audit.unresolved_source_citations")
 def _check_unresolved_source_citations(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -2619,6 +2634,7 @@ def _walk_vault_md(vault_root: Path):
 # ---------------- check: orphan_entity ----------------
 
 
+@call_spans.timed("audit.orphan_entities")
 def _check_orphan_entities(
     vault_root: Path, pages: list[find_module.ParsedPage]
 ) -> list[AuditFinding]:
@@ -2684,6 +2700,7 @@ def _extract_wikilinks_from_value(value) -> list[str]:
 # ---------------- check: unprocessed_source ----------------
 
 
+@call_spans.timed("audit.unprocessed_sources")
 def _check_unprocessed_sources(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -2825,6 +2842,7 @@ def _parse_fm_date(value) -> dt.date | None:
 # ---------------- check: index_drift ----------------
 
 
+@call_spans.timed("audit.index_drift")
 def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     kb = kb_root(vault_root)
@@ -2915,6 +2933,7 @@ def _extract_tags(value) -> list[str]:
     return out
 
 
+@call_spans.timed("audit.tag_inconsistency")
 def _check_tag_inconsistency(
     pages: list[find_module.ParsedPage],
 ) -> list[AuditFinding]:
@@ -2995,6 +3014,7 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
 }
 
 
+@call_spans.timed("audit.frontmatter_compliance")
 def _check_frontmatter_compliance(
     pages: list[find_module.ParsedPage],
     vault_root: Path,
@@ -3166,6 +3186,7 @@ def _check_frontmatter_compliance(
 # ---------------- check: unregistered_project_key ----------------
 
 
+@call_spans.timed("audit.unregistered_project_keys")
 def _check_unregistered_project_keys(
     vault_root: Path, pages: list[find_module.ParsedPage]
 ) -> list[AuditFinding]:
@@ -3220,6 +3241,7 @@ def _check_unregistered_project_keys(
 # ---------------- check: graph_drift ----------------
 
 
+@call_spans.timed("audit.reference_identity")
 def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
     """Flag duplicate/malformed IDs and reference-sidecar drift."""
     from . import memory_refs
@@ -3255,6 +3277,7 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
     return findings
 
 
+@call_spans.timed("audit.graph_drift")
 def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
     """Flag derived graph sidecar drift. Read-only and disabled-gate aware."""
     from . import epistemic_graph, recall_policy
@@ -3285,6 +3308,7 @@ def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
     return findings
 
 
+@call_spans.timed("audit.relation_registry")
 def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
     """Opt-in ontology-governance findings; never feeds default attention."""
     from . import memory_schema
@@ -3311,6 +3335,7 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
 # ---------------- check: embedding_drift ----------------
 
 
+@call_spans.timed("audit.embedding_drift")
 def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     """Flag embedding drift in three forms: (1) sidecar rows whose on-disk file
     mtime is newer than the row (external edit), (2) rows whose file is gone from
@@ -3467,6 +3492,7 @@ def _relevance_golden_queries(path: Path) -> set[str]:
     return {e["query"].strip().lower() for e in raw if isinstance(e, dict) and e.get("query")}
 
 
+@call_spans.timed("audit.relevance_pairs_pending")
 def _check_relevance_pairs_pending(
     *,
     logs_dir: Path | None = None,
@@ -3576,6 +3602,7 @@ def relation_debt_eligible(
     return not bool(_STALE_SKIP_TAGS & set(tags))
 
 
+@call_spans.timed("audit.relation_debt")
 def _check_relation_debt(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -3649,6 +3676,7 @@ def _check_relation_debt(
 # values. Provenance is exactly the field that must never be inferred.
 
 
+@call_spans.timed("audit.missing_sources")
 def _check_missing_sources(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -3906,6 +3934,7 @@ def _nearest_shared_roots(
     return {root: candidates[root] for root in survivors}
 
 
+@call_spans.timed("audit.derivation_double_counting")
 def _check_derivation_double_counting(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -4136,6 +4165,7 @@ def _experiment_duration_days(value: Any) -> int | None:
     return int(round(count * _DURATION_UNIT_DAYS[match.group(2).lower()]))
 
 
+@call_spans.timed("audit.unfinished_experiments")
 def _check_unfinished_experiments(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -4246,6 +4276,7 @@ _CHECK_BY_PREFILTER = re.compile(r"check[\s_-]*by", re.IGNORECASE)
 # prediction on a note the author dropped is not an obligation anyone still owes.
 
 
+@call_spans.timed("audit.prediction_window")
 def _check_prediction_window(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -5112,6 +5143,7 @@ def _record_observation_support(
     return {"support": "natural_key", "terms": key_terms} if key_terms else None
 
 
+@call_spans.timed("audit.unreflected_observations")
 def _check_unreflected_observations(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -5459,6 +5491,7 @@ def _collection_candidate_finding(
     )
 
 
+@call_spans.timed("audit.collection_candidate")
 def _check_collection_candidate(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -5621,6 +5654,7 @@ def _unreflected_finding(
     )
 
 
+@call_spans.timed("audit.unreflected_outcomes")
 @canonical_read
 def _check_unreflected_outcomes(
     vault_root: Path,
@@ -5676,6 +5710,7 @@ _QUESTION_PREFILTER = re.compile(r"question", re.IGNORECASE)
 #: outstanding work. Same inactive set the sibling lifecycle queues use.
 
 
+@call_spans.timed("audit.question_aging")
 def _check_question_aging(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -5823,6 +5858,7 @@ def _supersession_link_target(raw: str) -> str:
     return text.split("|", 1)[0].split("#", 1)[0].strip()
 
 
+@call_spans.timed("audit.supersession_integrity")
 def _check_supersession_integrity(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -6209,6 +6245,7 @@ def _activation(events: list[tuple[float, float]] | None, d: float) -> float | N
     return usage.activation(events, d)
 
 
+@call_spans.timed("audit.stale_review")
 def _check_stale_review(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -6686,6 +6723,7 @@ def _scope_divergence_semantic_finding(
     )
 
 
+@call_spans.timed("audit.scope_divergence_semantic")
 def _check_scope_divergence_semantic(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -7012,6 +7050,7 @@ def _entity_recurrence_resolution_entries(
     return entries
 
 
+@call_spans.timed("audit.entity_recurrence")
 def _check_entity_recurrence(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -7145,6 +7184,7 @@ def _sweep_pairs(
     return pair_cos
 
 
+@call_spans.timed("audit.corpus_contradictions")
 def _check_corpus_contradictions(
     vault_root: Path,
     pages: list[find_module.ParsedPage],

@@ -883,12 +883,7 @@ def test_explicit_offline_migration_over_an_existing_vault_migrates(
     assert manifest["version"] == state_migration.MANIFEST_VERSION
     assert manifest["vault_identity"] == state_paths.vault_state_key(vault)
     assert manifest["state"] == "complete"
-    assert manifest["descriptors"] == sorted(
-        descriptor.id
-        for descriptor in __import__(
-            "exomem.reserved_paths", fromlist=["external_state_descriptors"]
-        ).external_state_descriptors()
-    )
+    assert manifest["descriptors"] == list(state_migration.declared_descriptor_ids())
     for descriptor_id in (
         "authorization-projections",
         "claims-store",

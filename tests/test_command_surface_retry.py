@@ -857,8 +857,39 @@ def test_mcp_retry_scope_hashes_bearer_and_falls_back_to_session(monkeypatch) ->
     assert scope.startswith("bearer:")
     assert "super-secret-token" not in scope
 
-    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {"user-agent": "client/1"}
+    )
     assert command_surface.mcp_retry_scope() == "session:session-1"
+
+
+def test_mcp_retry_scope_on_stdio_ignores_the_per_call_session_id(monkeypatch) -> None:
+    monkeypatch.setattr("fastmcp.server.dependencies.get_access_token", lambda: None)
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    scopes = []
+    for per_call_id in ("call-1", "call-2"):
+        monkeypatch.setattr(
+            "fastmcp.server.dependencies.get_context",
+            lambda per_call_id=per_call_id: SimpleNamespace(session_id=per_call_id, transport="stdio"),
+        )
+        scopes.append(command_surface.mcp_retry_scope())
+    assert scopes[0] == scopes[1] and scopes[0].startswith("session:")
+    assert "call-" not in scopes[0]
+
+
+def test_an_http_call_with_only_host_and_accept_headers_keeps_its_own_session(monkeypatch) -> None:
+    from starlette.requests import Request
+
+    request = Request(
+        {"type": "http", "headers": [(b"host", b"memory.example"), (b"accept", b"application/json")]}
+    )
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_request", lambda: request)
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_context",
+        lambda: SimpleNamespace(session_id="http-session-1"),
+    )
+    assert command_surface.mcp_session_id() == "http-session-1"
+    assert command_surface.mcp_caller_identity()["transport"] == "http"
 
 
 def test_mcp_retry_scope_uses_stable_verified_principal_across_bearer_rotation(
@@ -1030,21 +1061,7 @@ def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     ) is True
 
 
-@pytest.mark.parametrize("surface", ["mcp", "rest"])
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"mode": "reconcile"},
-        {"mode": "fix", "dry_run": False},
-        {"mode": "backfill-ids", "dry_run": False},
-    ],
-)
-def test_remote_write_maintenance_is_refused_before_manager_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    surface: str,
-    kwargs: dict[str, object],
-) -> None:
+def _remote_maintain(surface: str):
     from exomem.commands import product_commands_for
 
     command = next(
@@ -1056,6 +1073,52 @@ def test_remote_write_maintenance_is_refused_before_manager_dispatch(
         tier2_enabled=True,
         product_commands=("maintain_memory",),
     )
+    return command, descriptor
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "reconcile"},
+        {"mode": "fix", "dry_run": False},
+        {"mode": "backfill-ids", "dry_run": False},
+        {"mode": "backfill-ids", "dry_run": False, "plan_id": "plan"},
+        {"mode": "backfill-ids", "dry_run": False, "why": "reason"},
+    ],
+)
+def test_remote_write_maintenance_without_a_plan_and_reason_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    kwargs: dict[str, object],
+) -> None:
+    command, descriptor = _remote_maintain(surface)
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("remote write maintenance reached manager dispatch"),
+    )
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(command, tmp_path, **kwargs)
+
+    assert raised.value.code == "MAINTENANCE_PLAN_REQUIRED"
+    assert raised.value.details == {"status": "terminal", "committed": False}
+    assert raised.value.remediation is not None
+
+
+_EXPORT_APPLY = {"mode": "collections-store-export", "apply": True, "plan_id": "plan", "why": "reason"}
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
+def test_remote_export_apply_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    kwargs = _EXPORT_APPLY
+    command, descriptor = _remote_maintain(surface)
     monkeypatch.setattr(
         writer_lease,
         "get_manager",
@@ -1068,7 +1131,86 @@ def test_remote_write_maintenance_is_refused_before_manager_dispatch(
     assert raised.value.code == "MAINTENANCE_REQUIRES_CLI"
     assert raised.value.details == {"status": "terminal", "committed": False}
     assert raised.value.remediation is not None
-    assert "exomem maintain" in raised.value.remediation
+    # Export is the one write that has no remote form: the text names it and says nothing of the job kinds.
+    assert "exomem collections export" in raised.value.remediation
+    assert "stop the service" in raised.value.remediation.lower()
+    assert "reconcile" not in raised.value.remediation
+
+
+def _legacy_alias(name: str):
+    from exomem.commands import COMMANDS
+
+    return next(item for item in COMMANDS if item.name == name)
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
+@pytest.mark.parametrize(
+    ("alias", "kwargs"),
+    [
+        ("reconcile", {}),
+        ("reconcile", {"dry_run": False}),
+        ("audit_fix", {}),
+        ("audit_fix", {"dry_run": False, "rebuild_embeddings": True}),
+    ],
+)
+def test_remote_write_through_a_legacy_maintenance_alias_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    alias: str,
+    kwargs: dict[str, object],
+) -> None:
+    _command, descriptor = _remote_maintain(surface)
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("a remote legacy alias write reached manager dispatch"),
+    )
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(_legacy_alias(alias), tmp_path, **kwargs)
+
+    assert raised.value.code == "MAINTENANCE_PLAN_REQUIRED"
+    assert raised.value.details == {"status": "terminal", "committed": False}
+    # The refusal names the job route, in the spelling of the surface that was called.
+    assert "plan_id" in raised.value.remediation
+    assert capabilities.active_tools_text("maintain_memory") in raised.value.remediation
+
+
+@pytest.mark.parametrize(
+    ("surface", "alias", "kwargs"),
+    [
+        ("mcp", "reconcile", {"dry_run": True}),
+        ("rest", "audit_fix", {"dry_run": True}),
+        ("mcp", "audit", {}),
+        ("cli", "reconcile", {}),
+        ("cli", "audit_fix", {"dry_run": False}),
+    ],
+)
+def test_legacy_maintenance_aliases_keep_their_dry_runs_and_their_local_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    alias: str,
+    kwargs: dict[str, object],
+) -> None:
+    calls: list[str] = []
+
+    class RecordingManager:
+        def invoke(self, dispatched, _injected, _call_kwargs, **_options):  # noqa: ANN001, ANN003
+            calls.append(dispatched.name)
+            return {"admitted": True}
+
+    monkeypatch.setattr(writer_lease, "get_manager", RecordingManager)
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface=surface, profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    with capabilities.active_surface(descriptor):
+        result = writer_lease.invoke_command(_legacy_alias(alias), tmp_path, **kwargs)
+
+    assert result == {"admitted": True}
+    assert calls == [alias]
 
 
 def test_remote_unknown_maintenance_selector_preserves_coverage_refusal(
@@ -1129,13 +1271,13 @@ def test_mcp_write_maintenance_returns_terminal_operator_refusal(
         lambda: pytest.fail("MCP write maintenance reached manager dispatch"),
     )
 
-    result = bound(mode="reconcile")
+    result = bound(**_EXPORT_APPLY)
 
     assert result["success"] is False
     assert result["error"]["code"] == "MAINTENANCE_REQUIRES_CLI"
     assert result["error"]["status"] == "terminal"
     assert result["error"]["committed"] is False
-    assert "exomem maintain --reconcile" in result["error"]["remediation"]
+    assert "exomem collections export" in result["error"]["remediation"]
 
 
 @pytest.mark.parametrize(
@@ -1344,9 +1486,8 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     remediation = result["error"]["remediation"]
     assert 'maintain_memory(mode="backfill-ids")' in remediation
     assert "confirmation" in remediation
-    assert "backfill of missing IDs" in remediation
+    assert "plan_id" in remediation
     assert remediation.index("identity issues") < remediation.index("confirmation")
-    assert "CLI" in remediation
     assert "re-read and validate" in remediation
 
 
@@ -1891,3 +2032,13 @@ def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monke
     assert result["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
     assert bound(value=7) == {"value": 7}
     assert runs == 1
+
+
+def test_an_http_call_whose_request_is_not_bound_never_gets_the_stdio_session(monkeypatch) -> None:
+    """If FastMCP stopped binding the request, HTTP callers must not share one session."""
+    monkeypatch.setattr("fastmcp.server.dependencies.get_http_headers", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_context",
+        lambda: SimpleNamespace(session_id="http-session-2", transport="streamable-http"),
+    )
+    assert command_surface.mcp_session_id() == "http-session-2"

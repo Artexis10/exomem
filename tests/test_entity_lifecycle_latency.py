@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, thread_time
 from types import SimpleNamespace
 
 from exomem import entity_recurrence, entity_types, epistemic_graph
@@ -49,6 +49,77 @@ def test_identity_frames_cold_collection_is_bounded_at_established_scale(
     assert len(candidates) == 1
     assert candidates[0].context_count == ESTABLISHED_CORPUS_SIZE
     assert elapsed < COLD_RUNTIME_CEILING_SECONDS
+
+
+#: Thread CPU, not wall: the sweep is pure computation, and CPU time does not
+#: grow when the test shares a loaded runner. The sweep that compiled its frame
+#: patterns per page measured 4.3 s here; one compiled per sweep, 1.0 s.
+PROSE_SWEEP_CPU_CEILING_SECONDS = 3.0
+
+
+def test_identity_frames_sweep_over_long_prose_and_a_populated_registry_is_bounded(
+    tmp_path: Path,
+) -> None:
+    """A real vault has multi-paragraph notes and hundreds of entity pages.
+
+    Every registry entity is an anchor in the frame grammar, so per-page grammar
+    work grows with the registry and per-clause work with the prose. The
+    one-sentence pages above exercise neither.
+    """
+    registry = entity_types.core_registry()
+    folder = registry.resolve("organization").folder
+    prose = (
+        "We met the field team on Tuesday, and the notes below record what changed.",
+        "The harvest plan moved twice, so the storage estimate is still rough.",
+        "The survey lead works with Org 0007 on the irrigation survey.",
+        "- Delivery window: early spring, depending on the frost.",
+        "Amber guild is an organization that maintains the shared tools.",
+        "Nothing here is final; the next review decides the budget.",
+    )
+    entity_pages = [
+        SimpleNamespace(
+            rel_path=f"Knowledge Base/Entities/{folder}/org-{index:04d}.md",
+            title=f"Org {index:04d}",
+            status="active",
+            frontmatter={
+                "type": "entity",
+                "status": "active",
+                "entity_type": "organization",
+                "title": f"Org {index:04d}",
+                "aliases": [f"Org Alias {index}"],
+            },
+            body=f"# Org {index:04d}\n",
+        )
+        for index in range(300)
+    ]
+    note_pages = [
+        SimpleNamespace(
+            rel_path=f"Knowledge Base/Notes/note-{index:04d}.md",
+            title=f"Note {index}",
+            status="active",
+            frontmatter={"type": "insight", "status": "active"},
+            body="\n".join(prose[(index + line) % len(prose)] for line in range(20)),
+        )
+        for index in range(ESTABLISHED_CORPUS_SIZE)
+    ]
+    pages = [*entity_pages, *note_pages]
+    entities = entity_recurrence.registry_index(pages, entity_types=registry)
+    resolver = WikilinkResolver.from_entries(tmp_path, ())
+
+    started = thread_time()
+    entity_recurrence.collect(
+        pages,
+        vault_root=tmp_path,
+        resolver=resolver,
+        registry=entities,
+        entity_types=registry,
+        indexable=lambda _path: True,
+        attachment_probe=lambda _path: False,
+    )
+    elapsed = thread_time() - started
+
+    assert len(entities.entries) == 300
+    assert elapsed < PROSE_SWEEP_CPU_CEILING_SECONDS
 
 
 def test_entity_family_graph_query_and_traversal_are_bounded_at_scale(

@@ -56,7 +56,8 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 
 - [ ] 4.1 Before PR B is built, an independent case-authoring evaluator files the revised amendment under the next free benchmark family. Freeze forty source-derived situations and keys with digests: sixteen relation, twelve referent, six placement and six freshness situations. Balance hooked and hookless clients; implementers never read the held-out material. Obtain the owner's acknowledgement before the final run.
   Historical evidence: #1674 filed f33 and #1681 supplied the two-session driver. That amendment stays sealed and unrun; it does not satisfy this revised task.
-- [ ] 4.2 Reuse the two-session driver and existing client isolation/capture. Under the manager's serial evaluation slot, run at most five development rounds of four paired situations and one repeat, at most eighty sessions. Ask one question and change at most one thing per round; use fresh cases after checking repairs. Record failures, captured inputs, calls and end state for each arm.
+  Authoring prerequisite: reconcile decision 8's common product base, default maps workflow, complete pull transcript, semantic scoring and actual product bindings. Reuse maintained capture seams before adding an adapter; the old driver's product label and legacy activation projection are insufficient proof. Catalogue delivery and actor allocation remain run dependencies; no actor or judge is needed to prepare the protocol.
+- [ ] 4.2 Reuse the maintained Compiler session, state and transcript capture for the capture and fresh-recall sessions. Establish the isolated write-capable product binding with its owner before generation. Under the manager's serial evaluation slot, run at most five development rounds of four paired situations and one repeat, at most eighty sessions. Ask one question and change at most one thing per round; use fresh cases after checking repairs. Record failures, captured inputs, calls and end state for each arm.
 - [ ] 4.3 After PR A's release, common tool-surface delivery, amendment acknowledgement and actor-room allocation, run one blind final comparison: forty paired situations, 160 actor sessions. Report the paired difference and 95% Newcombe interval, false precision, omissions, reasons, abandoned writes, calls and bytes. Merge PR B only when the lower bound exceeds zero and false precision rises by at most one of forty, or record the owner's ruling. An inconclusive result establishes no gain and authorizes no expansion.
 
 ## 5. Declarations (D1B, conditional on the D8 development rounds)
@@ -73,7 +74,7 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 ## 7. Labels (D6)
 
 - [x] 7.1 Add the relation `label`, `relation_registry.display_label`, and `relation_label` from every producer named in D6. Check: one test per producer through its public door asserts the label of a core relation, of an extension (`<label> (a kind of <parent label>)`) and of a shared label with its namespace; schema-fidelity tests show every existing key field unchanged.
-- [ ] 7.2 Show `relation_label` in Studio (`app.v5.js`) in its own PR under the frontend procedure. Check: Chrome DevTools inspection of the graph and relation-queue views before and after; accept payloads still send the key.
+- [x] 7.2 Show `relation_label` in Studio (`app.v5.js`) in its own PR under the frontend procedure. Check: Chrome DevTools inspection of the graph and relation-queue views before and after; accept payloads still send the key. Shipped as `app.v6.js` (the versioned assets are cached as immutable). The three payloads Studio reads did not carry the label after 7.1, so the review-context graph edges, the relation-queue items and the suggested relations now add it; a candidate reads as the meaning its authored spelling resolves to.
 
 ## 8. Typed activation (D4, conditional on the D8 development rounds and its trigger)
 
@@ -90,6 +91,11 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 
 This independently authorized repair adds no entity barrier and does not close task 2.9 or the held behaviour measurement.
 Its deterministic proof does not establish no-nudge semantic autonomy.
+
+Delivery evidence: #2136 merged as `1c288447861562872d7bbba65557b02b6e262070` and shipped in 0.147.0.
+Its reviewed head was `f235c4308a3c63432e591745a19caf27f182eab8`; CI run `40387270740` passed.
+The independent review is [recorded on the PR](https://github.com/Artexis10/exomem/pull/2136#issuecomment-6425859781).
+The task boxes remain open while real-model behaviour evidence and programme acceptance are reconciled; publication alone does not close them.
 
 - [ ] 10.1 Exclude registry-marked generic relations from typed-specific qualification while retaining writable connectivity, specific extensions and eligible incoming specific relations. Add one non-blocking authored-all-generic advisory, including when an incoming specific relation qualifies; suppress only the duplicate typed-edge-absent warning. Check: generic remains writable, generic markers govern aliases and extensions, specific relations retain qualification, ordinary connectivity keeps its warning, and compact MCP feedback names the authored pattern without claiming that no typed relation exists.
 - [ ] 10.2 Keep compile proposals as optional one-note scaffolds with unreviewed adjacent candidates; remove authored generic defaults and instructions to copy candidates into accepted edges. Disclose opening-only excerpts and the admitted full-source read route. Check: the proposal generates no relation bullet, preserves useful candidates, and never implies source-wide semantic coverage; restricted and absent source twins disclose no hidden identity or metadata.
