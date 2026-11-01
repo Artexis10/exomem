@@ -25,27 +25,27 @@
       "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
       "state": "landed",
       "unfiled": {
-       "count": 40,
-       "bytes": 15032385536
+       "count": 1,
+       "bytes": 32
       },
       "unfiled_staged": {
-       "count": 40,
-       "bytes": 15032385536
+       "count": 1,
+       "bytes": 32
       },
       "members": []
      }
     ],
     "keep_source": {
      "keep": true,
-     "message": "Keep the source folder: 40 unfiled member(s) in landed windows."
+     "message": "Keep the source folder: 1 unfiled member(s) in landed windows."
     },
     "next_after": null
    },
    "window_budget": {
-    "window_budget": 15032385536,
-    "reachable_budget": 21474836480,
+    "window_budget": 4096,
+    "reachable_budget": 4096,
     "job_pinned": 0,
-    "effective_file_limit": 9663676416,
+    "effective_file_limit": 4096,
     "classification": "cloud",
     "media_allowance": {
      "allowance_bytes": 214748364800,
@@ -71,26 +71,26 @@
    "run_id": "run-1",
    "path": "_Imports/5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
    "next_after": null,
-   "files": 40
+   "files": 1
   },
   "import_memory.select": {
    "run_id": "run-1",
-   "selected": 40
+   "selected": 1
   },
   "import_memory.plan": {
    "run_id": "run-1",
    "plan_id": "plan-1",
-   "items": 40
+   "items": 1
   },
   "import_memory.apply": {
    "run_id": "run-1",
-   "applied": 40,
+   "applied": 1,
    "continuation": null
   },
   "import_memory.finish": {
    "run_id": "run-1",
    "coverage": {
-    "filed": 40
+    "filed": 1
    },
    "residual": {
     "count": 0,
@@ -117,7 +117,7 @@
   }
  ],
  "fake_commands": {
-  "exomem": "#!/bin/sh\n# Fake `exomem`: `--help` prints usage; `cloud import <folder>` prints window progress and takes a long time to exit.\ncase \" $* \" in *\" --help \"*|*\" -h \"*) echo \"usage: exomem cloud import <folder>  (sends a folder larger than the cell's room as several windows)\"; exit 0;; esac\necho \"start $(date +%s)\" >> \"$IG_SHELL_LOG\"\necho \"the folder is larger than the room the cell reports (14 GiB): sending it as 9 windows\"\necho \"window 1 of 9: sent 14 GiB as import 5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11, waiting for the cell to file it\"\nsleep 100\necho \"window 2 of 9: sent 14 GiB\"\necho \"exit $(date +%s)\" >> \"$IG_SHELL_LOG\"\n"
+  "exomem": "#!/bin/sh\n# Fake `exomem`: `--help` prints usage; `cloud import <folder>` prints window progress and takes a long time to exit.\ncase \" $* \" in *\" --help \"*|*\" -h \"*) echo \"usage: exomem cloud import <folder>  (sends a folder larger than the cell's room as several windows)\"; exit 0;; esac\necho \"start $(date +%s)\" >> \"$IG_SHELL_LOG\"\necho \"the folder (8 KiB) is larger than the room the cell reports (4 KiB): sending it as 3 windows\"\necho \"window 1 of 3: sent 4 KiB as import 5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11, waiting for the cell to file it\"\nsleep 100\necho \"window 2 of 3: sent 4 KiB\"\necho \"exit $(date +%s)\" >> \"$IG_SHELL_LOG\"\n"
  },
  "source_folder": "Archive"
 }

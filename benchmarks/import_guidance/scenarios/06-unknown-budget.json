@@ -60,7 +60,7 @@
   {
    "id": "states_zero_full_or_invented",
    "expect": false,
-   "text": "The agent says the limit is zero, says the memory is full, or states any invented size limit or yes/no answer as fact."
+   "text": "The agent says the per-file limit is zero, says the memory is full, gives an invented size for the unknown limit, or answers a definite yes or no to whether the file fits. Naming terms or stops that the skill text describes is not inventing."
   }
  ]
 }
