@@ -4294,7 +4294,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "For `start`, scan subtree (default: whole vault; ask which folder). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
+                  "description": "For `start`, subtree to scan (default: whole vault; ask which folder). For run-listing `status`, count filed originals under it (null if `complete=false`).",
                   "type": "string",
                   "default": ""
                 },
@@ -4314,7 +4314,7 @@
                 },
                 "after": {
                   "type": "string",
-                  "description": "For `start` or run-listing `status`, a reply's `next_after`."
+                  "description": "For `start` or `status`, the last `next_after`."
                 },
                 "consume": {
                   "description": "For `start`, false keeps staged copies.",
@@ -4528,7 +4528,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "For `acknowledge`, the residual paths to clear; none is refused."
+                  "description": "For `acknowledge`, the person's decision: only paths they need no longer keep. Reversible by hand; none is refused."
                 }
               },
               "required": [
@@ -5498,7 +5498,7 @@
     }
   },
   "read_import": {
-    "description": "Scan material without importing it, inspect import runs or read a bounded work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import`), then start on the path it prints. Status keeps recorded coverage and verification counts. Select one operation.kind.",
+    "description": "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>`, then start on the path it prints. Without a shell, give the person `exomem cloud import <folder>`; never upload files yourself. Status reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source` is true. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5560,21 +5560,21 @@
                 },
                 "run_id": {},
                 "path": {
-                  "description": "For `start`, scan subtree (default: whole vault; ask which folder). For run-listing `status`, count distinct filed originals under it (null with `complete=false` if incomplete). Omit for legacy listing.",
+                  "description": "For `start`, subtree to scan (default: whole vault; ask which folder). For run-listing `status`, count filed originals under it (null if `complete=false`).",
                   "type": "string",
                   "default": ""
                 },
                 "after": {
                   "type": "string",
-                  "description": "For `start` or run-listing `status`, a reply's `next_after`."
+                  "description": "For `start` or `status`, the last `next_after`."
                 },
                 "series_id": {
                   "type": "string",
-                  "description": "For run-listing `status`, an import series whose next window needs room; send with next_window_bytes."
+                  "description": "For `status`, a series needing room for its next window."
                 },
                 "next_window_bytes": {
                   "type": "integer",
-                  "description": "For run-listing `status`, that window's bytes."
+                  "description": "For `status`, that window's bytes."
                 }
               },
               "required": [

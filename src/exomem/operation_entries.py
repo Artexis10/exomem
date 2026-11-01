@@ -533,7 +533,7 @@ _TOOL_HELP = {
     "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
-    "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a bounded work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import`), then start on the path it prints. Status keeps recorded coverage and verification counts."),
+    "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>`, then start on the path it prints. Without a shell, give the person `exomem cloud import <folder>`; never upload files yourself. Status reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source` is true."),
     "import_memory": ("write", "Import memory", "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Carry continuations through plan and apply; finish records coverage."),
 }
 

@@ -29,7 +29,7 @@
     }
   },
   "transfer_memory": {
-    "description": "Cancel or discard an import, or request an export of this Exomem Cloud memory.\n\nThe Cloud gateway runs it against your account, not this vault. Check progress\nwith observe_transfer. It never returns file bytes or download links.\n\nimport_cancel: stops an open import; no confirm.\nimport_discard: permanently deletes the staged originals; needs confirm=true.\nexport_request: packs your memory, pauses your assistants while it packs and\nreplaces any ready export. Call it without confirm for the effects and a fresh\nexport_id; ask the owner; then repeat with confirm=true and that export_id\n(the same id is safe to retry). Download from Home or `exomem cloud export`.",
+    "description": "Cancel or discard an import, or request an export of this Exomem Cloud memory.\n\nThe Cloud gateway runs it against your account, not this vault. Check progress\nwith observe_transfer. It never returns file bytes or download links.\n\nimport_cancel: stops an open import; no confirm.\nimport_discard: permanently deletes the staged originals; needs confirm=true.\n`IMPORT_RENAMES_PENDING`: run apply, or move the file and keep the source.\n`IMPORT_RECEIPT_UNREADABLE`: the owner discards with `--walk-stage`.\nexport_request: packs your memory, pauses your assistants while it packs and\nreplaces any ready export. Call it without confirm for the effects and a fresh\nexport_id; ask the owner; then repeat with confirm=true and that export_id\n(the same id is safe to retry). Download from Home or `exomem cloud export`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

@@ -39,7 +39,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # variants, the receipt's page cursor, and the adopt-local write variant, so the budget rises 2,000 B and
 # remote clients keep the maintenance that local clients have.
 # The windows status adds `series_id`, `next_window_bytes` and the `after` cursor to read_import, and the
-# acknowledge kind to import_memory, so the budget rises 750 B; the tool text is rewritten with 5.4.8.
+# acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it, and the Cloud-only
+# transfer_memory ceiling rises 150 B for the import_discard refusals.
 TOTAL_BUDGET = 165_250
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
@@ -108,7 +109,7 @@ TOOL_CEILINGS: dict[str, int] = {
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
     "observe_transfer": 1850,
-    "transfer_memory": 1650,
+    "transfer_memory": 1800,  # import_discard refusals: the agent routes them from the tool text
 }
 
 
