@@ -23,6 +23,7 @@ from test_retrieve_nudge_working_set import (
     SESSION,
     _context,
     _event,
+    _lane,
     _packet,
     hook,
 )
@@ -326,7 +327,7 @@ def test_an_older_service_gets_one_retry_without_the_conversation(monkeypatch: p
     monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
     conversation = hook._conversation_from_transcript(str(CLAUDE), CURRENT)
     packet = hook._fetch_packet_via_rest(
-        CURRENT, "sekret", "", 4.0, {"client": "claude-code", "session": SESSION}, conversation=conversation
+        CURRENT, _lane("sekret"), "", 4.0, {"client": "claude-code", "session": SESSION}, conversation=conversation
     )
     assert packet is not None
     assert len(bodies) == 2

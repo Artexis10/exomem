@@ -20,7 +20,7 @@ Give the assistant the information to save or name the project you mean. Exomem 
 
 ## Data handling
 
-MCP tool arguments, including user turns sent to `recall_context`, reach the authenticated Exomem Cloud service. Reads return authorized account content; successful writes persist governed memory in that account. OAuth selects the account. This package does not import a local vault, read local service credentials, or share authorization between accounts. Your AI provider also processes the conversation and tool results under its policies.
+MCP tool arguments, including user turns sent to `recall_context`, reach the authenticated Exomem Cloud service. Reads return authorized account content; successful writes persist governed memory in that account. OAuth selects the account, and this package reaches Exomem only through that admitted MCP connection. It does not import a local vault or share authorization between accounts. Your AI provider also processes the conversation and tool results under its policies.
 
 ## Surface support
 
@@ -36,4 +36,4 @@ Publisher: Substrate Systems OÜ.
 
 ## Claude lifecycle hooks
 
-On supported Cowork/Claude Code surfaces, trust the plugin's command hooks through the normal client approval flow. They invoke canonical Python scripts directly and require a real `python3` executable on the execution host; Python dependencies are not installed by this package. Hooks use the admitted MCP connection, never a local service credential. Retrieval requests context activation; capture asks the assistant to preserve governed outcomes. Neither bypasses the live server's write policy. Local hooks inspect the client transcript and workspace metadata for cadence and structural continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not inside the versioned package. Hook logs contain metadata only, not prompt or assistant snippets. Hooks do not execute in Claude Chat.
+On supported Cowork/Claude Code surfaces, trust the plugin's command hooks through the normal client approval flow. They invoke canonical Python scripts directly and require a real `python3` executable on the execution host; Python dependencies are not installed by this package. Hooks use only the admitted MCP connection. Retrieval requests context activation; capture asks the assistant to preserve governed outcomes. Neither bypasses the live server's write policy. Local hooks inspect the client transcript and workspace metadata for cadence and structural continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not inside the versioned package. Hook logs contain metadata only, not prompt or assistant snippets. Hooks do not execute in Claude Chat.

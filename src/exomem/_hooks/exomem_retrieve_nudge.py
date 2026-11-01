@@ -18,8 +18,8 @@ default.)
 Opt-in **inject mode** (`EXOMEM_RETRIEVE_INJECT`) upgrades the reminder to real
 retrieved content: on the same gated prompt, it fetches the top compact routing
 stubs (`search_memory(detail="compact", mode="hybrid")`) via a short transport
-ladder — REST first (the separate self-hosted credential module reads the
-managed local service's key), then an opt-in CLI fallback
+ladder — REST first (over the lanes the separate self-hosted credential module
+supplies), then an opt-in CLI fallback
 (`EXOMEM_RETRIEVE_INJECT_CLI`) — and appends them to the reminder. Any transport
 failure (or the flag being off) falls straight through to the reminder-only
 floor; the hook never blocks or raises past that point.
@@ -61,16 +61,12 @@ hybrid mode for the same prompt, ~1.5 s over REST, ~2.4 s via the CLI). The log
 line names the lane that answered and the hit count so that fall-through is
 visible instead of indistinguishable from success.
 
-When `EXOMEM_LOCAL_TOKEN_FILE` names a local client token (`exomem auth
-issue-local`) and a local port resolves (`EXOMEM_LOCAL_PORT` here, else in
-`service.env`), the REST rung first posts to the managed service's local
-listener on `127.0.0.1` with that token and logs `lane=local`. For one release a
-failed local request still falls through to the lifted-key request below.
-
-A key this hook lifts out of the managed install's `service.env` travels only
-to loopback: an `EXOMEM_HOST` that points anywhere else disables the REST rung
-for a file-sourced key (a key the user exported into the environment keeps
-today's behaviour, since they placed both). The stub block is cut by whole
+The REST rung tries each lane the credential module yields, in its order, and
+logs the lane that answered (`lane=local` or `lane=rest`). That module's
+docstring has the credential sources and the loopback binding. For one release a
+failed local request still falls through to the next lane. Where the module is
+not deployed, as in the Cloud archive, no lane exists: the REST rung is skipped
+exactly as when no credential is configured. The stub block is cut by whole
 lines, never inside a path. The two rungs share one wall-clock budget under the
 registered hook timeout: the REST rung is joined against the remaining budget
 and the CLI subprocess gets the remainder as its timeout, so a slow or
@@ -240,8 +236,6 @@ CLI_TIMEOUT_SECONDS = 5.0
 # A rung that would start with less than `_MIN_RUNG_SECONDS` left is skipped.
 INJECT_BUDGET_SECONDS = 8.0
 _MIN_RUNG_SECONDS = 0.5
-# A key read from disk is only ever sent to the local service.
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 # Local mirror of extract.py::_env_flag's truthy-parse convention. This script
 # deliberately never imports exomem (see module docstring), so the helper is
@@ -622,7 +616,7 @@ def _open_no_redirect(req: urllib.request.Request, timeout: float):
 
 def _fetch_via_rest(
     prompt: str,
-    api_key: str,
+    lane,
     limit: int = 3,
     timeout: float = REST_TIMEOUT_SECONDS,
     base_url: str | None = None,
@@ -630,7 +624,8 @@ def _fetch_via_rest(
     """One POST to the local REST facade's `/api/search_memory` (hybrid mode, compact
     detail). Returns the compact hit list, or `None` on ANY failure — connection
     error, timeout, non-200, malformed JSON, `success: false` — never raises.
-    `base_url` is the local listener's loopback origin when the local rung asks."""
+    `lane` builds the authenticated request. `base_url` is the local listener's
+    loopback origin when the local rung asks."""
     if base_url is None:
         port = _rest_port()
         if port is None:
@@ -640,15 +635,7 @@ def _fetch_via_rest(
     body = json.dumps(
         {"query": prompt, "detail": "compact", "limit": limit, "mode": INJECT_MODE}
     ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
+    req = lane.request(url, body)
     try:
         with _open_no_redirect(req, timeout=timeout) as resp:
             status = resp.getcode()
@@ -709,36 +696,18 @@ def _fetch_via_cli(
     return _parse_hits(payload)
 
 
-def _service_env_path() -> Path | None:
-    return _state_core().local_credentials().service_env_path()
+def _local_credentials():
+    """The self-hosted credential module, or `None` where it is not deployed.
+
+    The Cloud archive omits it, so every use of a lane goes through here.
+    """
+    return _state_core().optional_sibling_module("exomem_local_credentials.py")
 
 
-def _resolve_rest_key() -> tuple[str, str]:
-    return _state_core().local_credentials().rest_key(_service_env_value)
-
-
-def _service_env_value(name: str) -> str:
-    return _state_core().local_credentials().service_env_value(name, _service_env_path())
-
-
-def _local_port() -> int | None:
-    """The managed service's local listener port: this env, else `service.env`."""
-    value = os.environ.get("EXOMEM_LOCAL_PORT", "").strip() or _service_env_value(
-        "EXOMEM_LOCAL_PORT"
-    )
-    if not value.isascii() or not value.isdigit():
-        return None
-    port = int(value)
-    return port if 1 <= port <= 65535 else None
-
-
-def _resolve_local_credential() -> tuple[str, int | None]:
-    return _state_core().local_credentials().local_credential(_local_port)
-
-
-def _rest_api_key() -> str:
-    """The resolved key alone; see `_resolve_rest_key`."""
-    return _resolve_rest_key()[0]
+def _credentialed_lanes():
+    """The REST rung's lanes, local first; none without the credential module."""
+    credentials = _local_credentials()
+    return credentials.lanes(_rest_host()) if credentials is not None else iter(())
 
 
 def _bounded(call, budget: float):
@@ -762,20 +731,15 @@ def _bounded(call, budget: float):
 def _gather_with_lane(rest_call, cli_call):
     """Transport ladder decision, plus the name of the rung that answered:
     "local", "rest", "cli", or "none" when the ladder fell through to the
-    reminder-only floor. The local listener runs first when a local token and
-    port resolve, then REST when a key resolves; CLI only when REST wasn't
-    attempted or failed AND `EXOMEM_RETRIEVE_INJECT_CLI` is truthy. A resolved
-    transport that answers with nothing useful is still the answer, so CLI is
-    never a second opinion on REST.
+    reminder-only floor. The credentialed lanes run first, in the order
+    `_credentialed_lanes` yields them; CLI only when no lane was attempted or
+    all failed AND `EXOMEM_RETRIEVE_INJECT_CLI` is truthy. A resolved transport
+    that answers with nothing useful is still the answer, so CLI is never a
+    second opinion on REST.
 
     Both rungs take a timeout and return `None` for "not usable"; the ladder
     itself knows nothing about what they fetch, which is why stub mode and
     working-set mode share it exactly rather than drifting into two budgets.
-
-    A key read from `service.env` is bound to loopback: the hook must not become
-    the primitive that posts a key it lifted off disk, plus the prompt, to a host
-    named by `EXOMEM_HOST`. A key the user exported into the environment keeps
-    today's behaviour — they placed both variables.
 
     Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`). The
     CLI rung's `subprocess.run(timeout=)` is a wall-clock bound already; the
@@ -786,33 +750,15 @@ def _gather_with_lane(rest_call, cli_call):
     failed and the ladder moves on, while the abandoned request dies with the
     hook process."""
     deadline = time.monotonic() + INJECT_BUDGET_SECONDS
-    local_token, local_port = _resolve_local_credential()
-    if local_token and local_port is not None:
+    # For one release a failed local lane still falls through to the next, so a
+    # service whose supervisor predates the local listener keeps answering.
+    for lane in _credentialed_lanes():
         remaining = deadline - time.monotonic()
         if remaining >= _MIN_RUNG_SECONDS:
-            answer = _bounded(
-                lambda: rest_call(
-                    local_token,
-                    min(REST_TIMEOUT_SECONDS, remaining),
-                    f"http://127.0.0.1:{local_port}",
-                ),
-                remaining,
-            )
-            if answer is not None:
-                return answer, "local"
-        # For one release a failed local rung still falls through to the
-        # lifted-key rung below, so a service whose supervisor predates the
-        # local listener keeps answering.
-    api_key, source = _resolve_rest_key()
-    if api_key and (source == "env" or _rest_host() in _LOOPBACK_HOSTS):
-        remaining = deadline - time.monotonic()
-        if remaining >= _MIN_RUNG_SECONDS:
-            answer = _bounded(
-                lambda: rest_call(api_key, min(REST_TIMEOUT_SECONDS, remaining)),
-                remaining,
-            )
-            if answer is not None:  # REST reachable (even if empty) -> CLI never tried
-                return answer, "rest"
+            timeout = min(REST_TIMEOUT_SECONDS, remaining)
+            answer = _bounded(lambda lane=lane, timeout=timeout: rest_call(lane, timeout), remaining)
+            if answer is not None:  # reachable (even if empty) -> CLI never tried
+                return answer, lane.name
     if _env_flag("EXOMEM_RETRIEVE_INJECT_CLI"):
         remaining = deadline - time.monotonic()
         if remaining >= _MIN_RUNG_SECONDS:
@@ -822,17 +768,17 @@ def _gather_with_lane(rest_call, cli_call):
     return None, "none"
 
 
-def _local_origin(base_url: str | None) -> dict:
-    """The keyword a REST call takes only when the local rung asks: the lifted-key
-    rung calls the fetchers exactly as it always has."""
-    return {"base_url": base_url} if base_url else {}
+def _local_origin(lane) -> dict:
+    """The keyword a REST call takes only for a lane that fixes its own origin:
+    the other lane calls the fetchers exactly as it always has."""
+    return {"base_url": lane.origin} if lane.origin else {}
 
 
 def _gather_hits_with_lane(prompt: str) -> tuple[list[dict], str]:
     """Stub mode's rungs on the shared ladder. `[]` is the reminder-only floor."""
     hits, lane = _gather_with_lane(
-        lambda api_key, timeout, base_url=None: _fetch_via_rest(
-            prompt, api_key, timeout=timeout, **_local_origin(base_url)
+        lambda lane, timeout: _fetch_via_rest(
+            prompt, lane, timeout=timeout, **_local_origin(lane)
         ),
         lambda timeout: _fetch_via_cli(prompt, timeout=timeout),
     )
@@ -853,13 +799,13 @@ def _gather_packet_with_lane(
     if max_chars is not None:
         extra["max_chars"] = max_chars
     return _gather_with_lane(
-        lambda api_key, timeout, base_url=None: _fetch_packet_via_rest(
+        lambda lane, timeout: _fetch_packet_via_rest(
             prompt,
-            api_key,
+            lane,
             continuity,
             timeout,
             attribution,
-            **_local_origin(base_url),
+            **_local_origin(lane),
             **extra,
         ),
         lambda timeout: _fetch_packet_via_cli(
@@ -1279,7 +1225,7 @@ def _parse_packet(payload) -> dict | None:
 
 def _fetch_packet_via_rest(
     prompt: str,
-    api_key: str,
+    lane,
     continuity: str = "",
     timeout: float = REST_TIMEOUT_SECONDS,
     attribution: dict | None = None,
@@ -1320,14 +1266,8 @@ def _fetch_packet_via_rest(
             body["conversation"] = sent
         else:
             body.pop("conversation", None)
-        req = urllib.request.Request(
-            f"{base_url}/api/recall_context",
-            data=json.dumps({**body, **extra}).encode("utf-8"),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
+        req = lane.request(
+            f"{base_url}/api/recall_context", json.dumps({**body, **extra}).encode("utf-8")
         )
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
@@ -1349,7 +1289,7 @@ def _fetch_packet_via_rest(
         remaining = timeout - (time.monotonic() - started)
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_rest(
-                prompt, api_key, continuity, remaining, attribution, base_url, conversation,
+                prompt, lane, continuity, remaining, attribution, base_url, conversation,
                 max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
             )
             return smaller if smaller is not None else packet

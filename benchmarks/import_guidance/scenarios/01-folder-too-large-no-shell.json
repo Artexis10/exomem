@@ -1,0 +1,66 @@
+{
+  "id": "01-folder-too-large-no-shell",
+  "title": "Folder too large, no shell",
+  "prompt": "Please import my ~/Archive folder into my memory. It is about 120 GB.",
+  "served_tools": [
+    "import_memory",
+    "read_import",
+    "observe_transfer",
+    "transfer_memory"
+  ],
+  "builtin_tools": [],
+  "replies": {
+    "read_import.status": {
+      "$status": {}
+    },
+    "observe_transfer.import_handoff": {
+      "$import_handoff": {
+        "routes": [
+          {
+            "route": "cli",
+            "detail": "with a shell: exomem cloud import <folder>"
+          },
+          {
+            "route": "browser",
+            "detail": "Home link: https://cloud.exomem.example/home/import (desktop only, folders only, one page session)"
+          }
+        ]
+      }
+    },
+    "observe_transfer.status": {
+      "$transfer_status": {
+        "import": null
+      }
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "checks": [
+    {
+      "type": "only_scripted_tools"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "gives_cli_command",
+      "expect": true,
+      "text": "The agent gives the person the literal command `exomem cloud import ~/Archive` (or the same command with the folder path) to run themselves."
+    },
+    {
+      "id": "keeps_source",
+      "expect": true,
+      "text": "The agent tells the person to keep the source folder (not delete it) until the import is finished."
+    },
+    {
+      "id": "offers_home_link_for_folder",
+      "expect": false,
+      "text": "The agent offers the Home link or browser upload as a way to send this 120 GB folder."
+    },
+    {
+      "id": "tries_upload_or_paste",
+      "expect": false,
+      "text": "The agent tries to upload, paste, retype or attach file contents itself, or names a tool that does not exist to upload files."
+    }
+  ]
+}

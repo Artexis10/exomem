@@ -21,20 +21,22 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any
 
 
-@lru_cache(maxsize=1)
-def local_credentials():
-    """Load the self-hosted transport dependency only when that mode uses it.
+@cache
+def optional_sibling_module(filename: str):
+    """Load the module deployed beside this script as `filename`, or `None` when it is absent.
 
-    Cloud packages deliberately omit this module; native-MCP paths never call
-    this loader. Standalone local installs keep it beside these shared scripts.
+    Hooks use this for a dependency that only some installs deploy. The caller
+    treats `None` as "that capability is not installed".
     """
-    path = Path(__file__).with_name("exomem_local_credentials.py")
-    spec = importlib.util.spec_from_file_location("_exomem_local_credentials", path)
+    path = Path(__file__).with_name(filename)
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(f"_exomem_sibling_{path.stem}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

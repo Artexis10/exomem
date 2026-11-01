@@ -338,6 +338,43 @@ receipt, correct next-step selection, and byte-identical plan identity at every
 cut. A changed plan id/fingerprint, altered target, or substituted stable
 identity must refuse, not recover optimistically.
 
+### 11. Steps depend on their own plan, not on when approval comes
+
+Proposal prepares every step before any step runs, and approval often comes
+days later. Two leaf guards then refused runs the plan itself made valid:
+
+- A later step that links to a page an earlier step creates renders that link
+  as written while the page is absent, and in the writer's resolved form once
+  it exists. Its sealed draft hash could never match, so the run stopped
+  part-way.
+- An edit's transition token pins the reviewed `updated` instant, and the
+  writer refuses one older than a day.
+
+Proposal therefore prepares step `k` with a private resolver seam
+(`find.planned_pages`) that registers the pages steps `0..k-1` create, with the
+titles their leaves register. Only the writer resolver is projected, which
+renders links and resolves source claims: the semantic checks still read the
+vault as it is, and an earlier supersession changes a page's status, which a
+resolver entry cannot carry. Other dependencies, such as a link by a title an
+earlier edit changes, still refuse through the leaf when the step runs. Proposal refuses
+(`CURATION_STEP_CONFLICT`) the plans that projection cannot make run: a later
+step bound to a path an earlier step writes, a link to a page an earlier step
+supersedes, and a relation disposition on a step that links to a page an
+earlier step creates, since that link is its relation once the page exists.
+Relocation steps are refused before any step runs. A foreign change still
+alters the render, and the leaf still refuses it. Projecting planned pages into
+the semantic corpus would accept more plans; it needs sealed post-step bytes
+for every step kind, which supersede and create-entity do not produce today.
+
+At execution an edit step re-runs its leaf's validation for a fresh
+transition, ignoring any token copied into the plan. Exactness moves to the
+witness batch, which already sees the leaf's planned bytes before anything is
+written: the planned page, with `updated` put back to the reviewed instant by
+the edit writer's own helper, must hash to the sealed postcondition. The edit
+therefore records its real commit instant and still writes exactly the
+approved change. Creates keep their reviewed render instant, because it can
+decide the destination path.
+
 ## Risks / Trade-offs
 
 - **[Risk] Plan files duplicate pre-change content for compensation.** → Keep
