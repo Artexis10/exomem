@@ -10732,8 +10732,8 @@ def op_adoption_studio(
         next_window_bytes: Sender only: that window's bytes.
         import_id: For `acknowledge`, the discarded window.
         paths: For `acknowledge`: only paths the person confirmed they need no
-            longer keep. Ends their keep-source warning; no tool undoes it. None
-            is refused.
+            longer keep. Ends their keep-source warning; no tool undoes it. A call
+            with none is refused.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:

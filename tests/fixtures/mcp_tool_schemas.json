@@ -4528,7 +4528,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "For `acknowledge`: only paths the person confirmed they need no longer keep. Ends their keep-source warning; no tool undoes it. None is refused."
+                  "description": "For `acknowledge`: only paths the person confirmed they need no longer keep. Ends their keep-source warning; no tool undoes it. A call with none is refused."
                 }
               },
               "required": [
