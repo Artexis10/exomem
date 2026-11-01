@@ -1874,11 +1874,18 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         return _kubectl(k3s.name, ["auth", "can-i", *words, f"--as={identity}"], check=False).stdout.strip()
 
     print("[3.10] scenario: cellctl can neither patch nor read the cell's object-store key")
+    # Server-side apply sends the PATCH without a prior GET, so the write reaches admission
+    # even though RBAC already denies cellctl reading this Secret.
+    forged_key = {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": namespace},
+        "stringData": {OBJECT_STORE_KEY_ID_FIELD: "forged"},
+    }
     patched = _kubectl(
         k3s.name,
-        ["patch", "secret", OBJECT_STORE_KEY_SECRET, "--namespace", namespace, "--type=merge", "--dry-run=server",
-         f"--patch={json.dumps({'stringData': {OBJECT_STORE_KEY_ID_FIELD: 'forged'}})}", f"--as={cellctl_username}"],
-        check=False,
+        ["apply", "--server-side", "--force-conflicts", "--field-manager=forged-cellctl", "--dry-run=server",
+         "--filename=-", f"--as={cellctl_username}"],
+        documents=[forged_key], check=False,
     )
     assert patched.returncode != 0
     assert "exomem-cellctl-scope" in patched.stderr, patched.stderr

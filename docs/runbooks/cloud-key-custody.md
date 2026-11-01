@@ -44,7 +44,7 @@ the key, so run the script for both accounts.
 5. Export the operator key for the `cell-data` account, then run its dry run.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id>`
 6. Write down the date that the `cell-data` dry run prints as `first_dry_run=<date>`. This date starts the 7-day grace.
-7. If a dry run shows `keys_found` above 0, run the same command with `--apply`. Expect `keys_deleted` equal to `keys_found`.
+7. If the `founder` dry run shows `keys_found` above 0, run its command again with `--apply`. Expect `keys_deleted` equal to `keys_found`. For `cell-data`, use the command in step 8.
 8. For `cell-data`, add the date from step 6 to every later command.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id> --first-dry-run <date> --apply`
 9. Expect `hide=waiting` until the date in `grace_ends`. Rerun step 8 on or after that date.

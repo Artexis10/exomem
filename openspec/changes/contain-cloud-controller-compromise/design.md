@@ -304,9 +304,10 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret. Every key listing uses the provider's v4 API: on 2026-11-01 the v3 listing of a live account returned 6 of its 25 keys.
 - It hides a cell's prefix, and then deletes its key, only on a deletion record that Substrate signed with the grant key (audience `exomem-cell-delete`), and only after a 7-day grace period. It raises an alert on each hide. A deleted or recreated namespace alone hides nothing.
 
-**What `cellctl` keeps.** It keeps two keys that cannot create keys:
+**What `cellctl` keeps.** It keeps three keys that cannot create keys:
 - a key limited to the staging bucket, for presigning and removing export and import objects;
-- a key that can only list files in the backup bucket, for version bookkeeping.
+- a key that can only list files in the backup bucket, for version bookkeeping;
+- until task 3.3, a key limited to the founder account's old cell bucket that can only list buckets and files and delete files, for deleting the objects of cells created before the switch.
 
 **The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
 - It runs as a scheduled CI job outside the cluster, at least hourly. It alerts with its own receiver credential, which no in-cluster component holds.
