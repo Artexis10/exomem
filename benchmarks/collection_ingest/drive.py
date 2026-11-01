@@ -11,6 +11,10 @@ collection is copied into the vault, so the originals under
 
 ``personal`` leaves the media engines at their default (all on). ``cloud-like`` sets
 ``EXOMEM_MEDIA_ENGINES=documents,ocr`` (no speech), as the hosted image does.
+
+``--existing-pages SPEC`` imports into a vault that already holds pages: the driver writes
+the pages of SPEC (the ``*.vault-pages.json`` that the raw profiles write beside their key)
+into the new vault before the first journey, and records their bytes in the log.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import shutil
 import subprocess
@@ -67,6 +72,26 @@ def every_other_file(collection_dir: Path, name: str) -> list[str]:
         and path.suffix.lower() != ".md"
         and not any(part.startswith(".") for part in path.relative_to(collection_dir).parts)
     )
+
+
+def seed_existing_pages(spec_file: Path, vault: Path, today: dt.date) -> dict[str, Any]:
+    """Write the spec's pages into the vault; return what was written, for the scorer to compare.
+
+    ``{today}`` in a path or a body is the day of this drive, the day that the server dates its pages.
+    """
+    spec = json.loads(spec_file.read_text(encoding="utf-8"))
+    rows = []
+    for page in spec["pages"]:
+        rel = page["path"].replace("{today}", today.isoformat())
+        data = page["content"].replace("{today}", today.isoformat()).encode("utf-8")
+        target = vault / rel
+        if target.exists():
+            raise SystemExit(f"existing page {rel} is already in the new vault")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        rows.append({"id": page["id"], "path": rel, "bytes": len(data),
+                     "sha256": hashlib.sha256(data).hexdigest()})
+    return {"seeded": True, "spec": spec_file.name, "day": today.isoformat(), "pages": rows}
 
 
 def init_vault(python: Path, env: dict[str, str], vault: Path, state: Path) -> dict[str, Any]:
@@ -373,6 +398,8 @@ async def drive(args: argparse.Namespace) -> dict[str, Any]:
     init = init_vault(args.python, env, vault, state)
     if init["exit_code"] != 0:
         raise SystemExit(f"exomem init failed: {init}")
+    existing = (seed_existing_pages(args.existing_pages, vault, dt.date.today())
+                if args.existing_pages else {"seeded": False})
 
     rules_state: dict[str, Any] = {"folder_kind_rules": "not-probed", "collection_label": "not-tried"}
     log: dict[str, Any] = {
@@ -386,7 +413,7 @@ async def drive(args: argparse.Namespace) -> dict[str, Any]:
         "include_rules": args.include_rule,
         "env": {k: v for k, v in env.items() if k.startswith(("EXOMEM_", "HF_"))},
         "search_mode_note": "EXOMEM_DISABLE_EMBEDDINGS=1: search_memory runs its lexical lane only",
-        "collection_files_placed": placed, "init": init,
+        "collection_files_placed": placed, "init": init, "existing_vault": existing,
     }
     total_started = time.perf_counter()
     async with McpSession(python=args.python, state=state, env=env, timeout=args.timeout) as session:
@@ -452,6 +479,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="JSON selection rule; repeat to select more paths; replaces the default rules; refusal stops the run")
     parser.add_argument("--select-every-file", action="store_true",
                         help="also name every visible non-markdown file in `overrides` (observes per-file refusals)")
+    parser.add_argument("--existing-pages", type=Path, default=None, metavar="SPEC",
+                        help="page spec (<key>.vault-pages.json) to write into the vault before the import")
     parser.add_argument("--label", default="", help="free-text run label stored in the log")
     parser.add_argument("--log", type=Path, required=True, help="drive log JSON to write")
     args = parser.parse_args(argv)

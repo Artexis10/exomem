@@ -55,7 +55,7 @@ UNSAFE_NAME_CODES = ("INVALID_PATH", "UNSAFE_PATH")
 CLASS_CONTRACT = {
     "plain-md": "Markdown without front matter. Filed as a Source, and as an own note when an include rule asks for one. Text is searchable.",
     "same-title": "Three notes that share one H1 title. Each is filed under its own page name.",
-    "plain-txt": "Plain text without front matter, one near-empty. Filed as a Source. Text is searchable.",
+    "plain-txt": "Plain text without front matter, one a single short line. Filed as a Source. Text is searchable.",
     "broken-frontmatter": "A front-matter block that never closes, one that is not valid YAML, and a rule line that opens one. Filed with the original text verbatim.",
     "line-endings": "UTF-8 with CRLF, mixed or lone-CR line endings. Filed with the original bytes; text is searchable.",
     "utf8-bom": "UTF-8 with a byte-order mark. Filed; text is searchable.",
@@ -269,7 +269,7 @@ def build(
     p = probe()
     text("dump/todo.txt", "plain-txt",
          "\n".join(f"- {prose(rng)}" for _ in range(3)) + f"\n- {reference(p)}\n", phrase=p)
-    text("dump/blank.txt", "plain-txt", "\n", phrase=None)
+    text("dump/nearly empty.txt", "plain-txt", "nothing here yet\n", phrase=None)
     p = probe()
     text("dump/one line.txt", "plain-txt", reference(p), phrase=p)
     p = probe()
@@ -456,6 +456,16 @@ def _seed_pages(items: Sequence[RawItem], probe: Callable[[], str]) -> list[Seed
         )
         return SeedPage(page_id, path, body, role, collides_with, stem, phrase)
 
+    def note(page_id: str, path: str, title: str) -> SeedPage:
+        phrase = probe()
+        body = (
+            "---\ntype: insight\nexomem_id: 6f1d3c52-0a7e-4b8e-9c41-2d5e7a9b1c30\n"
+            f"title: {title}\nstatus: draft\ncreated: {{today}}T00:00:00Z\nupdated: {{today}}T00:00:00Z\n"
+            f"sources: []\ntags: [existing]\n---\n\n# {title}\n\n## Overview\n\n"
+            f"This note was in the vault before the import. Reference code {phrase} belongs to it.\n"
+        )
+        return SeedPage(page_id, path, body, "bystander", None, None, phrase)
+
     text_item = "dump/Harbor tide ledger.md"
     artifact_item = "legacy/latin1 river survey.txt"
     assert text_item in by_path and artifact_item in by_path
@@ -470,6 +480,6 @@ def _seed_pages(items: Sequence[RawItem], probe: Callable[[], str]) -> list[Seed
                    "collection_path: notes/archive note.md\n"
                    f"original_sha256: {hashlib.sha256(b'earlier archive note').hexdigest()}\n"
                    "original_bytes: 20\n"),
-        page("bystander-note", "Knowledge Base/Notes/Insights/existing-hand-written-note.md",
-             "Existing hand-written note", role="bystander", collides_with=None, stem=None),
+        note("bystander-note", "Knowledge Base/Notes/Insights/existing-hand-written-note.md",
+             "Existing hand-written note"),
     ]
