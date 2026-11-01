@@ -26,7 +26,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, BinaryIO, TypedDict, cast
 
 from . import foreground_priority
@@ -106,56 +105,17 @@ class MutationTiming(TypedDict):
     holder_kind: str
 
 
-# Which lock a coordinator guards, so a refusal names the lock that refused. The kinds are the
-# coordinators this module builds, not data: a new coordinator kind is a code change here.
-COORDINATOR_VAULT_BOUNDARY = "vault_boundary"
-COORDINATOR_IDENTITY_GATE = "identity_gate"
-COORDINATOR_IDENTITY_DOMAIN = "identity_domain"
-_COORDINATOR_BUSY_MESSAGE = {
-    COORDINATOR_VAULT_BOUNDARY: "vault mutation boundary is busy",
-    COORDINATOR_IDENTITY_GATE: "reserved-identity gate is busy",
-    COORDINATOR_IDENTITY_DOMAIN: "reserved-identity domain {name} is busy",
-}
-_COORDINATOR_KINDS = frozenset(_COORDINATOR_BUSY_MESSAGE)
-
-# One entry per coordinator: a command that holds the vault boundary reads that hold, and a
-# later hold of the reserved-identity gate, a domain or a review-state lock cannot replace it.
-_LAST_MUTATION_TIMING: ContextVar[Mapping[Path, MutationTiming]] = ContextVar(
-    "exomem_last_mutation_timing", default=MappingProxyType({})
+_LAST_MUTATION_TIMING: ContextVar[MutationTiming | None] = ContextVar(
+    "exomem_last_mutation_timing", default=None
 )
 
 
-# The newest hold of any coordinator, cleared by every later attempt, as before coordinators were
-# told apart: the journal fallback reads it without naming a coordinator.
-_LATEST_MUTATION_TIMING: ContextVar[MutationTiming | None] = ContextVar(
-    "exomem_latest_mutation_timing", default=None
-)
-
-
-def last_mutation_timing(coordinator: VaultMutationCoordinator | None = None) -> MutationTiming | None:
-    """Return the latest completed hold of `coordinator`, or with no argument the latest attempt's hold."""
-    if coordinator is not None:
-        return _LAST_MUTATION_TIMING.get().get(coordinator.lock_path)
-    return _LATEST_MUTATION_TIMING.get()
+def last_mutation_timing() -> MutationTiming | None:
+    """Return the most recent completed boundary hold in this context, or `None`."""
+    return _LAST_MUTATION_TIMING.get()
 
 
 logger = logging.getLogger(__name__)
-
-
-def _forget_timing(lock_path: Path) -> None:
-    """Clear this coordinator's prior hold and the latest, so an attempt that fails journals none."""
-    _LATEST_MUTATION_TIMING.set(None)
-    timings = _LAST_MUTATION_TIMING.get()
-    if lock_path in timings:
-        _LAST_MUTATION_TIMING.set(MappingProxyType({k: v for k, v in timings.items() if k != lock_path}))
-
-
-def _record_timing(lock_path: Path, timing: MutationTiming) -> None:
-    """Make `timing` this coordinator's latest, and the latest of all."""
-    _LATEST_MUTATION_TIMING.set(timing)
-    timings = {k: v for k, v in _LAST_MUTATION_TIMING.get().items() if k != lock_path}
-    timings[lock_path] = timing
-    _LAST_MUTATION_TIMING.set(MappingProxyType(timings))
 
 
 def _windows_library(ctypes_module: Any, name: str) -> Any:
@@ -2293,10 +2253,6 @@ def _open_lock_handle(path: Path) -> BinaryIO:
     return handle
 
 
-class _Contended(Exception):
-    """A `try_hold` found the boundary held by someone else."""
-
-
 class VaultMutationCoordinator:
     """Serialize the complete read-plan-write boundary for one vault or cell."""
 
@@ -2308,11 +2264,7 @@ class VaultMutationCoordinator:
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
         long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS,
-        kind: str = COORDINATOR_VAULT_BOUNDARY,
-        name: str | None = None,
     ) -> None:
-        if kind not in _COORDINATOR_KINDS:
-            raise ValueError("unknown mutation coordinator kind")
         if timeout_seconds < 0:
             raise ValueError("mutation lock timeout must be non-negative")
         if poll_interval_seconds <= 0:
@@ -2334,8 +2286,6 @@ class VaultMutationCoordinator:
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.long_holder_seconds = long_holder_seconds
-        self.kind = kind
-        self.name = name
 
     def current_thread_holds_boundary(self) -> bool:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
@@ -2433,7 +2383,6 @@ class VaultMutationCoordinator:
         holder_kind: str = "unknown",
         publish_holder_metadata: bool = True,
         may_borrow: bool = False,
-        probe: bool = False,
     ) -> Iterator[None]:
         """Hold both the local and OS mutation guards for the bounded interval.
 
@@ -2458,44 +2407,8 @@ class VaultMutationCoordinator:
             holder_kind=holder_kind,
             publish_holder_metadata=publish_holder_metadata,
             may_borrow=may_borrow,
-            probe=probe,
         ):
             yield
-
-    @contextmanager
-    def try_hold(
-        self,
-        *,
-        request_id: str | None = None,
-        operation: str | None = None,
-        holder_kind: str = "unknown",
-        publish_holder_metadata: bool = True,
-    ) -> Iterator[bool]:
-        """Hold the boundary if it is free right now, else yield `False` having waited for nothing.
-
-        A miss raises and logs no refusal, but it still counts as an acquire attempt and a
-        momentary waiter in the contention counters.
-
-        Lets a caller that holds a shared gate learn that this lock is busy, release the gate
-        and wait here alone, instead of holding the gate while it waits.
-        """
-        with contextlib.ExitStack() as stack:
-            try:
-                stack.enter_context(
-                    self.hold(
-                        timeout_seconds=0.0,
-                        request_id=request_id,
-                        operation=operation,
-                        holder_kind=holder_kind,
-                        publish_holder_metadata=publish_holder_metadata,
-                        probe=True,
-                    )
-                )
-            except _Contended:
-                held = False
-            else:
-                held = True
-            yield held
 
     @contextmanager
     def _hold(
@@ -2507,7 +2420,6 @@ class VaultMutationCoordinator:
         holder_kind: str,
         publish_holder_metadata: bool,
         may_borrow: bool = False,
-        probe: bool = False,
     ) -> Iterator[None]:
         """`hold()` without its foreground mark."""
         if type(publish_holder_metadata) is not bool:
@@ -2543,7 +2455,7 @@ class VaultMutationCoordinator:
         wait_start = time.monotonic()
         # Clear any prior hold's timing so a mutation that fails BEFORE
         # acquiring can never journal a previous mutation's wait/hold values.
-        _forget_timing(self.lock_path)
+        _LAST_MUTATION_TIMING.set(None)
         deadline = wait_start + timeout
         state = _state_for(self.lock_path)
         _note_acquire_attempt(state)
@@ -2579,7 +2491,7 @@ class VaultMutationCoordinator:
             with _waiting(state):
                 entered = state.guard.acquire(timeout=remaining)
         if not entered:
-            raise _Contended() if probe else self._refused(wait_start)
+            raise self._refused(wait_start)
         try:
             handle = self._open_lock_file(self.lock_path)
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
@@ -2591,7 +2503,6 @@ class VaultMutationCoordinator:
                             wait_start=wait_start,
                             publish_holder_metadata=publish_holder_metadata,
                             waiter_state=state,
-                            probe=probe,
                         )
                     finally:
                         # Before `_waiting` ends, so the signal never outlives the count.
@@ -2633,14 +2544,13 @@ class VaultMutationCoordinator:
                 hold_ms = round((time.monotonic() - acquired_at) * 1000, 2)
                 # The part of `hold_ms` that borrowers held (`lend`), so a long hold reads honestly.
                 lent_ms = round(state.lent_seconds * 1000, 2)
-                _record_timing(
-                    self.lock_path,
+                _LAST_MUTATION_TIMING.set(
                     {
                         "wait_ms": wait_ms,
                         "hold_ms": hold_ms,
                         "operation": _safe_label(operation, fallback="unknown"),
                         "holder_kind": _safe_label(holder_kind, fallback="unknown"),
-                    },
+                    }
                 )
                 with state.metadata_guard:
                     already_warned = state.long_warning_emitted
@@ -2759,7 +2669,7 @@ class VaultMutationCoordinator:
         _note_busy_refusal(state, probed)
         probed["contention"] = _contention_view(state)
         wait_ms = (time.monotonic() - wait_start) * 1000
-        error = _mutation_busy(probed, wait_ms=wait_ms, kind=self.kind, name=self.name)
+        error = _mutation_busy(probed, wait_ms=wait_ms)
         # A refusal is the loudest thing this boundary can say, and until now it
         # said it only through the raised OpError -- so it reached the log only
         # where a caller happened to log what it caught, and a caller that
@@ -2780,8 +2690,6 @@ class VaultMutationCoordinator:
         _log_mutation_lock_event(
             "mutation_lock_refused",
             level=logging.DEBUG if _ABSORBING_BUSY.get() else logging.WARNING,
-            coordinator=self.kind,
-            coordinator_name=self.name,
             operation=holder.get("operation"),
             holder_kind=holder.get("holder_kind"),
             age_seconds=holder.get("age_seconds"),
@@ -2886,7 +2794,6 @@ class VaultMutationCoordinator:
         wait_start: float,
         publish_holder_metadata: bool,
         waiter_state: _LocalLockState,
-        probe: bool = False,
     ) -> None:
         """Acquire and publish with the metadata mutex held for one generation.
 
@@ -2901,7 +2808,7 @@ class VaultMutationCoordinator:
             except OSError as exc:
                 raise self._lock_unavailable(exc) from None
             if not metadata_locked:
-                raise _Contended() if probe else self._refused(wait_start)
+                raise self._refused(wait_start)
             acquired = False
             try:
                 try:
@@ -2940,7 +2847,7 @@ class VaultMutationCoordinator:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise _Contended() if probe else self._refused(wait_start)
+                raise self._refused(wait_start)
             _raise_waiter_signal(waiter_state)
             time.sleep(min(self.poll_interval_seconds, remaining))
 
@@ -3244,7 +3151,7 @@ def planned_write_moved_busy() -> OpError:
     This write holds the boundary, so the message must not call the boundary busy:
     a writer outside the line changed a file this write planned, and a re-run re-plans it.
     """
-    busy = _mutation_busy(None, kind=COORDINATOR_VAULT_BOUNDARY)
+    busy = _mutation_busy(None)
     busy.details["cause"] = "auxiliary_changed"
     return OpError(
         "MUTATION_BUSY",
@@ -3255,11 +3162,7 @@ def planned_write_moved_busy() -> OpError:
 
 
 def _mutation_busy(
-    snapshot: dict[str, object] | None = None,
-    *,
-    wait_ms: float | None = None,
-    kind: str | None = None,
-    name: str | None = None,
+    snapshot: dict[str, object] | None = None, *, wait_ms: float | None = None
 ) -> OpError:
     details: dict[str, object] = {
         "status": "retryable",
@@ -3283,13 +3186,9 @@ def _mutation_busy(
         last_holder = contention.get("last_holder")
         if last_holder is not None:
             details["last_holder"] = last_holder
-    if kind is not None:
-        details["coordinator"] = kind
-    if name is not None:
-        details["coordinator_name"] = name
     return OpError(
         "MUTATION_BUSY",
-        _COORDINATOR_BUSY_MESSAGE[kind or COORDINATOR_VAULT_BOUNDARY].format(name=name),
+        "vault mutation boundary is busy",
         "Retry after the current mutation completes; inspect cell health if it remains busy.",
         details=details,
     )
