@@ -1303,3 +1303,19 @@ def test_a_window_that_lands_on_the_cells_record_at_a_rerun_leaves_no_encrypted_
 
     assert result["import_ids"] == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
     assert not list(rig.tmp.glob("checkpoint/window-*/archive.age")) and not _checkpoints(rig)
+
+
+def test_a_series_record_whose_window_folder_is_not_the_clis_own_stops_the_run_and_removes_nothing(rig):
+    """Catches a damaged `dir` in the record that a landed window's cleanup turns into removing the whole checkpoint folder."""
+    _stop_after_complete_while_cloud_imports(rig)
+    rig.cloud.release()  # The window lands at the rerun, and a landed window's folder is removed.
+    record = rig.tmp / "checkpoint" / "series.json"
+    damaged = json.loads(record.read_text())
+    damaged["windows"][0]["dir"] = ""
+    record.write_text(json.dumps(damaged))
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert record.exists() and list(rig.tmp.glob("checkpoint/window-*/archive.age"))
+    assert stop.value.code == "SERIES_RECORD_DAMAGED" and NOT_IN_EXOMEM in stop.value.message

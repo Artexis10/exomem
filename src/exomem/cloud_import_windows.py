@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import stat
 import time
@@ -40,6 +41,8 @@ from .cloud_import_job import _private_json
 
 WINDOWS = "windows"
 SERIES_RECORD, RESEND_RECORD = "series.json", "series-resend.json"
+# Each window's own folder in the checkpoint folder: this prefix and hex. The series record keeps the name.
+WINDOW_DIR = "window-"
 # D3: a demand is a lease that lapses after 15 minutes, and the sender renews it at least every 5.
 DEMAND_RENEWAL_SECONDS = 300
 WAIT_POLL_SECONDS = 30
@@ -205,10 +208,12 @@ class Member:
 #     until Cloud ends it.
 # (d) IMPORT_CONFLICT at register while Cloud cannot show a row for the window's ID means that another import holds the
 #     cell: the run stops, and resumes under the same ID once that import ends. The stop names the window's last earlier
-#     attempt only when that attempt's row still holds the cell, which a pending discard does. IMPORT_CONFLICT with the
-#     window's own row holding the cell, other than in rule (f), means its earlier attempt with another member set holds
-#     the cell: the run stops, and resumes. That stop names Cloud's cancel route only for a row that is neither `done` nor
-#     already cancelled; for a cancelled row, it says that Cloud is ending it.
+#     attempt only when a read of that attempt's row shows that it still holds the cell, which only a pending discard
+#     does; the stop then names no cancel, and a failed read only leaves the name out. IMPORT_CONFLICT with the window's
+#     own row holding the cell, other than in rule (f), means its earlier attempt with another member set holds the cell:
+#     the run stops, and resumes. Cloud accepts a cancel only of a row that holds the cell and is neither cancelled nor
+#     being discarded, so only for such a row does that stop name Cloud's cancel route. For a cancelled row, it says that
+#     Cloud is ending it, and for a row with a pending discard, that Cloud is discarding it.
 # (e) A window's checkpoint is stale when Cloud cannot show a row for the window's ID: a rerun drops it and sends the
 #     window afresh under the same ID (rule a), because the checkpoint may hold a copy for a key or upload that no row knows.
 # (f) The window's own attempt that is `key_ready` and never completed its upload (`requested`) holds the cell and can
@@ -271,9 +276,18 @@ class Series:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        return cls(raw["source"], raw["api_base_url"], raw["series_id"], raw["series_file"],
-                   [Member(**item) for item in raw["members"]], [SentWindow(**item) for item in raw["windows"]],
-                   raw["options"], raw.get("clears", {}), raw.get("skipped", []))
+        series = cls(raw["source"], raw["api_base_url"], raw["series_id"], raw["series_file"],
+                     [Member(**item) for item in raw["members"]], [SentWindow(**item) for item in raw["windows"]],
+                     raw["options"], raw.get("clears", {}), raw.get("skipped", []))
+        # A format check on the CLI's own field: each removal of a window's folder joins `dir` to the checkpoint folder.
+        damaged = [n for n, window in enumerate(series.windows, 1)
+                   if not (isinstance(window.dir, str) and re.fullmatch(re.escape(WINDOW_DIR) + "[0-9a-f]+", window.dir))]
+        if damaged:
+            raise Stopped(PREFLIGHT, "SERIES_RECORD_DAMAGED", (
+                f"the series record {path.name} is damaged: window {damaged[0]} does not name its folder as the CLI does, "
+                f"{WINDOW_DIR} and hex, so the run stops before it sends or removes anything. Restore the record from a "
+                f"backup, or put back the window's folder name. {not_sent_notice(series.not_landed())}"), resume=False)
+        return series
 
     def write(self, path: Path) -> None:
         _private_json(path, asdict(self))
@@ -399,7 +413,7 @@ class _Run:
         return [], 0, "admission would grow the cell for the next member"
 
     async def create(self, taken: list[Member], cost: int) -> None:
-        window = SentWindow([member.path for member in taken], f"window-{uuid.uuid4().hex[:8]}", import_id=str(uuid.uuid4()), cost=cost)
+        window = SentWindow([member.path for member in taken], f"{WINDOW_DIR}{uuid.uuid4().hex[:8]}", import_id=str(uuid.uuid4()), cost=cost)
         self.series.windows.append(window)
         self.series.write(self.record)
         await self.send(window)
@@ -425,6 +439,7 @@ class _Run:
                 row = await self._own_row(window.import_id)
                 if row is not None and _unsent(row):  # Rule (f): settle the attempt before the record forgets its ID.
                     await self._cancel(window.import_id)
+                shutil.rmtree(checkpoint, ignore_errors=True)  # The record forgets the window, so no run uses its copy again.
                 self.series.windows.remove(window)
                 self.series.write(self.record)
                 return
@@ -463,11 +478,16 @@ class _Run:
                         renewed = True
                         continue
                     if row is None:  # Rule (d).
-                        message = "another import is open; cancel it in Home or wait for it to end"
                         last = window.attempts[-1] if window.attempts else None
-                        earlier = await self._own_row(last) if last else None
+                        try:
+                            earlier = await self._own_row(last) if last else None
+                        except Exception:  # noqa: BLE001 -- the hint is advice: a failed read leaves it out, and the stop stays.
+                            earlier = None
                         if earlier is not None and _holds_cell(earlier):  # An attempt that rule (b) renewed holds the cell only while Cloud discards it.
-                            message += f". The open import is {last}, an earlier attempt of this window that Cloud is still discarding"
+                            message = (f"another import is open; wait for it to end. The open import is {last}, an earlier "
+                                       "attempt of this window that Cloud is still discarding")
+                        else:
+                            message = "another import is open; cancel it in Home or wait for it to end"
                     else:
                         message = (f"Cloud import {refused} is an earlier attempt of this window with another member set, "
                                    f"and its state is {safe_code(row['observed_state']) or 'unknown'}. The run continues once the cell "
@@ -475,7 +495,9 @@ class _Run:
                         # The Cloud import protocol fixes `cancelled`: Cloud ends such a row on its own, so another cancel changes nothing.
                         if row["requested_state"] == "cancelled":
                             message += ". Cloud is already ending it after a cancel"
-                        elif row["observed_state"] != "done":  # Cloud refuses to cancel a done import, so the stop names no cancel route for one.
+                        elif row["requested_state"] == "discard_requested":  # The protocol's state; Cloud refuses to cancel a row that it discards.
+                            message += ". Cloud is discarding it"
+                        elif _holds_cell(row):  # Cloud refuses to cancel a row that no longer holds the cell.
                             message += f". To end it now, {_STOP_ON_CLOUD}"
                     resume = True
                 elif error.ended:
