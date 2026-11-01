@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -459,10 +460,15 @@ def test_authority_changed_during_staging_refuses_before_headers(
         handoff = commands.op_transfer_artifact(
             vault, operation="download", artifact=stored["path"]
         )
-    copy = reserved_paths.copy_generic_file
+    hold = reserved_paths.hold_generic_file
 
+    @contextmanager
     def invalidate(*args, **kwargs):
-        copied = copy(*args, **kwargs)
+        with hold(*args, **kwargs) as held:
+            invalidate_authority()
+            yield held
+
+    def invalidate_authority():
         if invalidated == "expiry":
             monkeypatch.setattr(
                 upload_tokens.time, "time", lambda: handoff["deliveries"]["https"]["expires_at"]
@@ -480,7 +486,6 @@ def test_authority_changed_during_staging_refuses_before_headers(
                 "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
                 "scope_ids: [01ARZ3NDEKTSV4RRFFQ69G5FAV]\naudience: external\nceiling: 1\n"
             )
-        return copied
 
     # Run the route's real staging in a worker, where revoking the real local authority can run its own loop.
     from starlette.concurrency import run_in_threadpool
@@ -488,7 +493,7 @@ def test_authority_changed_during_staging_refuses_before_headers(
     from exomem import server_transfer
 
     monkeypatch.setattr(server_transfer, "run_in_threadpool", run_in_threadpool)
-    monkeypatch.setattr(reserved_paths, "copy_generic_file", invalidate)
+    monkeypatch.setattr(reserved_paths, "hold_generic_file", invalidate)
     denied = client.get(handoff["deliveries"]["https"]["url"])
     assert denied.status_code == 404
     assert denied.content == client.get("/download", params={"grant": "unavailable"}).content
@@ -618,9 +623,7 @@ def test_raw_release_and_receipt_use_the_computed_copy_digest(vault, monkeypatch
 
 
 @pytest.mark.parametrize("interruption", ["disconnect", "cancel"])
-def test_private_spool_is_removed_when_the_stream_is_interrupted(
-    vault, monkeypatch, tmp_path, interruption
-):
+def test_held_original_is_released_when_the_stream_is_interrupted(vault, monkeypatch, interruption):
     import asyncio
     from urllib.parse import parse_qs, urlsplit
 
@@ -648,15 +651,16 @@ def test_private_spool_is_removed_when_the_stream_is_interrupted(
             vault, operation="download", artifact=stored["path"]
         )
     grant = parse_qs(urlsplit(handoff["deliveries"]["https"]["url"]).query)["grant"][0]
-    copied_paths = []
-    copy = reserved_paths.copy_generic_file
+    streams = []
+    hold = reserved_paths.hold_generic_file
 
+    @contextmanager
     def capture(*args, **kwargs):
-        result = copy(*args, **kwargs)
-        copied_paths.append(result.private_path)
-        return result
+        with hold(*args, **kwargs) as held:
+            streams.append(held.held.stream)
+            yield held
 
-    monkeypatch.setattr(reserved_paths, "copy_generic_file", capture)
+    monkeypatch.setattr(reserved_paths, "hold_generic_file", capture)
 
     async def disconnected():
         async def receive():
@@ -674,7 +678,7 @@ def test_private_spool_is_removed_when_the_stream_is_interrupted(
 
     with pytest.raises(asyncio.CancelledError if interruption == "cancel" else ClientDisconnect):
         asyncio.run(disconnected())
-    assert copied_paths and all(not path.parent.exists() for path in copied_paths)
+    assert streams and all(stream.closed for stream in streams)
     assert (vault / stored["path"]).read_bytes() == b"%PDF-test"
 
 
@@ -815,9 +819,7 @@ def test_in_place_rewrite_during_final_origin_check_releases_no_stale_original(
     assert original.read_bytes() == b"%PDF-other"
 
 
-def test_cancelled_stage_entry_returns_spool_and_slot_without_garbage_collection(
-    vault, monkeypatch, tmp_path
-):
+def test_cancelled_stage_entry_returns_handle_and_slot_without_garbage_collection(vault, monkeypatch):
     import asyncio
     import threading
 
@@ -831,32 +833,23 @@ def test_cancelled_stage_entry_returns_spool_and_slot_without_garbage_collection
     started = threading.Event()
     resume = threading.Event()
     finished = threading.Event()
-    copy = reserved_paths.copy_generic_file
-    paths = []
+    hold = reserved_paths.hold_generic_file
+    streams = []
     # A single slot proves that cancellation returns capacity without waiting for GC.
     monkeypatch.setattr(artifact_recovery, "_SLOTS", threading.BoundedSemaphore(1))
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-
-    def blocked_copy(*args, **kwargs):
-        result = copy(*args, **kwargs)
-        paths.append(result.private_path)
-        started.set()
-        assert resume.wait(timeout=5)
-        return result
-
-    private_directory = reserved_paths.private_copy_directory
-    from contextlib import contextmanager
 
     @contextmanager
-    def observed_directory():
+    def blocked_hold(*args, **kwargs):
         try:
-            with private_directory() as private:
-                yield private
+            with hold(*args, **kwargs) as held:
+                streams.append(held.held.stream)
+                started.set()
+                assert resume.wait(timeout=5)
+                yield held
         finally:
             finished.set()
 
-    monkeypatch.setattr(reserved_paths, "copy_generic_file", blocked_copy)
-    monkeypatch.setattr(reserved_paths, "private_copy_directory", observed_directory)
+    monkeypatch.setattr(reserved_paths, "hold_generic_file", blocked_hold)
 
     async def cancel_during_enter():
         async def enter():
@@ -871,7 +864,7 @@ def test_cancelled_stage_entry_returns_spool_and_slot_without_garbage_collection
         finally:
             resume.set()
         assert await asyncio.to_thread(finished.wait, 5)
-        assert paths and all(not path.parent.exists() for path in paths)
+        assert streams and all(stream.closed for stream in streams)
         assert await asyncio.to_thread(artifact_recovery._SLOTS.acquire, timeout=5)
         artifact_recovery._SLOTS.release()
 

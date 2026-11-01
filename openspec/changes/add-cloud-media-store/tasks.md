@@ -171,6 +171,7 @@
     - the vault guard is not held while the ciphertext downloads;
     - a download of an evicted original writes no second copy, and a file that changes during the response stops it;
     - a ranged request on a file that matches its cache identity reads no other byte, and a mismatch hashes the file once.
+  - [ ] 5.4.12a Follow-up, optional for closing this change: release the held handle when the client disconnects (listen for `http.disconnect`); two aborted seeks in a large recording can fill both slots. Leaving it out of 5.4.12 was decided on 2026-11-01 under the operator's standing rule for reversible choices; the operator may revert it.
   - [ ] 5.4.13 Reserve the bytes of offload's ciphertext temporary file from the hydration capacity, with no hydration slot (D12, choice 3). Remove the offload term from the window budget. Verify these with tests:
     - an offload waits with no attempt consumed while a hydration holds the capacity, and runs after it;
     - with `max_hydrations` at 1, an owner read of an evicted original hydrates while an offload runs;
