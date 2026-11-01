@@ -29,7 +29,10 @@ The source code is public. The design must therefore hold against an attacker wh
 - **Owner exports and import uploads are encrypted to recipients that `cellctl` cannot replace.**
   - An export is encrypted to a recipient that the tenant's browser generates, and the signed grant names it.
   - An import uses the cell's recipient. The gateway fetches it from the cell, on a path that excludes `cellctl`.
-- **The controller cannot decrypt backups.** Each cell generates its own backup repository password, keeps it on its encrypted volume, and writes an escrow copy encrypted to an offline recovery key. `cellctl` then holds no key that decrypts a backup. A restore after volume loss needs the operator's presence to open the escrow copy.
+- **The controller cannot decrypt backups.** Each cell generates its own backup repository password, keeps it on its encrypted volume, and writes an escrow copy. `cellctl` then holds no key that decrypts a backup.
+  - **Standard mode:** the escrow copy opens only with the operator's presence-gated key.
+  - **Opt-in tenant-locked mode:** it opens only with the tenant's own key, so the operator cannot decrypt that cell's backups either.
+- **Exports cannot be forged.** The cell reports each archive's digest through the gateway, and the tenant's browser checks it before it accepts the download.
 - **Attack signals alert through a path that excludes the controller.** These signals are an admission denial for `cellctl`'s identity, a grant check that fails in a cell, a Secret read by an unexpected identity, and a Job of an unknown kind. The access record pipeline of `make-cloud-cells-operator-resistant` evaluates them and sends each alert to the receiver.
 - **Job egress narrows to object storage.** This is a later phase: once the command pin and the grants are in force, a cell Job's egress goes through a platform egress proxy that allows only the pinned object-store host.
 

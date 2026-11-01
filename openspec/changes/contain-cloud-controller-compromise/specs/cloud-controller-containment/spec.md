@@ -115,12 +115,19 @@ A refused operation SHALL log a cataloged, content-free event that names the cel
 
 A cell SHALL encrypt an owner export, before upload, to the recipient that the signed export grant names. The tenant's client SHALL generate that recipient.
 
+The cell SHALL report the archive's SHA-256 on a gateway-authenticated route that the controller cannot reach. The tenant's client SHALL accept a download only when its digest matches.
+
 A cell SHALL decrypt an import only when the signed import grant names the cell's own import recipient. Substrate SHALL obtain that recipient from the cell through the gateway, on a path that the controller cannot reach.
 
 #### Scenario: The controller reads a completed export
 
 - **WHEN** an identity holding everything the controller holds downloads a completed owner export
 - **THEN** it cannot decrypt the archive
+
+#### Scenario: The controller forges an export
+
+- **WHEN** the controller replaces a completed export with an archive that it encrypted to the tenant's recipient
+- **THEN** the tenant's client refuses the download, because its digest differs from the one that the cell reported through the gateway
 
 #### Scenario: The controller substitutes an import recipient
 
@@ -131,7 +138,12 @@ A cell SHALL decrypt an import only when the signed import grant names the cell'
 
 Each cell SHALL generate its own backup repository password and keep it on its encrypted volume, outside every backup and export root. It SHALL write an escrow copy, encrypted to the pinned escrow recipient, under its own object-store prefix.
 
-No platform service SHALL hold the password or a key that decrypts it. A restore after the loss of the cell's volume SHALL need the operator's presence-gated escrow identity.
+No platform service SHALL hold the password or a key that decrypts it. In standard mode the escrow recipient SHALL be the operator's presence-gated identity. In tenant-locked mode it SHALL be the tenant's own key, and the platform SHALL write no copy that it can open. A restore after the loss of the cell's volume SHALL need the holder of the escrow recipient's identity.
+
+#### Scenario: A tenant-locked cell's backup
+
+- **WHEN** the operator, with every platform credential and their authenticator, downloads a tenant-locked cell's backup repository and escrow copy
+- **THEN** they cannot decrypt any snapshot
 
 #### Scenario: The controller reads a backup
 

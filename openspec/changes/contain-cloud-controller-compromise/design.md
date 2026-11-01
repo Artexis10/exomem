@@ -159,6 +159,7 @@ A mismatch refuses the operation and logs a cataloged, content-free event (D7).
 
 The fix in both cases:
 - **Exports.** The tenant's browser generates an `age` key pair when it requests the export. Substrate takes the public recipient from the authenticated browser session, and stores it in a column that only Substrate's role writes, never `cellctl`'s. It also puts the recipient into the signed export grant. The cell encrypts the archive to that recipient before upload, and the browser decrypts it after download. The private key never leaves the browser.
+- **Export integrity.** `age` does not prove who made a ciphertext, so `cellctl` could swap in a forged archive that the browser's key still decrypts. The cell therefore reports the archive's SHA-256 on a route that the gateway calls with a signed proof (D1), which excludes `cellctl`. Substrate shows that digest to the browser, and the browser checks it before it accepts the download.
 - **Imports.** The serving cell publishes its import recipient on a route that the gateway calls with a signed proof (D1). `cellctl` cannot reach that port, so the path excludes it. Substrate puts the recipient into the signed import grant, and the cell checks that the grant's recipient is its own before it decrypts.
 
 **Backups need no grant.** The cell derives its repository from its own cell ID and the pinned endpoint and bucket. `cell-backup` takes no destination.
@@ -177,7 +178,12 @@ The fix in both cases:
 | O2: the cell holds its backup password, with an offline escrow copy | Ciphertext only | A restore after volume loss needs the operator's presence |
 | O3: an external KMS unwraps for `cellctl` | Every backup, but slower and logged | A paid third party; the hosting provider has none; it does not meet the goal |
 
-**Decision: O2.**
+**Decision: O2, in two modes.** The operator chose these on 2026-11-01.
+- **Standard mode.** The escrow copy is encrypted to the operator's presence-gated recipient. `cellctl` holds nothing that decrypts a backup. The operator can still open the escrow copy deliberately, and the privacy copy says so.
+- **Tenant-locked mode (opt-in).** This is the tenant lock of `make-cloud-cells-operator-resistant` D3. The escrow copy is encrypted to the tenant's own key, from their recovery code or passkey, and no platform copy is written. The operator then cannot decrypt the cell's backups, or read it while it is stopped, locked or deleted, once earlier platform copies expire. A tenant who loses their recovery code loses their backups, and a restore after volume loss needs the tenant.
+- **Neither mode stops one thing:** whoever controls the node can read a running, unlocked cell. Only a confidential cell (`make-cloud-cells-operator-resistant` D8) closes that.
+
+The steps:
 - **Generate.** On first start, `exomem cell-init` generates the restic password and writes it to the cell's encrypted volume, at a path outside both backup roots (`/data/vault` and `/data/host`). Otherwise the password would sit inside the repository that it protects. It also stays outside the export root.
 - **Escrow.** It writes an escrow copy, encrypted with `age` to the pinned escrow recipient (D2), to the cell's own prefix in the locked backup bucket (`lock-cloud-backups-against-deletion`). So no running service can destroy it before retention ends.
 - **Back up.** `cell-backup` reads the password from the volume. The backup Job already mounts the volume.
