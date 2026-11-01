@@ -2323,6 +2323,26 @@ def _vector_bands(
     return vector_bands(vectors, query_vector, config)[0]
 
 
+def _contact_terms(item: CandidateFacts) -> frozenset[str]:
+    """The turn words that earned this candidate's worded contact; empty when its kind records none.
+
+    Alias phrases are split and folded with `_fold_lexical_term`, the fold `name_contact` already carries.
+    """
+    phrase_words = (_fold_lexical_term(word) for phrase in item.exact_alias_phrases for word in phrase.lower().split())
+    return item.name_contact | frozenset(word for word in phrase_words if word)
+
+
+def _independent(partner: CandidateFacts, item: CandidateFacts) -> bool:
+    """Whether `partner` adds a fact about `item` beyond the words that already reached `item`.
+
+    A partner whose kind records no words keeps the earlier rule and counts.
+    """
+    if partner.anchor_id == item.anchor_id:
+        return False
+    words = _contact_terms(partner)
+    return not words or not words <= _contact_terms(item)
+
+
 def add_graph_corroboration(
     candidates: Sequence[CandidateFacts],
     *,
@@ -2345,21 +2365,29 @@ def add_graph_corroboration(
     carries a worded contact kind — the turn's own words reached it — is the
     independent fact a link can legitimately corroborate.
     `retrieval_paths` is accepted so that intent is explicit at the call site.
+
+    A partner reached only by turn words this candidate was also reached by is
+    not independent either: one word shared by two linked names ("domain" in
+    two concept titles) is one contact counted twice, not a second fact.
     """
     del retrieval_paths  # deliberately unused: see the docstring.
-    named_paths: dict[str, set[str]] = {}
-    named_neighbours: dict[str, set[str]] = {}
+    named_paths: dict[str, list[CandidateFacts]] = {}
+    named_neighbours: dict[str, list[CandidateFacts]] = {}
     for item in candidates:
         if not item.evidence & WORDED_CONTACT_KINDS:
             continue
         if item.path:
-            named_paths.setdefault(item.path, set()).add(item.anchor_id)
+            named_paths.setdefault(item.path, []).append(item)
         for path in item.neighbourhood:
-            named_neighbours.setdefault(path, set()).add(item.anchor_id)
+            named_neighbours.setdefault(path, []).append(item)
     corroborated = {
         item.anchor_id for item in candidates
-        if (item.path and named_neighbours.get(item.path, set()) - {item.anchor_id})
-        or any(named_paths.get(path, set()) - {item.anchor_id} for path in item.neighbourhood)
+        if (item.path and any(_independent(partner, item) for partner in named_neighbours.get(item.path, ())))
+        or any(
+            _independent(partner, item)
+            for path in item.neighbourhood
+            for partner in named_paths.get(path, ())
+        )
     }
     return tuple(
         replace(item, evidence=item.evidence | {"graph_corroboration"})
