@@ -2423,6 +2423,7 @@ def _late_projected_result(
     date_column: str | None,
     columns: list[str] | None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]],
+    string_columns: frozenset[str] = frozenset(),
 ) -> query_data.QueryDataResult:
     """Window on raw values, then run the SAME governed projector exactly
     once per surviving row -- record parsing stays O(collection), but link
@@ -2468,6 +2469,7 @@ def _late_projected_result(
         date_from=date_from,
         date_to=date_to,
         date_column=date_column,
+        string_columns=string_columns,
     )
     governed = [project_values(row) for row in windowed.rows]
     if columns:
@@ -2635,6 +2637,7 @@ def query_collection(
         include_item_version=adapter.mutable,
         item_id_property=profile.item_id_property,
     )
+    string_columns = frozenset(name for name, spec in manifest.schema.fields.items() if spec.type == "string")
     effective_columns = columns
     if columns:
         identity_columns = ["collection_id", profile.item_id_property, "inferred", "ambiguous"]
@@ -2655,6 +2658,7 @@ def query_collection(
             date_column=date_column,
             columns=effective_columns,
             project_values=project_values,
+            string_columns=string_columns,
         )
     else:
         result = query_data.evaluate_rows(
@@ -2671,9 +2675,7 @@ def query_collection(
             date_from=date_from,
             date_to=date_to,
             date_column=date_column,
-            string_columns=frozenset(
-                name for name, spec in manifest.schema.fields.items() if spec.type == "string"
-            ),
+            string_columns=string_columns,
         )
     if aggregate is None and result.truncated and result.returned == 0:
         raise collections.CollectionError(

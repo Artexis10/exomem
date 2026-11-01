@@ -22,12 +22,14 @@ class LegacyQuery:
     date_column: str | None
     warnings: tuple[str, ...]
     compatibility_version: int = VERSION
+    #: Columns the manifest declares strings; their filters compare as strings (`query_compat.match`).
+    string_columns: frozenset[str] = frozenset()
 
 
 def normalize(*, columns_available, filters=None, columns=None, sort_by=None,
               descending=False, limit=query_data.DEFAULT_LIMIT, offset=0,
               aggregate=None, date_from=None, date_to=None, date_column=None,
-              warnings=None) -> LegacyQuery:
+              warnings=None, string_columns=frozenset()) -> LegacyQuery:
     """Freeze caller values; retain legacy operator/error/date-bound semantics."""
     predicates = []
     for predicate in filters or ():
@@ -49,4 +51,4 @@ def normalize(*, columns_available, filters=None, columns=None, sort_by=None,
     frozen = json.dumps(predicates, ensure_ascii=False)
     return LegacyQuery(frozen, tuple(columns or ()), available, sort_by, bool(descending),
                        query_data._bounded_limit(limit), max(0, int(offset)),
-                       aggregate, date_col, tuple(notices))
+                       aggregate, date_col, tuple(notices), string_columns=frozenset(string_columns))
