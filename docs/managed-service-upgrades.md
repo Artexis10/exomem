@@ -328,13 +328,14 @@ The issue command runs in a subshell from the empty working directory, so a
 The probe loop sends one MCP read and one MCP write every 30 seconds for 50
 minutes, which covers the 45 minutes after a switch made within 5 minutes of
 its start. It writes one line per call, `TIME read|write RESPONSE`, and each
-write creates a disposable note in the copy:
+write records a disposable episode in the copy. An episode passes the vault's
+write rules, so the write reaches the mutation path and commits:
 
 ```sh
 TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
 while [ "$(date +%s)" -lt "$END" ]; do
   NOW=$(date -u +%H:%M:%S)
-  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"create_note\",\"arguments\":{\"title\":\"Rehearsal probe $NOW\",\"content\":\"Disposable rehearsal write.\",\"note_type\":\"insight\"}}"; do
+  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"record_episode\",\"arguments\":{\"operation\":{\"kind\":\"record\",\"subject\":\"Rehearsal probe\",\"summary\":\"Disposable rehearsal write at $NOW UTC.\",\"worked_on\":[\"rehearsal probe\"]}}}"; do
     BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
       -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":${CALL#* }}" | tr -d '\n')
@@ -344,12 +345,14 @@ while [ "$(date +%s)" -lt "$END" ]; do
 done
 ```
 
-A call fails when its line holds `"isError":true`, `MUTATION_BUSY`,
-`VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. The check command
-prints two counts; expect both to be 0:
+A call fails when its line holds `"isError":true`, `"success":false`,
+`MUTATION_BUSY`, `VAULT_LOCK_TIMEOUT` or `no-response`, or no `"result"`. A
+refused write still returns a `"result"`, with `"success":false` inside it,
+so the check must look for both. The check command prints two counts; expect
+both to be 0:
 
 ```sh
-grep -cE '"isError":true|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
+grep -cE '"isError":true|success\\?":false|MUTATION_BUSY|VAULT_LOCK_TIMEOUT|no-response' /tmp/xr/calls.log; grep -vc '"result"' /tmp/xr/calls.log
 ```
 
 The worker also inherits the user manager's environment. Run `systemctl --user
