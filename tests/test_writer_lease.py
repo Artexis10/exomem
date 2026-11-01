@@ -5722,6 +5722,7 @@ def test_startup_sweep_reads_a_released_store_without_changing_its_schema(
         "attempt_id",
         "commit_token",
         "commit_secret",
+        "window_seconds",  # each row's own replay window; opening the store adds it, the sweep does not
     }
     del released
     _seed_idempotency_row(database, "dead:legacy", owner="4244:deadbeefdeadbeef", updated_at=1.0)

@@ -9,7 +9,7 @@
 
 - [ ] 1.1 Add `write_intents.py`: schema with `meta.format_version`, WAL with `synchronous=FULL`, private paths, the staged-input store, the bounds with the audience share and the free-space floor, and retention. Confirm the largest synchronous input and check the byte-bound relation at startup. Proof: an intent written and then killed with SIGKILL reads back complete; a write at a bound returns `journal_full`; the stored row has no credential field; an applier that reads a newer format version refuses and accept answers `journal_unavailable`.
 - [ ] 1.2 Add the identity columns (K, original digest, replay window, dispatch `request_id`) and the unique index on K over `accepted` and `applying` rows. Proof: two inline attempts with the same K under a held boundary record one intent, and both callers receive its `intent_id`.
-- [ ] 1.3 Make `IdempotencyStore` store each row's expiry and prune by it. Give a journaled K an expiry no earlier than the end of the intent's retention. Proof: the scratch-state probe that re-ran a completed implicit key after another implicit claim now replays it.
+- [x] 1.3 Make `IdempotencyStore` store each row's expiry and prune by it. Give a journaled K an expiry no earlier than the end of the intent's retention. Proof: the scratch-state probe that re-ran a completed implicit key after another implicit claim now replays it.
 - [ ] 1.4 Add the orphan sweep for staged inputs. Proof: an input directory without a row is deleted at applier start; one with an `accepted` row stays.
 - [ ] 1.5 Add the `intent_eligible` attribute to the registry `Command`, with a reason per command, and declare tranche 1. Proof: a registry test fails when a write command has no declaration.
 

@@ -3068,6 +3068,8 @@ class IdempotencyStore:
                         conn.execute("ALTER TABLE mutations ADD COLUMN commit_token TEXT")
                     if "commit_secret" not in columns:
                         conn.execute("ALTER TABLE mutations ADD COLUMN commit_secret BLOB")
+                    if "window_seconds" not in columns:
+                        conn.execute("ALTER TABLE mutations ADD COLUMN window_seconds REAL")
                 if not path.exists():  # pragma: no cover - sqlite always creates the database
                     raise RuntimeError("idempotency runtime database was not created")
                 if os.name != "nt":
@@ -3382,6 +3384,7 @@ class IdempotencyStore:
         operation,  # noqa: ANN001
         *,
         expires_after: float | None = None,
+        min_retention_seconds: float | None = None,
         on_replay=None,  # noqa: ANN001
         operation_guard=None,  # noqa: ANN001
         commit_observed=None,  # noqa: ANN001
@@ -3416,6 +3419,7 @@ class IdempotencyStore:
                     expires_after,
                     commit_evidence=commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
+                    min_retention_seconds=min_retention_seconds,
                 )
             if disposition == "owner":
                 break
@@ -3633,8 +3637,16 @@ class IdempotencyStore:
         *,
         commit_evidence=None,
         legacy_graph_pending_proof=None,
+        min_retention_seconds: float | None = None,
     ) -> tuple[str, Any]:
         now = self.clock()
+        # The row keeps this window for its whole life, so a later caller's shorter window
+        # cannot expire it. A journaled key passes the intent's retention as the floor.
+        row_window = (
+            None
+            if expires_after is None
+            else max(expires_after, min_retention_seconds or 0.0)
+        )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._prune_expired(conn, now, expires_after, key)
@@ -3643,7 +3655,11 @@ class IdempotencyStore:
                 "FROM mutations WHERE key = ?",
                 (key,),
             ).fetchone()
-            if row and self._expired_row(row, now, expires_after):
+            stored_window = conn.execute(
+                "SELECT window_seconds FROM mutations WHERE key = ?", (key,)
+            ).fetchone()
+            own_window = stored_window[0] if stored_window and stored_window[0] is not None else expires_after
+            if row and self._expired_row(row, now, own_window):
                 conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
                 row = None
             if row is not None:
@@ -3677,8 +3693,8 @@ class IdempotencyStore:
             try:
                 self._ensure_private_runtime_state()
                 conn.execute(
-                    "INSERT INTO mutations(key, digest, state, updated_at, owner, attempt_id, commit_token, commit_secret) "
-                    "VALUES (?, ?, 'reserved', ?, ?, ?, ?, ?)",
+                    "INSERT INTO mutations(key, digest, state, updated_at, owner, attempt_id, commit_token, "
+                    "commit_secret, window_seconds) VALUES (?, ?, 'reserved', ?, ?, ?, ?, ?, ?)",
                     (
                         key,
                         digest,
@@ -3687,6 +3703,7 @@ class IdempotencyStore:
                         attempt.attempt_id,
                         attempt.commit_token,
                         stored_commit_secret,
+                        row_window,
                     ),
                 )
                 cursor = conn.execute(
@@ -3872,13 +3889,13 @@ class IdempotencyStore:
     ) -> None:
         key_pattern = f"{key.partition(':')[0]}:%"
         if expires_after is not None:
-            cutoff = now - expires_after
+            # A row stores its own window; only a row from before that column falls back to the caller's.
             expired_completed = conn.execute(
                 "SELECT key, result FROM mutations WHERE key LIKE ? "
                 "AND state = 'completed' "
                 "AND typeof(updated_at) IN ('integer', 'real') "
-                "AND updated_at >= 0 AND updated_at <= ?",
-                (key_pattern, cutoff),
+                "AND updated_at >= 0 AND updated_at <= ? - COALESCE(window_seconds, ?)",
+                (key_pattern, now, expires_after),
             ).fetchall()
             for expired_key, expired_payload in expired_completed:
                 try:
@@ -3898,8 +3915,8 @@ class IdempotencyStore:
                 "SELECT key, result FROM mutations WHERE key LIKE ? "
                 "AND state = 'committed_failure' "
                 "AND typeof(updated_at) IN ('integer', 'real') "
-                "AND updated_at >= 0 AND updated_at <= ?",
-                (key_pattern, cutoff),
+                "AND updated_at >= 0 AND updated_at <= ? - COALESCE(window_seconds, ?)",
+                (key_pattern, now, expires_after),
             ).fetchall()
             for expired_key, expired_payload in expired_failures:
                 try:
