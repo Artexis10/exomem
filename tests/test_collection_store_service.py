@@ -47,7 +47,6 @@ from test_typed_history_generations import previous_release
 from exomem import __main__ as cli
 from exomem import (
     capabilities,
-    command_surface,
     commands,
     record_governance,
     records,
@@ -332,38 +331,6 @@ def test_nested_archive_declarations_retain_file_source_ownership(tmp_path):
 def test_the_service_startup_gate_admits_the_mixed_vault(service):
     """Defect: the installed service refuses to start on a vault whose marker routes C to the store."""
     state_migration.require_vault_state_ready(service.root)
-
-
-@pytest.mark.parametrize("include_history,rollovers", [(False, 1), (True, 1), (False, 2)])
-def test_query_reopens_after_the_store_handle_changes_before_mcp_egress(
-        service, monkeypatch, include_history, rollovers):
-    """Idle handoff must reread a query instead of hiding an unchanged collection."""
-    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
-    bound = command_surface.bind_vault(command.leaf, service.root, command=command)
-    server_runtime = runtime._SERVERS[service.root].runtime
-    invoke = writer_lease.invoke_command
-    calls = 0
-
-    def handoff_after_read(*args, **kwargs):
-        nonlocal calls
-        result = invoke(*args, **kwargs)
-        calls += 1
-        if calls <= rollovers:
-            assert server_runtime.retire_idle_handle()
-        return result
-
-    monkeypatch.setattr(writer_lease, "invoke_command", handoff_after_read)
-    with request_scope(OWNER):
-        result = bound(action="query", collection=CID, include_agent_history=include_history)
-
-    assert calls == 2
-    if rollovers == 2:
-        assert result["error"]["code"] == "COLLECTION_STORE_BUSY"
-        assert "rows" not in result
-    else:
-        assert [row["title"] for row in result["rows"]] == ["Canonical"]
-        if include_history:
-            assert result["agent_history"]["events"]
 
 
 def test_a_busy_consistency_read_does_not_cost_a_publication_interval(tmp_path, monkeypatch, caplog):

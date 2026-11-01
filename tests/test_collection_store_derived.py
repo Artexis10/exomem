@@ -4,7 +4,7 @@ A derived collection's rows live in a file beside the store and rebuild from its
 log. Each test names the defect only it catches. The export is invented: a device's
 November days of local samples, preserved through the real archive expansion. The
 service journey runs the real server lifecycle through the shared ``invoke_command``
-dispatcher, which skips the MCP server's second egress pass.
+dispatcher, which runs the same terminal egress filter as the MCP server.
 """
 
 from __future__ import annotations
