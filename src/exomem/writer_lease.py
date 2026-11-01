@@ -4421,17 +4421,17 @@ _CAPTURE_WAIT_CEILING_SECONDS = 600.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
 _CAPTURE_WAITERS_FULL_REMEDIATION = (
     "The write did not commit. Other writes are already waiting on the boundary and "
-    "the server keeps workers free for reads: retry with the same idempotency key "
-    "after retry_after_ms."
+    "the server keeps workers free for reads: retry after retry_after_ms, with the "
+    "same idempotency key if the write carried one."
 )
 _CAPTURE_HOLDER_OVERDUE_REMEDIATION = (
     "The write did not commit. The mutation boundary's holder has run past its "
     "allowance and looks stuck: inspect coordination_status or cell health, then "
-    "retry with the same idempotency key once it clears."
+    "retry once it clears, with the same idempotency key if the write carried one."
 )
 _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
     "The write did not commit. The boundary stayed busy for the whole bounded wait: "
-    "retry with the same idempotency key after retry_after_ms."
+    "retry after retry_after_ms, with the same idempotency key if the write carried one."
 )
 
 
@@ -4440,6 +4440,26 @@ def _writes_absorb_contention() -> bool:
         "0",
         "false",
     }
+
+
+_CALLER_HOLDS_NO_REQUEST_WORKER: ContextVar[bool] = ContextVar(
+    "exomem_caller_holds_no_request_worker", default=False
+)
+
+
+@contextmanager
+def caller_holds_no_request_worker() -> Iterator[None]:
+    """Mark a write whose caller is a background thread, not an anyio request worker.
+
+    The waiter cap below protects anyio's request workers from a long holder. A background
+    commit thread is not one, so such a write still waits in line and parks, but it neither
+    takes nor counts a waiter slot and so can never make a request's write refuse as full.
+    """
+    token = _CALLER_HOLDS_NO_REQUEST_WORKER.set(True)
+    try:
+        yield
+    finally:
+        _CALLER_HOLDS_NO_REQUEST_WORKER.reset(token)
 
 
 # A waiting write parks one of the process's sync workers (anyio's limiter,
@@ -4531,7 +4551,8 @@ def _wait_out_write_warmup(
         return warming, "absorb_disabled", 0.0
     if time.monotonic() >= deadline:
         return warming, "warm_wait_exhausted", 0.0
-    if not _take_capture_waiter_slot():
+    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
+    if counted and not _take_capture_waiter_slot():
         return warming, "capture_waiters_full", 0.0
     started = time.monotonic()
     try:
@@ -4544,7 +4565,8 @@ def _wait_out_write_warmup(
             readiness.wait(warming, min(remaining, _WARMUP_POLL_SECONDS))
             warming = still_warming()
     finally:
-        _release_capture_waiter_slot()
+        if counted:
+            _release_capture_waiter_slot()
     waited = time.monotonic() - started
     return warming, None if warming is None else "warm_wait_exhausted", waited
 
@@ -4654,12 +4676,17 @@ class _ContentionWait:
         self.deadline = self.started + wait_seconds if deadline is None else deadline
         self.ticket: object | None = None
         self.holds_slot = False
+        # Whether the slot counts against the cap; a caller with no request worker holds one free.
+        self.slot_counted = False
         self.absorbed = 0
         self.last_attempt_seconds = 0.0
 
     def take_slot(self) -> bool:
         if not self.holds_slot:
-            self.holds_slot = _take_capture_waiter_slot()
+            if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
+                self.holds_slot = True
+            else:
+                self.holds_slot = self.slot_counted = _take_capture_waiter_slot()
         return self.holds_slot
 
     def join_line(self) -> None:
@@ -4691,9 +4718,9 @@ class _ContentionWait:
         return round((time.monotonic() - self.started) * 1000)
 
     def close(self) -> None:
-        if self.holds_slot:
+        if self.slot_counted:
             _release_capture_waiter_slot()
-            self.holds_slot = False
+        self.holds_slot = self.slot_counted = False
         if self.ticket is not None:
             self.queue.leave(self.ticket)
             self.ticket = None

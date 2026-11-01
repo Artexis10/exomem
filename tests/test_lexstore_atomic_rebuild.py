@@ -48,6 +48,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -532,7 +533,8 @@ def test_a_replay_drops_the_rows_of_pages_deleted_and_renamed_while_it_waits(
     event reaches the registry at once; the events of the whole batch arrive
     late. The replay waits for them. The published catalogue must hold S and the
     newer Q, and none of the rows of P or R. A replay that waits but forgets the
-    late deletions publishes the rows of pages that no longer exist.
+    late deletions never matches the registry, so it declines the pass instead
+    of publishing.
     """
     p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
     q = _kb_file(tmp_path, "q.md", "- [config] qbefore ^u2")
@@ -2826,3 +2828,38 @@ def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
     assert sorted(parsed) == ["Knowledge Base/lost.md", "Knowledge Base/other.md"]
     hits = lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb")
     assert [path for path, _score in hits] == ["Knowledge Base/lost.md"]
+
+
+def test_a_census_refuses_when_the_registry_holds_two_spellings_of_one_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows two spellings of one page digest to one key. When the registry
+    holds both and the walk finds the page once, the census must refuse, as it
+    did before the census view digested paths once. A view keyed by digest alone
+    keeps one spelling, sees one entry on each side, and excuses the drift.
+    """
+    # Windows folds case in the digest; this platform does not.
+    monkeypatch.setattr(freshness, "_digest_path", str.casefold)
+    lineage = {"instance_id": "registry", "policy_version": 1, "access_policy_fingerprint": "f"}
+    start = SimpleNamespace(generation=4, **lineage)
+    after_walk_checkpoint = SimpleNamespace(generation=5, **lineage)
+    replayed = freshness.RecallDelta(
+        from_=start,
+        to=SimpleNamespace(generation=5, **lineage),
+        complete=True,
+        changed=frozenset(),
+        deleted=frozenset(),
+    )
+    signature = (100, 100, 10)
+    after_walk = (
+        after_walk_checkpoint,
+        {"Knowledge Base/Note.md": signature, "Knowledge Base/note.md": signature},
+    )
+    view = lexstore.LexicalStore._census_view(
+        [("Knowledge Base/Note.md", signature)], after_walk
+    )
+
+    assert (
+        lexstore.LexicalStore._census_agrees_outside_replay(start, replayed, after_walk, view)
+        is None
+    )

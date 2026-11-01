@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.154.0](https://github.com/Artexis10/exomem/compare/v0.153.1...v0.154.0) (2026-11-01)
+
+
+### Features
+
+* **adoption:** file imported media by rename, so imports can exceed the cell's free space ([#2284](https://github.com/Artexis10/exomem/issues/2284)) ([dd039a8](https://github.com/Artexis10/exomem/commit/dd039a8bad0ae1cb3dd69bcde4a21808d1ed4592))
+* **cellctl:** alert on a cell whose recall catalogue stops advancing ([#2272](https://github.com/Artexis10/exomem/issues/2272)) ([17e8a64](https://github.com/Artexis10/exomem/commit/17e8a6493c5be06e4122eaaff659d364c23af889))
+* **cloud-rehearsal:** raw-import mode comparing Cloud with the local journey ([#2290](https://github.com/Artexis10/exomem/issues/2290)) ([42879ce](https://github.com/Artexis10/exomem/commit/42879ce1cd35e604c98ae41b91e870bcc203c6fa))
+* **media:** keep a turned-off cell's stored media readable until it drains ([#2271](https://github.com/Artexis10/exomem/issues/2271)) ([085b4d4](https://github.com/Artexis10/exomem/commit/085b4d4cccde9c50d0813e56d9741d24d4074e2c))
+
+
+### Bug Fixes
+
+* **acceptance:** serve the collection store before direct mode prepares collections ([#2269](https://github.com/Artexis10/exomem/issues/2269)) ([309a3e9](https://github.com/Artexis10/exomem/commit/309a3e99c9fc49062f0bf24bc0896c8ca83499ee))
+* **jobs:** read a maintenance job's row and its live state together ([#2291](https://github.com/Artexis10/exomem/issues/2291)) ([3754c9f](https://github.com/Artexis10/exomem/commit/3754c9f19797fe268950d53a4973a18ce55b1f43))
+* **lexstore:** converge a full repair under a live import and yield to it ([#2288](https://github.com/Artexis10/exomem/issues/2288)) ([4c6dbcd](https://github.com/Artexis10/exomem/commit/4c6dbcd85b7b5e7825c02f68845b88d7979be45d))
+* **media:** let a managed service find and keep the diarizer sidecar ([#2286](https://github.com/Artexis10/exomem/issues/2286)) ([2a5995e](https://github.com/Artexis10/exomem/commit/2a5995e64de9caea23c48da643a959d0120bf9f3))
+* **writes:** wait out busy boundaries for CLI writes and file uploads ([#2268](https://github.com/Artexis10/exomem/issues/2268)) ([00af333](https://github.com/Artexis10/exomem/commit/00af33390a0d48b0c06a470fe1adfae7b2794ed4))
+
+
+### Performance
+
+* **adoption:** file large imports faster and let custody proofs in between apply chunks ([#2281](https://github.com/Artexis10/exomem/issues/2281)) ([eef0fd8](https://github.com/Artexis10/exomem/commit/eef0fd8d6abcb90b7b2eb02ab7669f5324783082))
+* **lexstore:** catch up a lag over the foreground cap in capped steps ([#2270](https://github.com/Artexis10/exomem/issues/2270)) ([1786527](https://github.com/Artexis10/exomem/commit/17865277e924d4c8f970acb4e43d41d66a96585f))
+
 ## [0.153.1](https://github.com/Artexis10/exomem/compare/v0.153.0...v0.153.1) (2026-10-31)
 
 

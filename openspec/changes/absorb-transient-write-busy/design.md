@@ -24,6 +24,14 @@ Rejected: marker files per waiter. A crashed process leaves its marker behind, a
 
 The direct `/upload` handlers acquire the boundary before they read or write any vault byte, so a busy acquire has had no effect. They wait out ordinary contention through the same queue, waiter cap and refusal causes as keyed writes. The tus commit already runs keyed under the session id and so already waits; when it still ends `retryable` with a busy or warming code, the server schedules its own re-attempt with backoff until the session expires.
 
+### D4. A moved navigation auxiliary is a retryable busy, and background commits take no slot
+
+Navigation auxiliaries are planned with content guards before the narrow boundary is taken, so a writer outside the line can change one while a write waits. After a refused batch, with the boundary still held, the commit seams recheck every guard of the write's own basis: primary page, read dependencies, source closure, vocabulary, lifecycle and retained input. The seam raises `MUTATION_BUSY` with `committed: false` and `cause: auxiliary_changed` only on positive evidence: no basis guard changed and an auxiliary's guard no longer holds. The absorption loop already re-runs such a refusal. In every other case the old error stays, so a refusal with no moved guard (a full disk, a read-only folder, a residue limit, an existing path variant) is never re-run. The same check stops a failed closure guard from being reported as `STALE_VOCABULARY_BINDING`, and a failed source-closure guard on the creation path reports `STALE_SEMANTIC_WRITE` like the other two seams.
+
+A session commit runs on a background thread, not an anyio request worker. It still waits in line, but it neither takes nor counts a waiter slot, so it cannot make a request's write refuse as full.
+
+Rejected: re-planning inside each leaf, which needs a loop in about ten leaves, and planning under the boundary, which lengthens the critical section and touches about eighteen planners.
+
 ## Risks
 
 - REST callers without a key gain nothing from this change; the deployment guide tells them to send one key per intended write.
