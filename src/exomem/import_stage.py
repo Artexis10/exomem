@@ -113,6 +113,40 @@ class Stage:
     identities: dict[str, Identity] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class Series:
+    """What a window's series file says about its whole series: the label, and every member's path relative to a stage.
+
+    The file is a JSON object `{"label": ..., "paths": [...]}`. A series file that omits either, or holds the
+    wrong type for it, says nothing of it: `label` is None, and `paths` is empty. The paths are names only:
+    adoption compares them as strings and never opens one.
+    """
+
+    label: str | None
+    paths: tuple[str, ...]
+
+
+def is_series_file(path: str) -> bool:
+    """Whether a vault-relative path is the series file at the root of an import stage."""
+    parts = path.split("/")
+    return len(parts) == 3 and parts[0] == STAGE_DIR and parts[2] == SERIES_FILE
+
+
+def read_series(vault_root: Path, import_id: str) -> Series | None:
+    """The series that a window's staged series file records, or None when the stage holds no readable one."""
+    if not vault.is_import_id(import_id):
+        return None
+    path = vault_root / STAGE_DIR / import_id / SERIES_FILE
+    document = None if path.is_symlink() else _load(path)
+    if document is None:
+        return None
+    label, paths = document.get("label"), document.get("paths")
+    return Series(
+        label.strip() if isinstance(label, str) and label.strip() else None,
+        tuple(paths) if isinstance(paths, list) and all(isinstance(path, str) for path in paths) else (),
+    )
+
+
 def _read_members(entries: object) -> tuple[dict[str, tuple[int, str]], dict[str, Identity]] | None:
     """The manifest as maps, or None when it is malformed: a manifest that cannot be trusted lists nothing."""
     if not isinstance(entries, list):
