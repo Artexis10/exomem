@@ -8,7 +8,7 @@ What `cellctl` holds today (from `origin/main`):
 |---|---|---|
 | Platform master keys | `CELLCTL_BACKUP_MASTER_KEYS`, pod env | Every cell's wrapped cell root key, restic password and object-store key |
 | Fleet bearer key | `CELLCTL_CELL_TOKEN_KEY_*`, pod env; the gateway holds the same key | Every cell's request bearer: `HMAC(key, "exomem-cloud-cell-token-v1:" + cell_id)` |
-| Parent object-store key | `CELLCTL_B2_KEY_MANAGEMENT_*` | Creates per-cell keys, including keys that read any prefix |
+| Parent object-store key | `CELLCTL_B2_KEY_MANAGEMENT_*` | Creates keys with any capability on any bucket in the provider account (D9) |
 | Per-cell object-store keys | Unwrapped every pass | Read, write and delete in a cell's prefix |
 | Write access to cell workloads | RBAC on StatefulSets and Jobs | The admission policy pins image, volumes, placement, Secret names and NetworkPolicies, but not command, args or environment |
 | Export and import URLs | Presigned by `cellctl` | The cell checks only the `https://` prefix |
@@ -46,6 +46,7 @@ The adversary has code execution inside the `cellctl` pod, with its environment,
 | Closed pod template (D3) | Running any command, hook or probe against a cell's volume or Secret; planting a CA or a DNS override | A cell subcommand that is itself exploitable |
 | Signed grants, destination checks and recipients (D4) | Exporting, importing or restoring without a Substrate grant; sending data to an address that `cellctl` chose; reading an owner export or an import upload in transit | A compromised Substrate |
 | Cell-held backup keys (D5) | Decrypting any backup with what `cellctl` holds | The operator opening the escrow copy with their presence |
+| Key custodian and key watcher (D9) | Creating an object-store key with any capability; changing the backup bucket's lock settings unnoticed | A compromised custodian or node, within the provider account |
 | Independent attack alerts (D7) | A compromise that stays unnoticed | Root on the node suppressing events before they leave it |
 
 ## Decisions
@@ -188,7 +189,9 @@ The fix in both cases:
   - A tenant-locked statement names the tenant's recipient, and only a tenant-authenticated request makes Substrate sign one.
   - The cell reads the statement on the tenant-lock key channel (`make-cloud-cells-operator-resistant` D3, task 5.1), which excludes `cellctl`.
   - The cell keeps the highest generation that it has seen on its volume and refuses an older statement. So `cellctl` can neither substitute a recipient nor downgrade a locked cell by replaying an old standard-mode statement.
+  - The statement carries its own audience, `exomem-cell-mode`, which differs from the operation grants' audience. So no operation grant passes as a mode statement, and no mode statement passes as a grant.
   - A cell whose volume carries the tenant's inner layer never writes an operator escrow copy. Leaving the lock takes a newer, tenant-authenticated statement.
+  - **Leaving the lock starts a new repository.** The cell runs `exomem cell-backup-migrate` into a new repository with a new password, and escrows only that password to the operator. The repository from the locked period keeps its tenant-only escrow and expires with its retention. So the operator never gets a password that opens a snapshot taken while the cell was locked.
 - **Tenant-locked cells keep their keys inside the inner layer.** The backup password sits inside the tenant's inner layer, not only on the outer volume, whose passphrase the platform keeps. A restore after volume loss receives the password on the tenant-lock key channel, never through a cluster Secret.
 - **Neither mode stops one thing:** whoever controls the node can read a running, unlocked cell. Only a confidential cell (`make-cloud-cells-operator-resistant` D8) closes that.
 
@@ -198,13 +201,14 @@ The steps:
 - **Back up.** `cell-backup` reads the password from the volume. The backup Job already mounts the volume.
 - **Restore with the volume.** A restore onto an existing volume uses that password.
 - **Restore after volume loss.** The operator decrypts the escrow copy with their presence-gated identity (`make-cloud-cells-operator-resistant` D6) and supplies the password to the restore through a one-time Secret.
-- **What `cellctl` keeps.** It still mints per-cell object-store keys, so it can read ciphertext but cannot decrypt it.
+- **What `cellctl` keeps.** It no longer creates object-store keys (D9). It keeps a key that can only list files, for version bookkeeping.
 
 **Existing cells move to a new repository.** Restic's `key add` and `key remove` change only key files, and every key file wraps the same master key. A re-key would therefore leave every snapshot readable to anyone who holds the old platform password and a copy of an old key file. Instead, each cell runs a new subcommand, `exomem cell-backup-migrate`:
 1. `restic init` a new repository with the cell-held password, with `--copy-chunker-params` so deduplication continues.
 2. `restic copy` every snapshot from the old repository. This re-encrypts every snapshot under the new master key.
 3. Write the escrow copy.
-4. Destroy the platform-wrapped password.
+4. Run `restic check` on the new repository, and compare its snapshot list with the old repository's.
+5. Only when both pass, destroy the platform-wrapped password. Otherwise keep it and report the cell as not migrated.
 
 This is the same move as `lock-cloud-backups-against-deletion` D5, which copies each repository into the locked bucket, so there is one migration, not two.
 
@@ -234,7 +238,8 @@ A compromised `cellctl` would not report itself. The access record pipeline (`ma
 - an admission denial for `cellctl`'s service account;
 - a grant or destination refusal logged by a cell;
 - a Secret read by an identity outside the expected set;
-- a Job or StatefulSet that the policy denied as an unknown kind.
+- a Job or StatefulSet that the policy denied as an unknown kind;
+- an object-store key or a backup bucket setting outside the fixed shapes, which the key watcher reports (D9).
 
 Each alert carries only an identity, a cell ID and a reason token. It never carries content.
 
@@ -247,6 +252,48 @@ The admission policy accepts any digest from the cell image repository. The atte
 This change adds a minimum release that the chart pins, so that admission refuses a rollback below it. This is a required task, not an option: without it, `cellctl` can roll a cell back to a release that lacks these checks.
 
 The cellctl admission policy matches only the digest pattern, and it cannot order releases. The attested-image verifier (`make-cloud-cells-operator-resistant` task 4.1) therefore enforces the floor. It reads the release version from the attestation and refuses one below the pinned minimum.
+
+### D9. One key custodian creates object-store keys
+
+**Provider facts.** A disposable test on the object store, on 2026-11-01, showed two things:
+- A key that can create keys can create a key with any capability. A key without `writeBuckets` or `bypassGovernance` created keys with `writeBuckets`, `bypassGovernance`, `writeFileRetentions` and `readFiles`. The provider has no rule that limits a new key to its creator's capabilities.
+- A key that can create keys cannot be limited to a bucket. The provider refuses `writeKeys` on a bucket-level key.
+
+So `cellctl`'s parent key can today create a key that reads, deletes or reconfigures any bucket in the provider account. That includes the buckets of other workloads in the same account. In the locked bucket of `lock-cloud-backups-against-deletion`, such a key could also:
+- remove the default retention, so that new backups are written unlocked and can be deleted outright (shown in the same test);
+- extend locks without bound, which nobody can undo in compliance mode.
+
+It cannot shorten or remove an existing compliance lock, and it cannot switch Object Lock off. The same test showed both refusals.
+
+**Options considered**
+
+| Option | Who can create keys | Cost |
+|---|---|---|
+| Keep minting in `cellctl` | `cellctl`, its whole attack surface | None, and it fails the goal |
+| A key custodian in the same account | One small component | One new component; a compromised custodian or node still reaches the whole account |
+| Keys minted ahead, outside the cluster | A scheduled job outside the cluster | A pool of reserved cell IDs, and a minting key in CI secrets |
+| A separate account for cell data | The custodian, within cell data only | One more provider account for the operator to create |
+
+**Decision.** The operator chose these on 2026-11-01:
+- A key custodian, in the current account, now.
+- A separate member account in the provider's account group for cell data, created at the backup-lock migration (`lock-cloud-backups-against-deletion` D5). The group bills both accounts together.
+
+**The custodian.**
+- It runs as its own small Deployment, with its own service account and image, in its own namespace. That namespace is outside every namespace that admission rule 1 lets `cellctl` write. The same chart check as the lock extender's enforces this.
+- It takes no inbound traffic. It reads namespace names and writes only the object-store key entries of each cell's `cell-credentials` Secret.
+- It holds the only key that can create keys.
+- It creates exactly one key shape. The bucket is pinned in the chart, the name prefix is `cells/<cell_id>/`, and the capability set is fixed. The cell ID comes from the namespace name, never from a request. No created key carries `writeKeys`, `writeBuckets`, `writeFileRetentions`, `bypassGovernance` or `shareFiles`.
+- It deletes the key of a cell whose namespace is gone, after it hides that cell's prefix with the cell's own key.
+- `cellctl` loses its parent key. It keeps a key that can only list files, for version bookkeeping.
+
+**The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
+- A scheduled check runs outside the cluster, with a key that can only list keys and buckets.
+- It compares every key in the account with the fixed shapes: the custodian, the lock extender, the per-cell keys, the watcher and the infrastructure key.
+- It compares the backup bucket's Object Lock, default retention, lifecycle rules and bucket type with pinned values.
+- It raises an alert through the platform receiver on any difference. The alert path excludes the cluster, so a compromised node cannot suppress it.
+- The 23-day lock margin leaves time to act on the alert before any hidden version expires.
+
+**Residual.** A compromised custodian or node can still create any key in the account until the separate account exists. That includes keys that extend locks without bound. The watcher reports such a key, but it cannot undo an extension.
 
 ## Reuse
 
@@ -267,9 +314,10 @@ The cellctl admission policy matches only the digest pattern, and it cannot orde
 1. **Cell-side checks in report mode.** The cell verifies proofs, grants and destinations and logs each would-be refusal, but does not refuse. Substrate starts signing grants.
 2. **Command pin.** Add `cell-backup` and `cell-restore`, and render every Job through them. The admission rules for command, environment names and anchors enforce once the K3s Live job admits every rendered kind.
 3. **Enforcement.** The cell refuses a request without a proof, and an operation without a grant or with a foreign destination.
-4. **Backup custody.** Cells re-key one at a time, owner first. `cellctl` stops holding backup passwords.
-5. **Retirements.** Retire the bearer, then the master keys' backup wrapping.
-6. **Egress proxy** (D6).
+4. **Backup custody.** Cells move to new repositories one at a time, owner first. `cellctl` stops holding backup passwords.
+5. **Key custody** (D9). The custodian and the key watcher start, then `cellctl`'s parent key is deleted.
+6. **Retirements.** Retire the bearer, then the master keys' backup wrapping.
+7. **Egress proxy** (D6).
 
 ## Open Questions
 

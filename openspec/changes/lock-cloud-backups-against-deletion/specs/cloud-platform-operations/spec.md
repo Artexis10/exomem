@@ -8,6 +8,8 @@ The platform SHALL keep every current version's lock at least 23 days in the fut
 
 A lifecycle rule SHALL remove only hidden versions whose lock has expired, and never a current version.
 
+Only the key custodian SHALL hold a key that can create keys or change the locked bucket's settings. A key watcher outside the cluster SHALL raise an alert when the bucket's Object Lock, default retention, lifecycle rules or bucket type differ from their pinned values.
+
 Import and export staging objects SHALL NOT be stored in the locked bucket.
 
 A procedure SHALL restore a cell's backup repository from its hidden versions. A rehearsal SHALL prove it.
@@ -16,6 +18,11 @@ A procedure SHALL restore a cell's backup repository from its hidden versions. A
 
 - **WHEN** an identity holding everything the controller holds deletes every object under every cell's backup prefix
 - **THEN** every version remains for at least 23 days, including packs written long before, and the recovery procedure restores each repository
+
+#### Scenario: A minted key removes the default retention
+
+- **WHEN** a key removes the locked bucket's default retention
+- **THEN** the key watcher raises an alert at its next run, and every version locked before the change stays locked for at least 23 days
 
 #### Scenario: An old pack is hidden
 

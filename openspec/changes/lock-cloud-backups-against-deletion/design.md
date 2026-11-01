@@ -1,7 +1,7 @@
 ## Context
 
 - **Repository.** Each Cloud cell backs up with restic to `s3:<endpoint>/<bucket>/cells/<cell_id>`.
-- **Keys.** Its key comes from a per-cell object-store key with list, read, write and delete in that prefix. The controller creates those keys with a parent key that holds `listKeys`, `writeKeys`, `deleteKeys`, `listFiles` and `deleteFiles`.
+- **Keys.** Its key comes from a per-cell object-store key with list, read, write and delete in that prefix. Today the controller creates those keys with a parent key that holds `listKeys`, `writeKeys`, `deleteKeys`, `listFiles` and `deleteFiles`. That key is account-wide, because the provider allows key creation only on account-level keys.
 - **Retention.** Restic's policy is `--keep-daily 7 --keep-weekly 4` (`--keep-hourly 24` added where hourly backups run), and `forget --prune` follows each backup.
 - **Bucket contents.** The same bucket holds import and export staging objects under each cell's prefix. It has native versioning but no Object Lock.
 
@@ -43,11 +43,13 @@ The backups therefore move to a new bucket with Object Lock enabled and default 
 
 ### D3. Deletes hide; the lifecycle removes after the lock
 
-- **What restic sees.** A delete through the S3 API on a versioned bucket hides the file and keeps its versions. Restic sees a normal delete, and its `prune` works on the visible files.
+- **What restic sees.** A delete through the S3 API on a versioned bucket hides the file and keeps its versions. Restic sees a normal delete, and its `prune` works on the visible files. Task 1.1 confirmed this with restic 0.19.1 over the S3 API: `init`, `backup`, `forget --prune`, `check`, `key add` and `key remove` all succeeded in compliance mode. Every delete, restic's lock files included, became a hidden version, and every upload carried the default lock.
 - **Removal.** A lifecycle rule removes hidden (noncurrent) versions once their lock has expired. It never expires a current version, so live restic packs and the cell's escrow copy (`contain-cloud-controller-compromise` D5) stay until something hides them.
-- **Minted keys stay harmless.** The provider limits a minted key's capabilities to a subset of its parent key's. The controller's parent key lacks `writeBuckets` and any retention-bypass capability, so no key that the controller can create can change the bucket's lock, versioning or lifecycle. Task 1.1 checks this rule on the provider.
-- **The controller's keys.** In compliance mode, no key can remove a locked version. A per-cell key may therefore keep the delete capability that restic needs, because on a locked version that delete only hides. The parent key loses `deleteFiles`, so the controller removes nothing directly. Task 1.1 checks which capability a hide needs on this provider.
-- **A deleted cell.** The controller hides the cell's files with its per-cell key, then deletes the key. The lifecycle rule removes the versions once their retention ends.
+- **Minted keys are not limited.** Task 1.1 refuted the assumption that a minted key holds only a subset of its parent key's capabilities. A key without `writeBuckets` or a bypass capability minted keys with `writeBuckets`, `bypassGovernance`, `writeFileRetentions` and `readFiles`. A key with `writeBuckets` then removed the bucket's default retention, and the next upload carried no lock and could be deleted outright. No key could switch Object Lock off, or shorten or remove an existing lock.
+  - So whoever can create keys can make new backups unlocked, or extend locks without bound. `contain-cloud-controller-compromise` D9 therefore moves key creation out of the controller into a key custodian, and adds a key watcher outside the cluster that alerts on any other key and on any change to this bucket's settings.
+  - Versions locked before such a change stay locked for at least the margin, so an alert leaves 23 days to act.
+- **The per-cell keys.** In compliance mode, no key can remove a locked version. A per-cell key may therefore keep the delete capability that restic needs, because on a locked version that delete only hides. Task 1.1 confirmed that restic's deletes through a per-cell key became hidden versions. The controller keeps only a key that can list files, so it removes nothing directly.
+- **A deleted cell.** The key custodian hides the cell's files with its per-cell key, then deletes the key. The lifecycle rule removes the versions once their retention ends.
 
 ### D4. Recovery from a mass deletion
 
@@ -55,6 +57,7 @@ A runbook procedure lists a cell's file versions as of a point in time and resto
 
 ### D5. Migration
 
+0. The operator creates a separate member account in the provider's account group, for cell data only (`contain-cloud-controller-compromise` D9). The locked bucket and the key custodian's key live in that account. The other platform buckets stay in the current account, out of reach of any key that the custodian can create.
 1. New cells start in the locked bucket.
 2. Each existing cell copies its repository with `restic copy` into a new repository in the new bucket, one cell at a time. The new repository has a new master key and the cell-held password (`contain-cloud-controller-compromise` D5), so this one move also retires the platform password.
 3. Each cell then switches its repository.
