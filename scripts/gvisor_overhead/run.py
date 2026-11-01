@@ -36,6 +36,7 @@ CELL_ID = "abcdefghijklmnop"
 CELL_PORT = 8765
 PROTOCOL = "2025-11-25"
 IMPORT_NAME = "Project Archive"
+RUNTIMES = ("runc", "runsc", "runsc-nodirectfs", "runsc-ptrace", "runsc-debug")
 MEDIA_DIR = "Knowledge Base/Sources/Media"
 CELL_COMMAND = (
     'ulimit -c 0 && mkdir -p /data/scratch/tmp /data/scratch/cache /data/scratch/export && exec "$@"'
@@ -233,6 +234,72 @@ print(json.dumps({"import_id": import_id, "files": count, "bytes": total, "resul
     "encrypt_ms": (t_encrypt - t_prepare) * 1000, "run_import_ms": (t_run - t_encrypt) * 1000}))
 '''
 
+PROBE_SCRIPT = r'''
+import ctypes, errno, json, os, sys
+from pathlib import Path
+libc = ctypes.CDLL(None, use_errno=True)
+
+
+class How(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint64), ("mode", ctypes.c_uint64), ("resolve", ctypes.c_uint64)]
+
+
+def failure():
+    code = ctypes.get_errno()
+    return "errno %d %s" % (code, errno.errorcode.get(code, "?"))
+
+
+def openat2(fd, resolve):
+    how = How(os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, 0, resolve)
+    result = libc.syscall(ctypes.c_long(437), ctypes.c_int(fd), ctypes.c_char_p(b"."), ctypes.byref(how),
+                          ctypes.c_size_t(ctypes.sizeof(how)))
+    if result < 0:
+        return failure()
+    os.close(result)
+    return "ok"
+
+
+def renameat2(fd):
+    for name in ("probe-a", "probe-b"):
+        try:
+            os.unlink(name, dir_fd=fd)
+        except OSError:
+            pass
+    os.close(os.open("probe-a", os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600, dir_fd=fd))
+    libc.renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    result = libc.renameat2(fd, b"probe-a", fd, b"probe-b", 1)
+    outcome = "ok" if result == 0 else failure()
+    for name in ("probe-a", "probe-b"):
+        try:
+            os.unlink(name, dir_fd=fd)
+        except OSError:
+            pass
+    return outcome
+
+
+report = {"kernel": os.uname().release, "roots": {}}
+for root in sys.argv[1:]:
+    entry = {}
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    for label, resolve in (("none", 0), ("no_xdev", 1), ("no_magiclinks", 2), ("no_symlinks", 4),
+                           ("beneath", 8), ("all_four", 15)):
+        entry["openat2_" + label] = openat2(fd, resolve)
+    entry["renameat2_noreplace"] = renameat2(fd)
+    os.close(fd)
+    with open("/proc/self/mountinfo") as handle:
+        entry["mountinfo"] = [line.strip()[:200] for line in handle if " %s " % root in line]
+    try:
+        from exomem import _held_fs_posix as held
+        caps = held.probe(Path(root))
+        entry["product_probe"] = {"relative_operations": caps.relative_operations, "no_follow": caps.no_follow,
+                                  "same_device_rename": caps.same_device_rename, "hard_link": caps.hard_link,
+                                  "reason": caps.reason}
+    except Exception as error:
+        entry["product_probe"] = "%s: %s" % (type(error).__name__, error)
+    report["roots"][root] = entry
+print(json.dumps(report))
+'''
+
 REBUILD_SCRIPT = r'''
 import json, time
 from pathlib import Path
@@ -401,6 +468,28 @@ class Lab:
             facts[key] = (result.stdout + result.stderr).strip()[:6000]
         self.docker("rm", "-f", name, check=False)
         self.diag("runsc_facts", facts)
+
+    # -- compatibility
+    def compat(self) -> None:
+        """Which kernel primitives the cell's filesystem layer needs, per runtime and root; unmeasured."""
+        volume = f"gv-compat-{self.run_id}"
+        self.new_volume(volume)
+        try:
+            for runtime in RUNTIMES:
+                wall, probed = self.oneshot(runtime, volume, ["python", "-c", PROBE_SCRIPT, "/data", "/tmp"],
+                                            entrypoint="env", timeout=300)
+                self.log(f"compat {runtime} rc={probed.returncode} {wall:.0f} ms {probed.stdout.strip()[:1200]}"
+                         f"{probed.stderr.strip()[-300:]}")
+                self.diag(f"compat-{runtime}", {"rc": probed.returncode, "stdout": probed.stdout,
+                                                "stderr": probed.stderr[-2000:]})
+        finally:
+            self.docker("volume", "rm", "-f", volume, check=False)
+        # The sandbox's own log names every syscall it refused; the debug runtime wrote it to the host.
+        pattern = "unsupported syscall|ENOSYS|not implemented|not supported"
+        listing = sh(["sudo", "sh", "-c", f"ls -l /tmp/runsc-debug | head -20; "
+                      f"grep -rhiE '{pattern}' /tmp/runsc-debug | cut -c1-300 | sort | uniq -c | sort -rn | head -60"],
+                     check=False, timeout=120)
+        self.diag("runsc_debug_unsupported", listing.stdout + listing.stderr)
 
     # -- seed
     def make_fixtures(self) -> None:
@@ -594,7 +683,7 @@ class Lab:
     # -- (b)
     def work_write(self, arm: str, rep: int, mcp: Mcp) -> None:
         def write(index: int, marker: str) -> Call:
-            body = (f"Benchmark note {index} for {arm} repeat {rep}. Marker {marker}. "
+            body = (f"Benchmark note {index} for {arm} repeat {rep}. Edit anchor {marker}. "
                     + " ".join(fixtures.FILLER[index % len(fixtures.FILLER)].split()) + ".")
             deadline = time.monotonic() + 120
             while True:
@@ -624,8 +713,9 @@ class Lab:
         self.record(arm, rep, "b.write_note", values, ok=bool(values), note=f"paths_found={len(paths)}")
         values = []
         for path, marker in paths[:10]:
-            answer = mcp.call("edit", {"path": path, "why": "benchmark edit", "old_string": marker,
-                                       "new_string": marker + "x"})
+            answer = mcp.call("edit", {"path": path, "why": "benchmark edit",
+                                       "old_string": f"Edit anchor {marker}",
+                                       "new_string": f"Edited anchor {marker}"})
             if answer.ok:
                 values.append(answer.ms)
             else:
@@ -745,8 +835,11 @@ class Lab:
         self.docker("network", "create", "--driver", "bridge", "--internal", self.network)
         try:
             self.environment()
-            self.make_fixtures()
             self.runsc_facts()
+            self.compat()
+            if self.args.compat_only:
+                return
+            self.make_fixtures()
             self.seed()
             for rep in range(1, self.args.repeats + 1):
                 order = ("runc", "runsc") if rep % 2 else ("runsc", "runc")
@@ -764,6 +857,7 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed-notes", type=int, default=200)
     parser.add_argument("--only", default="search,write,media,import")
+    parser.add_argument("--compat-only", action="store_true", help="probe the runtimes and stop")
     args = parser.parse_args()
     args.only = {part for part in args.only.split(",") if part}
     lab = Lab(args)
