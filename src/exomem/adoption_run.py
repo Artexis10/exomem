@@ -1064,8 +1064,8 @@ def _collection_of(root: Path, source_root: str, label: str | None, stage: impor
 
     A recorded stage (``stage``) gives the folder from its record, not from a walk, so that a window whose
     files adoption has already filed keeps it. The record is the series file's path list, which every window of
-    a series carries whole, and for a stage without one, the manifest's members. The series file's label is
-    the default label.
+    a series carries whole, when it names every member of the manifest, and otherwise the manifest's members.
+    The series file's label is the default label.
     """
     parts = source_root.split("/") if source_root else []
     collection_root = source_root
@@ -1073,7 +1073,8 @@ def _collection_of(root: Path, source_root: str, label: str | None, stage: impor
     if len(parts) == 2 and parts[0] == IMPORT_STAGE_DIR:
         series = import_stage.read_series(root, parts[1]) if stage is not None else None
         if stage is not None:
-            folder = _only_folder(series.paths if series is not None and series.paths else stage.members)
+            listed = series.listing(stage.members) if series is not None else ()
+            folder = _only_folder(listed or stage.members)
         else:
             try:
                 entries = [e for e in (root / source_root).iterdir() if not e.name.startswith(".")]
@@ -1507,16 +1508,20 @@ def _whole_scan(root: Path, run: dict) -> list[str] | None:
     """The collection path of every file the scan holds, for a run of a series or a paged run; None for any other.
 
     A recorded stage with a series file passes the series' path list, so that a bare name meets the files of
-    the windows that have not landed. Consumed files of earlier pages are no longer on disk, but their Sources
-    are in the import index.
+    the windows that have not landed, when the list names every member of the stage's manifest (see
+    `Series.listing`). Consumed files of earlier pages are no longer on disk, but their Sources are in the
+    import index.
     """
     collection_root = (run.get("collection") or {}).get("root", "")
-    series = import_stage.read_series(root, run["stage"]["stage"]) if run.get("stage") else None
-    if series is not None and series.paths:
-        prefix = f"{IMPORT_STAGE_DIR}/{run['stage']['stage']}"
+    stage = import_stage.read(root, run["stage"]["stage"]) if run.get("stage") else None
+    listed = ()
+    if stage is not None and (series := import_stage.read_series(root, stage.import_id)) is not None:
+        listed = series.listing(stage.members)
+    if listed:
+        prefix = f"{IMPORT_STAGE_DIR}/{stage.import_id}"
         return [
             adoption_plan.collection_path_of(f"{prefix}/{path}", collection_root)
-            for path in series.paths if path != import_stage.SERIES_FILE
+            for path in listed if path != import_stage.SERIES_FILE
         ]
     paging = run.get("paging")
     if not paging:

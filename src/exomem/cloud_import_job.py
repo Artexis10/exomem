@@ -407,9 +407,9 @@ def _keep_residual(vault_root: Path, import_id: str, *, walk_stage: bool) -> Non
         if import_stage.RESIDUAL_KEY not in receipt and (import_stage.MEMBERS_KEY in receipt or stage.exists()):
             unfiled = adoption_run.unfiled_members(vault_root, import_id)
             # The receipt's record outranks a walk's. An empty one would say that every member was filed over the
-            # members that a walk listed, so the walk's record stands.
+            # members that a walk listed, so the walk's record stands. One with members carries the walk's.
             if unfiled or not import_stage.read_walk_members(vault_root, import_id):
-                receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record(unfiled)
+                receipt[import_stage.RESIDUAL_KEY] = import_stage.residual_record_with_walk(vault_root, import_id, unfiled)
                 changed = True
         for key in (import_stage.MEMBERS_KEY, import_stage.RENAMES_PENDING_KEY):
             changed |= receipt.pop(key, None) is not None
@@ -427,7 +427,6 @@ def _walk(vault_root: Path, import_id: str) -> None:
     _write_walk(vault_root, import_id, import_stage.residual_record([
         import_stage.residual_member(path, size, import_stage.UNREADABLE_CODE)
         for path, size in import_stage.staged_files(vault_root, import_id)
-        if path != import_stage.SERIES_FILE
     ]))
 
 

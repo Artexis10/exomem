@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 from . import private_state, state_migration, state_paths, vault
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from . import held_fs
 
 STAGE_DIR = vault.IMPORT_STAGE_DIRNAME
@@ -42,7 +44,7 @@ SERIES_FILE = ".exomem-series.json"
 # Members that the person cleared from a residual record (D12): the same entry plus the time, kept beside `members`.
 ACKNOWLEDGED_KEY = "acknowledged"
 # What `window_record` finds, and which file holds a residual record; the status protocol's words.
-WINDOW_LANDED, WINDOW_RESIDUAL, WINDOW_UNREADABLE = "landed", "residual", "unreadable"
+WINDOW_LANDED, WINDOW_DISCARDED, WINDOW_UNREADABLE = "landed", "discarded", "unreadable"
 RECEIPT_SOURCE, WALK_SOURCE = "receipt", "walk"
 
 
@@ -124,6 +126,19 @@ class Series:
 
     label: str | None
     paths: tuple[str, ...]
+
+    def listing(self, members: Iterable[str]) -> tuple[str, ...]:
+        """The path list when it names every one of `members` but the series file, else none.
+
+        A window with no member besides the series file has nothing to check the list against, so it has none.
+
+        A well-typed list can still be the wrong one: paths relative to the source folder instead of the stage,
+        or the list of another series. It would put the collection root where no file is. A window's own members
+        are the check, because every window of a series is a part of its list.
+        """
+        wanted = [path for path in members if path != SERIES_FILE]
+        named = set(self.paths)
+        return self.paths if wanted and all(path in named for path in wanted) else ()
 
 
 def is_series_file(path: str) -> bool:
@@ -244,14 +259,19 @@ def write_local_record(vault_root: Path, import_id: str, members: list[dict]) ->
 
 
 def staged_files(vault_root: Path, import_id: str) -> list[tuple[str, int]]:
-    """Each file under the stage as (path relative to the stage, bytes); a file whose size cannot be read is left out."""
+    """Each file under the stage as (path relative to the stage, bytes), but the series file and a file whose size cannot be read.
+
+    The series file is part of how the stage was sent; it is never a member that adoption files or leaves unfiled.
+    """
     base = vault_root / STAGE_DIR / import_id
     found: list[tuple[str, int]] = []
     for directory, _names, files in os.walk(base):
         for name in files:
             full = Path(directory) / name
             try:
-                found.append((full.relative_to(base).as_posix(), full.lstat().st_size))
+                path = full.relative_to(base).as_posix()
+                if path != SERIES_FILE:
+                    found.append((path, full.lstat().st_size))
             except OSError:
                 continue
     return found
@@ -270,6 +290,28 @@ def residual_record(members: list[dict]) -> dict:
     or, when the receipt could not be read, in the walk store (`WALK_RECORDS`). `read_residual` reads both.
     """
     return {"version": RESIDUAL_VERSION, MEMBERS_KEY: members}
+
+
+def residual_record_with_walk(vault_root: Path, import_id: str, unfiled: list[dict]) -> dict:
+    """The residual record of a plain discard: `unfiled`, and the members and acknowledgements of an earlier walk.
+
+    A walk lists files that the manifest does not, because it cannot tell a filed file from an unfiled one. The
+    receipt's record outranks the walk's, so a record of `unfiled` alone would hide those members. A path that
+    both list keeps the entry of `unfiled`, which has the run's code; a path that the walk acknowledged stays
+    acknowledged, because the person cleared it. A walk that cannot be used adds nothing.
+    """
+    walked = _record_of(read_walk(vault_root, import_id))
+    if walked is None:
+        return residual_record(unfiled)
+    members, acknowledged = walked
+    cleared = {entry["path"] for entry in acknowledged}
+    listed = {entry["path"] for entry in unfiled}
+    record = residual_record(
+        [entry for entry in unfiled if entry["path"] not in cleared]
+        + [entry for entry in members if entry["path"] not in listed])
+    if acknowledged:
+        record[ACKNOWLEDGED_KEY] = acknowledged
+    return record
 
 
 def renames_pending_record(paths: list[str]) -> dict:
@@ -344,9 +386,9 @@ def _paths_of(value: object) -> tuple[str, ...]:
 class WindowRecord:
     """What the cell holds for one window, as `window_record` decides it; the three kinds are the status protocol's words.
 
-    `landed` has a stage with a manifest. `residual` has the unfiled and acknowledged members of a discarded
+    `landed` has a stage with a manifest. `discarded` has the unfiled and acknowledged members of a discarded
     window, read from `source`. `unreadable` has a record that cannot be used, or a stage and no record, so
-    nothing about its members is known; `staged` says whether the stage folder still holds files.
+    nothing about its members is known; `staged` says whether the stage folder exists.
     """
 
     kind: str
@@ -384,7 +426,7 @@ def window_record(vault_root: Path, import_id: str) -> WindowRecord | None:
     problems = ["the receipt of this window cannot be read"] if receipt_damaged else []
     if receipt is not None and RESIDUAL_KEY in receipt:
         if (kept := _record_of(receipt[RESIDUAL_KEY])) is not None:
-            return WindowRecord(WINDOW_RESIDUAL, None, tuple(kept[0]), tuple(kept[1]), RECEIPT_SOURCE, renames_pending=pending)
+            return WindowRecord(WINDOW_DISCARDED, None, tuple(kept[0]), tuple(kept[1]), RECEIPT_SOURCE, renames_pending=pending)
         problems.append("its residual record in the receipt is damaged")
     if receipt is not None and MEMBERS_KEY in receipt and stage is None and receipt["request"].get("kind") == "adopt":
         problems.append("its manifest is damaged")
@@ -392,7 +434,7 @@ def window_record(vault_root: Path, import_id: str) -> WindowRecord | None:
     if walk_damaged or (walk is not None and MEMBERS_KEY in walk and walked is None):
         problems.append("its walk record cannot be read")
     if walked is not None and (walked[0] or walked[1] or stage is None):
-        return WindowRecord(WINDOW_RESIDUAL, None, tuple(walked[0]), tuple(walked[1]), WALK_SOURCE, renames_pending=pending)
+        return WindowRecord(WINDOW_DISCARDED, None, tuple(walked[0]), tuple(walked[1]), WALK_SOURCE, renames_pending=pending)
     if stage is not None and not problems:
         return WindowRecord(WINDOW_LANDED, stage, staged=staged, renames_pending=pending)
     if problems or staged:
@@ -408,7 +450,7 @@ def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     tells the three apart.
     """
     record = window_record(vault_root, import_id)
-    return list(record.members) if record is not None and record.kind == WINDOW_RESIDUAL else None
+    return list(record.members) if record is not None and record.kind == WINDOW_DISCARDED else None
 
 
 def _stems(directory: Path) -> set[str]:

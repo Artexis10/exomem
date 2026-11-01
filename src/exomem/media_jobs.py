@@ -768,9 +768,10 @@ class MediaJobStore:
                              "series TEXT PRIMARY KEY, demand_bytes INTEGER NOT NULL, "
                              "budget_offset INTEGER NOT NULL, renewed_at REAL NOT NULL)")
                 # The latest owner census that offload read, for the window status (D12); one row, rebuildable.
+                # NULL used_bytes is a census that could not count: the status must not show an older figure instead.
                 conn.execute("CREATE TABLE IF NOT EXISTS media_owner_census ("
                              "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
-                             "used_bytes INTEGER NOT NULL, observed_at TEXT NOT NULL)")
+                             "used_bytes INTEGER, observed_at TEXT NOT NULL)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
