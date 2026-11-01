@@ -14,6 +14,7 @@ import types
 from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
+from starlette.concurrency import run_in_threadpool
 from test_cloud_original_download import _get, _headers, _preserved_original
 from test_cloud_upload_bridge import _run
 from test_cloud_upload_bridge import cell as cell
@@ -63,7 +64,21 @@ class _Reads:
             monkeypatch.setattr(_held_fs_posix, "_read", counted)
 
 
-async def _stream(app, key, path, *, extra=None, on_body=None):
+def _staying_client():
+    """A `receive` for a client that stays: its empty request body, then silence until the response ends."""
+    answered = False
+
+    async def receive():
+        nonlocal answered
+        if not answered:
+            answered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Event().wait()
+
+    return receive
+
+
+async def _stream(app, key, path, *, extra=None, on_body=None, receive=None):
     """Drive `/download` at the ASGI layer and return every message the server would put on the wire."""
     headers = {**_headers(key, path, **(extra or {})), "host": "cell.local"}
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
@@ -72,16 +87,13 @@ async def _stream(app, key, path, *, extra=None, on_body=None):
              "headers": [(name.encode(), value.encode()) for name, value in headers.items()]}
     sent = []
 
-    async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
-
     async def send(message):
         sent.append(message)
         if on_body is not None and message["type"] == "http.response.body":
-            await on_body()
+            await on_body(message)
 
     try:
-        await app(scope, receive, send)
+        await app(scope, receive or _staying_client(), send)
     except (artifact_recovery.RecoveryUnavailable, reserved_paths.ReservedPathLeafError) as error:
         return sent, error
     return sent, None
@@ -115,7 +127,7 @@ def test_a_file_that_changes_during_the_response_never_gets_a_complete_looking_b
     size = original.stat().st_size
     changed = []
 
-    async def change_after_first_chunk():
+    async def change_after_first_chunk(_message):
         if not changed:
             with original.open("r+b") as handle:  # in place, so the inode stays the same
                 handle.write(b"X")
@@ -220,22 +232,19 @@ def _grant_download(vault, monkeypatch):
     return client, url, parse_qs(urlsplit(url).query)["grant"][0], vault / stored["path"], content
 
 
-def _grant_stream(vault, grant, *, range_header=None, on_body=None):
+def _grant_stream(vault, grant, *, range_header=None, on_body=None, receive=None):
     """Drive the grant route at the ASGI layer; return every message it sends and the error that stopped it."""
     headers = [(b"range", range_header.encode())] if range_header else []
     scope = {"type": "http", "method": "GET", "headers": headers, "extensions": {}}
     sent = []
 
-    async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
-
     async def send(message):
         sent.append(message)
         if on_body is not None and message["type"] == "http.response.body":
-            on_body(message)
+            await on_body(message)
 
     try:
-        asyncio.run(server_transfer._OriginalDownloadResponse(vault, grant)(scope, receive, send))
+        asyncio.run(server_transfer._OriginalDownloadResponse(vault, grant)(scope, receive or _staying_client(), send))
     except (artifact_recovery.RecoveryUnavailable, reserved_paths.ReservedPathLeafError) as error:
         return sent, error
     return sent, None
@@ -264,7 +273,7 @@ def test_a_file_rewritten_during_a_multipart_body_stops_it_without_the_final_bou
     _, _, grant, original, content = _grant_download(vault, monkeypatch)
     changed = []
 
-    def rewrite_after_the_first_part(message):
+    async def rewrite_after_the_first_part(message):
         if not changed and message["body"] == content[0:10]:
             with original.open("r+b") as handle:  # in place, so the inode stays the same
                 handle.write(b"X")
@@ -284,7 +293,7 @@ def test_a_file_rewritten_during_a_multipart_body_stops_it_without_the_final_bou
 def test_a_rename_after_the_last_chunk_does_not_fail_a_completed_download(vault, monkeypatch):
     _, _, grant, original, content = _grant_download(vault, monkeypatch)
 
-    def rename_after_the_last_chunk(message):
+    async def rename_after_the_last_chunk(message):
         if not message["more_body"]:
             original.rename(original.with_name("moved-" + original.name))
 
@@ -293,3 +302,89 @@ def test_a_rename_after_the_last_chunk_does_not_fail_a_completed_download(vault,
     assert error is None
     bodies = [message for message in sent if message["type"] == "http.response.body"]
     assert b"".join(message["body"] for message in bodies) == content
+
+
+class _AbortedSeek:
+    """A client that takes one full chunk of the body and then goes away, as a browser does on a seek.
+
+    `receive` answers `http.disconnect` once that chunk is sent. With `hold`, the send that carries the chunk
+    also waits for `hold`, as a send does under back-pressure, so the response is mid-body when the client leaves.
+    """
+
+    def __init__(self, reads=None, *, hold=None):
+        self.reads, self.hold = reads, hold
+        self.taken = asyncio.Event()
+        self.read_when_it_left = None
+
+    async def receive(self):
+        await self.taken.wait()
+        return {"type": "http.disconnect"}
+
+    async def on_body(self, message):
+        if self.taken.is_set() or len(message["body"]) != server_transfer._HeldFileResponse.chunk_size:
+            return
+        self.read_when_it_left = self.reads.total if self.reads else None
+        self.taken.set()
+        if self.hold:
+            await self.hold.wait()
+
+
+@pytest.mark.parametrize("range_header", [None, "bytes=100-"], ids=["simple", "ranged"])
+def test_a_download_stops_reading_when_the_client_disconnects(cell, monkeypatch, range_header):
+    key, app, vault = cell
+    original, path = _large_original(vault)
+    reads = _Reads(monkeypatch, original)
+    seek = _AbortedSeek(reads)
+
+    sent, error = _run(app, lambda client: _stream(
+        app, key, path, extra={"range": range_header} if range_header else None,
+        on_body=seek.on_body, receive=seek.receive))
+
+    assert error is None
+    assert reads.total - seek.read_when_it_left <= server_transfer._HeldFileResponse.chunk_size
+    bodies = [message for message in sent if message["type"] == "http.response.body"]
+    assert all(message["more_body"] for message in bodies), "a body cut short by a disconnect looked complete"
+
+
+def test_two_aborted_seeks_leave_both_download_slots_free(cell):
+    key, app, vault = cell
+    _, path = _large_original(vault)
+
+    async def scenario(client):
+        hold = asyncio.Event()
+        seeks = [_AbortedSeek(hold=hold) for _ in range(2)]
+        requests = [asyncio.create_task(_stream(
+            app, key, path, extra={"range": "bytes=100-"}, on_body=seek.on_body, receive=seek.receive))
+            for seek in seeks]
+        try:
+            # Each seek is stuck mid-body when it leaves. A response that ignores that holds its slot until
+            # `hold` opens, so this wait ends only to report that it did not finish; it never decides a pass.
+            await asyncio.wait(requests, timeout=20)
+            return (await _get(client, path, _headers(key, path))).status_code
+        finally:
+            hold.set()
+            await asyncio.gather(*requests)
+
+    assert _run(app, scenario) == 200
+
+
+def test_a_multi_range_download_stops_reading_when_the_client_disconnects(vault, monkeypatch):
+    _, _, grant, original, content = _grant_download(vault, monkeypatch)
+    # `_client` runs the threadpool inline, which never yields to the loop; a disconnect needs the real one.
+    monkeypatch.setattr(server_transfer, "run_in_threadpool", run_in_threadpool)
+    reads = _Reads(monkeypatch, original)
+    seek = _AbortedSeek(reads)
+
+    sent, error = _grant_stream(vault, grant, range_header="bytes=0-150000,160000-204799",
+                                on_body=seek.on_body, receive=seek.receive)
+
+    assert error is None
+    assert reads.total - seek.read_when_it_left <= server_transfer._HeldFileResponse.chunk_size
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    boundary = dict(start["headers"])[b"content-type"].split(b"boundary=")[1]
+    sent_bytes = b"".join(message["body"] for message in sent if message["type"] == "http.response.body")
+    assert b"--" + boundary + b"--" not in sent_bytes, "a body cut short by a disconnect looked complete"
+    # The aborted request released its slot and pin: the next one gets the whole original.
+    again, error = _grant_stream(vault, grant)
+    assert error is None
+    assert b"".join(message["body"] for message in again if message["type"] == "http.response.body") == content

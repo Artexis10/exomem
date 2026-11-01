@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import anyio
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
@@ -521,6 +522,13 @@ def _hydration_too_large(error: BaseException | None) -> JSONResponse | None:
                         status_code=409, headers=_RECOVERY_HEADERS)
 
 
+async def _cancel_on_disconnect(receive, scope: anyio.CancelScope) -> None:
+    """Cancel `scope` when the client disconnects. A live client leaves `receive` waiting, so this never spins."""
+    while (await receive())["type"] != "http.disconnect":
+        pass
+    scope.cancel()
+
+
 class _HeldFileResponse(FileResponse):
     """A `FileResponse` that reads a held original from its handle, with no private copy (task 5.4.12).
 
@@ -528,6 +536,10 @@ class _HeldFileResponse(FileResponse):
     `read_held` checks the file's version after each read, before the bytes are sent. A file that
     changes during the stream therefore stops the response, and the chunk that completes the body
     is sent only after its check passes, so a stopped response never looks complete.
+
+    A client that disconnects stops the stream (task 5.4.12a). uvicorn drops `send` silently after a
+    disconnect, so only `receive` reports it, and a stream left running would hold its download slot
+    and `local_originals` pin for the rest of the span.
     """
 
     def __init__(self, held: reserved_paths.GenericFileCopy, *, media_type: str,
@@ -537,6 +549,26 @@ class _HeldFileResponse(FileResponse):
         super().__init__("", headers=headers, media_type=media_type, filename=filename,
                          stat_result=held.source_stat)
         self.held = held
+
+    async def __call__(self, scope, receive, send) -> None:
+        """Stream the body until it ends or the client disconnects.
+
+        A disconnect cancels the stream and returns normally, with no final chunk. The caller's `async with`
+        then releases the handle, the pin and the slot. A read already running in a worker thread finishes first,
+        so at most one chunk is read after the disconnect.
+        """
+        failure: Exception | None = None
+        async with anyio.create_task_group() as group:
+            group.start_soon(_cancel_on_disconnect, receive, group.cancel_scope)
+            try:
+                await super().__call__(scope, receive, send)
+            except Exception as error:  # noqa: BLE001 - raised again below, after the group exits
+                # An error raised inside the group would reach the callers as an ExceptionGroup, which their
+                # `except` clauses do not match. Only a cancellation may leave the group.
+                failure = error
+            group.cancel_scope.cancel()
+        if failure is not None:
+            raise failure
 
     async def _send_span(self, send, start: int, end: int, *, more_after: bool) -> None:
         """Send bytes `start` up to `end`; the last chunk ends the body unless `more_after`."""
