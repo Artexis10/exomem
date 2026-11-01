@@ -107,6 +107,17 @@ _last_debt = 0.0
 _per_path_blocked: set[Path] = set()
 _PER_PATH_LOCK = threading.Lock()
 
+#: Vaults whose latest per-path drain cleared no receipt only because live
+#: commits won the race for it: a commit landed after the drain sampled its
+#: checkpoint, or the mutation boundary stayed busy behind one. Not a fault of
+#: the queue, so it neither ages out into a whole-vault pass nor counts as a
+#: stall. Held beside `_per_path_blocked` and with the same key and lock.
+_per_path_raced: set[Path] = set()
+
+#: The external change the availability arm last saw standing, per vault, as
+#: (latest pending epoch, monotonic time first seen). Scheduling state only.
+_external_change_seen: dict[Path, tuple[int, float]] = {}
+
 #: The checkpoint generation this process last spent a covering drain on, per
 #: vault. Scheduling state only, like `_last_debt`: it authorizes nothing, and a
 #: restart that forgets it costs one more bounded drain.
@@ -131,10 +142,13 @@ def note_graph_progress(vault_root: Path) -> None:
     """Wake the drain without waiting out a backoff: this vault's graph was just published.
 
     A publication also changes what the next per-path drain can do, so this
-    vault's record of a blocked one is dropped until that drain says so again.
+    vault's record of a blocked or raced one is dropped until that drain says
+    so again.
     """
+    key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        _per_path_blocked.discard(state_paths.resolved_vault_path(vault_root))
+        _per_path_blocked.discard(key)
+        _per_path_raced.discard(key)
     _PROGRESS.set()
     _DEBT.set()
 
@@ -147,6 +161,28 @@ def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
             _per_path_blocked.discard(key)
         else:
             _per_path_blocked.add(key)
+
+
+def note_per_path_race(vault_root: Path, *, raced: bool) -> None:
+    """Record whether this vault's latest per-path drain only lost races to commits."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        if raced:
+            _per_path_raced.add(key)
+        else:
+            _per_path_raced.discard(key)
+
+
+def per_path_repair_raced(vault_root: Path) -> bool:
+    """Whether this vault's latest per-path drain cleared nothing because commits won.
+
+    While it did, queued receipts keep owning the repair however old they are:
+    the age bound exists for a receipt that never drains, and this queue drains
+    whenever the writes pause.
+    """
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        return key in _per_path_raced
 
 
 def per_path_repair_blocked(vault_root: Path) -> bool:
@@ -231,6 +267,7 @@ _FULL_REBUILD_CAUSES = {
     "unreadable_without_barrier": "graph unreadable with no barrier",
     "barrier_external_epoch": "barrier holds an unpublished external epoch",
     "queue_stalled": "graph unreadable and its repair queue made no progress",
+    "external_change_stalled": "graph unreadable behind an external change nobody repaired",
 }
 
 
@@ -398,7 +435,7 @@ def _recover_once(vault_root: Path) -> bool:
 
 
 def _republish_once(vault_root: Path) -> bool | None:
-    """Restore a stranded marker; None defers for foreground work. Never raises."""
+    """Restore a stranded marker; None defers, False declines. Never raises."""
     from . import epistemic_graph
 
     try:
@@ -406,6 +443,30 @@ def _republish_once(vault_root: Path) -> bool | None:
     except Exception:  # noqa: BLE001 - the graph stays unavailable, so the signal stays
         log.warning("graph drain: availability republication failed", exc_info=True)
         return False
+
+
+def _external_change_stood(vault_root: Path) -> bool:
+    """True when one external change has stayed pending for `stall_seconds`.
+
+    The watcher repairs an external change and clears its mark, which ends the
+    wait. A mark that outlives the whole backoff ladder with no newer one and no
+    clear means the watcher is dead or exhausted, and only then is the graph's
+    availability debt the drain's to rebuild. "The same change" is the latest
+    pending epoch: a newer mark is a live watcher's input and restarts the wait.
+    """
+    from . import freshness
+
+    key = state_paths.resolved_vault_path(vault_root)
+    epoch = freshness.external_pending_epoch(vault_root)
+    if epoch is None:
+        _external_change_seen.pop(key, None)
+        return False
+    now = time.monotonic()
+    seen = _external_change_seen.get(key)
+    if seen is None or seen[0] != epoch:
+        _external_change_seen[key] = (epoch, now)
+        return False
+    return now - seen[1] >= stall_seconds()
 
 
 def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
@@ -501,7 +562,10 @@ def _work_once(vault_root: Path) -> int:
     waited longer than `stall_seconds`, recovery runs as it would with an empty
     queue. The age bounds a receipt that never drains behind writes that do:
     their progress restarts the stall escalation in `_run_owned`, which is the
-    route for a queue that drains without making any progress.
+    route for a queue that drains without making any progress. Neither bounds a
+    queue whose latest pass cleared nothing only because commits won the race
+    for it (`per_path_repair_raced`): a whole-vault pass would lose to the same
+    commits.
     """
     from . import epistemic_graph
 
@@ -548,9 +612,18 @@ def _work_once(vault_root: Path) -> int:
         if _cover_unacknowledged_checkpoint(vault_root):
             processed += 1
         else:
+            # A deferral retains the availability debt. Only a declined proof, or
+            # an external change the watcher left standing for the whole stall,
+            # needs a rebuild.
             republished = _republish_once(vault_root)
-            # Deferral retains availability debt; only a declined proof needs a rebuild.
-            if republished is True or (republished is False and _request_full_rebuild(vault_root)):
+            if republished is True:
+                processed += 1
+            elif republished is False:
+                if _request_full_rebuild(vault_root):
+                    processed += 1
+            elif _external_change_stood(vault_root) and _request_full_rebuild(
+                vault_root, cause="external_change_stalled"
+            ):
                 processed += 1
     return processed
 
@@ -592,7 +665,8 @@ def stall_seconds() -> float:
     the shipped constants. Wall time rather than a pass count, because write
     signals cut each backoff wait short and would reach the ceiling in seconds.
     Barrier recovery reads it too, against the oldest queued receipt's age
-    (`epistemic_graph.recovery_decline_reason`).
+    (`epistemic_graph.recovery_decline_reason`), and so does the availability
+    arm, against an external change the watcher leaves pending.
     """
     total, step = 0.0, RETRY_SECONDS
     while 0.0 < step < MAX_RETRY_SECONDS:
@@ -709,9 +783,12 @@ def _run_owned(vault_root: Path) -> None:
             # the drain can repair per path, until the oldest of them has
             # waited this same threshold. Progress restarts this count, so that
             # age is what bounds a receipt that never drains behind writes that
-            # do.
-            if _marker_pending(vault_root) or not (
-                _queue_pending(vault_root) and _availability_pending(vault_root)
+            # do. A pass that only lost races to commits restarts it as well:
+            # the queue is draining as fast as the writes let it.
+            if (
+                per_path_repair_raced(vault_root)
+                or _marker_pending(vault_root)
+                or not (_queue_pending(vault_root) and _availability_pending(vault_root))
             ):
                 stalled_since = None
             elif stalled_since is None:
