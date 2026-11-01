@@ -282,6 +282,48 @@ def renameat2(fd):
     return outcome
 
 
+def fsync_dir(fd):
+    try:
+        os.fsync(fd)
+        return "ok"
+    except OSError as error:
+        return "errno %d %s" % (error.errno, errno.errorcode.get(error.errno, "?"))
+
+
+def replay(root):
+    """The probe's own steps through the product's filesystem class, with the errno behind each refusal."""
+    from exomem import _held_fs_posix as held
+    capabilities = held.Capabilities(True, True, True, True, True)
+    fs = held.PosixHeldFilesystem(held._open(root, held._DIRECTORY_FLAGS), capabilities)
+    stem = ".gv-replay-%d" % os.getpid()
+    names = (stem, stem + "-renamed", stem + "-link")
+    steps = {}
+
+    def attempt(label, call):
+        result = call()
+        steps[label] = "ok" if result.ok else "%s cause=%r" % (result.error.code, result.error.cause)
+
+    try:
+        with fs.parent(".").require() as parent:
+            with fs.file(parent, names[0], access="write", create=True, exclusive=True).require() as source:
+                attempt("write", lambda: fs.write(source, b"probe"))
+            with fs.file(parent, names[0], access="mutate").require() as source:
+                attempt("link", lambda: fs.link(source, parent, names[2]))
+                attempt("rename", lambda: fs.rename(source, parent, names[1]))
+            with fs.file(parent, names[1], access="mutate").require() as renamed:
+                attempt("unlink", lambda: fs.unlink(renamed))
+    except Exception as error:
+        steps["exception"] = "%s: %s" % (type(error).__name__, error)
+    finally:
+        for name in names:
+            try:
+                os.unlink(name, dir_fd=fs.descriptor)
+            except OSError:
+                pass
+        fs.close()
+    return steps
+
+
 report = {"kernel": os.uname().release, "roots": {}}
 for root in sys.argv[1:]:
     entry = {}
@@ -290,7 +332,12 @@ for root in sys.argv[1:]:
                            ("beneath", 8), ("all_four", 15)):
         entry["openat2_" + label] = openat2(fd, resolve)
     entry["renameat2_noreplace"] = renameat2(fd)
+    entry["fsync_directory"] = fsync_dir(fd)
     os.close(fd)
+    try:
+        entry["product_replay"] = replay(root)
+    except Exception as error:
+        entry["product_replay"] = "%s: %s" % (type(error).__name__, error)
     with open("/proc/self/mountinfo") as handle:
         entry["mountinfo"] = [line.strip()[:200] for line in handle if " %s " % root in line]
     try:
@@ -417,8 +464,9 @@ class Lab:
         address = json.loads(info.stdout)[self.network]["IPAddress"]
         return f"http://{address}:{CELL_PORT}", created, t0
 
-    def wait_http(self, url: str, path: str, t0: float, timeout: float) -> float | None:
+    def wait_http(self, url: str, path: str, t0: float, timeout: float, container: str) -> float | None:
         deadline = time.monotonic() + timeout
+        next_check = time.monotonic() + 5
         with httpx.Client(timeout=2.0, trust_env=False) as client:
             while time.monotonic() < deadline:
                 try:
@@ -426,6 +474,12 @@ class Lab:
                         return now_ms() - t0
                 except httpx.HTTPError:
                     pass
+                if time.monotonic() > next_check:
+                    state = self.docker("inspect", "--format", "{{.State.Running}}", container, check=False)
+                    if state.stdout.strip() != "true":
+                        self.log(f"{container} is not running; no point waiting for {path}")
+                        return None
+                    next_check = time.monotonic() + 5
                 time.sleep(0.05)
         return None
 
@@ -530,7 +584,7 @@ class Lab:
         name = f"gv-seedcell-{self.run_id}"
         url, _, t0 = self.start_cell("runc", name, volume)
         try:
-            ready = self.wait_http(url, "/health/ready", t0, 300)
+            ready = self.wait_http(url, "/health/ready", t0, 300, name)
             self.log(f"seed cell ready after {ready} ms")
             if ready is None:
                 raise HarnessError("seed cell never became ready")
@@ -571,10 +625,6 @@ class Lab:
         self.new_volume(volume)
         self.helper(volume, "tar -C /data -xpf /snap/seed.tar && chmod 2770 /data",
                     mounts=[f"{self.snap}:/snap:ro"])
-        if "media" in self.args.only:
-            # Staged before the cell starts: an overlay over the volume would not see a later host-side copy.
-            self.helper(volume, f"mkdir -p '/data/vault/{MEDIA_DIR}' && cp /media/* '/data/vault/{MEDIA_DIR}/'",
-                        mounts=[f"{self.fx / 'media'}:/media:ro"], user="10001:10001")
         try:
             self.session_body(arm, rep, tag, volume, name)
         finally:
@@ -599,8 +649,8 @@ class Lab:
                 self.fail(arm, rep, "c.import_stage_job", f"{type(error).__name__}: {error}")
         # (e) startup
         url, created, t0 = self.start_cell(CELL_RUNTIME[arm], name, volume)
-        live = self.wait_http(url, "/health", t0, 240)
-        ready = self.wait_http(url, "/health/ready", t0, 400)
+        live = self.wait_http(url, "/health", t0, 240, name)
+        ready = self.wait_http(url, "/health/ready", t0, 400, name)
         self.record(arm, rep, "e.docker_run_returns", [created])
         for case, value in (("e.start_to_live", live), ("e.start_to_ready", ready)):
             if value is None:
@@ -616,7 +666,7 @@ class Lab:
             sections = (
                 ("search", lambda: self.work_search(arm, rep, url, mcp)),
                 ("write", lambda: self.work_write(arm, rep, mcp)),
-                ("media", lambda: self.work_media(arm, rep, mcp, volume)),
+                ("media", lambda: self.work_media(arm, rep, mcp, name)),
                 ("import", lambda: self.work_import_cell(arm, rep, mcp, import_id)),
             )
             for key, work in sections:
@@ -747,7 +797,17 @@ class Lab:
         self.record(arm, rep, "b.write_to_searchable", values, ok=bool(values))
 
     # -- (d)
-    def work_media(self, arm: str, rep: int, mcp: Mcp, volume: str) -> None:
+    def work_media(self, arm: str, rep: int, mcp: Mcp, container: str) -> None:
+        # Files go in through the running container, so both runtimes see them the same way
+        # (a host-side copy into the volume is invisible to a sandbox with an overlay over it).
+        for filename in self.media_files:
+            with (self.fx / "media" / filename).open("rb") as source:
+                staged = subprocess.run(
+                    ["docker", "exec", "-i", "-u", "10001:10001", container, "sh", "-c",
+                     f"mkdir -p '/data/vault/{MEDIA_DIR}' && cat > '/data/vault/{MEDIA_DIR}/{filename}'"],
+                    stdin=source, capture_output=True, check=False, timeout=120)
+            if staged.returncode != 0:
+                raise HarnessError(f"staging {filename} failed: {staged.stderr[-300:]!r}")
         for filename in self.media_files:
             path = f"{MEDIA_DIR}/{filename}"
             case = f"d.media_{filename.replace('.', '_').replace('-', '_')}"

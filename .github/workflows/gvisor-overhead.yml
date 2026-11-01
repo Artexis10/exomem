@@ -23,7 +23,7 @@ env:
   REPEATS: "1"
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
-  EXTRA_ARGS: ""
+  EXTRA_ARGS: "--compat-only"
 
 jobs:
   measure:
