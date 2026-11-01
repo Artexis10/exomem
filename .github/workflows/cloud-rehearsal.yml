@@ -134,7 +134,7 @@ jobs:
     needs: checks
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'large-import'
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 358
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -161,7 +161,7 @@ jobs:
       # finding, 2 a harness failure. Loop devices and the device-mapper module need sudo.
       - name: Run the large import
         working-directory: infra/cloud-rehearsal
-        timeout-minutes: 140
+        timeout-minutes: 345
         env:
           PYTHONUNBUFFERED: "1"
           REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/large-import-diagnostics
@@ -169,7 +169,7 @@ jobs:
           LARGE_IMPORT_GB: ${{ inputs.large_import_gb }}
           LARGE_IMPORT_SMOKE: ${{ inputs.large_import_smoke && '--large-import-smoke' || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run --large-import ${LARGE_IMPORT_SMOKE} ${LARGE_IMPORT_FILES:+--large-import-files "$LARGE_IMPORT_FILES"} ${LARGE_IMPORT_GB:+--large-import-gb "$LARGE_IMPORT_GB"} --report "${RUNNER_TEMP}/large-import-report.json"
+          uv run --frozen exomem-cloud-rehearsal run --large-import --large-import-minutes 320 ${LARGE_IMPORT_SMOKE} ${LARGE_IMPORT_FILES:+--large-import-files "$LARGE_IMPORT_FILES"} ${LARGE_IMPORT_GB:+--large-import-gb "$LARGE_IMPORT_GB"} --report "${RUNNER_TEMP}/large-import-report.json"
       - name: Summarize the report
         if: always()
         run: |
