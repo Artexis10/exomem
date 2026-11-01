@@ -532,7 +532,9 @@ class _HeldFileResponse(FileResponse):
 
     def __init__(self, held: reserved_paths.GenericFileCopy, *, media_type: str,
                  headers: dict[str, str] | None = None, filename: str | None = None):
-        super().__init__(held.relative_path, headers=headers, media_type=media_type, filename=filename,
+        # The handle is the only source. A path that cannot open makes a Starlette body writer that this class
+        # no longer overrides fail loudly, instead of opening the vault-relative name from the working directory.
+        super().__init__("", headers=headers, media_type=media_type, filename=filename,
                          stat_result=held.source_stat)
         self.held = held
 

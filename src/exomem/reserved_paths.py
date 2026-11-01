@@ -1533,20 +1533,29 @@ def hold_generic_file(vault_root: Path, value: object, *,
     handle hashes the file. The caller then reads bytes with `read_held`.
     """
     _copy_deadline(deadline)
-    with open_generic_binary(vault_root, value) as source:
-        try:
-            version = source.version
-            descriptor = source.stream.fileno()
-            digest = recorded_sha256(version)
-            if digest is None:
-                digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
-                if size != version.size or source.current_version() != version:
-                    raise ReservedPathLeafError("IO_REFUSED")
-            held = GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
-                                   digest, version.size, None, version, deadline, None, source)
-        except (OSError, held_fs.HeldFsError) as error:
-            raise ReservedPathLeafError("IO_REFUSED") from error
-        yield held
+    finished = False
+    try:
+        with open_generic_binary(vault_root, value) as source:
+            try:
+                version = source.version
+                descriptor = source.stream.fileno()
+                digest = recorded_sha256(version)
+                if digest is None:
+                    digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
+                    if size != version.size or source.current_version() != version:
+                        raise ReservedPathLeafError("IO_REFUSED")
+                held = GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
+                                       digest, version.size, None, version, deadline, None, source)
+            except (OSError, held_fs.HeldFsError) as error:
+                raise ReservedPathLeafError("IO_REFUSED") from error
+            yield held
+            finished = True
+    except ReservedPathLeafError:
+        # Only the name check that `open_generic_binary` runs at exit can raise here once the caller finished
+        # cleanly. `read_held` already proved each byte sent against the held version, so a rename after the
+        # last byte changes nothing that was delivered and must not fail a complete response.
+        if not finished:
+            raise
 
 
 def read_held(held: GenericFileCopy, offset: int, length: int) -> bytes:

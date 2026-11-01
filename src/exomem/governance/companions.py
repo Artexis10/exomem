@@ -408,8 +408,7 @@ def _classify_scene_frame(
                 # A held artifact has no copy bound, so half the spool's free space bounds the parent's copy.
                 parent = reserved_paths.copy_generic_file(
                     vault_root, parent_path, Path(temporary) / "parent",
-                    max_bytes=(shutil.disk_usage(temporary).free // 2 if artifact.max_bytes is None
-                               else artifact.max_bytes - artifact.size),
+                    max_bytes=shutil.disk_usage(temporary).free // 2,
                     deadline=artifact.deadline,
                 )
                 reserved_paths.require_current_generic_copy(parent)
