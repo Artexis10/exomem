@@ -737,7 +737,11 @@ def audit_fix(
     rewrites = _plan_content(vault_root, report, today_iso)
     report.plan_id = _plan_id(rewrites, rebuild_embeddings)
     if dry_run:
-        maintenance_jobs.record_planned((rewrite.rel, None) for rewrite in rewrites)
+        # What the plan does to each page, so an owner reads it from the job's receipt before approving a write.
+        what: dict[str, list[str]] = {}
+        for fixed in report.fixed:
+            what.setdefault(fixed.path, []).append(f"{fixed.category}: {fixed.action}")
+        maintenance_jobs.record_planned((rewrite.rel, "; ".join(what.get(rewrite.rel, ()))) for rewrite in rewrites)
     if reviewed:
         maintenance_jobs.require_current_plan("fix", plan_id, report.plan_id, "the content rewrites of fix")
         _commit_in_chunks(vault_root, kb, rewrites, report)

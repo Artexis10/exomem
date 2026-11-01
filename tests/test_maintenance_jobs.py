@@ -995,6 +995,40 @@ def test_a_remote_fix_preview_is_a_read_only_job_whose_receipt_starts_the_write(
     assert written["committed"] >= len(_FIXED_PAGES)
 
 
+def test_a_fix_preview_receipt_lets_the_owner_page_what_the_plan_does_to_a_page(server, vault) -> None:
+    _seed_fixable(vault)
+    linker = "Knowledge Base/Notes/Insights/linker.md"
+
+    async def scenario(client):
+        handle, _ = await _preview_job(client, {"kind": "fix"})
+        return await _receipt_entries(client, handle["run_id"])
+
+    planned = {entry["path"]: entry for entry in _session(server, scenario)}
+
+    assert planned[linker]["kind"] == "planned"
+    assert "wikilink" in planned[linker]["value"]
+
+
+def test_a_backfill_preview_receipt_pages_the_identity_issues_it_found(server, vault) -> None:
+    twins = sorted(path for path in _page_ids(vault) if _page_ids(vault)[path] is None)[:2]
+    shared = None
+    for rel in twins:
+        page = vault / rel
+        updated, _ = memory_refs.add_id_to_markdown(page.read_text(encoding="utf-8"))
+        frontmatter, _, _ = vault_module.parse_frontmatter(updated)
+        shared = shared or frontmatter[ID_FIELD]
+        page.write_text(updated.replace(frontmatter[ID_FIELD], shared), encoding="utf-8")
+
+    async def scenario(client):
+        handle, _ = await _preview_job(client, {"kind": "backfill-ids"})
+        return await _receipt_entries(client, handle["run_id"])
+
+    issues = [entry for entry in _session(server, scenario) if entry["kind"] == "identity_issue"]
+
+    assert [entry["path"] for entry in issues] == twins
+    assert all(entry["value"] == f"duplicate: {shared}" for entry in issues)
+
+
 def test_a_remote_reconcile_preview_is_a_read_only_job_whose_receipt_starts_the_write(server, vault) -> None:
     _seed_reconcile(vault)
 
