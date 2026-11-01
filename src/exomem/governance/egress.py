@@ -523,7 +523,9 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
                     ),
                 },
             )
-        if collector.outcomes:
+        # A boundary that touched nothing still takes a receipt where governance
+        # applies, so a broken store refuses it as it refuses a boundary that did.
+        if collector.outcomes or _governance_applies(collector.vault_root):
             receipts.append_event(
                 collector.vault_root,
                 event_type="disclosure",
@@ -532,6 +534,12 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
             )
     except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
         raise ReceiptUnavailableError() from exc
+
+
+def _governance_applies(vault_root: Path) -> bool:
+    """A restricted caller, or a compiled policy: the owner on an empty policy has neither."""
+    root = Path(vault_root)
+    return not _file_policy_empty(root, policy_module.load(root)) or caller_restricted(root)
 
 
 def _bounded_outcomes(
@@ -5978,6 +5986,9 @@ _REFERENCE_KWARGS = frozenset(
         "collection",
         "only_paths",
         "selector_paths",
+        # A source page the caller names and a link target: both are paths by contract.
+        "sources",
+        "target",
     }
 )
 

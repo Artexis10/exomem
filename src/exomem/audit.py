@@ -1927,7 +1927,7 @@ def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
     from .governance import receipts
 
     report = receipts.verify_chain(vault_root)
-    return [
+    findings = [
         AuditFinding(
             category="governance_receipts",
             severity="error",
@@ -1937,6 +1937,27 @@ def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
         )
         for item in report["issues"]
     ]
+    # A consistent chain with no local anchor is not corrupt, so it warns: a
+    # synced vault holds instances from other machines, and a rewritten copy
+    # looks the same.
+    findings.extend(
+        AuditFinding(
+            category="governance_receipts",
+            severity="warn",
+            path=instance["path"],
+            detail=(
+                f"receipt instance {instance_id} has no local anchor, so a "
+                "consistent rewrite of it cannot be told from the original"
+            ),
+            proposed_fix=(
+                "Check that this instance belongs to a machine you trust; "
+                "this machine anchors only its own instance."
+            ),
+        )
+        for instance_id, instance in report["instances"].items()
+        if not instance["anchored"]
+    )
+    return findings
 
 
 @call_spans.timed("audit.semantic_contract_drift")

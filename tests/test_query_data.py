@@ -393,6 +393,56 @@ def test_unsupported_format(vault: Path) -> None:
     assert e.value.code == "UNSUPPORTED_FORMAT"
 
 
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "Knowledge Base//Notes/Hidden/withheld.csv",
+        "Knowledge Base/./Notes/Hidden/withheld.csv",
+        "Knowledge Base/Notes/Hidden/withheld.txt",
+        "Knowledge Base/Notes/Hidden",
+    ],
+    ids=["double-slash", "dot-segment", "unsupported-suffix", "folder"],
+)
+def test_a_restricted_caller_gets_the_missing_text_for_every_spelling_of_a_withheld_path(
+    vault: Path, typed: str
+) -> None:
+    """Existence, type and suffix once answered before the release check.
+
+    The `//` and `/./` spellings of a withheld file failed later with a read
+    error, a withheld `.txt` with UNSUPPORTED_FORMAT and a withheld folder with
+    NOT_A_FILE, while a path that never existed refused with NOT_FOUND each
+    time. The caller learned which paths exist from the code alone.
+    """
+    from test_restricted_refusal_floor import EXTERNAL, _restrict_external
+
+    from exomem import commands
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+
+    _write(vault, "Knowledge Base/Notes/Hidden/withheld.csv", CSV)
+    _write(vault, "Knowledge Base/Notes/Hidden/withheld.txt", "not data\n")
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+
+    with request_scope(EXTERNAL), pytest.raises(ValueError) as caught:
+        commands.op_query_data(vault, path=typed)
+
+    # The text an absent path has always had: the caller's own spelling.
+    assert str(caught.value) == f"NOT_FOUND: path does not exist: {typed}"
+
+
+def test_the_owner_keeps_the_specific_refusal_for_a_folder_or_an_unsupported_file(
+    vault: Path,
+) -> None:
+    _write(vault, "Knowledge Base/Notes/Hidden/plain.txt", "not data\n")
+    for path, code in (
+        ("Knowledge Base/Notes/Hidden", "NOT_A_FILE"),
+        ("Knowledge Base/Notes/Hidden/plain.txt", "UNSUPPORTED_FORMAT"),
+    ):
+        with pytest.raises(qd.QueryDataError) as e:
+            qd.query_data(vault, path=path)
+        assert e.value.code == code
+
+
 def test_bad_op(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
     with pytest.raises(qd.QueryDataError) as e:

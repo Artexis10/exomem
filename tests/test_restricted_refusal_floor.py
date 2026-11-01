@@ -98,6 +98,69 @@ def test_restricted_refusals_complete_at_the_floor_and_read_alike(
     assert owner_elapsed < 1.0
 
 
+def _door_arguments(name: str, target: str) -> dict:
+    """Each floored door's own spelling of "this one path"."""
+    return {
+        "browse_memory": {"path": target},
+        "connect_memory": {"operation": "suggest-links", "path": target},
+        "compile_source": {"sources": [target]},
+        "query_dataset": {"path": target},
+    }[name]
+
+
+@pytest.mark.parametrize(
+    ("name", "withheld", "missing"),
+    [
+        ("browse_memory", "Knowledge Base/Notes/Hidden", "Knowledge Base/Notes/Absent"),
+        (
+            "connect_memory",
+            "Knowledge Base/Notes/Hidden/withheld-example.md",
+            "Knowledge Base/Notes/Hidden/missing-example.md",
+        ),
+        (
+            "compile_source",
+            "Knowledge Base/Notes/Hidden/withheld-example.md",
+            "Knowledge Base/Notes/Hidden/missing-example.md",
+        ),
+        (
+            "query_dataset",
+            "Knowledge Base/Notes/Hidden/withheld-example.csv",
+            "Knowledge Base/Notes/Hidden/missing-example.csv",
+        ),
+    ],
+)
+def test_the_other_path_doors_refuse_withheld_and_missing_alike_at_the_floor(
+    vault: Path, name: str, withheld: str, missing: str
+) -> None:
+    """Withheld work took 8 to 90 ms longer than a missing path's on each door.
+
+    A restricted caller's refusal now takes the same bytes and at least the
+    floor, so neither the text nor the clock tells the two apart.
+    """
+    floor_s = projection_timing.RESTRICTED_REFUSAL_FLOOR_MS / 1000.0
+    _write_page(vault, "Knowledge Base/Notes/Hidden/withheld-example.md", memory_refs.new_id())
+    (vault / withheld).parent.mkdir(parents=True, exist_ok=True)
+    if withheld.endswith(".csv"):
+        (vault / withheld).write_text("name,amount\nexample,1\n", encoding="utf-8")
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == name)
+
+    def refusal(target: str) -> tuple[float, str]:
+        started = time.perf_counter()
+        with request_scope(EXTERNAL), pytest.raises(Exception) as caught:  # noqa: PT011 - compared as text below
+            writer_lease.invoke_command(command, vault, **_door_arguments(name, target))
+        text = f"{type(caught.value).__name__}: {caught.value}"
+        return time.perf_counter() - started, text.replace(target, "<target>")
+
+    refusal(withheld)  # the first call of a door pays its own caches
+    refusal(missing)
+    shown, absent = refusal(withheld), refusal(missing)
+
+    assert "NOT_FOUND" in absent[1]
+    assert shown[1] == absent[1]
+    assert min(shown[0], absent[0]) >= floor_s
+
+
 def test_an_early_refusal_leaves_the_full_withheld_receipt(vault: Path) -> None:
     """The owner's audit record of a refused read keeps its hash, size and ref."""
     identity = memory_refs.new_id()

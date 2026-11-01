@@ -3194,12 +3194,13 @@ def _resolve_memory_identifier(
     return resolved
 
 
-def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
+def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.GetResult:
     """Answer a withheld seed page exactly as an absent one, as `op_get` does.
 
-    A context seeded from a page is assembled from that page, so whether it
-    assembles at all is a fact about the page. An absent page already raises
-    here, through the same read `op_get` takes.
+    A context or a link ranking seeded from a page is assembled from that
+    page, so whether it assembles at all is a fact about the page. An absent
+    page already raises here, through the same read `op_get` takes. A page
+    that may be released is returned for a caller that goes on with it.
     """
     try:
         page = get_page_module.get_page(vault_root, path=path)
@@ -3215,6 +3216,7 @@ def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
         raise ValueError(
             f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
         )
+    return page
 
 
 def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
@@ -3542,10 +3544,8 @@ def op_suggest_links(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
-        try:
-            gp = get_page_module.get_page(vault_root, path=path)
-        except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+        # Ranking takes work that a missing page skips, so a withheld page refuses first.
+        gp = _refuse_withheld_page_seed(vault_root, path)
         page = find_module._CACHE.get(vault_root / gp.path, vault_root)
         if page is None:
             raise ValueError(f"UNREADABLE: could not parse {gp.path}")
@@ -5677,6 +5677,10 @@ def op_query_data(
             ),
         )
     except query_data_module.QueryDataError as e:
+        # A folder may exist only to hold pages withheld from this caller, and a
+        # policy path cannot name a folder, so a restricted caller is told it is absent.
+        if e.code == "NOT_A_FILE" and egress_module.caller_restricted(vault_root):
+            raise ValueError(f"NOT_FOUND: {query_data_module.missing_path_reason(path)}") from e
         raise ValueError(f"{e.code}: {e.reason}") from e
     representation = (
         "profile"
@@ -5687,7 +5691,7 @@ def op_query_data(
         vault_root, result.as_dict(), representation=representation
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
+        raise ValueError(f"NOT_FOUND: {query_data_module.missing_path_reason(path)}")
     return released
 
 
@@ -6286,10 +6290,9 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         target: Vault-relative path or bare basename. `.md` optional.
 
     Returns: {target, inbound: [{path, line_number, context, raw_target}],
-             count}.
+             count}. A caller that some page is withheld from gets no `target`.
     Errors: INVALID_TARGET; INVALID_PATH.
     """
-    requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
     # The caller's view (`None` for the owner): a bare link counts when the
     # target's basename is unique among the pages the caller may see.
@@ -6313,25 +6316,26 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # indistinguishable from both "nothing links here" and "never existed";
     # raising NOT_FOUND would invent a signal the surface otherwise never
     # emits, which is its own oracle.
-    #
-    # The echoed `target` reverts to what the CALLER sent, because the
-    # normalized form can be strictly more specific than the input — a bare
-    # basename resolves to a full vault path — and confirming the canonical
-    # location of a withheld page is the same disclosure the L17 fix removed
-    # from sub-floor notices.
-    if not _release_permits_link_target(vault_root, target):
-        payload["target"] = requested.strip().replace("\\", "/").lstrip("/")
-        payload["inbound"] = []
-        payload["count"] = 0
-        return payload
+    permitted = _release_permits_link_target(vault_root, target)
     # The count is the length of the list the caller receives: a link from a
     # page it may not see is decided here, before counting, rather than left
-    # for the entry filter to drop beside a count that still includes it.
+    # for the entry filter to drop beside a count that still includes it. A
+    # withheld target takes this pass too, and its rows are dropped after it,
+    # so that it costs what a missing target costs.
     if visible is not None:
         payload["inbound"] = [
             row for row in payload["inbound"] if visible(str(row.get("path") or ""))
         ]
         payload["count"] = len(payload["inbound"])
+    if not permitted:
+        payload["inbound"] = []
+        payload["count"] = 0
+    # The echoed `target` is the normalised form, which can be strictly more
+    # specific than the input (a bare basename resolves to a full vault path),
+    # and the terminal filter strips it only for a withheld target. A caller
+    # that restriction applies to already holds what it sent, so it gets none.
+    if visible is not None or not permitted:
+        payload.pop("target", None)
     return payload
 
 
@@ -13136,9 +13140,21 @@ def remember_description(project_keys_hint: str) -> str:
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
+    from .governance.raw_protection import is_owner
     from .writer_lease import coordination_status
 
-    return coordination_status(vault_root)
+    status = coordination_status(vault_root)
+    boundary = status.get("mutation_boundary")
+    # The contention counters name the last lock holder and how often writers
+    # collided. Only the owner needs them, so another caller gets the boundary state alone.
+    if isinstance(boundary, Mapping) and "contention" in boundary and not is_owner(
+        principal_module.effective_principal()
+    ):
+        status = {
+            **status,
+            "mutation_boundary": {k: v for k, v in boundary.items() if k != "contention"},
+        }
+    return status
 
 
 _GovernanceOperation = Literal[
@@ -13751,7 +13767,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("overview", "list_directory"),
-        {"public_title": "Browse memory folders", "surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True},
+        {"public_title": "Browse memory folders", "surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "viewer_map",
@@ -13845,7 +13861,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("propose_compilation",),
-        {"public_title": "Prepare a sourced note", "preferred_name": "prepare_note", "surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
+        {"public_title": "Prepare a sourced note", "preferred_name": "prepare_note", "surface": "primary", "actions": ("review", "save"), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "preserve_evidence",
@@ -13949,7 +13965,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("suggest_links", "graph_context", "suggest_relations", "link", "list_inbound_links"),
-        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True},
+        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "adopt_vault",
@@ -14066,7 +14082,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("query_data",),
-        {"public_title": "Query a data file", "surface": "advanced", "actions": ("ask",), "first_run_safe": True},
+        {"public_title": "Query a data file", "surface": "advanced", "actions": ("ask",), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "read_media",

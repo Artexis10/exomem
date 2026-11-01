@@ -1859,6 +1859,26 @@ def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
         assert egress.WITHHELD_REFERENCE not in present[form], form
 
 
+@pytest.mark.parametrize(
+    ("parameter", "value"),
+    [("sources", [ERROR_WITHHELD]), ("target", ERROR_WITHHELD)],
+)
+def test_a_source_or_link_target_the_caller_named_is_echoed_in_an_error(
+    vault: Path, parameter: str, value: object
+) -> None:
+    """`compile_source` names pages in `sources`, `list_inbound_links` one in `target`.
+
+    Neither was a reference parameter, so an error that echoed the caller's own
+    path read `[withheld]` for a withheld page and the path for a missing one.
+    """
+    _govern_patterns_shut(vault)
+    error = ValueError(f"SOURCES_NOT_FOUND: [{ERROR_WITHHELD!r}]")
+    with _external_scope():
+        egress.postfilter_error("compile_source", error, vault, request_kwargs={parameter: value})
+    assert ERROR_WITHHELD in str(error)
+    assert egress.WITHHELD_REFERENCE not in str(error)
+
+
 def test_an_ungoverned_vault_keeps_its_error_text(vault: Path) -> None:
     """The empty-policy fast path is untouched: no governance tree means no
     reference gating, and only the always-on scrubber may alter the text."""

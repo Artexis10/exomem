@@ -32,7 +32,12 @@ from exomem.governance import (
     receipts,
 )
 from exomem.governance.decisions import Decision
-from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.governance.principal import (
+    RequestPrincipal,
+    library_scope,
+    owner_principal,
+    request_scope,
+)
 
 pytestmark = pytest.mark.reads_repository_docs
 
@@ -2569,10 +2574,65 @@ def test_postfilter_second_pass_is_receipt_silent(vault: Path) -> None:
     assert _receipt_records(vault) == []
 
 
-def test_ungoverned_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
-    with request_scope(_external()):
+def test_ungoverned_owner_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
+    """The owner on an empty policy governs nothing: no receipt, no store write."""
+    with library_scope():
         _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Nowhere")
     assert _receipt_records(vault) == []
+
+
+def test_a_restricted_probe_that_touches_nothing_is_receipted(vault: Path) -> None:
+    """A path outside every scope decides no item, so the boundary collects no outcome.
+
+    The receipt is still due: a call that withheld an item appends one, and a
+    store fault would otherwise refuse only that call.
+    """
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Nowhere")
+    (record,) = _receipt_records(vault)
+    assert record["event_type"] == "disclosure"
+    assert record["outcomes"] == []
+
+
+def test_an_owner_zero_hit_search_on_a_governed_vault_is_receipted(vault: Path) -> None:
+    """A non-empty policy governs every caller, the owner included."""
+    _restricted_vault(vault)
+    with library_scope():
+        _through_dispatcher(vault, "search", query="zzqxnonexistentterm")
+    (record,) = _receipt_records(vault)
+    assert record["event_type"] == "disclosure"
+    assert record["outcomes"] == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("list_directory", {"path": "Knowledge Base/Notes/Nowhere"}),
+        ("search", {"query": "zzqxnonexistentterm"}),
+    ],
+    ids=["absent-path", "zero-hit-search"],
+)
+def test_a_receipt_store_fault_refuses_a_call_that_touched_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, name: str, arguments: dict
+) -> None:
+    """Withheld and absent items must fail alike when the store is down.
+
+    Only the call that withheld an item used to touch the store, so a fault
+    refused it and let the absent-path probe and the empty search succeed.
+    """
+    _restricted_vault(vault)
+
+    def fail(*_args, **_kwargs):
+        raise receipts.ReceiptError("sidecar unavailable")
+
+    monkeypatch.setattr(receipts, "append_event", fail)
+    with request_scope(_external()):
+        with pytest.raises(egress.ReceiptUnavailableError, match="retry"):
+            _through_dispatcher(vault, name, **arguments)
 
 
 def test_external_dispatcher_retries_mint_distinct_boundary_ids(vault: Path) -> None:
@@ -2618,13 +2678,15 @@ def test_credential_block_is_receipted_without_a_policy(vault: Path) -> None:
         with egress.disclosure_boundary(vault, "test") as collector:
             cleaned = egress.postfilter("test", {"value": secret}, vault)
             egress.emit_boundary_receipt(collector)
-    records = _receipt_records(vault)
+    # The external caller is restricted, so the boundary also files its empty disclosure.
+    everything = _receipt_records(vault)
+    records = [r for r in everything if r["event_type"] == "credential_block"]
     assert cleaned["value"] != secret
-    assert len(records) == 1 and records[0]["event_type"] == "credential_block"
+    assert len(records) == 1
     assert records[0]["command"] == "test"
     assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
     assert records[0]["purpose"] == "credential-review"
-    assert secret not in json.dumps(records)
+    assert secret not in json.dumps(everything)
 
 
 def test_credential_block_does_not_suppress_the_disclosure_receipt(vault: Path) -> None:
@@ -3851,6 +3913,26 @@ def test_inbound_links_withheld_matches_the_no_links_shape(vault: Path) -> None:
     never_existed = _inbound(vault, "Knowledge Base/Notes/Patterns/nope.md", _external())
     assert withheld["count"] == never_existed["count"] == 0
     assert withheld["inbound"] == never_existed["inbound"] == []
+    # The whole payload, not two fields of it: the echoed `target` told them apart.
+    assert withheld == never_existed
+
+
+def test_inbound_links_never_echo_the_target_to_a_restricted_caller(vault: Path) -> None:
+    """The echo of a target is the one field that names what the caller asked about.
+
+    The dispatcher filter dropped it only for a withheld target, so its presence
+    was the answer. A restricted caller now never gets it, whether the target is
+    withheld, missing or released.
+    """
+    _link_to_restricted(vault)
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    released = "Knowledge Base/Notes/Insights/links-out.md"
+    for target in (RESTRICTED_PATH, "Knowledge Base/Notes/Patterns/nope.md", released):
+        assert "target" not in _inbound(vault, target, _external()), target
+    # What the owner asks about is the owner's own, so it comes back to them.
+    assert _inbound(vault, RESTRICTED_PATH, owner_principal())["target"] == RESTRICTED_PATH
 
 
 def test_inbound_links_still_answer_the_owner(vault: Path) -> None:
