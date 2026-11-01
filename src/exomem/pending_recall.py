@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from . import call_spans, derived_receipts, freshness
+from . import call_spans, derived_receipts, foreground_priority, freshness
 from .find_types import ParsedPage
 
 #: Bound content hydration, while the complete custody footprint stays available.
@@ -584,8 +584,8 @@ def recall_lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool
 
 def _retire_settled(
     vault_root: Path, batches: Sequence[object], projection: _Projection
-) -> bool:
-    """Retire every batch both recall lanes have published. Returns whether any did.
+) -> tuple[str, ...]:
+    """Retire every batch both recall lanes have published. Returns the retired batch ids.
 
     The identity a lane must hold is the row's proven after state, or -- when an
     out-of-band write superseded that state -- the canonical bytes now on disk.
@@ -593,19 +593,24 @@ def _retire_settled(
     forever, and it is still exact: the lanes must hold the current generation,
     and the clearing itself goes through the frozen exact-batch CAS.
     """
-    retired = False
-    for batch in _settled_batches(vault_root, batches, projection):
-        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired":
-            retired = True
-    return retired
+    return tuple(
+        batch.receipt.batch_id
+        for batch in _settled_batches(vault_root, batches, projection)
+        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired"
+    )
 
 
 def _settled_batches(
     vault_root: Path, batches: Sequence[object], projection: _Projection
 ) -> list[object]:
-    """The batches whose custody both recall lanes have published (no mutation)."""
+    """The batches whose custody both recall lanes have published (no mutation).
+
+    Each batch reads its pages and both lane stores, so a drain pass pauses for
+    an in-flight request between batches; no caller holds a boundary or the
+    lexical publication lock here.
+    """
     settled = []
-    for batch in batches:
+    for batch in foreground_priority.yielding_in_bulk(batches):
         expected: dict[str, str | None] = {}
         blocked = False
         for row in batch.rows:
@@ -849,8 +854,12 @@ def note_persistent_publication(
         _forget(_key(root))
 
 
-def note_components_completed(vault_root: Path, batch_ids: Iterable[str]) -> None:
+def note_components_completed(
+    vault_root: Path, batch_ids: Iterable[str]
+) -> tuple[str, ...] | None:
     """Derived components completed; retire whatever custody they settled.
+
+    Returns the retired batch ids, or None when custody could not be read whole.
 
     Retirement needs both recall lanes to hold the generation *and* every
     non-omittable component to be completed. The lanes publish inside the
@@ -863,15 +872,17 @@ def note_components_completed(vault_root: Path, batch_ids: Iterable[str]) -> Non
     """
     named = {batch_id for batch_id in batch_ids if isinstance(batch_id, str) and batch_id}
     if not named:
-        return
+        return ()
     root = Path(vault_root)
     snapshot = derived_receipts.snapshot_pending_visibility(
         root, limit=_TARGETED_SNAPSHOT_LIMIT, batch_ids=named,
     )
     if snapshot.outcome != "complete":
-        return
-    if _retire_settled(root, snapshot.batches, _Projection({}, frozenset())):
+        return None
+    retired = _retire_settled(root, snapshot.batches, _Projection({}, frozenset()))
+    if retired:
         _forget(_key(root))
+    return retired
 
 
 # --------------------------------------------------------------------------- #

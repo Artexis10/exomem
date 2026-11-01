@@ -188,6 +188,33 @@ def test_resolver_entries_decline_when_an_event_arrives_during_capture(
     assert semantic_contract.current_writer_resolver_entries(warm_corpus) is None
 
 
+def test_a_write_published_during_the_proof_does_not_force_a_disk_build(
+    warm_corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent write retries the corpus route instead of walking and parsing the vault."""
+    original_walk = semantic_contract.vault.walk_vault_md
+    alpha = warm_corpus / "Knowledge Base" / "Notes" / "Insights" / "alpha.md"
+    published: list[None] = []
+
+    def write_during_first_walk(root: Path):
+        paths = tuple(original_walk(root))
+        if not published:
+            published.append(None)
+            alpha.write_text(_page("Alpha updated", "[[Beta]]"), encoding="utf-8")
+            semantic_contract.publish_corpus_files_changed(root, changed=(alpha,))
+        return iter(paths)
+
+    def no_disk_build(self: WikilinkResolver) -> None:
+        raise AssertionError("a write during the proof forced a disk build")
+
+    monkeypatch.setattr(semantic_contract.vault, "walk_vault_md", write_during_first_walk)
+    monkeypatch.setattr(WikilinkResolver, "_build", no_disk_build)
+
+    snapshot = find.writer_resolver_snapshot(warm_corpus)
+
+    assert snapshot.titles["alpha updated"] == ["Knowledge Base/Notes/Insights/alpha"]
+
+
 def test_resolver_entries_decline_when_configuration_changes_during_capture(
     warm_corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2594,13 +2594,14 @@ def test_retired_pending_rows_do_not_strand_unfinished_components(
     assert protocol.complete_component(
         vault, graph, current_generation=receipt.canonical_generation, now=24.0
     )
-    assert protocol.recover_prepared_batches(
+    _drain().drain_once(
         vault,
+        dispatch=None,
         observe_current_generation=lambda _root: receipt.canonical_generation,
         visibility_publisher=lambda _root, _receipt: True,
         limit=8,
         now=25.0,
-    ) == 0
+    )
     assert protocol.component_status(
         vault, receipt, protocol.DerivedComponent.GRAPH
     ).failure_code is None

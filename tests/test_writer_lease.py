@@ -4729,6 +4729,31 @@ def test_a_nested_guard_reuses_the_operations_grant_only_when_it_asks_and_the_gr
     assert manager.client.acquisitions == acquisitions
 
 
+def test_a_trusted_progress_check_asks_the_coordinator_once_a_renewal_has_failed(tmp_path: Path) -> None:
+    """Defect: a publication progress check keeps trusting a grant whose renewal failed (A3), so it
+    works on for the rest of the grant while the coordinator may already have expired the lease."""
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", time.time() + 30.0, 1), ttl_seconds=3.0)
+    token = manager.ensure_writer().fencing_token
+    asked = []
+    status = manager.client.status
+    manager.client.status = lambda: asked.append(token) or status()
+    with writer_lease_module.progress_check():
+        manager.validate_fencing_token(token)
+    assert asked == []  # a fresh grant needs no round trip
+
+    stop = threading.Event()
+
+    def unreachable(fencing_token: int, **_: object) -> LeaseRecord:
+        stop.set()
+        raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "down")
+
+    manager.client.renew = unreachable
+    manager._renew_loop(stop=stop)  # one renewal interval, whose renewal fails
+    with writer_lease_module.progress_check():
+        manager.validate_fencing_token(token)
+    assert asked == [token]
+
+
 def test_preferred_replica_never_idle_releases(tmp_path: Path) -> None:
     manager = _idle_manager(
         tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=60.0, preferred_writer=True

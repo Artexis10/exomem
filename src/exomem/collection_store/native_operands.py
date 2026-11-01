@@ -76,6 +76,12 @@ def family(kind: str) -> str:
     return "number" if kind == "integer" else kind
 
 
+def ranked_operand(value: object, kind: str) -> tuple[int, int, int, object]:
+    """A scalar operand with its null-placement rank: values, then null, then missing, ascending."""
+    tag, band, key = scalar_operand(value, kind)
+    return (2 if tag == MISSING_TAG else 1 if tag == NULL_TAG else 0), tag, band, key
+
+
 def scalar_operand(value: object, kind: str) -> tuple[int, int, object]:
     """Use the same comparison domains for literals, released values and cells."""
     if value is MISSING:

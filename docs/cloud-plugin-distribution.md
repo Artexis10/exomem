@@ -176,14 +176,18 @@ Provider previews remain the final check for provider-specific rasterisation.
 The registered Cloud hooks use the admitted MCP connection.
 The retrieve and capture registrations fix `--activation-mode mcp` before ambient transport settings are read.
 The retrieve hook emits native activation guidance without selecting its REST or CLI transport ladder.
-The capture hook's episode door returns before local credential resolution in MCP mode.
+The capture hook's episode door returns before it builds any REST request in MCP mode.
 The continuation hook reads local structural state and uses a restricted environment for its fixed Git probes.
-It does not load the self-hosted credential helper.
 
-The package retains canonical shared scripts, including dormant self-hosted transport branches in retrieve and capture.
-The producer excludes `exomem_local_credentials.py`, which contains the local credential-file readers.
+The Cloud-shipped scripts no longer contain the self-hosted credential transport.
+`exomem_local_credentials.py` owns every read of a local credential and every authenticated REST request.
+The producer excludes that module from the archive.
+The retrieve and capture hooks load it through the continuation script's optional sibling loader.
+Where the module is absent, those hooks behave as when no credential is configured.
 Do not prune Python functions during packaging or create a second Cloud hook implementation to change a scanner result.
-The registered-hook regression check executes all five events with conflicting transport settings and synthetic credentials.
+The split lives in the canonical source, so self-hosted installs run the same code.
+The registered-hook regression check scans the shipped scripts for our closed set of credential identifiers.
+It then executes all five events with conflicting transport settings and synthetic credentials.
 It records attempted credential-file reads, network connections and unexpected child processes even when a hook soft-fails.
 
 An automated credential-flow finding requires review of those reachable paths; its text alone does not prove credential forwarding.
@@ -191,6 +195,7 @@ Keep the finding and the execution evidence available to the directory reviewer.
 `USES_HOOKS` describes an intentional supported component.
 Directory-only manifest fields are supported metadata, not a reason to remove policy links or the icon.
 Older Claude validators can report those fields as warnings; record the validator version and its actual result.
+`claude plugin validate --profile directory` on Claude Code 2.1.316 reports no unrecognized-field warning for `documentationUrl`, `privacyPolicyUrl`, `supportUrl`, `termsOfServiceUrl` and `icon`, so they stay.
 
 ### Updating an existing listing
 

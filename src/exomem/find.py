@@ -16,9 +16,10 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import date
 from functools import partial, wraps
@@ -7870,6 +7871,28 @@ def prime_resolver_from_entries(
         return resolver
 
 
+# Pages a curation plan's earlier steps will create, keyed by the resolved vault root.
+_PLANNED_PAGES: ContextVar[tuple[Path, tuple[tuple[str, str | None], ...]] | None] = ContextVar(
+    "exomem_writer_planned_pages", default=None
+)
+
+
+@contextmanager
+def planned_pages(vault_root: Path, pages: Iterable[tuple[str, str | None]]) -> Iterator[None]:
+    """Let writer snapshots resolve links to pages that do not exist yet.
+
+    Curation prepares every step of a plan before any step runs. A later step that
+    links to a page an earlier step creates must render that link as it will once
+    the page lands, or its sealed draft can never match. Each entry is a
+    vault-relative path and the title the page will carry.
+    """
+    token = _PLANNED_PAGES.set((Path(vault_root).resolve(), tuple(pages)))
+    try:
+        yield
+    finally:
+        _PLANNED_PAGES.reset(token)
+
+
 def writer_resolver_snapshot(
     vault_root: Path,
     *,
@@ -7886,30 +7909,58 @@ def writer_resolver_snapshot(
 
     A caller that cannot afford a walk of the vault passes `allow_disk=False`:
     when both cheap routes decline it gets None and the span records
-    `disk_declined`, instead of a resolver built from disk.
+    `disk_declined`, instead of a resolver built from disk. Inside
+    `planned_pages`, the snapshot also holds the planned pages.
     """
+    resolver = _writer_resolver_snapshot(
+        vault_root, freshness_key=freshness_key, allow_disk=allow_disk
+    )
+    planned = _PLANNED_PAGES.get()
+    if resolver is not None and planned is not None and planned[0] == Path(vault_root).resolve():
+        for path, title in planned[1]:
+            resolver.add_pending(path, title=title)
+    return resolver
+
+
+def _writer_resolver_snapshot(
+    vault_root: Path,
+    *,
+    freshness_key: tuple[int, int, str] | None,
+    allow_disk: bool,
+):
     from . import semantic_contract
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
+    # A write published during the corpus proof's vault walk moves the
+    # checkpoint, and the proof declines. The publication advances the corpus
+    # with the checkpoint, so one fresh attempt costs one walk instead of a
+    # disk build (on 2026-11-01, 9 of 11 disk builds were this race). A
+    # caller-supplied key names one exact state, so it gets one attempt.
+    attempts = 2 if freshness_key is None else 1
     # A fixed phase label; its one field names the route taken, a count.
     with call_spans.span("writer.resolver_snapshot", {}) as measured:
-        current_freshness = (
-            freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
-        )
-        with _RESOLVER_LOCK:
-            cached = _RESOLVER_CACHE.get(root)
-            if cached and cached[0] == current_freshness:
-                measured["forked"] = 1
-                return cached[1].fork()
-        entries = semantic_contract.current_writer_resolver_entries(
-            root,
-            freshness_key=current_freshness,
-            declined=measured,
-        )
-        if entries is not None:
-            measured["corpus_entries"] = 1
-            return WikilinkResolver.from_entries(root, entries)
+        for _attempt in range(attempts):
+            current_freshness = (
+                freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
+            )
+            with _RESOLVER_LOCK:
+                cached = _RESOLVER_CACHE.get(root)
+                if cached and cached[0] == current_freshness:
+                    measured["forked"] = 1
+                    return cached[1].fork()
+            declined: dict[str, int] = {}
+            entries = semantic_contract.current_writer_resolver_entries(
+                root,
+                freshness_key=current_freshness,
+                declined=declined,
+            )
+            measured.update(declined)
+            if entries is not None:
+                measured["corpus_entries"] = 1
+                return WikilinkResolver.from_entries(root, entries)
+            if f"declined_{semantic_contract.CHANGED_DURING_PROOF}" not in declined:
+                break
         if not allow_disk:
             measured["disk_declined"] = 1
             return None

@@ -29,7 +29,7 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
@@ -274,22 +274,29 @@ class AdoptionRunStore:
     def list_runs(self) -> list[dict]:
         return self.listing()["runs"]
 
-    def runs_of_stage(self, import_id: str) -> tuple[dict, ...]:
-        """Every readable run that started in the import's stage, the most recently updated first."""
+    def runs_by_stage(self) -> dict[str, tuple[dict, ...]]:
+        """Every readable run, grouped by the import whose stage it started in; the most recently updated first."""
         try:
             names = sorted(folder.name for folder in self.base.iterdir())
         except OSError:
-            return ()
-        runs = []
+            return {}
+        grouped: dict[str, list[dict]] = {}
         for name in names:
             try:
                 run = self.load(name)
             except AdoptionRunError:
                 continue
             recorded = run.get("stage") if isinstance(run, dict) else None
-            if isinstance(recorded, dict) and recorded.get("stage") == import_id:
-                runs.append(run)
-        return tuple(sorted(runs, key=lambda run: str(run.get("updated") or ""), reverse=True))
+            if isinstance(recorded, dict) and isinstance(recorded.get("stage"), str):
+                grouped.setdefault(recorded["stage"], []).append(run)
+        return {
+            import_id: tuple(sorted(runs, key=lambda run: str(run.get("updated") or ""), reverse=True))
+            for import_id, runs in grouped.items()
+        }
+
+    def runs_of_stage(self, import_id: str) -> tuple[dict, ...]:
+        """Every readable run that started in the import's stage, the most recently updated first."""
+        return self.runs_by_stage().get(import_id, ())
 
     def listing(self, *, path: str = "") -> dict:
         rows: list[dict] = []
@@ -477,6 +484,8 @@ def walk_inventory(
                 kept.append(d)
             dirnames[:] = kept
             for fn in filenames:
+                if fn == import_stage.SERIES_FILE and import_stage.is_series_file(_rel(root, Path(dirpath) / fn)):
+                    continue  # the series file is never an item to file, nor a hidden file to report
                 if not include_hidden and fn.startswith("."):
                     hidden_files += 1
                     continue
@@ -514,6 +523,19 @@ def _stands_for_manifest(stage: import_stage.Stage | None, rel: str, info: os.st
     """Whether the stat of a staged file equals the identity its stage's manifest records."""
     vouched = adoption_consume.vouched(stage, rel)
     return vouched is not None and vouched[0] == import_stage.Identity.of(info)
+
+
+def has_text_suffix(path: str) -> bool:
+    """Whether the importer treats this path's suffix as text-like, whatever its size."""
+    return PurePosixPath(path).suffix.lower() in _TEXT_IMPORT_SUFFIXES
+
+
+def reads_as_text(path: str, size: int) -> bool:
+    """Whether the importer files this member as text: a text-like suffix within the inline text limit.
+
+    The importer also needs the bytes to decode as UTF-8, which a status call does not read.
+    """
+    return has_text_suffix(path) and size <= adoption_plan.INLINE_TEXT_MAX_BYTES
 
 
 def _row(
@@ -1031,24 +1053,43 @@ def _open_cursor(run: dict, kind: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # lifecycle actions
 # --------------------------------------------------------------------------- #
-def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
+def _only_folder(paths: Iterable[str]) -> str | None:
+    """The one folder that holds every path, or None; a hidden name is not counted, as in a walk of the stage."""
+    visible = [path for path in paths if not path.startswith(".")]
+    folders = {path.split("/", 1)[0] for path in visible}
+    return next(iter(folders)) if len(folders) == 1 and all("/" in path for path in visible) else None
+
+
+def _collection_of(root: Path, source_root: str, label: str | None, stage: import_stage.Stage | None = None) -> dict:
     """The collection's label, and the folder its files' collection paths hang from.
 
     A staged Cloud upload holds its collection in the one folder inside
     ``_Imports/<import_id>/``; a re-upload gets a new import id, so the inner folder
     is what keeps ``collection_path`` stable across uploads.
+
+    A recorded stage (``stage``) gives the folder from its record, not from a walk, so that a window whose
+    files adoption has already filed keeps it. The record is the series file's path list, which every window of
+    a series carries whole, when it names every member of the manifest, and otherwise the manifest's members.
+    The series file's label is the default label.
     """
     parts = source_root.split("/") if source_root else []
     collection_root = source_root
     default = parts[-1] if parts else Path(root).name
     if len(parts) == 2 and parts[0] == IMPORT_STAGE_DIR:
-        try:
-            entries = [e for e in (root / source_root).iterdir() if not e.name.startswith(".")]
-        except OSError:
-            entries = []
-        if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink():
-            collection_root = f"{source_root}/{entries[0].name}"
-            default = entries[0].name
+        series = import_stage.read_series(root, parts[1]) if stage is not None else None
+        if stage is not None:
+            listed = series.listing(stage.members) if series is not None else ()
+            folder = _only_folder(listed or stage.members)
+        else:
+            try:
+                entries = [e for e in (root / source_root).iterdir() if not e.name.startswith(".")]
+            except OSError:
+                entries = []
+            folder = entries[0].name if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink() else None
+        if folder is not None:
+            collection_root, default = f"{source_root}/{folder}", folder
+        if series is not None and series.label is not None:
+            default = series.label
     chosen = (label or "").strip() or default
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
@@ -1246,7 +1287,7 @@ def start(
         "updated": created_iso,
         "phase": "selecting",
         "source_root": source_root,
-        "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection),
+        "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection, stage),
         "stage": _recorded_stage(stage),
         "consume": consume,
         "scan_summary": {
@@ -1430,7 +1471,7 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
     return tuple(pages)
 
 
-def unfiled_members(root: Path, import_id: str) -> list[dict]:
+def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
     """The members of an import that adoption did not file, as a residual record lists them.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
@@ -1438,9 +1479,10 @@ def unfiled_members(root: Path, import_id: str) -> list[dict]:
     left the stage, by rename or by hand, keeps the bytes the manifest gives it; the runs that started in the
     stage classify every member, the most recent first, and one that no run scanned is `outside_run`. A member
     that adoption filed, and the series file, are left out: filed is what a run's outcome says, not what the
-    stage no longer holds.
+    stage no longer holds. A caller that lists many windows passes `runs`, the stage's runs from `runs_by_stage`,
+    so it reads the run store once.
     """
-    pages = AdoptionRunStore(root).runs_of_stage(import_id)
+    pages = AdoptionRunStore(root).runs_of_stage(import_id) if runs is None else runs
     stage = import_stage.read(root, import_id)
     files = dict(import_stage.staged_files(root, import_id))
     for path, (size, _digest) in (stage.members if stage is not None else {}).items():
@@ -1468,10 +1510,24 @@ def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
 
 
 def _whole_scan(root: Path, run: dict) -> list[str] | None:
-    """The collection path of every eligible file the scan holds, for a paged run; None for any other.
+    """The collection path of every file the scan holds, for a run of a series or a paged run; None for any other.
 
-    Consumed files of earlier pages are no longer on disk, but their Sources are in the import index.
+    A recorded stage with a series file passes the series' path list, so that a bare name meets the files of
+    the windows that have not landed, when the list names every member of the stage's manifest (see
+    `Series.listing`). Consumed files of earlier pages are no longer on disk, but their Sources are in the
+    import index.
     """
+    collection_root = (run.get("collection") or {}).get("root", "")
+    stage = import_stage.read(root, run["stage"]["stage"]) if run.get("stage") else None
+    listed = ()
+    if stage is not None and (series := import_stage.read_series(root, stage.import_id)) is not None:
+        listed = series.listing(stage.members)
+    if listed:
+        prefix = f"{IMPORT_STAGE_DIR}/{stage.import_id}"
+        return [
+            adoption_plan.collection_path_of(f"{prefix}/{path}", collection_root)
+            for path in listed if path != import_stage.SERIES_FILE
+        ]
     paging = run.get("paging")
     if not paging:
         return None
@@ -1479,7 +1535,6 @@ def _whole_scan(root: Path, run: dict) -> list[str] | None:
         root, path=run["source_root"], include_hidden=paging["include_hidden"],
         stage=adoption_consume.recorded(root, run) if run.get("consume", True) else None,
     )
-    collection_root = (run.get("collection") or {}).get("root", "")
     return [
         adoption_plan.collection_path_of(row["path"], collection_root) for row in files if row["eligible"]
     ]

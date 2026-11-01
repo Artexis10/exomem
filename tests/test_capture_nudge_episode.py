@@ -29,6 +29,11 @@ SESSION = "session-episode-under-test"
 SUBSTANTIVE = "We compared the two lamps and settled the finish. " + "x" * 400
 
 
+def _lane(key: str = "key"):
+    """A REST lane carrying `key`, built by the same module the installed hook loads."""
+    return retrieve_hook._local_credentials().Lane("rest", None, key)
+
+
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "home"
@@ -413,12 +418,12 @@ def test_hook_rest_redirect_does_not_forward_file_key(
         if route == "episode":
             assert hook._episode_revision_count("ep-test") is None
         else:
-            key, origin = retrieve_hook._resolve_rest_key()
-            assert origin == "file"
+            lane = next(retrieve_hook._credentialed_lanes())
+            assert lane.name == "rest"
             if route == "recall":
-                assert retrieve_hook._fetch_via_rest("test", key) is None
+                assert retrieve_hook._fetch_via_rest("test", lane) is None
             else:
-                assert retrieve_hook._fetch_packet_via_rest("test", key, "", 1.0) is None
+                assert retrieve_hook._fetch_packet_via_rest("test", lane, "", 1.0) is None
         assert received == []
     finally:
         for server in (source, destination):
@@ -476,12 +481,12 @@ def test_hook_rest_file_key_bypasses_environment_proxy(
         if route == "episode":
             hook._episode_revision_count("ep-test")
         else:
-            key, origin = retrieve_hook._resolve_rest_key()
-            assert origin == "file"
+            lane = next(retrieve_hook._credentialed_lanes())
+            assert lane.name == "rest"
             if route == "recall":
-                retrieve_hook._fetch_via_rest("test", key)
+                retrieve_hook._fetch_via_rest("test", lane)
             else:
-                retrieve_hook._fetch_packet_via_rest("test", key, "", 1.0)
+                retrieve_hook._fetch_packet_via_rest("test", lane, "", 1.0)
         assert proxied == []
         assert direct == ["Bearer disposable-test-key"]
     finally:
@@ -750,7 +755,7 @@ def test_the_retrieve_hook_sends_client_and_session_on_both_rungs(
     monkeypatch.setattr(retrieve_hook, "_rest_port", lambda: 1234)
     monkeypatch.setattr(retrieve_hook, "_open_no_redirect", fake_urlopen)
     attribution = retrieve_hook.attribution("rollout-9")
-    retrieve_hook._fetch_packet_via_rest("continue", "key", "", 1.0, attribution)
+    retrieve_hook._fetch_packet_via_rest("continue", _lane(), "", 1.0, attribution)
 
     assert bodies[0]["client"] == "codex"
     assert bodies[0]["session"] == episode_capture.hook_key("codex", "rollout-9")
@@ -807,7 +812,7 @@ def test_an_older_service_that_refuses_attribution_still_serves_the_packet(
     monkeypatch.setattr(retrieve_hook, "_rest_port", lambda: 1234)
     monkeypatch.setattr(retrieve_hook, "_open_no_redirect", fake_urlopen)
     packet = retrieve_hook._fetch_packet_via_rest(
-        "continue", "key", "", 1.0, retrieve_hook.attribution("s")
+        "continue", _lane(), "", 1.0, retrieve_hook.attribution("s")
     )
 
     assert packet == {"abstained": True, "ok": 1}

@@ -829,7 +829,9 @@ def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
         and isinstance(source_type, str)
         and bool(source_type.strip())
         and isinstance(tags, list)
-        and all(isinstance(tag, str) and tag.strip() for tag in tags)
+        # A hand-written `tags: [2026-10-24]` reads back as a date; it is still a tag, and
+        # rejecting it would rebuild the page over the capture's title and kind.
+        and all(isinstance(tag, str | int | float | dt.date) and str(tag).strip() for tag in tags)
         and isinstance(frontmatter.get("ingested_into"), list)
     )
 

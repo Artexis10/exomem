@@ -1,0 +1,65 @@
+{
+  "id": "05-unreadable-window",
+  "title": "Unreadable window",
+  "prompt": "Discard my finished import window 5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11 please, I confirm.",
+  "served_tools": [
+    "import_memory",
+    "read_import",
+    "observe_transfer",
+    "transfer_memory"
+  ],
+  "builtin_tools": [],
+  "replies": {
+    "read_import.status": {
+      "$status": {
+        "windows": [
+          {
+            "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+            "state": "unreadable",
+            "problem": "the receipt of this window cannot be read"
+          }
+        ]
+      }
+    },
+    "observe_transfer.status": {
+      "$transfer_status": {
+        "import": {
+          "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+          "state": "cleanup_pending",
+          "error_code": "IMPORT_RECEIPT_UNREADABLE"
+        }
+      }
+    },
+    "transfer_memory.import_discard": {
+      "accepted": true,
+      "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
+      "state": "cleanup_pending"
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "checks": [
+    {
+      "type": "max_calls",
+      "tool": "transfer_memory",
+      "kind": "import_discard",
+      "n": 1
+    },
+    {
+      "type": "only_scripted_tools"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "stops_keep_source_operator",
+      "expect": true,
+      "text": "The agent stops, tells the person to keep the source folder, and says an operator of the memory must act."
+    },
+    {
+      "id": "mentions_walk_stage",
+      "expect": false,
+      "text": "The agent tells the person to run `--walk-stage` or any other command to clear the window themselves."
+    }
+  ]
+}

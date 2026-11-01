@@ -533,7 +533,7 @@ _TOOL_HELP = {
     "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
-    "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a bounded work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import`), then start on the path it prints. Status keeps recorded coverage and verification counts."),
+    "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true."),
     "import_memory": ("write", "Import memory", "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Carry continuations through plan and apply; finish records coverage."),
 }
 
@@ -573,7 +573,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume")),
-        _row("status", "read_import", ("run_id", "path")),
+        _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",)),
         _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),
@@ -582,6 +582,8 @@ _REMAINING = {
         _row("work-item", "read_import", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
         _row("propose", "import_memory", ("run_id", "proposals"), ("run_id",)),
         _row("apply-proposal", "import_memory", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True),
+        # `paths` stays optional so the handler refuses a call without them, whatever the client sends.
+        _row("acknowledge", "import_memory", ("import_id", "paths"), ("import_id",), destructive=True),
     )),
     "read_media": (None, (_row("video", "read_media"),)),
     "process_media": ("operation", (
