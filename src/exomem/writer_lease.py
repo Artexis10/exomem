@@ -4461,9 +4461,6 @@ def _capture_waiter_cap() -> int:
 
 
 def _take_capture_waiter_slot() -> bool:
-    """Take a slot; a caller with no request worker needs none and counts for none."""
-    if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
-        return True
     global _capture_waiters
     with _CAPTURE_WAITERS_LOCK:
         if _capture_waiters >= _capture_waiter_cap():
@@ -4473,8 +4470,6 @@ def _take_capture_waiter_slot() -> bool:
 
 
 def _release_capture_waiter_slot() -> None:
-    if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
-        return
     global _capture_waiters
     with _CAPTURE_WAITERS_LOCK:
         _capture_waiters = max(0, _capture_waiters - 1)
@@ -4539,7 +4534,8 @@ def _wait_out_write_warmup(
         return warming, "absorb_disabled", 0.0
     if time.monotonic() >= deadline:
         return warming, "warm_wait_exhausted", 0.0
-    if not _take_capture_waiter_slot():
+    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
+    if counted and not _take_capture_waiter_slot():
         return warming, "capture_waiters_full", 0.0
     started = time.monotonic()
     try:
@@ -4552,7 +4548,8 @@ def _wait_out_write_warmup(
             readiness.wait(warming, min(remaining, _WARMUP_POLL_SECONDS))
             warming = still_warming()
     finally:
-        _release_capture_waiter_slot()
+        if counted:
+            _release_capture_waiter_slot()
     waited = time.monotonic() - started
     return warming, None if warming is None else "warm_wait_exhausted", waited
 
@@ -4662,12 +4659,17 @@ class _ContentionWait:
         self.deadline = self.started + wait_seconds if deadline is None else deadline
         self.ticket: object | None = None
         self.holds_slot = False
+        # Whether the slot counts against the cap; a caller with no request worker holds one free.
+        self.slot_counted = False
         self.absorbed = 0
         self.last_attempt_seconds = 0.0
 
     def take_slot(self) -> bool:
         if not self.holds_slot:
-            self.holds_slot = _take_capture_waiter_slot()
+            if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
+                self.holds_slot = True
+            else:
+                self.holds_slot = self.slot_counted = _take_capture_waiter_slot()
         return self.holds_slot
 
     def join_line(self) -> None:
@@ -4699,9 +4701,9 @@ class _ContentionWait:
         return round((time.monotonic() - self.started) * 1000)
 
     def close(self) -> None:
-        if self.holds_slot:
+        if self.slot_counted:
             _release_capture_waiter_slot()
-            self.holds_slot = False
+        self.holds_slot = self.slot_counted = False
         if self.ticket is not None:
             self.queue.leave(self.ticket)
             self.ticket = None
