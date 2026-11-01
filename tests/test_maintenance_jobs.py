@@ -846,3 +846,48 @@ def test_cancel_stays_narrow_under_the_wide_boundary_switch_while_a_job_holds_th
 
     assert cancelled.get("error") is None
     assert final["state"] == "cancelled"
+
+
+def test_a_status_read_that_meets_the_job_ending_never_reports_it_interrupted(
+    server, vault, monkeypatch
+) -> None:
+    # `_owner` is the first call after the read has taken the job's row. Ending the cancelled job
+    # there stages the interleaving a poll meets by chance. If the read waits on the job's thread
+    # (the join times out), the job had not left the live registry before the read classified it.
+    real_checkpoint, real_owner = maintenance_jobs.checkpoint, maintenance_jobs._owner
+    holding, proceed, armed = threading.Event(), threading.Event(), threading.Event()
+    job_threads: list[threading.Thread] = []
+
+    def pausing_checkpoint(phase, *args, **kwargs):
+        if phase == "planning":
+            job_threads.append(threading.current_thread())
+            holding.set()
+            assert proceed.wait(_DEADLINE_SECONDS)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    def owner_once_the_job_has_ended():
+        if armed.is_set():
+            armed.clear()
+            proceed.set()
+            job_threads[0].join(1.0)
+        return real_owner()
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", pausing_checkpoint)
+    monkeypatch.setattr(maintenance_jobs, "_owner", owner_once_the_job_has_ended)
+
+    async def scenario(client):
+        preview = await _preview(client)
+        handle = await _start(client, preview["plan_id"])
+        assert await asyncio.to_thread(holding.wait, _DEADLINE_SECONDS)
+        await _cancel(client, handle["run_id"])
+        armed.set()
+        read = await _status(client, handle["run_id"])
+        return read, await _until_terminal(client, handle["run_id"])
+
+    try:
+        read, final = _session(server, scenario)
+    finally:
+        proceed.set()
+
+    assert read["state"] in {"running", "cancelled"}
+    assert final["state"] == "cancelled"
