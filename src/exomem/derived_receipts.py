@@ -2843,9 +2843,10 @@ def record_recovery_error(
             failure_code="handler_unavailable",
             failed_at=_timestamp(now),
         )
-    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+    except Exception:  # noqa: BLE001 - a held store gate (MUTATION_BUSY) included
         # The original exact custody remains authoritative even when
-        # failure telemetry itself cannot be advanced.
+        # failure telemetry itself cannot be advanced. A drain records this in
+        # its pass's `finally`, where an error would replace the pass's own.
         pass
 
 

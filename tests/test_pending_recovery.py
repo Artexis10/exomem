@@ -405,6 +405,54 @@ def test_failed_unproven_prefix_backs_off_and_later_commit_recovers(tmp_path: Pa
         ).fetchone() == (None,)
 
 
+def test_a_pass_that_ends_early_still_backs_off_a_batch_its_recovery_could_not_prove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recovery proof that meets mixed bytes rotates its batch behind later work.
+
+    A pass can end before its normal end: on a held boundary, a cancellation or a failure.
+    The rotation must still land, or every pass proves the same batch again under the
+    boundary.
+    """
+    before = delta._page(title="Before", body="old", updated="2026-01-01")
+    after = delta._page(title="After", body="new", updated="2026-02-01")
+    first, second = "Knowledge Base/Notes/first.md", "Knowledge Base/Notes/second.md"
+    delta._write(tmp_path, first, before)
+    delta._write(tmp_path, second, before)
+    receipt = delta._prepare(
+        tmp_path,
+        batch_id="mixed-early-end",
+        generation="generation-mixed",
+        now=9.0,
+        paths=(
+            delta._batch_path(first, before=before, after=after),
+            delta._batch_path(second, before=before, after=after),
+        ),
+    )
+    delta._write(tmp_path, first, after)
+
+    def failed_claim(*_args, **_kwargs):
+        raise RuntimeError("the claim failed after the recovery proof")
+
+    monkeypatch.setattr(derived_receipts, "claim_ready_components", failed_claim)
+    with pytest.raises(RuntimeError):
+        derived_drain.drain_once(
+            tmp_path,
+            dispatch=None,
+            observe_current_generation=lambda _: "generation-current",
+            visibility_publisher=pending_recall.publish,
+            limit=1,
+            now=100.0,
+        )
+
+    assert (
+        derived_receipts.component_status(
+            tmp_path, receipt, derived_receipts.DerivedComponent.LEXSTORE
+        ).next_attempt_at
+        > 100.0
+    )
+
+
 @pytest.mark.usefixtures("managed_runtime")
 @pytest.mark.parametrize("hidden_count", [1, 513])
 def test_restricted_recall_discloses_no_hidden_pending_coverage(

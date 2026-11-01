@@ -320,7 +320,9 @@ class _Turn:
         waits out every unit of the turn; when it ends a turn early, the rest
         of the pass waits for the next one and spends no attempt. A borrowed
         turn is spent after one unit: a loan is for one brief derived unit, and
-        its owner's next unit waits until it returns.
+        its owner's next unit waits until it returns. On Windows only this
+        process's waiters count (`waiter_count`), so a writer in another process
+        waits out the whole turn.
         """
         if self.borrowed:
             return True
@@ -485,7 +487,6 @@ class _Pass:
             if not (handled or settled or waiting or unhealthy or claim_due):
                 break  # nothing to complete, recover, claim or prove: skip the acquisition
         self._release([*proven, *waiting])
-        self._finish_recovery()
 
     def release_outstanding(self) -> None:
         self._release(list(self.outstanding.values()))
@@ -545,19 +546,30 @@ class _Pass:
                 return list(unhealthy[index + 1:])
         return []
 
-    def _finish_recovery(self) -> None:
-        """Repair or rotate stranded recovery outcomes; repair takes its own guard."""
+    def finish_recovery(self, *, repair: bool) -> bool:
+        """Repair or rotate each recovery outcome the pass proved, however the pass ended.
+
+        A repair takes its own guard, so only a pass that ended normally repairs, and it
+        stops repairing at the first repair that meets a held boundary. Every outcome left
+        unrepaired rotates behind later batches with backoff, as a stranded one does, so a
+        later pass repairs it. Returns whether a repair met a held boundary.
+        """
+        busy = False
         for batch_id, outcome in self.recovery:
+            if outcome == "repair" and (busy or not repair):
+                outcome = "stranded"
             try:
                 derived_receipts.finish_recovery(
                     self.vault_root, batch_id, outcome,
                     converge_current=self.converge, now=self.started_at,
                 )
-            except Exception as error:  # noqa: BLE001 - callback failure stays durable and bounded
-                _raise_if_busy(error)
+            except Exception as error:  # noqa: BLE001 - one batch cannot stop the rest
+                busy = busy or _is_busy(error)
                 derived_receipts.record_recovery_error(
                     self.vault_root, batch_id, error, now=self.started_at
                 )
+        self.recovery.clear()
+        return busy
 
     def _claim(self, limit: int) -> tuple[DerivedComponentStatus, ...]:
         claims = derived_receipts.claim_ready_components(
@@ -799,14 +811,19 @@ def drain_once(
         observe=observe_current_generation,
         publisher=visibility_publisher,
     )
+    ended = False
     try:
         work.run()
+        ended = True
     except _BoundaryBusy:
         if cadence is not None:
             cadence.busy = True
     finally:
-        # Busy, cancelled or failed: nothing this pass still holds waits out its lease.
+        # Busy, cancelled or failed: nothing this pass still holds waits out its lease,
+        # and nothing it proved in recovery is proved again before its backoff.
         work.release_outstanding()
+        if work.finish_recovery(repair=ended) and cadence is not None:
+            cadence.busy = True
     sweep = cadence is None or cadence.sweep_due(started_at)
     swept = (
         derived_receipts.completed_visibility_batches(vault_root, limit=int(limit), now=started_at)
