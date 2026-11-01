@@ -383,6 +383,36 @@ class Arm:
         """Write the empty vault's external state manifest, as `init_vault` does for a new vault."""
         self.run_python(INIT_STATE, str(self.vault))
 
+    async def _start_coordinator(self) -> None:
+        coordinator_log = (self.logs / "coordinator.log").open("ab")
+        self.coordinator = subprocess.Popen(
+            [self.python, "-I", "-m", "exomem.lease_coordinator", "--host", "127.0.0.1",
+             "--port", str(self.coordinator_port), "--database", str(self.root / "coordinator.sqlite")],
+            env=self.env, stdout=coordinator_log, stderr=subprocess.STDOUT, cwd=self.root)
+        await self._wait("coordinator-start", 30, lambda: self._port_open(self.coordinator_port, self.coordinator))
+
+    async def adopt_store(self) -> None:
+        """Enroll a copied vault's collection store with this arm's own coordinator, as its owner would.
+
+        A copy meets a coordinator that never enrolled its store, so the worker refuses every
+        collection read until the owner's offline `collections adopt-local` previews and applies.
+        """
+        if not any(self.state.glob("*/collections.sqlite")):
+            return
+        await self._start_coordinator()
+        try:
+            def adopt(*mode: str) -> dict:
+                done = subprocess.run(
+                    [self.python, "-I", "-m", "exomem", "collections", "adopt-local", "--vault", str(self.vault),
+                     "--why", "private latency sandbox copy", *mode],
+                    env=self.env, cwd=self.root, capture_output=True, text=True, timeout=1800)
+                if done.returncode != 0:
+                    raise MeasurementRefused("arm-store-adoption-failed", phase="arm-preparation")
+                return json.loads(done.stdout)
+            adopt("--preview-id", adopt("--dry-run")["preview_id"])
+        finally:
+            await self.stop()
+
     async def start(self, *, quiescence_limit: float) -> dict[str, float]:
         """Start the coordinator and the worker, join the worker as a local client and wait for quiet."""
         import httpx2 as httpx
@@ -391,12 +421,7 @@ class Arm:
 
         environment = self.env
         self.state_before = state_keys(self.state)
-        coordinator_log = (self.logs / "coordinator.log").open("ab")
-        self.coordinator = subprocess.Popen(
-            [self.python, "-I", "-m", "exomem.lease_coordinator", "--host", "127.0.0.1",
-             "--port", str(self.coordinator_port), "--database", str(self.root / "coordinator.sqlite")],
-            env=environment, stdout=coordinator_log, stderr=subprocess.STDOUT, cwd=self.root)
-        await self._wait("coordinator-start", 30, lambda: self._port_open(self.coordinator_port, self.coordinator))
+        await self._start_coordinator()
         worker_log = (self.logs / "worker.log").open("ab")
         self.worker = subprocess.Popen(
             [self.python, "-I", "-c", WORKER_GUARD, "worker", "--socket", str(self.socket),
@@ -895,6 +920,8 @@ def run_private(args: argparse.Namespace) -> dict:
                                           passthrough=json.loads((RECALL_BENCHMARK / "profile.json").read_text())
                                           ["worker_environment"]))
         if args.prepare:
+            for arm in arms.values():
+                asyncio.run(arm.adopt_store())
             asyncio.run(warm(arms))
             for root in roots.values():
                 (root / "prepared.json").write_text(json.dumps({"prepared": True}))
