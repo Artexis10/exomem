@@ -1,8 +1,9 @@
 """Chunking for text written without spaces between words.
 
-`chunk_text` caps a paragraph at `MAX_WORDS_PER_CHUNK` whitespace words. An
-unspaced paragraph (Japanese, Chinese, Thai, ...) is one "word" to that rule, so
-it was never capped and the encoder silently truncated it at its sequence
+`chunk_text` cuts a paragraph of more than `MAX_WORDS_PER_CHUNK` whitespace words
+into consecutive chunks of at most that many words, so no word is left out of the
+index. An unspaced paragraph (Japanese, Chinese, Thai, ...) is one "word" to that rule,
+so it was never capped and the encoder silently truncated it at its sequence
 limit. A paragraph whose token characters are mostly scriptio continua now
 splits into pieces of at most `MAX_UNSPACED_CHARS_PER_CHUNK` characters, at
 sentence punctuation where it can and hard at the limit where it cannot. Every
@@ -19,7 +20,7 @@ from exomem import embeddings
 
 
 def _legacy_chunk_text(title: str, body: str) -> list[str]:
-    """The pre-change algorithm, kept verbatim as the reference for spaced text."""
+    """The pre-change algorithm, kept verbatim as the reference for paragraphs within the word cap."""
     title = (title or "").strip()
     body = (body or "").strip()
     if not body:
@@ -48,7 +49,7 @@ def _random_spaced_body(rng: random.Random) -> str:
     paragraphs = []
     for _ in range(rng.randint(1, 4)):
         words = []
-        for _ in range(rng.choice((3, 40, 349, 350, 351, 900))):
+        for _ in range(rng.choice((3, 40, 349, 350))):
             alphabet = rng.choice(_SPACED_ALPHABETS)
             words.append("".join(rng.choice(alphabet) for _ in range(rng.randint(1, 9))))
             if rng.random() < 0.1:
@@ -58,7 +59,7 @@ def _random_spaced_body(rng: random.Random) -> str:
     return rng.choice(("\n\n", "\n\n\n", "\n \n\n")).join(paragraphs)
 
 
-def test_spaced_text_chunks_exactly_as_before() -> None:
+def test_spaced_text_within_the_word_cap_chunks_exactly_as_before() -> None:
     rng = random.Random(20260923)
     for _ in range(400):
         title = rng.choice(("", "Title", "Notes on the pump"))
@@ -66,9 +67,22 @@ def test_spaced_text_chunks_exactly_as_before() -> None:
         assert embeddings.chunk_text(title, body) == _legacy_chunk_text(title, body)
 
 
+def test_a_long_paragraph_without_blank_lines_embeds_every_word() -> None:
+    words = [f"w{number}" for number in range(1000)]
+
+    chunks = embeddings.chunk_text("T", " ".join(words))
+
+    assert [len(chunk.removeprefix("T\n\n").split()) for chunk in chunks] == [350, 350, 300]
+    assert [word for chunk in chunks for word in chunk.removeprefix("T\n\n").split()] == words
+
+
 def test_spaced_paragraph_with_a_few_unspaced_characters_keeps_the_word_cap() -> None:
     body = " ".join(["word"] * 1000) + " 東京"
-    assert embeddings.chunk_text("T", body) == _legacy_chunk_text("T", body)
+
+    chunks = embeddings.chunk_text("T", body)
+
+    assert all(len(chunk.removeprefix("T\n\n").split()) <= embeddings.MAX_WORDS_PER_CHUNK for chunk in chunks)
+    assert sum(len(chunk.removeprefix("T\n\n").split()) for chunk in chunks) == 1001
 
 
 def _japanese_paragraph(sentences: int) -> str:

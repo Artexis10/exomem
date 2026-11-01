@@ -287,8 +287,13 @@ def retire(vault_root: Path, pages: tuple[Path, ...]) -> None:
     """Remove part pages that no extraction owns any more, and the folder once it is empty."""
     if not pages:
         return
-    from . import index_sync
+    from . import file_watcher, index_sync
 
+    # The removal is ours, so the watcher need not report it again (as `delete_file` does for frames).
+    try:
+        file_watcher.register_self_delete(vault_root, [page.relative_to(vault_root).as_posix() for page in pages])
+    except Exception:  # noqa: BLE001 — suppression is best-effort
+        pass
     removed: list[str] = []
     for page in pages:
         try:

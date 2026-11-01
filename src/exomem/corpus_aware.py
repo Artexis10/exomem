@@ -74,8 +74,8 @@ def _require_complete_advisory_body(body: str, *, title: str = "") -> None:
         and embeddings._needs_character_cap(title.strip())
     ):
         raise OverlapAdvisorySkipped("text_truncated")
-    # The retrieval chunker intentionally drops long spaced paragraph tails.
-    # A retained template prefix is not a query for the complete written note.
+    # The retrieval chunker cuts a long spaced paragraph into several passages, so one
+    # query vector is not the complete written note either.
     for paragraph in body.split("\n\n"):
         if (
             len(paragraph.split()) > embeddings.MAX_WORDS_PER_CHUNK
