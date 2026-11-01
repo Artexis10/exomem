@@ -175,8 +175,11 @@ def test_the_query_of_a_job_url_holds_only_the_names_the_cell_admits() -> None:
     The cell's list is `_PRESIGN_QUERY` in src/exomem/cloud_grant.py. It is the SigV4 presign names plus
     the multipart, version and response names that these four URL kinds carry.
     """
-    admitted = {"x-amz-algorithm", "x-amz-credential", "x-amz-date", "x-amz-expires", "x-amz-signedheaders",
-                "x-amz-signature", "uploadid", "partnumber", "versionid", "response-content-disposition"}
-    used = {name.lower() for url in _presigned_cell_urls("https://s3.example")
-            for name, _value in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
-    assert used == admitted
+    admitted = {"X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders",
+                "X-Amz-Signature", "uploadId", "partNumber", "versionId", "response-content-disposition"}
+    queries = [urlsplit(url).query for url in _presigned_cell_urls("https://s3.example")]
+    names = [[name for name, _value in parse_qsl(query, keep_blank_values=True)] for query in queries]
+    assert {name for url_names in names for name in url_names} == admitted
+    # The cell refuses a repeated name and a raw `;`; the export link's content disposition holds one, encoded.
+    assert all(len(set(url_names)) == len(url_names) for url_names in names)
+    assert not any(";" in query for query in queries)

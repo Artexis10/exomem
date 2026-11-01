@@ -36,12 +36,13 @@ OBJECT_STORE_BUCKET_ENV = "EXOMEM_CLOUD_OBJECT_STORE_BUCKET"
 GRANT_MAX_LIFETIME = 72 * 3600
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DEFAULT_PORT = {"https": 443, "http": 80}  # nosemgrep: ep-word-set -- the URL schemes' default ports.
-# The query names that cellctl's S3 clients put in a presigned URL (checked with botocore 1.43.111): the SigV4
-# presign names, the multipart names of an upload part, and the version and response names of a download.
-# Any other name, such as `x-amz-acl` or `x-amz-copy-source`, changes what the request does.
+# The query names that cellctl's S3 clients put in a presigned URL (checked with botocore 1.43.111), in the
+# case botocore emits: the SigV4 presign names, the multipart names of an upload part, and the version and
+# response names of a download. Any other name, such as `x-amz-acl` or `x-amz-copy-source`, changes what the
+# request does.
 _PRESIGN_QUERY = frozenset({  # nosemgrep: ep-word-set -- parameter names fixed by the SigV4 and S3 protocols.
-    "x-amz-algorithm", "x-amz-credential", "x-amz-date", "x-amz-expires", "x-amz-signedheaders",
-    "x-amz-signature", "uploadid", "partnumber", "versionid", "response-content-disposition",
+    "X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders",
+    "X-Amz-Signature", "uploadId", "partNumber", "versionId", "response-content-disposition",
 })
 
 
@@ -143,7 +144,7 @@ class Destination:
 
         The shape is the one `cellctl` produces: path style, `/<bucket>/<object key>`, with the
         signature in the query. A virtual-host URL names another host and is refused as one.
-        The query may carry only the names of `_PRESIGN_QUERY`, compared without case.
+        The query may carry only the names of `_PRESIGN_QUERY`, each once and in exact case, and no `;`.
         """
         # A parser silently drops tabs and newlines and clients read a backslash as a slash, so refuse these first.
         if not isinstance(url, str) or any(ord(char) <= 0x20 or ord(char) >= 0x7F or char == "\\" for char in url):
@@ -176,7 +177,9 @@ class Destination:
             return Reason.URL_FOREIGN_KEY
         if grant_key is not None and key != grant_key:
             return Reason.URL_GRANT_KEY
-        if any(name.lower() not in _PRESIGN_QUERY for name, _ in parse_qsl(parts.query, keep_blank_values=True)):
+        # `parse_qsl` splits only on `&`, and botocore encodes a `;` as %3B, so a raw one hides a second parameter.
+        names = [name for name, _ in parse_qsl(parts.query, keep_blank_values=True)]
+        if ";" in parts.query or len(set(names)) != len(names) or not _PRESIGN_QUERY.issuperset(names):
             return Reason.URL_QUERY
         return None
 
@@ -198,7 +201,7 @@ def _grant_reason(
         fields=_COMMON_CLAIMS | _PAYLOAD_CLAIMS[operation], lifetime=GRANT_MAX_LIFETIME,
     )
     if (claims is None or not _key_is_own(claims["object_key"], cell_id)
-            or not all(cloud_origin.canonical_uuid(claims[name]) for name in ("tenant_id", "operation_id"))
+            or not all(cloud_cell.canonical_app_id(claims[name]) for name in ("tenant_id", "operation_id"))
             or not isinstance(claims["jti"], str) or not claims["jti"]
             or not (operation is not Operation.IMPORT or (
                 type(claims["ciphertext_bytes"]) is int and claims["ciphertext_bytes"] > 0

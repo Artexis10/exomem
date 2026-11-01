@@ -44,11 +44,11 @@ def signer() -> Ed25519PrivateKey:
 
 @pytest.fixture
 def env(signer) -> dict[str, str]:
-    """The three trust anchors a Job receives."""
+    """The three trust anchors a Job receives, under the names cellctl renders them (a rename here fails a test)."""
     return {
-        cloud_grant.GRANT_PUBLIC_KEY_ENV: _pem(signer),
-        cloud_grant.OBJECT_STORE_ENDPOINT_ENV: ENDPOINT,
-        cloud_grant.OBJECT_STORE_BUCKET_ENV: BUCKET,
+        "EXOMEM_CLOUD_GRANT_PUBLIC_KEY": _pem(signer),
+        "EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT": ENDPOINT,
+        "EXOMEM_CLOUD_OBJECT_STORE_BUCKET": BUCKET,
     }
 
 
@@ -182,6 +182,9 @@ def test_a_grant_for_another_operation_is_reported_as_for_another_operation(sign
     pytest.param(_url() + "&x-amz-acl=public-read", Reason.URL_QUERY, id="an-acl-parameter"),
     pytest.param(_url() + "&X-Amz-Copy-Source=%2Fother-bucket%2Fkey", Reason.URL_QUERY, id="a-copy-source-parameter"),
     pytest.param(_url() + "&x%2Damz%2Dacl=public-read", Reason.URL_QUERY, id="an-encoded-parameter-name"),
+    pytest.param(_url() + "&uploadId=u;x-amz-copy-source=%2Fother%2Fkey", Reason.URL_QUERY, id="a-semicolon-hides-a-parameter"),
+    pytest.param(_url() + "&X-Amz-Algorithm=AWS4-HMAC-SHA256", Reason.URL_QUERY, id="a-repeated-name"),
+    pytest.param(_url() + "&uploadid=u", Reason.URL_QUERY, id="a-name-in-another-case"),
 ])
 def test_a_url_that_leaves_the_pinned_object_is_refused(signer, env, url, reason):
     assert _reasons(env, grant=_grant(signer), urls=[url]) == [reason]
@@ -198,14 +201,14 @@ def test_an_http_anchor_admits_an_http_url_and_refuses_an_https_one(signer, env)
     assert _reasons(env, grant=grant, urls=[_url(base="https://127.0.0.1:9000")]) == [Reason.URL_SCHEME]
 
 
-def test_the_query_names_cellctl_presigns_are_admitted_in_either_case(signer, env):
+def test_the_query_names_cellctl_presigns_are_admitted(signer, env):
     """Defect: a name cellctl really presigns is refused, and enforce mode would stop every export."""
-    query = ("partNumber=1&uploadId=abc&versionId=v1&response-content-disposition=attachment"
+    query = ("partNumber=1&uploadId=abc&versionId=v1"
+             "&response-content-disposition=attachment%3B%20filename%3D%22export.zip%22"
              "&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=k%2F20260101&X-Amz-Date=20260101T000000Z"
              "&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=0123abcd")
     url = f"{ENDPOINT}/{BUCKET}/{EXPORT_KEY}?{query}"
     assert _reasons(env, grant=_grant(signer), urls=[url]) == []
-    assert _reasons(env, grant=_grant(signer), urls=[url.replace("uploadId", "uploadid")]) == []
 
 
 def test_every_part_url_of_an_export_is_checked(signer, env):

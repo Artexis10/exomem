@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -128,13 +127,6 @@ def validate_configuration() -> None:
         _public_key()
 
 
-def canonical_uuid(value: object) -> bool:
-    try:
-        return isinstance(value, str) and str(uuid.UUID(value)) == value
-    except ValueError:
-        return False
-
-
 def signed_claims(
     token: object, *, key: Ed25519PublicKey | None, cell_id: str | None, audience: str,
     fields: frozenset[str], lifetime: int,
@@ -177,7 +169,7 @@ def _claims(token: object, *, audience: str, fields: frozenset[str], lifetime: i
     claims = signed_claims(token, key=_public_key(), cell_id=_serving_cell_id(), audience=audience,
                            fields=fields, lifetime=lifetime)
     if (claims is None or claims["v"] != 1 or claims["iss"] != claims["resource"]
-            or not all(canonical_uuid(claims[name]) for name in ("tenant_id", "grant_id", "family_id"))
+            or not all(cloud_cell.canonical_app_id(claims[name]) for name in ("tenant_id", "grant_id", "family_id"))
             or not all(isinstance(claims[name], str) and claims[name] for name in ("client_id", "resource"))):
         return None
     return claims
