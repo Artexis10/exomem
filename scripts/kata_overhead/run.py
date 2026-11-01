@@ -414,6 +414,102 @@ except Exception as error:
 print(json.dumps(facts))
 '''
 
+HOST_MEMORY_SCRIPT = r'''
+import json, os, sys
+cid = sys.argv[1]
+skip = {os.getpid(), os.getppid()}
+
+
+def meminfo():
+    out = {}
+    for line in open("/proc/meminfo"):
+        key, _, rest = line.partition(":")
+        out[key] = int(rest.split()[0])
+    return out
+
+
+def kv(path, wanted):
+    out = {}
+    for line in open(path):
+        fields = line.split()
+        if fields and fields[0].rstrip(":") in wanted:
+            out[fields[0].rstrip(":")] = int(fields[1])
+    return out
+
+
+info = meminfo()
+used = info["MemTotal"] - info["MemFree"] - info["Buffers"] - info["Cached"] - info["SReclaimable"]
+processes, cgroups = [], set()
+for entry in os.listdir("/proc"):
+    if not entry.isdigit() or int(entry) in skip:
+        continue
+    try:
+        command = open("/proc/%s/cmdline" % entry, "rb").read().replace(b"\0", b" ").decode(errors="replace")
+        cgroup = open("/proc/%s/cgroup" % entry).read()
+    except OSError:
+        continue
+    if cid == "none" or (cid not in command and cid not in cgroup):
+        continue
+    try:
+        rollup = kv("/proc/%s/smaps_rollup" % entry, {"Rss", "Pss", "Pss_Anon", "Pss_File", "Pss_Shmem"})
+        name = open("/proc/%s/comm" % entry).read().strip()
+    except OSError:
+        continue
+    processes.append({"pid": int(entry), "comm": name, "cmd": command[:200], **rollup})
+    for line in cgroup.splitlines():
+        if line.startswith("0::") and len(line) > 4:
+            cgroups.add(line[3:])
+# A cgroup under another in the set is already counted by its parent.
+leaves = sorted(path for path in cgroups if not any(other != path and path.startswith(other.rstrip("/") + "/") for other in cgroups))
+groups = {}
+for path in leaves:
+    base = "/sys/fs/cgroup" + path
+    try:
+        groups[path] = {"current_kb": int(open(base + "/memory.current").read()) // 1024,
+                        **{k + "_kb": v // 1024 for k, v in kv(base + "/memory.stat", {"anon", "file", "kernel", "shmem"}).items()}}
+    except OSError as error:
+        groups[path] = {"unreadable": str(error)}
+# Under a VM, one thread per virtual CPU is named "CPU n/KVM"; this is how many the cell's VM has right now.
+vcpu_threads = 0
+for item in processes:
+    if item["comm"].startswith("qemu"):
+        for task in os.listdir("/proc/%d/task" % item["pid"]):
+            try:
+                vcpu_threads += open("/proc/%d/task/%s/comm" % (item["pid"], task)).read().strip().endswith("/KVM")
+            except OSError:
+                pass
+by_comm = {}
+for item in processes:
+    row = by_comm.setdefault(item["comm"], {"processes": 0, "pss_kb": 0, "rss_kb": 0})
+    row["processes"] += 1
+    row["pss_kb"] += item.get("Pss", 0)
+    row["rss_kb"] += item.get("Rss", 0)
+print(json.dumps({
+    "host_used_kb": used, "mem_available_kb": info["MemAvailable"],
+    "pss_kb": sum(i.get("Pss", 0) for i in processes), "rss_kb": sum(i.get("Rss", 0) for i in processes),
+    "cgroup_current_kb": sum(g.get("current_kb", 0) for g in groups.values()) if groups else None,
+    "vcpu_threads": vcpu_threads, "by_comm": by_comm, "cgroups": groups, "processes": processes}))
+'''
+
+# What the cell itself sees: its own cgroup and, under a VM, the guest's memory.
+CELL_VIEW_SCRIPT = r'''
+import json, os
+def read(path):
+    try:
+        return open(path).read().strip()
+    except OSError as error:
+        return "unreadable: %s" % error
+stat = {}
+for line in read("/sys/fs/cgroup/memory.stat").splitlines():
+    fields = line.split()
+    if len(fields) == 2 and fields[0] in ("anon", "file", "kernel", "shmem", "slab"):
+        stat[fields[0]] = fields[1]
+cpu = {"cpu_count": os.cpu_count(), "affinity": len(os.sched_getaffinity(0)), "online": read("/sys/devices/system/cpu/online"),
+       "cpu.max": read("/sys/fs/cgroup/cpu.max"), "cpuset.cpus.effective": read("/sys/fs/cgroup/cpuset.cpus.effective")}
+print(json.dumps({"cpu": cpu, "memory_current": read("/sys/fs/cgroup/memory.current"), "memory_stat": stat,
+                  "meminfo": read("/proc/meminfo").splitlines()[:6]}))
+'''
+
 REBUILD_SCRIPT = r'''
 import json, time
 from pathlib import Path
@@ -561,6 +657,40 @@ class Lab:
         self.docker("stop", "-t", "15", name, check=False)
         self.docker("rm", "-f", name, check=False)
         return facts
+
+    # -- memory
+    def host_memory(self, container: str) -> dict:
+        """Host-side memory of one cell: the processes that carry it and the cgroups they sit in, read as root."""
+        cid = "none"
+        if container != "none":
+            cid = self.docker("inspect", "--format", "{{.Id}}", container).stdout.strip()
+        result = sh(["sudo", "python3", "-", cid], check=False, timeout=120, input_text=HOST_MEMORY_SCRIPT)
+        if result.returncode != 0:
+            raise HarnessError(f"host memory read failed: {result.stderr[-400:]}")
+        return json.loads(result.stdout)
+
+    def memory(self, arm: str, rep: int, container: str, moment: str, baseline_used_kb: float) -> None:
+        """Record the host-side memory of the cell and what the cell sees, in kB."""
+        try:
+            host = self.host_memory(container)
+            self.diag(f"memory-{arm}-r{rep}-{moment}", host)
+            self.record(arm, rep, f"m.host_pss_{moment}", [host["pss_kb"]], unit="kB",
+                        note=json.dumps(host["by_comm"])[:500])
+            self.record(arm, rep, f"m.host_rss_{moment}", [host["rss_kb"]], unit="kB")
+            self.record(arm, rep, f"m.host_used_delta_{moment}", [host["host_used_kb"] - baseline_used_kb], unit="kB",
+                        note="host MemTotal - MemFree - Buffers - Cached - SReclaimable, minus the value before the cell started")
+            if host["cgroup_current_kb"] is not None:
+                self.record(arm, rep, f"m.host_cgroup_{moment}", [host["cgroup_current_kb"]], unit="kB",
+                            note=json.dumps(host["cgroups"])[:500])
+            view = self.docker("exec", container, "python", "-c", CELL_VIEW_SCRIPT, check=False, timeout=60)
+            if view.returncode == 0:
+                seen = json.loads(view.stdout)
+                self.diag(f"cellview-{arm}-r{rep}-{moment}", seen)
+                if seen["memory_current"].isdigit():
+                    self.record(arm, rep, f"m.cell_view_cgroup_{moment}", [int(seen["memory_current"]) / 1024], unit="kB",
+                                note="memory.current read inside the container")
+        except Exception as error:  # noqa: BLE001 - recorded, the session goes on
+            self.fail(arm, rep, f"m.{moment}", f"{type(error).__name__}: {error}")
 
     # -- environment facts
     def environment(self) -> None:
@@ -741,6 +871,11 @@ class Lab:
         if "fs" in a.only:
             self.fs_micro(arm, rep, volume)
         # (e) startup
+        try:
+            baseline_used = self.host_memory("none")["host_used_kb"]
+        except Exception as error:  # noqa: BLE001 - recorded, the session goes on
+            baseline_used = 0
+            self.fail(arm, rep, "m.baseline", f"{type(error).__name__}: {error}")
         url, created, t0 = self.start_cell(arm, name, volume)
         live = self.wait_http(url, "/health", t0, 240, name)
         ready = self.wait_http(url, "/health/ready", t0, 400, name)
@@ -753,6 +888,8 @@ class Lab:
         if ready is None:
             self.stop_cell(name, f"{tag}-cell")
             return
+        time.sleep(5)
+        self.memory(arm, rep, name, "idle", baseline_used)
         mcp = Mcp(url, self.token)
         try:
             mcp.initialize()
@@ -770,6 +907,7 @@ class Lab:
                 except Exception as error:  # noqa: BLE001 - recorded, the session goes on
                     self.fail(arm, rep, f"section.{key}", f"{type(error).__name__}: {error}")
             self.diag(f"spellings-{tag}", mcp.names)
+            self.memory(arm, rep, name, "after", baseline_used)
         finally:
             mcp.close()
             facts = self.stop_cell(name, f"{tag}-cell")

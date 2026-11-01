@@ -60,9 +60,9 @@ def summarize(rows: list[dict], base: str = "runc", test: str = "kata") -> dict[
                 half = T95[min(len(logs) - 1, 10)] * statistics.stdev(logs) / math.sqrt(len(logs))
                 entry["ci_low"], entry["ci_high"] = math.exp(mean - half), math.exp(mean + half)
                 if entry["ci_low"] > 1.0:
-                    entry["verdict"] = f"slower under {test}"
+                    entry["verdict"] = (f"slower under {test}" if case["unit"] == "ms" else f"higher under {test}")
                 elif entry["ci_high"] < 1.0:
-                    entry["verdict"] = f"faster under {test}"
+                    entry["verdict"] = (f"faster under {test}" if case["unit"] == "ms" else f"lower under {test}")
                 else:
                     entry["verdict"] = "no measurable change"
             else:
