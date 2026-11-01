@@ -1259,7 +1259,9 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
     """Drop the cache row of a path that no longer holds the original it records.
 
     Every writer of the row pins the path or holds the vault guard, so the guard and
-    the write exclusion keep them all out. An evicted path keeps its row, marked.
+    the write exclusion keep them all out. An evicted path keeps its row, marked. So does a path whose bytes
+    are gone and whose companion is not proven released: a damaged companion reads as no binding, and the
+    row may be the census's only sign of an original that lives in the store.
     """
     relative = ledger._relative(path)
     with _guard(vault, "media_store_prune"):
@@ -1274,6 +1276,12 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
                 # The flag orders the claims of the original's jobs (D3, M4).
                 conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
             else:
+                if snapshot.state == "missing":
+                    try:
+                        _require_released(vault, relative)
+                    except ValueError:  # The same release rule as the census; its next pass names this row.
+                        conn.rollback()
+                        return False
                 conn.execute("DELETE FROM media_cache WHERE binary_rel = ?", (relative,))
             conn.commit()
             return True

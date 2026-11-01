@@ -3155,6 +3155,41 @@ def test_a_census_stays_complete_for_a_cached_row_whose_original_was_deleted(vau
     assert media_store.drain_record(vault).latched
 
 
+def test_a_prune_pass_keeps_the_row_of_a_stopped_eviction_whose_companion_is_damaged(vault: Path, selected_store):
+    """Catches a prune that drops the row of an original whose companion is damaged, so the census reads zero for bytes that live only in the store."""
+    from exomem import media_store
+
+    path = _stored(vault, "stopped", 300)
+    path.unlink()  # An eviction that stopped after it removed the bytes and before it marked the row.
+    _companion(path).write_bytes(b"")
+    relative = path.relative_to(vault).as_posix()
+    assert _ledger_rows(vault)[relative][0] == 0
+
+    assert not media_store.evict(vault, path)  # The pass reads the row first and prunes it when its original is gone.
+    _retained(selected_store, vault)
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+    assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN"
+    assert media_store.drain_record(vault).blocked_by == (relative,)
+    assert relative in _ledger_rows(vault)
+
+
+def test_a_prune_pass_still_drops_the_row_of_an_original_whose_companion_was_deleted(vault: Path, selected_store):
+    """Catches a prune that keeps every row without bytes, so rows of deleted originals pile up and keep a cell from draining."""
+    from exomem import media_store
+
+    path = _stored(vault, "deleted", 300)
+    path.unlink()
+    _companion(path).unlink()
+    relative = path.relative_to(vault).as_posix()
+    assert relative in _ledger_rows(vault)
+
+    assert not media_store.evict(vault, path)
+
+    assert relative not in _ledger_rows(vault)
+
+
 def test_the_retained_status_names_the_original_whose_companion_blocks_the_census(vault: Path, selected_store):
     """Catches an unknown census that gives the operator no original to look at, or that puts its path in the error."""
     from exomem import commands, media_store
