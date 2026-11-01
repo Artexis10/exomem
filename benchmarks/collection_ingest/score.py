@@ -246,20 +246,22 @@ def raw_pages(item: dict[str, Any], index: dict[str, Any], scan: dict[str, Any],
 
 
 def original_bytes_held(item: dict[str, Any], pages: list[str], scan: dict[str, Any], vault: Path,
-                        collection: str, inline_bound: int) -> str:
+                        collection: str, inline_bound: int, originals: Path | None = None) -> str:
     """``artifact`` or ``text`` when the original bytes are held, ``missing`` when they are not,
     ``unknown`` when this scorer has no verified copy of the original to compare a text page with.
 
     Artifact bytes are found by hash among the stored files. A text original is found verbatim
-    inside a page file: the vault's own placed copy of the original is the reference, and it is
-    used only when its hash equals the key's.
+    inside a page file: the vault's own placed copy of the original is the reference, or else the
+    copy under ``originals`` (the generated collection, for a vault whose placed copy was consumed
+    or not copied out), and it is used only when its hash equals the key's.
     """
     if any(digest == item["sha256"] for digest in scan["media_files"].values()):
         return "artifact"
     if item["form"] == "artifact" or item["bytes"] > inline_bound:
         return "missing"
-    placed = vault / collection / item["path"]
-    if not placed.is_file() or sha256_file(placed) != item["sha256"]:
+    candidates = [vault / collection / item["path"], *([originals / item["path"]] if originals else [])]
+    placed = next((path for path in candidates if path.is_file() and sha256_file(path) == item["sha256"]), None)
+    if placed is None:
         return "unknown"
     original = placed.read_bytes()
     return "text" if any(original in (vault / page).read_bytes() for page in pages) else "missing"
@@ -267,7 +269,7 @@ def original_bytes_held(item: dict[str, Any], pages: list[str], scan: dict[str, 
 
 def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[str, list[str]],
                 refused: dict[str, str], probes: list[Probe], scan: dict[str, Any], vault: Path,
-                collection: str) -> dict[str, Any]:
+                collection: str, originals: Path | None = None) -> dict[str, Any]:
     """Score every raw item: filed, refused or lost; bytes held; probe phrase found by search."""
     if not raw:
         return {"state": "unknown", "reason": "the key has no raw items (not a raw profile)"}
@@ -275,6 +277,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
     probe_of = {p.item: p for p in probes if p.kind == "raw"}
     classes: dict[str, Counter[str]] = {}
     problems: list[dict[str, Any]] = []
+    meets_by_item: dict[str, bool] = {}
     for item in raw:
         pages = pages_of[item["path"]]
         code = refused.get(nfc(item["path"]))
@@ -282,6 +285,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
         # The key names no refusal code: any coded refusal meets a filed-or-refused item, and the code seen is reported.
         allowed = item["outcome"] == "filed-or-refused" and code != NO_CODE
         meets = state == "filed" or (state == "refused" and allowed)
+        meets_by_item[item["path"]] = meets
         row = classes.setdefault(item["raw_class"], Counter())
         row["items"] += 1
         row[state] += 1
@@ -293,7 +297,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
                              "code": code, "key_outcome": item["outcome"]})
         probe = probe_of.get(item["path"])
         if pages:
-            held = original_bytes_held(item, pages, scan, vault, collection, inline_bound)
+            held = original_bytes_held(item, pages, scan, vault, collection, inline_bound, originals)
             row["bytes_" + ("held" if held in ("artifact", "text") else held)] += 1
             if held != "unknown":
                 row["form_checked"] += 1
@@ -338,6 +342,7 @@ def raw_section(key: dict[str, Any], raw: list[dict[str, Any]], pages_of: dict[s
                      for name, row in sorted(classes.items())},
         "not_meeting_key": problems[:LOST_SAMPLES],
         "not_meeting_key_count": len(problems),
+        "meets_key_by_item": meets_by_item,
     }
 
 
@@ -669,7 +674,8 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
                 settle["recovered_" + probe.kind] = settle.get("recovered_" + probe.kind, 0) + probe.strict
     scorer_calls = session.calls
     scorer_wall = round(time.perf_counter() - started, 1)
-    raw_metrics = raw_section(key, raw, raw_pages_of, refused_codes, probes, scan, vault, collection)
+    raw_metrics = raw_section(key, raw, raw_pages_of, refused_codes, probes, scan, vault, collection, args.originals)
+    raw_meets_key = raw_metrics.pop("meets_key_by_item", {})  # reported once, under per_item
     existing_metrics = existing_vault_section(key, log, vault, raw_pages_of, probes)
     ranked = [p for p in probes if p.kind in ("note", "media")]  # the samples below stay as they were
 
@@ -745,6 +751,7 @@ async def score(args: argparse.Namespace) -> dict[str, Any]:
             "junk_pages": {i["path"]: len(pages_of[i["path"]]) for i in junk},
             "links_kept": edge_kept,
             "embeds_kept": embed_edge_kept,
+            "raw_meets_key": raw_meets_key,
         },
         "fidelity": fidelity,
         "homes": homes,
@@ -873,6 +880,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds a search may wait for the index to finish warming")
     parser.add_argument("--settle-s", type=float, default=15.0,
                         help="pause before the one re-query of recall misses (0 disables it)")
+    parser.add_argument("--originals", type=Path,
+                        help="the generated collection, read when the vault holds no placed copy of an original")
     args = parser.parse_args(argv)
     metrics = asyncio.run(score(args))
     print(json.dumps(headline(metrics), ensure_ascii=False, indent=1))
