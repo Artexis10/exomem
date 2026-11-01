@@ -5285,6 +5285,10 @@ def _page_rule_findings(
     return findings
 
 
+# The rule that owns a page's relation disposition; a review answers its findings.
+RELATION_DISPOSITION_RULE: tuple[str, str, str] = ("relations", "*", "disposition")
+
+
 def _disposition_finding(
     page: SemanticPageState,
     disposition: RelationDisposition,
@@ -5338,7 +5342,7 @@ def _disposition_finding(
             )
         ),
         governed_element_identity=("relations", "disposition"),
-        resolved_rule=("relations", "*", "disposition"),
+        resolved_rule=RELATION_DISPOSITION_RULE,
     )
 
 
@@ -5657,7 +5661,7 @@ def evaluate(
         blocking = tuple(item for item in errors if item.key in new_error_keys)
     if invalidated_disposition:
         disposition_errors = tuple(
-            item for item in errors if item.resolved_rule == ("relations", "*", "disposition")
+            item for item in errors if item.resolved_rule == RELATION_DISPOSITION_RULE
         )
         blocking = tuple(sorted({*blocking, *disposition_errors}, key=_finding_sort_key))
     if mode == "posthoc":
