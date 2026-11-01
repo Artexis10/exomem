@@ -790,9 +790,9 @@ def test_a_handoff_after_a_loan_prices_each_batch_it_re_proves_once(
 ) -> None:
     """The custody price is the measured time of one proof, however many batches a handoff proves.
 
-    The handoff at the import's end proves its last batch and re-proves the two that the loan
-    handed off, whose index pages the last one moved. Dividing its time by its one new batch
-    would price each proof three times over and shrink every later chunk and loan.
+    The handoff at the import's end proves its last batch and re-proves the one that holds the
+    index pages the last one moved. Dividing its time by its one new batch would price each
+    proof twice over and shrink every later chunk and loan.
     """
     held = _import_three_sources_while(
         vault, tmp_path, monkeypatch, _prove_in_place(vault), proof_seconds=0.2
@@ -800,6 +800,103 @@ def test_a_handoff_after_a_loan_prices_each_batch_it_re_proves_once(
 
     assert held["outcome"] == "ready" and 2 in held["handoffs"], "the import made no loan"
     assert 0.2 <= writer_lease.owed_custody_handoff_seconds(vault, more_batches=1) < 0.4
+
+
+def _hand_off_three_batches_sharing_a_page(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[list[str]], list[str]]:
+    """Commit three batches in one session and hand off custody after each, as an import does
+    when it lends between chunks. Each batch creates its own page and rewrites one shared page,
+    as every Source an import files rewrites its index and log pages. Returns the batches each
+    handoff proved and the batch ids, oldest first.
+    """
+    # A governed write gives the vault the canonical generation every proof is bound to.
+    _governed_write(
+        _manager(tmp_path),
+        vault,
+        rel_path="Knowledge Base/Notes/warm.md",
+        source=_compiled_page("Warm", "warmprobe"),
+    )
+    generation = writer_lease.current_canonical_generation(vault)
+    shared = "Knowledge Base/Notes/Insights/handoff-shared.md"
+    shared_text = _compiled_page("Handoff shared", "handoffshared0")
+    _put(vault, shared, shared_text)
+    session = writer_lease._FastAcknowledgementSession(
+        vault_root=vault,
+        request_id="handoff-import",
+        mutation_attempt_digest="0" * 64,
+        terminal_replay_until=0.0,
+        advisory_required=False,
+    )
+    proofs: list[list[str]] = []
+    prove = derived_receipts.prove_committed
+
+    def recorded_proof(root, receipt, **kwargs):
+        proofs[-1].append(receipt.batch_id)
+        return prove(root, receipt, **kwargs)
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", recorded_proof)
+    batch_ids = [f"handoff-{index}" for index in range(3)]
+    with writer_lease.active_manager().consistency_guard(vault, operation="test_import"):
+        for index, batch_id in enumerate(batch_ids):
+            own = f"Knowledge Base/Notes/Insights/handoff-{index}.md"
+            own_text = _compiled_page(f"Handoff {index}", f"handoffown{index}")
+            next_shared = _compiled_page("Handoff shared", f"handoffshared{index + 1}")
+            receipt = _prepare_store_batch(
+                vault,
+                batch_id=batch_id,
+                generation=generation,
+                changes=((own, None, own_text), (shared, shared_text, next_shared)),
+            )
+            _put(vault, own, own_text)
+            _put(vault, shared, next_shared)
+            shared_text = next_shared
+            session.batches.append(
+                writer_lease._FastAcknowledgementBatch(
+                    receipt=receipt, canonical_commit_monotonic=time.monotonic()
+                )
+            )
+            proofs.append([])
+            writer_lease._handoff_derived_batches(session)
+    assert all(batch.handoff_outcome == "ready" for batch in session.batches)
+    return proofs, batch_ids
+
+
+def test_a_handoff_re_proves_only_the_earlier_batch_that_holds_the_page_it_moved(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second handoff hands the first batch's copy of the shared page on to the second.
+
+    The third batch moves the page again, so its handoff re-proves the second, which holds it,
+    but not the first, which holds nothing the third moved. Re-proving every batch that shares
+    a page costs an import the square of its batches.
+    """
+    proofs, (first, second, third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch
+    )
+
+    assert proofs == [[first], [second, first], [third, second]]
+
+
+def test_a_batch_the_last_handoff_did_not_re_prove_still_retires(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skipping a re-proof leaves no custody behind: the skipped batch completes and retires."""
+    proofs, (first, _second, _third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch
+    )
+    assert first not in proofs[-1]
+
+    _drain(vault)
+    # Retirement waits for the catalogue to hold the pages, which a running server's repair
+    # worker publishes; it is driven here the way a running server drives it.
+    lexstore.ensure_fresh(vault)
+    _drain(vault)
+    pending_recall.reset(vault)
+
+    assert derived_receipts._load_receipt(vault, first).state == "completed"
+    assert pending_recall.overlay(vault).outcome == "ready"
+    assert set(_pending_row_states(vault)) == {"retired"}, _pending_row_states(vault)
 
 
 @pytest.mark.parametrize("flag", [None, "0"])

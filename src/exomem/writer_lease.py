@@ -525,8 +525,39 @@ _handoff_samples: dict[Path, deque[float]] = {}
 _handoff_samples_lock = threading.Lock()
 
 
-def _pending_handoff_batches(session: _FastAcknowledgementSession) -> int:
-    return sum(1 for b in session.batches if b.handoff_outcome is None and b.handoff_error is None)
+def _handoff_targets(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    """The batches the next handoff proves, newest first.
+
+    Every batch not yet handed off, or whose handoff failed, and every earlier batch that
+    still holds unretired custody on a path one of them changed. An earlier batch whose
+    rows on those paths are all retired handed them on before, to the batch that holds
+    them now, so its re-proof would find nothing of this handoff's to hand on. Without
+    that skip each handoff re-proves every batch that shares an import's index pages,
+    and an import's handoffs cost the square of its batches.
+    """
+    pending = [
+        batch
+        for batch in session.batches
+        if batch.handoff_outcome is None and batch.handoff_error is None
+    ]
+    if not pending:
+        return []
+    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
+    from . import derived_receipts
+
+    # Unreadable custody re-proves every batch that shares a changed path: dearer, never less.
+    holders = derived_receipts.open_custody_batches(session.vault_root, changed_paths)
+    return [
+        batch
+        for batch in reversed(session.batches)
+        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
+        and (
+            batch.handoff_outcome is None
+            or batch.handoff_error is not None
+            or holders is None
+            or batch.receipt.batch_id in holders
+        )
+    ]
 
 
 def _timed_handoff(session: _FastAcknowledgementSession) -> None:
@@ -544,9 +575,10 @@ def _timed_handoff(session: _FastAcknowledgementSession) -> None:
 def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> float | None:
     """Seconds the custody handoff will take once `more_batches` more batches have committed.
 
-    The dearest recent time per proved batch, times every batch of the active session plus
-    `more_batches`, or nothing when no batch is owed. None when no handoff has been measured for
-    this vault.
+    The dearest recent time per proved batch, times the batches a handoff would prove now
+    (`_handoff_targets`) plus `more_batches`, or nothing when no batch is owed. A batch still
+    to commit may also move a page that an earlier batch holds, one proof more, which this
+    leaves out. None when no handoff has been measured for this vault.
     """
     with _handoff_samples_lock:
         samples = _handoff_samples.get(_fast_ack_root_key(vault_root))
@@ -555,14 +587,12 @@ def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> floa
         return None
     session = _ACTIVE_FAST_ACK_SESSION.get()
     if session is None or not active_derived_batch_custody(vault_root):
-        batches = pending = 0
+        proved = 0
     else:
-        batches, pending = len(session.batches), _pending_handoff_batches(session)
-    if not pending and not more_batches:
+        proved = len(_handoff_targets(session))
+    if not proved and not more_batches:
         return 0.0
-    # A handoff re-proves each earlier batch that shares a path with a new one, and a batch's
-    # paths are known only once it commits; an import's batches all share its index pages.
-    return dearest * (batches + more_batches)
+    return dearest * (proved + more_batches)
 
 
 #: What the running leaf declared about its default duplicate/overlap sweep:
@@ -906,26 +936,17 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> int:
     """Cache exact custody before releasing canonical writers, without waits.
 
     A newer hold can move a path whose earlier receipt was already handed off.
-    Re-prove only those overlapping receipts after publishing the newer custody.
+    Re-prove only the earlier receipts that still hold custody on such a path
+    (`_handoff_targets`), after publishing the newer custody.
     A failed handoff stays pending and cannot escape into canonical rollback.
     Returns how many receipts it proved, for the handoff's per-batch time.
     """
     proved = 0
     if session.handoff_in_progress:
         return proved
-    pending = [
-        batch
-        for batch in session.batches
-        if batch.handoff_outcome is None and batch.handoff_error is None
-    ]
-    if not pending:
+    affected = _handoff_targets(session)
+    if not affected:
         return proved
-    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
-    affected = [
-        batch
-        for batch in reversed(session.batches)
-        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
-    ]
     where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
     # Public proof and publication guards reenter consistency_guard, including
     # on the direct leaf fallback where no enclosing canonical hold exists.

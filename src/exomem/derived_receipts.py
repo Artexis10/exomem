@@ -1880,15 +1880,7 @@ def snapshot_pending_visibility(
         generation = _pending_visibility_generation(connection)
         selected = None if batch_ids is None else set(batch_ids)
         if rel_paths is not None:
-            selected = {
-                str(row[0])
-                for rel in set(rel_paths)
-                for row in connection.execute(
-                    "SELECT batch_id FROM pending_recall_rows "
-                    "WHERE state != 'retired' AND rel_path = ?",
-                    (rel,),
-                )
-            }
+            selected = set(_open_custody_batches(connection, rel_paths))
         # LEFT JOIN preserves orphan custody as an explicit invalid row. Both
         # lineage lookups use their primary keys, including above the body cap.
         query = (
@@ -1989,6 +1981,43 @@ def snapshot_pending_visibility(
     finally:
         if connection is not None:
             connection.close()
+
+
+def _open_custody_batches(
+    connection: sqlite3.Connection, rel_paths: Collection[str]
+) -> frozenset[str]:
+    # A seek on (path, batch) per path: only the batches with open custody on it.
+    return frozenset(
+        str(row[0])
+        for rel in set(rel_paths)
+        for row in connection.execute(
+            "SELECT batch_id FROM pending_recall_rows WHERE state != 'retired' AND rel_path = ?",
+            (rel,),
+        )
+    )
+
+
+def open_custody_batches(vault_root: Path, rel_paths: Collection[str]) -> frozenset[str] | None:
+    """The batches that still hold unretired pending-visibility custody on any of these paths.
+
+    A batch whose row on a path is retired has handed that path on, or published it, so
+    nothing a newer write did to the path is its to hand on. None when the store cannot
+    be read.
+    """
+    try:
+        deferred_index.store_path(vault_root).stat()
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return None
+    try:
+        connection = _connect_receipt_read(vault_root)
+        try:
+            return _open_custody_batches(connection, rel_paths)
+        finally:
+            connection.close()
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        return None
 
 
 def pending_visibility_snapshot_is_current(
