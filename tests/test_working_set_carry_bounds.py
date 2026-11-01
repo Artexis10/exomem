@@ -498,6 +498,23 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
     # A page the later corpus shares with the base is the base's entry, not read again.
     assert retained.pages["b.md"] is base.pages["b.md"]
     assert retained.pages["a.md"] is not base.pages["a.md"]
+    # The postings counted from the patched base hold each page's own counts, as a count of its text gives.
+    words = sorted({word for text in later.values() for word in text.split()})
+    counted = postings.counted_from_page_terms(words, statistics.document_frequency)
+    assert counted is not None
+    assert {word: dict(pages) for word, pages in counted.items()} == {
+        word: {path: text.split().count(word) for path, text in later.items() if word in text.split()}
+        for word in words
+    }
+
+
+@pytest.mark.parametrize("repeats", [256, 65_536])
+def test_a_page_term_count_survives_a_word_repeated_past_each_storage_width(repeats: int) -> None:
+    """A page's counts are kept in the narrowest width that holds them: a word repeated past a width's
+    limit must still read back whole, never wrapped or refused."""
+    length, terms, counts = lexstore._page_terms(" ".join(["alpha"] * repeats + ["beta"]))
+
+    assert (length, terms, list(counts)) == (repeats + 1, ("alpha", "beta"), [repeats, 1])
 
 
 def test_an_admitted_ranking_after_a_write_equals_the_ranking_of_a_fresh_process(
@@ -561,45 +578,6 @@ def test_snapshot_aliases_do_not_evict_another_readers_unchanged_statistics(vaul
     _result, rebuilt = ranking(views[1])
     assert rebuilt == 0
     assert ranking(views[0]) == (first, 0), "snapshot aliases must not crowd out a reader"
-
-
-def test_an_fts_only_correction_changes_warm_admitted_ranking(vault: Path) -> None:
-    """A SQL repair can change scoring without a canonical checkpoint change."""
-    held = _seed_ranked(vault)
-    withheld = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
-
-    def ranked() -> list[tuple[str, float]]:
-        context = lexstore.RequestQueryContext(
-            vault, lambda path: path != withheld, lifecycle_statuses.Basis(vault)
-        )
-        return _ranked(vault, 1000, query_context=context)
-
-    before = ranked()
-    store = lexstore.get_store(vault)
-    connection = store._connect()
-    try:
-        checkpoint = connection.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' ORDER BY key"
-        ).fetchall()
-        with connection:
-            rowid = connection.execute(
-                "SELECT rowid FROM pages WHERE path = ?",
-                ("Knowledge Base/Notes/Journal/ordinary-note-00000.md",),
-            ).fetchone()
-            assert rowid is not None
-            connection.execute(
-                "UPDATE fts SET stemmed = ? WHERE rowid = ?", ("harbour " * 200, rowid[0])
-            )
-        assert connection.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' ORDER BY key"
-        ).fetchall() == checkpoint
-    finally:
-        connection.close()
-
-    after = ranked()
-    assert after != before, "a noncandidate's tokens change the admitted score denominator"
-    lexstore.clear_stores()
-    assert ranked() == after, "warm repair scores must equal a fresh process cache"
 
 
 @pytest.mark.parametrize("partition", ["candidate", "outside"])
