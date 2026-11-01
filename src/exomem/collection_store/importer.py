@@ -3068,7 +3068,8 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     plan = compile_mapping(job.binding["mapping"]["declared"], manifest, job.binding["mapping"]["format"])
     order = import_time.Fold(current.checkpoint.get("fold")) if plan.ordered else None
     reader = _live(writer, current, proof, plan)
-    batch = _next_batch(reader, plan, reader.pending, order, limit=store.batch_rows(cid, MAX_BATCH_ROWS))
+    batch = _next_batch(reader, plan, reader.pending, order,
+                        limit=store.batch_rows(cid, min(MAX_BATCH_ROWS, derived_rows.IMPORT_BATCH_ROWS)))
     batch.members = reader.taken(batch.checkpoint)
     reader.marked = _cursor(batch.checkpoint)
     guards = reader.guards()
