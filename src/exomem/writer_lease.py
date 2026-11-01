@@ -5430,7 +5430,11 @@ class LeaseManager:
         because it may have consumed the request stream. The caller's place in line and its
         waiter slot end with the acquire: it no longer waits.
         """
-        if not _writes_absorb_contention():
+        # A re-entrant hold never contends, and waiting in line would wait on this thread.
+        if (
+            not _writes_absorb_contention()
+            or self._mutation_coordinator_for(vault_root).current_thread_holds_boundary()
+        ):
             with self.mutation_guard(
                 vault_root, request_id=request_id, operation=operation
             ) as mutation:
@@ -5455,9 +5459,9 @@ class LeaseManager:
                 ),
                 acquire,
                 absorbable=refused_before_the_body,
-                request_id=str(uuid.uuid4()),
+                request_id=request_id or str(uuid.uuid4()),
                 join_on_arrival=True,
-                # The /upload route or the session park hands the refusal to its caller and records it.
+                # The caller of the guard hands the refusal to its client and records it.
                 seam_records=True,
             )
 

@@ -667,6 +667,15 @@ def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, st
     return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": reason}
 
 
+def _busy_failed(file_id: str, error: OpError) -> dict[str, str]:
+    """A file's commit refused before it began: failed with the retryable busy code, so the batch keeps its other files."""
+    return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": error.message[:300]}
+
+
+def _refused_before_commit(error: OpError) -> bool:
+    return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+
+
 #: The three terminal states one preserved file can end in. `outcome` mirrors
 #: them for one release -- an existing client branching on `stored`/`failed`
 #: keeps working, and `already_stored` reports `outcome="stored"` beside a
@@ -1535,6 +1544,7 @@ def capture_source_artifacts(
             outcomes[index] = _failed(file_id, error)
 
     manager = active_manager()
+    refusals: list[OpError] = []
     try:
         for index, artifact in staged.items():
             try:
@@ -1599,8 +1609,16 @@ def capture_source_artifacts(
                 outcomes[index] = _failed(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
                 )
+            except OpError as error:
+                if not _refused_before_commit(error):
+                    raise
+                outcomes[index] = _busy_failed(artifact.file_id, error)
+                refusals.append(error)
     finally:
         _release_staged(vault_root, staged, outcomes)
+    if staged and len(refusals) == len(staged):
+        # Nothing began, so the call stays retryable under its own key instead of recording a failure.
+        raise refusals[0]
 
     resolved = [outcome for outcome in outcomes if outcome is not None]
     stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
@@ -1683,6 +1701,7 @@ def preserve_artifacts(
         vault_root, scope=scope, category=category, raw_protection=raw_protection,
         wanted_hashes=frozenset(artifact.sha256 for artifact in staged.values()),
     )
+    refusals: list[OpError] = []
     try:
         for index, artifact in staged.items():
             try:
@@ -1810,8 +1829,16 @@ def preserve_artifacts(
                     }
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
+            except OpError as error:
+                if not _refused_before_commit(error):
+                    raise
+                outcomes[index] = _busy_failed(artifact.file_id, error)
+                refusals.append(error)
     finally:
         _release_staged(vault_root, staged, outcomes)
+    if staged and len(refusals) == len(staged):
+        # Nothing began, so the call stays retryable under its own key instead of recording a failure.
+        raise refusals[0]
     return _batch_result(outcomes)
 
 

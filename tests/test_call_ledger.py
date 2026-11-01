@@ -904,7 +904,10 @@ def test_an_artifact_write_records_what_landed_and_no_handle(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: SimpleNamespace(mutation_guard=lambda *_a, **_k: nullcontext()),
+        lambda: SimpleNamespace(
+            mutation_guard=lambda *_a, **_k: nullcontext(),
+            absorbing_mutation_guard=lambda *_a, **_k: nullcontext(),
+        ),
     )
 
     arguments = {
