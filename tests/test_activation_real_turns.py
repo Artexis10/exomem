@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem import lexstore
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "activation_real_turns.py"
 
@@ -247,6 +249,54 @@ def test_run_turn_is_unjudged_with_neither_expectation(tmp_path: Path) -> None:
 
     assert result["judged"] is False
     assert result["passed"] is None
+
+
+def _seed_captured_vault(vault: Path) -> str:
+    """A vault past the carry's corpus floor whose one captured page no note was compiled from."""
+    from test_working_set_carry import seed_ordinary_notes
+
+    _seed_vault(vault)
+    seed_ordinary_notes(vault)
+    page = vault / "Knowledge Base" / "Sources" / "zerrin-bracken-invoice.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: source\nstatus: active\nupdated: 2026-09-09\n---\n\n# Zerrin Bracken invoice\n\n"
+        "Zerrin Bracken Ltd invoiced the freight total of four hundred crates.\n",
+        encoding="utf-8",
+    )
+    return "Knowledge Base/Sources/zerrin-bracken-invoice.md"
+
+
+CAPTURED_TURN = "what did the zerrin bracken invoice say about the freight total"
+
+
+def test_expect_reached_names_the_route_to_a_captured_page_and_ignores_other_keys(tmp_path: Path) -> None:
+    module = _module()
+    vault = tmp_path / "vault"
+    source = _seed_captured_vault(vault)
+    module.prepare_environment(vault, state_dir=str(tmp_path / "state"))
+    lexstore.ensure_fresh(vault)  # the script runs on a snapshot whose catalogue is already built
+
+    reached = module.run_turn(vault, {"turn": CAPTURED_TURN, "expect_reached": [source], "stratum": "uncompiled"})
+    narrow = module.run_turn(vault, {"turn": CAPTURED_TURN, "expect": [source]})
+
+    assert reached["passed"] is True
+    assert reached["routes"] == {source: ["pointer", "source"]}
+    assert narrow["passed"] is False  # `expect` keeps its meaning: a captured page is no resolved anchor
+
+
+def test_the_maps_packet_reaches_the_captured_page_through_its_turn_slice(tmp_path: Path) -> None:
+    module = _module()
+    vault = tmp_path / "vault"
+    source = _seed_captured_vault(vault)
+    module.prepare_environment(vault, state_dir=str(tmp_path / "state"), packet="maps")
+    lexstore.ensure_fresh(vault)
+
+    result = module.run_turn(vault, {"turn": CAPTURED_TURN, "expect_reached": [source]})
+
+    assert os.environ["EXOMEM_ACTIVATION_PACKET"] == "maps"
+    assert result["passed"] is True
+    assert result["routes"] == {source: ["slice:carried", "source"]}
 
 
 def _seed_ambiguous_vault(vault: Path) -> None:

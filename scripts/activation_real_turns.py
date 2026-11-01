@@ -25,6 +25,15 @@ Turns file: a JSON list of objects, each ``{"turn": "...", "expect":
 packet's `resolved` OR `partial` anchor paths) or ``{"turn": "...",
 "expect_abstain": true}`` (the packet must abstain). A turn with neither key
 is run and reported with no pass/fail judgement.
+
+``{"turn": "...", "expect_reached": ["Knowledge Base/...md", ...]}`` asks a
+wider question than ``expect``: every listed path must be reached by the packet
+in any served way (an anchor of any status, a unit's page, a pointer, or a turn
+slice lead). The report names the route of each path. ``expect`` keeps its
+meaning. Any other key of a turn object (a stratum label, say) is ignored.
+
+``--packet maps`` runs the shipped default packet instead of the anchors
+packet; its turn slice is then what the turn reached.
 """
 
 from __future__ import annotations
@@ -66,7 +75,7 @@ def refuse_path_inside_a_repository(path: Path, *, label: str) -> Path:
         raise SnapshotError(f"{label} {path} sits inside a git checkout: {exc}") from exc
 
 
-def prepare_environment(snapshot: Path, *, state_dir: str | None) -> None:
+def prepare_environment(snapshot: Path, *, state_dir: str | None, packet: str = "anchors") -> None:
     """Strip inherited `EXOMEM_*` env vars except the kept set, set
     `EXOMEM_VAULT_PATH` to the snapshot, and set `XDG_STATE_HOME` under the
     snapshot's parent UNLESS `--state-dir` was given explicitly.
@@ -80,8 +89,9 @@ def prepare_environment(snapshot: Path, *, state_dir: str | None) -> None:
     for key in [k for k in os.environ if k.startswith("EXOMEM_") and k not in _KEPT_EXOMEM_ENV]:
         del os.environ[key]
     os.environ["EXOMEM_VAULT_PATH"] = str(snapshot)
-    # This check judges resolved and partial anchors, which only the anchors packet carries.
-    os.environ["EXOMEM_ACTIVATION_PACKET"] = "anchors"
+    # `expect` judges resolved and partial anchors, which only the anchors packet carries;
+    # `--packet maps` judges what the default packet's turn slice reached.
+    os.environ["EXOMEM_ACTIVATION_PACKET"] = packet
     os.environ["XDG_STATE_HOME"] = (
         state_dir if state_dir else str(snapshot.parent / f"{snapshot.name}-activation-state")
     )
@@ -108,6 +118,36 @@ def _anchor_paths(packet: dict[str, Any], *, statuses: frozenset[str]) -> set[st
         for anchor in packet.get("anchors", ()) or ()
         if anchor.get("status") in statuses
     }
+
+
+def reached_routes(packet: dict[str, Any]) -> dict[str, list[str]]:
+    """Each path the packet reaches, with the ways it reaches it, in any served status.
+
+    A route is `anchor:<status>`, `unit`, `pointer`, `slice:<match>`; a path in the product's
+    append-only raw-material trees (`vault.in_append_only_tree`) also says `source`.
+    """
+    from exomem import vault
+
+    routes: dict[str, list[str]] = {}
+
+    def add(path: object, route: str) -> None:
+        if path:
+            held = routes.setdefault(str(path), [])
+            if route not in held:
+                held.append(route)
+
+    for anchor in packet.get("anchors") or ():
+        add(anchor.get("path") or anchor.get("ref"), f"anchor:{anchor.get('status')}")
+    for unit in packet.get("units") or ():
+        add((unit.get("provenance") or {}).get("path"), "unit")
+    for pointer in packet.get("pointers") or ():
+        add(pointer.get("ref"), "pointer")
+    for item in (packet.get("turn_slice") or {}).get("items") or ():
+        add(item.get("path") or item.get("ref"), f"slice:{item.get('match')}")
+    for path, held in routes.items():
+        if vault.in_append_only_tree(path):
+            held.append("source")
+    return routes
 
 
 def run_turn(vault_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
@@ -149,6 +189,7 @@ def run_turn(vault_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
 
     expect_abstain = entry.get("expect_abstain")
     expect = entry.get("expect")
+    expect_reached = entry.get("expect_reached")
     if expect_abstain is True:
         result["judged"] = True
         result["passed"] = abstained
@@ -160,6 +201,14 @@ def run_turn(vault_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
         result["passed"] = not missing
         result["expectation"] = list(expect)
         result["missing"] = missing
+    elif isinstance(expect_reached, list) and expect_reached:
+        routes = reached_routes(packet)
+        missing = [path for path in expect_reached if path not in routes]
+        result["judged"] = True
+        result["passed"] = not missing
+        result["expectation"] = list(expect_reached)
+        result["missing"] = missing
+        result["routes"] = {path: routes[path] for path in expect_reached if path in routes}
     else:
         result["judged"] = False
         result["passed"] = None
@@ -186,6 +235,8 @@ def _print_report(results: list[dict[str, Any]]) -> None:
             verdict = "PASS" if result["passed"] else "FAIL"
             detail = f" missing={result['missing']}" if result.get("missing") else ""
             print(f"  [{verdict}] expected {result['expectation']!r}{detail}")
+            for path, routes in (result.get("routes") or {}).items():
+                print(f"    reached {path!r} by {', '.join(routes)}")
         print()
 
 
@@ -194,6 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot", type=Path, required=True, help="Vault snapshot root (read-only).")
     parser.add_argument("--turns", type=Path, required=True, help="Path to the private turns JSON file.")
     parser.add_argument("--json", action="store_true", help="Emit the report as JSON instead of text.")
+    parser.add_argument(
+        "--packet",
+        choices=("anchors", "maps"),
+        default="anchors",
+        help="Packet mode to run: `anchors` (default; judged by `expect`) or the shipped `maps`.",
+    )
     parser.add_argument(
         "--state-dir",
         type=Path,
@@ -218,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    prepare_environment(snapshot, state_dir=str(args.state_dir) if args.state_dir else None)
+    prepare_environment(snapshot, state_dir=str(args.state_dir) if args.state_dir else None, packet=args.packet)
 
     results = run_all(snapshot, turns)
 
