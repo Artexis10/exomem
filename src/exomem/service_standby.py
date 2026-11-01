@@ -20,7 +20,6 @@ Pure process state.  Nothing here reasons over notes.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -298,26 +297,12 @@ def _read_snapshot_token(vault_root: Path, *, quiet: bool) -> str | None:
     if conn is None:
         return None
     try:
-        rows = conn.execute(
-            "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
-            (
-                epistemic_graph._RECALL_CHECKPOINT_KEY,
-                epistemic_graph._GRAPH_SYNC_CHECKPOINT_KEY,
-            ),
-        ).fetchall()
+        return epistemic_graph.published_snapshot_token(conn)
     except Exception:  # noqa: BLE001 - a sidecar we cannot read is not proven
         report("standby graph checkpoint read failed", exc_info=True)
         return None
     finally:
         conn.close()
-    values = {str(key): value for key, value in rows}
-    return json.dumps(
-        [
-            values.get(epistemic_graph._RECALL_CHECKPOINT_KEY),
-            values.get(epistemic_graph._GRAPH_SYNC_CHECKPOINT_KEY),
-        ],
-        sort_keys=True,
-    )
 
 
 def prove_graph_snapshot(vault_root: Path) -> bool:
@@ -345,9 +330,8 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     from . import epistemic_graph
 
     vault_root = Path(vault_root)
-    # Sampled before the proof, so movement during it still earns a re-proof,
-    # a snapshot published during it is never named as the one proved, and
-    # whole-vault debt raised during it is never retired on its account.
+    # Sampled before the proof, so movement during it still earns a re-proof
+    # and whole-vault debt raised during it is never retired on its account.
     stat = _graph_stat(vault_root)
     signal = (_durable_generation(vault_root), snapshot_token(vault_root))
     marker = _observe_full_marker(vault_root)
@@ -363,16 +347,11 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     except Exception:  # noqa: BLE001 - an unadopted snapshot is a waiting component
         log.warning("standby graph snapshot adoption failed", exc_info=True)
         adoption = epistemic_graph.SnapshotAdoption(False, reason="adoption_raised")
-    token = snapshot_token(vault_root) if adoption.adopted else None
-    if adoption.adopted and token != signal[1]:
-        # The proof read the snapshot that was published when it started; the
-        # serving worker has published another since. Naming that one as
-        # proved would carry a snapshot nobody proved across promotion, so this
-        # attempt proves nothing and the moved token earns a re-proof.
-        adoption = epistemic_graph.SnapshotAdoption(
-            False, residue=adoption.residue, reason="snapshot_published_during_proof"
-        )
-        token = None
+    # The token the proof read in its own transaction names the snapshot it
+    # proved. A snapshot the serving worker publishes during or after the
+    # proof is never named as proved: promotion finds the token moved and
+    # records `advanced`, and the promoted worker runs the handoff in full.
+    token = adoption.proved_token if adoption.adopted else None
     with _lock:
         _attempt_ended_at = _clock()
         if _promoting or _promoted or _discarded:

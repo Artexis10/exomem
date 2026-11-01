@@ -1928,6 +1928,59 @@ class _SnapshotSourceSeal:
     policy_identity: tuple[str, str]
 
 
+class _ProofPage(NamedTuple):
+    """One admitted page as the cold proof read it."""
+
+    snapshot_hash: str
+    title: str
+    guard: vault_module.PathGuard
+
+
+@dataclass
+class _SealMovement:
+    """What a collecting seal recheck found moved, for the cold proof to fold."""
+
+    failed: list[tuple[str, vault_module.PathGuardError]] = dataclass_field(default_factory=list)
+    resolver_membership: frozenset[str] | None = None
+    indexed_membership: frozenset[str] | None = None
+    policy_moved: bool = False
+
+
+#: Re-read rounds the cold proof spends on pages that moved under it before it
+#: declines `sources_kept_moving`. Each round re-reads only the moved pages but
+#: rechecks every page, so this bounds the proof at five whole-corpus rechecks.
+_PROOF_FOLD_ROUNDS = 4
+
+
+def _proof_page_moved(
+    vault_root: Path, rel: str, error: Exception, suspects: set[str]
+) -> bool:
+    """Whether a page the cold proof could not read or recheck moved (True) or is unsafe.
+
+    A page removed after the membership walk fails the read loop's lstat, and a
+    replaced one fails its guard. Both are movement the proof folds. A page that
+    grew between the lstat and the open reads as unsafe, and a parent directory
+    replaced mid-open as unreadable, so either counts as movement once per page;
+    `suspects` holds the pages spent, and a clean read clears a page from it.
+    """
+    if isinstance(error, FileNotFoundError):
+        return True
+    if not isinstance(error, vault_module.PathGuardError):
+        return False
+    # Branching on `code` is sound: it is the closed enum vault.py itself defines and raises.
+    # nosemgrep: ep-word-membership -- vault.py's own PathGuardError codes, not text to interpret.
+    if error.code in {"PATH_GUARD_CHANGED", "PATH_GUARD_CONTENT"}:
+        return True
+    if error.code == "PATH_GUARD_IO" and not os.path.lexists(vault_root / rel):
+        return True
+    # nosemgrep: ep-word-membership -- vault.py's own PathGuardError codes, not text to interpret.
+    if error.code in {"PATH_GUARD_UNSAFE", "PATH_GUARD_IO"} and rel not in suspects:
+        suspects.add(rel)
+        return True
+    # PATH_GUARD_ROOT and PATH_GUARD_INVALID, or a page unsafe on its second read.
+    return False
+
+
 class _RepublicationDeferred(Exception):
     """Release an uncommitted seal for foreground work without declaring graph damage."""
 
@@ -3132,6 +3185,13 @@ class EpistemicGraphIndex:
         unusable sidecar still fails, and the caller pays the whole-vault pass as
         before.
 
+        Pages that writers replace, create or delete while the proof runs are
+        folded into the proof rather than declining it; see
+        `_snapshot_sources_match_disk`. The adoption names the snapshot it
+        proved in `proved_token`, read in the proof's own read transaction, so
+        a publication during the proof shows as a moved snapshot at promotion
+        instead of discarding the proof.
+
         Needs the recall registry seeded for the vault scope, which the warm-up
         does before any of this; it does not need a running watcher, so a
         standby can prove and adopt while the old worker still serves.
@@ -3156,6 +3216,10 @@ class EpistemicGraphIndex:
         decline: list[str] = []
         try:
             stored_checkpoint = self._stored_recall_checkpoint(conn)
+            # Read in the transaction the proof compares rows against, so it
+            # names the snapshot proved even when another is published during
+            # the proof.
+            proved_token = published_snapshot_token(conn)
             row = conn.execute(
                 "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
             ).fetchone()
@@ -3202,7 +3266,9 @@ class EpistemicGraphIndex:
         # built now *is* the pre-delta topology. One walk at start-up, in place
         # of a whole-vault rebuild on the first write.
         find_module.recall_resolver_snapshot(self.vault_root)
-        return SnapshotAdoption(True, residue=tuple(sorted(residue)), reason="adopted")
+        return SnapshotAdoption(
+            True, residue=tuple(sorted(residue)), reason="adopted", proved_token=proved_token
+        )
 
     def _snapshot_sources_match_disk(
         self,
@@ -3219,16 +3285,39 @@ class EpistemicGraphIndex:
         "everything matches except these paths, and here they are". A caller
         that can repair a bounded set -- adoption, which enqueues them -- passes
         a set; a public reader passes nothing and keeps today's strict answer.
-        Membership differences and a moved resolver topology still decline
-        outright either way: those are a different corpus, not a repairable
-        residue.
+        A page still on disk that the snapshot indexes but no longer admits, and
+        a moved resolver topology that the residue does not explain, still
+        decline outright either way: those are a different corpus, not a
+        repairable residue.
 
         The graph's file rows atomically carry the source hash from which all
         nodes and outgoing edges were derived.  Resolver-only paths outside the
         indexed KB still affect target resolution, so their freshly parsed
         path/title topology is checked against the persisted resolver digest as
-        well.  Any incomplete read fails closed; this is deliberately the cold
-        path and never runs for a live reader at the exact stored checkpoint.
+        well.  This is deliberately the cold path and never runs for a live
+        reader at the exact stored checkpoint.
+
+        A caller that passes `residue_out` also lets the proof converge while
+        writers keep committing. On a live vault the proof takes minutes, and a
+        governed write replaces several pages inside that window. Instead of
+        declining, the proof rechecks every page, re-reads only the pages that
+        moved or appeared, drops the ones that vanished, and recomputes the
+        residue and the topology from what it read. Then it rechecks every page
+        again, byte for byte, and folds again while that recheck still finds
+        movement, for at most `_PROOF_FOLD_ROUNDS` rounds. Without `residue_out`
+        any movement declines, and any incomplete read fails closed.
+
+        The invariant a True answer establishes: the snapshot S that `conn`'s
+        read transaction sees, plus the residue R, equals the admitted-page
+        projection of disk at one instant T* -- the end of the last read round
+        -- under one recall policy identity. Every page holds at T* the bytes
+        the proof hashed, because each was read before T* and rechecked
+        unchanged after it, and both memberships and the policy identity were
+        equal on both sides of it as well. The topology difference is explained
+        by R. A moved page is never accepted on bytes the proof did not hash at
+        their final value. The caller adds the rest: R fits in
+        `graph_drain.DRAIN_LIMIT`, and the registry origin is at or below the
+        generation it sampled before any read.
         """
 
         def declined(reason: str) -> bool:
@@ -3241,146 +3330,240 @@ class EpistemicGraphIndex:
                 reason_out.append(reason)
             return False
 
+        folding = residue_out is not None
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
             resolver_membership = self._recall_membership()
             indexed_membership = self._indexed_recall_membership()
             if resolver_membership is None or indexed_membership is None:
                 return declined("recall_membership_unreadable")
-            current_hashes: dict[str, str] = {}
-            captured_guards: dict[str, vault_module.PathGuard] = {}
-            resolver_entries: list[tuple[str, str | None]] = []
-            for rel in sorted(resolver_membership | indexed_membership):
-                path = self.vault_root / rel
-                # Admission and opening are separate operations.  A direct
-                # editor can replace an admitted path with a symlink/reparse
-                # point between them, so the proof must open descriptor-rooted
-                # with no-follow semantics.  The lstat size only supplies an
-                # arbitrary-file-size bound; a replacement outside that exact
-                # descriptor snapshot is refused without opening its bytes.
-                limit = int(path.lstat().st_size)
-                raw, source_guard = vault_module.read_bounded_guarded_bytes(
-                    self.vault_root,
-                    rel,
-                    limit=limit,
-                )
-                page = find_module._parse_page(
-                    path,
-                    0.0,
-                    self.vault_root,
-                    content=raw,
-                    resolved_relative=rel,
-                )
-                if page is None:
-                    return declined("source_unparseable")
-                captured_guards[rel] = source_guard
-                if rel in indexed_membership:
-                    current_hashes[rel] = page.snapshot_hash
-                if rel in resolver_membership:
-                    resolver_entries.append((rel, page.title))
-
             stored_hashes = {
                 str(path): str(source_hash)
                 for path, source_hash in conn.execute(
                     "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
                 ).fetchall()
             }
-            residue: set[str] = set()
-            unchanged_without_row: set[str] = set()
-            if stored_hashes != current_hashes:
-                if residue_out is None:
-                    return declined("indexed_sources_differ")
-                # A page created or removed since the publication is a residue
-                # like a page whose bytes moved: this proof enumerated it, and
-                # the drain adds an appeared page's rows and deletes a vanished
-                # one's, widening to the pages whose links it re-targets. Before
-                # the 2026-09-27 upgrade both were "a different corpus", so one
-                # agent write after the serving worker's last publication held
-                # a standby to its warm budget and cost a cold start.
-                created = set(current_hashes) - set(stored_hashes)
-                removed = set(stored_hashes) - set(current_hashes)
-                if any(os.path.lexists(self.vault_root / rel) for rel in removed):
-                    # Still on disk but no longer admitted: nothing on the
-                    # residue path is proven to remove its rows.
-                    return declined("indexed_membership_differs")
-                residue.update(created | removed)
-                residue.update(
-                    rel
-                    for rel, source_hash in current_hashes.items()
-                    if rel in stored_hashes and stored_hashes[rel] != source_hash
-                )
-                residue_out.update(residue)
-                # A sidecar written when file rows were keyed by a name cut at
-                # `#` holds no file row for the page that lost its key, yet
-                # keeps that page's dependency coverage. Its bytes are what the
-                # stored topology saw, so its title is unchanged: leave it out of
-                # the revert below, which would otherwise treat it as absent.
-                # It stays residue, so the drain repairs it with one rebuild.
-                unchanged_without_row |= {
-                    rel
-                    for rel in created
-                    if conn.execute(
-                        "SELECT 1 FROM graph_dependency_coverage "
-                        "WHERE source_path = ? AND source_hash = ?",
-                        (rel, current_hashes[rel]),
-                    ).fetchone()
-                }
-            resolver = vault_module.WikilinkResolver.from_entries(
-                self.vault_root,
-                resolver_entries,
-            )
             carry = self._read_topology_carry(conn)
-            explained = residue - unchanged_without_row
-            topology_matches = resolver_fingerprint is not None and (
-                _resolver_topology_fingerprint(resolver) == resolver_fingerprint
-                or bool(
-                    carry is not None
-                    and (explained or carry)
-                    and self._residue_explains_topology(
-                        conn, resolver, explained, resolver_fingerprint, carry=carry
-                    )
-                )
-            )
-            if not topology_matches:
-                return declined("resolver_topology_mismatch")
+            pages: dict[str, _ProofPage] = {}
+            # Pages whose read saw them move. Each is re-read in the next round.
+            raced: set[str] = set()
+            suspects: set[str] = set()
+            residue: set[str] = set()
+            to_read = sorted(resolver_membership | indexed_membership)
+            rounds = 0
+            while True:
+                for rel in to_read:
+                    try:
+                        page = self._read_proof_page(rel)
+                    except (FileNotFoundError, vault_module.PathGuardError) as error:
+                        if not folding:
+                            raise
+                        if not _proof_page_moved(self.vault_root, rel, error, suspects):
+                            return declined("source_unsafe")
+                        pages.pop(rel, None)
+                        raced.add(rel)
+                        continue
+                    if page is None:
+                        return declined("source_unparseable")
+                    pages[rel] = page
+                    raced.discard(rel)
+                    suspects.discard(rel)
 
-            # Stabilize the cold proof after every parse/topology callback.  A
-            # direct editor does not participate in Exomem's mutation lock and
-            # may replace bytes while this O(vault) proof is running.  Re-read
-            # each captured source, then repeat both path censuses and the
-            # policy identity so a mid-proof edit cannot bless the older graph
-            # snapshot merely because its first pass was internally coherent.
-            seal = _SnapshotSourceSeal(
-                tuple(captured_guards.values()),
-                frozenset(resolver_membership),
-                frozenset(indexed_membership),
-                policy_identity,
-            )
-            if not self._snapshot_source_seal_matches_disk(seal):
-                return declined("projection_moved_during_proof")
+                if not raced:
+                    current_hashes = {rel: pages[rel].snapshot_hash for rel in indexed_membership}
+                    residue = set()
+                    unchanged_without_row: set[str] = set()
+                    if stored_hashes != current_hashes:
+                        if not folding:
+                            return declined("indexed_sources_differ")
+                        # A page created or removed since the publication is a
+                        # residue like a page whose bytes moved: this proof
+                        # enumerated it, and the drain adds an appeared page's
+                        # rows and deletes a vanished one's, widening to the
+                        # pages whose links it re-targets. Before the 2026-09-27
+                        # upgrade both were "a different corpus", so one agent
+                        # write after the serving worker's last publication held
+                        # a standby to its warm budget and cost a cold start.
+                        created = set(current_hashes) - set(stored_hashes)
+                        removed = set(stored_hashes) - set(current_hashes)
+                        if any(os.path.lexists(self.vault_root / rel) for rel in removed):
+                            # Still on disk but no longer admitted: nothing on
+                            # the residue path is proven to remove its rows.
+                            return declined("indexed_membership_differs")
+                        residue.update(created | removed)
+                        residue.update(
+                            rel
+                            for rel, source_hash in current_hashes.items()
+                            if rel in stored_hashes and stored_hashes[rel] != source_hash
+                        )
+                        # A sidecar written when file rows were keyed by a name
+                        # cut at `#` holds no file row for the page that lost
+                        # its key, yet keeps that page's dependency coverage.
+                        # Its bytes are what the stored topology saw, so its
+                        # title is unchanged: leave it out of the revert below,
+                        # which would otherwise treat it as absent. It stays
+                        # residue, so the drain repairs it with one rebuild.
+                        unchanged_without_row = {
+                            rel
+                            for rel in created
+                            if conn.execute(
+                                "SELECT 1 FROM graph_dependency_coverage "
+                                "WHERE source_path = ? AND source_hash = ?",
+                                (rel, current_hashes[rel]),
+                            ).fetchone()
+                        }
+                    resolver = vault_module.WikilinkResolver.from_entries(
+                        self.vault_root,
+                        [(rel, pages[rel].title) for rel in sorted(resolver_membership)],
+                    )
+                    explained = residue - unchanged_without_row
+                    topology_matches = resolver_fingerprint is not None and (
+                        _resolver_topology_fingerprint(resolver) == resolver_fingerprint
+                        or bool(
+                            carry is not None
+                            and (explained or carry)
+                            and self._residue_explains_topology(
+                                conn, resolver, explained, resolver_fingerprint, carry=carry
+                            )
+                        )
+                    )
+                    if not topology_matches:
+                        return declined("resolver_topology_mismatch")
+
+                # Stabilize the cold proof after every parse/topology callback.
+                # A direct editor does not participate in Exomem's mutation
+                # lock and may replace bytes while this O(vault) proof is
+                # running. Re-read each captured source, then repeat both path
+                # censuses and the policy identity so a mid-proof edit cannot
+                # bless the older graph snapshot merely because its first pass
+                # was internally coherent.
+                seal = _SnapshotSourceSeal(
+                    tuple(page.guard for page in pages.values()),
+                    frozenset(resolver_membership),
+                    frozenset(indexed_membership),
+                    policy_identity,
+                )
+                if not folding:
+                    if not self._snapshot_source_seal_matches_disk(seal):
+                        return declined("projection_moved_during_proof")
+                    break
+                movement = _SealMovement()
+                if self._snapshot_source_seal_matches_disk(seal, movement_out=movement) and (
+                    not raced
+                ):
+                    break
+                if movement.policy_moved:
+                    # The policy decides admission for every page, so no
+                    # re-read of the moved ones can bring the proof back to one
+                    # policy identity.
+                    return declined("projection_moved_during_proof")
+                if movement.resolver_membership is None or movement.indexed_membership is None:
+                    return declined("recall_membership_unreadable")
+                moved: set[str] = set()
+                for rel, error in movement.failed:
+                    if not _proof_page_moved(self.vault_root, rel, error, suspects):
+                        return declined("source_unsafe")
+                    moved.add(rel)
+                rounds += 1
+                if rounds > _PROOF_FOLD_ROUNDS:
+                    return declined("sources_kept_moving")
+                resolver_membership = movement.resolver_membership
+                indexed_membership = movement.indexed_membership
+                admitted = resolver_membership | indexed_membership
+                for rel in set(pages) - admitted:
+                    del pages[rel]
+                raced &= admitted
+                to_read = sorted((moved | raced | (admitted - set(pages))) & admitted)
+
+            if residue_out is not None:
+                residue_out.update(residue)
             if seal_out is not None:
                 seal_out.append(seal)
             return True
-        except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
+        except Exception as error:  # noqa: BLE001 - an incomplete cold proof fails closed
+            # The class at INFO, so a declined proof is diagnosable from the
+            # service log; the traceback stays at DEBUG.
+            log.info("cold snapshot proof raised %s", type(error).__name__)
             log.debug("cold snapshot proof raised", exc_info=True)
             return declined("proof_raised")
 
+    def _read_proof_page(self, rel: str) -> _ProofPage | None:
+        """Read, hash and guard one admitted page for the cold proof; None when it does not parse.
+
+        Raises FileNotFoundError for a page removed since the membership walk,
+        and `vault.PathGuardError` for one the guarded read refused.
+        """
+        path = self.vault_root / rel
+        # Admission and opening are separate operations.  A direct editor can
+        # replace an admitted path with a symlink/reparse point between them,
+        # so the proof must open descriptor-rooted with no-follow semantics.
+        # The lstat size only supplies an arbitrary-file-size bound; a
+        # replacement outside that exact descriptor snapshot is refused without
+        # opening its bytes.
+        limit = int(path.lstat().st_size)
+        raw, source_guard = vault_module.read_bounded_guarded_bytes(
+            self.vault_root,
+            rel,
+            limit=limit,
+        )
+        page = find_module._parse_page(
+            path,
+            0.0,
+            self.vault_root,
+            content=raw,
+            resolved_relative=rel,
+        )
+        if page is None:
+            return None
+        return _ProofPage(page.snapshot_hash, page.title, source_guard)
+
     def _snapshot_source_seal_matches_disk(
-        self, seal: _SnapshotSourceSeal, *, interrupt: Callable[[], None] | None = None,
+        self,
+        seal: _SnapshotSourceSeal,
+        *,
+        interrupt: Callable[[], None] | None = None,
+        movement_out: _SealMovement | None = None,
     ) -> bool:
         """Replay byte/membership checks without page parsing or topology work.
 
         This is O(source bytes + paths); it preserves the direct-edit proof,
         including same-sized content changes with restored timestamps.
+
+        Strict by default: the first guard that moved raises
+        `vault.PathGuardError`, and the answer is False when either membership
+        or the policy identity moved. `movement_out` makes the recheck
+        collecting instead: every guard is rechecked, each failure is recorded
+        there with both memberships as walked now and whether the policy
+        identity moved, and the answer is False when anything moved.
         """
+        if movement_out is None:
+            for guard in seal.guards:
+                if interrupt is not None:
+                    interrupt()
+                guard.recheck(self.vault_root)
+            return (
+                self._recall_membership(interrupt=interrupt) == seal.resolver_membership
+                and self._indexed_recall_membership(interrupt=interrupt)
+                == seal.indexed_membership
+                and recall_policy.recall_policy_identity(self.vault_root) == seal.policy_identity
+            )
         for guard in seal.guards:
             if interrupt is not None:
                 interrupt()
-            guard.recheck(self.vault_root)
+            try:
+                guard.recheck(self.vault_root)
+            except vault_module.PathGuardError as error:
+                movement_out.failed.append((guard.target, error))
+        movement_out.resolver_membership = self._recall_membership(interrupt=interrupt)
+        movement_out.indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
+        movement_out.policy_moved = (
+            recall_policy.recall_policy_identity(self.vault_root) != seal.policy_identity
+        )
         return (
-            self._recall_membership(interrupt=interrupt) == seal.resolver_membership
-            and self._indexed_recall_membership(interrupt=interrupt) == seal.indexed_membership
-            and recall_policy.recall_policy_identity(self.vault_root) == seal.policy_identity
+            not movement_out.failed
+            and movement_out.resolver_membership == seal.resolver_membership
+            and movement_out.indexed_membership == seal.indexed_membership
+            and not movement_out.policy_moved
         )
 
     def _drain_owns_topology(
@@ -10149,6 +10332,23 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     )
 
 
+def published_snapshot_token(conn: sqlite3.Connection) -> str:
+    """Name the published snapshot `conn`'s read transaction sees, by its two checkpoints.
+
+    The one rendering of the token: the standby names the snapshot it proved
+    with it, and promotion compares that against the snapshot on disk.
+    """
+    rows = conn.execute(
+        "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
+        (_RECALL_CHECKPOINT_KEY, _GRAPH_SYNC_CHECKPOINT_KEY),
+    ).fetchall()
+    values = {str(key): value for key, value in rows}
+    return json.dumps(
+        [values.get(_RECALL_CHECKPOINT_KEY), values.get(_GRAPH_SYNC_CHECKPOINT_KEY)],
+        sort_keys=True,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SnapshotAdoption:
     """What proving an inherited graph snapshot established, and what it owes.
@@ -10159,11 +10359,15 @@ class SnapshotAdoption:
     paths for incremental repair and has left the availability marker withdrawn,
     so reads that require a current projection keep refusing until the repair
     lands.
+
+    `proved_token` names the snapshot the proof read, in the form
+    `published_snapshot_token` renders; it is set only on an adoption.
     """
 
     adopted: bool
     residue: tuple[str, ...] = ()
     reason: str = ""
+    proved_token: str | None = None
 
     def __bool__(self) -> bool:
         return self.adopted
