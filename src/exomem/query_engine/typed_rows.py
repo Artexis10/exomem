@@ -6,12 +6,13 @@ import json
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
-from ..collection_store import derived_rows, index_migrations, native_identity
+from ..collection_store import derived_rows, index_migrations, native_identity, native_operands
 from ..collection_store.native_projections import NativeProjectionPlan
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
 from .ordered_seeks import Seek
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, ReadSession, wire_bytes
+from .scalars import MISSING
 
 _SEAL = object()
 _RESPONSE_RESERVE_BYTES = 8 * 1024
@@ -74,12 +75,28 @@ def indexed_relation(admitted, *, hinted=True):
     return admitted.table + " p" + (" INDEXED BY " + admitted.index if hinted else "")
 
 
-def _populate_native(session, manifest, projection, private, table, scanned, where, params, layout, compiled):
+def _populate_native(session, manifest, projection, private, table, scanned, where, params, layout, compiled, *,
+                     operands=False):
     """Stream only admitted query dependencies into the request's scalar TEMP relation."""
     fields = {scalar.field for scalar in projection.scalars
               if scalar.field in manifest.schema.fields and scalar.field in compiled.dependency_paths}
     columns = ("row_id", "item_key", "row_version", *(f"k{ordinal}_{part}" for ordinal in range(len(private.scalars))
                                                      for part in ("rank", "tag", "band", "key")))
+    if operands and fields <= session._field_plans[manifest.collection_id].whole_fields:
+        # Every dependency is released whole, so the READY relation's operand expressions (the
+        # ones its indexes are built on) equal the operands of the released values; ordinals the
+        # query does not depend on stay missing, as the per-row path leaves them.
+        selected, constants = ["p.row_id", "p.item_key", "p.row_version"], []
+        for ordinal, scalar in enumerate(private.scalars):
+            if scalar.field in fields:
+                selected += [f"p.k{ordinal}_{part}" for part in ("rank", "tag", "band", "key")]
+            else:
+                tag, band, key = native_operands.scalar_operand(MISSING, scalar.kind)
+                selected += ["?"] * 4
+                constants += [2 if tag == 0 else 1 if tag == 1 else 0, tag, band, key]
+        session.connection.execute(f"INSERT INTO {table}({','.join(columns)}) SELECT {','.join(selected)} "
+                                   f"FROM {scanned} WHERE {where}", (*constants, *params))
+        return
     sql = f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})"
 
     def parameters(rows):
@@ -194,6 +211,18 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
         ordinal = len(session._queries) + 1
         ids = f"query_ids_{ordinal}"
         materialize = not uniform or compiled.usable_index is None
+        interval = None
+        if uniform and materialize and isinstance(projection, NativeProjectionPlan) and not compiled.residual:
+            # A uniform copy reads only the rows the request's own predicate admits; compiled against
+            # the READY relation, that predicate lets SQLite seek the projection's expression index.
+            # Scanning through an index that covers every dependency lets SQLite read the indexed
+            # operand expressions from the index instead of recomputing them for each row.
+            needed = {scalar.field for scalar in projection.scalars if scalar.field in compiled.dependency_paths}
+            covering = sorted((len(spec.keys), name) for name, spec in zip(projection.index_names, projection.indexes,
+                                                                            strict=True)
+                              if needed <= {key.field for key in spec.keys})
+            interval = (projection.read_relation(source.schema, index=covering[0][1] if covering else None) + " p",
+                        compiled.where_sql, compiled.params)
         count = None
         if not uniform:
             conn.execute(f"CREATE TEMP TABLE {ids}(row_id INTEGER PRIMARY KEY)")
@@ -206,6 +235,10 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                         raise QueryError("QUERY_COST_LIMIT")
                     conn.execute(f"INSERT INTO temp.{ids} VALUES(?)", (subject.row_id,))
                     session.check_temp()
+        elif interval is not None:
+            relation, where, params = interval
+            count = conn.execute(f"SELECT count(*) FROM (SELECT 1 FROM {relation} WHERE {where} LIMIT ?)",
+                                 (*params, session.limits.max_row_visits + 1)).fetchone()[0]
         elif not compiled.page_bound:
             count = conn.execute(
                 f"SELECT count(*) FROM (SELECT 1 FROM {source.items} WHERE collection_id=? LIMIT ?)",
@@ -236,7 +269,9 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                 index = f"{private.table_name}_order"
                 order = compiled.order_sql.replace("p.", "")
                 conn.execute(f"CREATE INDEX temp.{index} ON {private.table_name}({order})")
-            if uniform:
+            if interval is not None:
+                scanned, where, params = interval
+            elif uniform:
                 scanned = f"{stored} p NOT INDEXED"
                 where, params = "1", ()
             else:
@@ -245,7 +280,8 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             # Projection ordinals are fixed by the validated internal layout; withheld keys never enter TEMP.
             if isinstance(projection, NativeProjectionPlan):
                 _populate_native(session, manifest, projection, private, table, scanned, where, params,
-                                 source.layout or session.typed_layout(manifest.collection_id), compiled)
+                                 source.layout or session.typed_layout(manifest.collection_id), compiled,
+                                 operands=interval is not None)
             else:
                 keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
                                 else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
