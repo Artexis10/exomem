@@ -72,7 +72,8 @@ class FakeCell(Cell):
         residual = sum(len(w.get("members", [])) for w in windows if w["state"] == "discarded")
         keep = {"keep": bool(unfiled or residual),
                 "message": f"Keep the source folder: {unfiled} unfiled and {residual} discarded, not filed." if unfiled or residual else None}
-        reply = {"import_windows": {"counts": {}, "windows": windows, "keep_source": keep, "next_after": None}}
+        # The real `report()` leaves `import_windows` out when the cell holds no window record.
+        reply = {"import_windows": {"counts": {}, "windows": windows, "keep_source": keep, "next_after": None}} if windows else {}
         if self.windows_unknown:  # The cell cannot list its records: no `windows` key at all, as the real reply has it.
             reply = {"import_windows": {"unknown": self.windows_unknown, "keep_source": {"keep": True, "message": "Keep the source folder."}}}
         if not self.older:
@@ -112,6 +113,7 @@ class FakeCloud:
         self.limits: dict | None = None
         self.refuse_when = lambda members: False
         self.refuse_registration = False
+        self.refusal_code = "STORAGE_ALLOWANCE_EXCEEDED"
 
     def _api(self, request):
         path = request.url.path
@@ -122,13 +124,22 @@ class FakeCloud:
             if self.refuse_registration:
                 return httpx2.Response(503, json={"error": {"code": "STORE_UNAVAILABLE"}})
             body = json.loads(request.content)
-            self.rows[body["import_id"]] = {"import_id": body["import_id"], "requested_state": "requested",
+            known = self.rows.get(body["import_id"])
+            if known is not None:  # Cloud replays a known ID whatever its state, and refuses a changed declaration.
+                declared = {key: body[key] for key in ("kind", "declared_bytes", "declared_files")}
+                if declared != known["declaration"]:
+                    return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
+                return httpx2.Response(200, json={"import": known})
+            self.rows[body["import_id"]] = {"declaration": {key: body[key] for key in ("kind", "declared_bytes", "declared_files")},
+                                            "import_id": body["import_id"], "requested_state": "requested",
                                             "observed_state": "key_ready", "recipient": self.recipient}
             self.registered_at.append(self.rig.now)
             self.registered_calls.append(len(self.rig.cell.calls))
             return httpx2.Response(200, json={"import": self.rows[body["import_id"]]})
         import_id = path.removeprefix(base + "/").split("/")[0]
         row = self.rows[import_id]
+        if request.method == "POST" and row["observed_state"] == "failed":
+            return httpx2.Response(409, json={"error": {"code": "IMPORT_CONFLICT"}})
         if request.method == "POST" and path.endswith("/prepare-upload"):
             size = json.loads(request.content)["ciphertext_bytes"]
             row["requested_state"] = "prepared"
@@ -144,7 +155,7 @@ class FakeCloud:
         with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
             self.members[import_id] = {m.name: archive.extractfile(m).read() for m in archive if m.isfile()}
         if self.refuse_when(self.members[import_id]):
-            row.update(observed_state="failed", error_code="STORAGE_ALLOWANCE_EXCEEDED")
+            row.update(observed_state="failed", error_code=self.refusal_code)
             return
         row.update(requested_state="uploaded", observed_state="done")
         self.completed.append(import_id)
@@ -827,3 +838,75 @@ def test_a_series_that_the_preflight_refuses_records_no_demand(rig):
         rig.run()
 
     assert [call["next_window_bytes"] for call in rig.cell.calls if call["next_window_bytes"] is not None] == []
+
+
+# -- Review round 2
+
+
+def test_a_rerun_after_a_restore_that_lost_every_receipt_sends_the_landed_windows_again(rig):
+    """Catches an absent window listing read as unknown: the rerun waits two hours and stops instead of sending again."""
+    _stopped_after_two_windows(rig)
+    rig.cell.windows.clear()  # The cell holds no window record, so its reply has no `import_windows` key.
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a1.bin", "a1.bin", "a2.bin", "a2.bin", "a3.bin", "a4.bin"]
+
+
+def _fail_the_first_landing(rig: Rig) -> CloudImportError:
+    rig.files(a01__bin=800, a02__bin=800)
+    refused = []
+    rig.cloud.refusal_code = "ARCHIVE_UNREADABLE"
+    rig.cloud.refuse_when = lambda members: not refused and not refused.append(True)
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+    assert stop.value.code == "ARCHIVE_UNREADABLE"
+    return stop.value
+
+
+def test_a_window_whose_attempt_ended_failed_is_sent_again_under_a_new_import_and_lands_once(rig):
+    """Catches a window pinned to the import ID of a dead attempt, which Cloud replays on every rerun."""
+    assert _fail_the_first_landing(rig).resume, "the stop must say that a rerun goes on"
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+    assert len(rig.cloud.rows) == 2
+
+
+def test_a_window_whose_member_changed_after_a_failed_attempt_is_sent_again_under_a_new_import(rig):
+    """Catches a rerun that gets IMPORT_CONFLICT for a changed declaration under the old import ID."""
+    _fail_the_first_landing(rig)
+    (rig.source / "a02.bin").write_bytes(b"changed before the retry")
+
+    rig.run()
+
+    assert rig.cloud.all_sent() == ["a01.bin"]
+    assert "a02.bin" in rig.said()
+
+
+def test_a_resumed_run_whose_first_call_fails_still_says_what_is_not_in_exomem(rig):
+    """Catches a failure on the first network call of a rerun that carries no notice."""
+    from fastmcp.exceptions import ToolError
+
+    _stopped_after_two_windows(rig)
+
+    def fail(call):
+        raise ToolError("boom")
+
+    rig.cell.before_reply = fail
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert NOT_IN_EXOMEM in stop.value.message
+
+
+def test_a_skipped_member_adds_to_the_cells_keep_the_source_message_and_does_not_replace_it(rig):
+    """Catches a final message that drops what the cell says about unfiled members."""
+    _stopped_after_two_windows(rig, count=5)
+    (rig.source / "a3.bin").write_bytes(b"changed after the series began")
+
+    rig.run()
+
+    assert "unfiled" in rig.said() and "1 files were not sent" in rig.said()

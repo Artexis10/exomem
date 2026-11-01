@@ -124,7 +124,10 @@ class Reading:
     @classmethod
     def of(cls, reply: dict) -> Reading:
         section = reply.get("window_budget")
-        windows = reply.get("import_windows") if isinstance(reply.get("import_windows"), dict) else {}
+        # `report()` leaves `import_windows` out when the cell holds no window record: that is an empty listing.
+        # Only a listing that says it is unknown, or that has no `windows` list, proves nothing.
+        listing = reply.get("import_windows", {"windows": []})
+        windows = listing if isinstance(listing, dict) else {}
         listing_why = None
         if "windows" not in windows:
             listing_why = windows.get("unknown") or "the cell did not list its window records"
@@ -180,6 +183,17 @@ class SentWindow:
     state: str = "open"  # open: created or being sent; landed: the cell finished it; settled: the resend cleared its old records
     import_id: str | None = None
     cost: int = 0
+    # The import IDs of earlier attempts that ended terminally or declared another member set. A receipt for one lands the window.
+    attempts: list[str] = field(default_factory=list)
+
+    def ids(self) -> list[str]:
+        return [*self.attempts, *([self.import_id] if self.import_id else [])]
+
+    def renew(self) -> None:
+        """Give the window a new import ID: Cloud replays a known ID whatever its state, and refuses a changed declaration."""
+        if self.import_id:
+            self.attempts.append(self.import_id)
+        self.import_id = str(uuid.uuid4())
 
 
 @dataclass
@@ -350,7 +364,10 @@ class _Run:
                 gone.append(path)
             else:
                 kept.append(fresh)
+        checkpoint = self.record.parent / window.dir
         if gone:
+            if not (checkpoint / "checkpoint.json").exists():
+                window.renew()  # The member set differs from any earlier attempt's declaration.
             # The record is the partition: a member that changed is not sent and not planned again, and the person keeps it.
             window.paths = [item.rel for item in kept]
             self.series.skipped.extend(gone)
@@ -361,7 +378,6 @@ class _Run:
                 self.series.write(self.record)
                 return
             self.series.write(self.record)
-        checkpoint = self.record.parent / window.dir
         self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
         try:
             result = await import_source(
@@ -376,9 +392,17 @@ class _Run:
                 self.refused = window.cost
                 self.progress.say("The Job refused the window for space; planning it again from the current budget.")
                 return
+            # An attempt that ended and removed its checkpoint is dead on Cloud, which replays its ID; the rerun uses a new one.
+            ended = not error.resume and not (checkpoint / "checkpoint.json").exists()
+            if ended:
+                window.renew()
+                self.series.write(self.record)
             raise Stopped(error.phase, error.code, f"{error.message}. {not_sent_notice(self.series.not_landed())}",
-                          error.import_id, resume=error.resume) from None
-        window.import_id, window.state = result["import_id"], "landed"
+                          error.import_id, resume=error.resume or ended) from None
+        if window.import_id != result["import_id"]:  # The import resumed from a checkpoint that holds its own ID.
+            window.attempts = [import_id for import_id in window.ids() if import_id != result["import_id"]]
+            window.import_id = result["import_id"]
+        window.state = "landed"
         self.series.write(self.record)
         self.refused = None
         await self.settle(window)
@@ -450,11 +474,15 @@ class _Run:
             reading = await self.read()
         receipts = {window.get("import_id") for window in reading.windows}
         for window in list(self.series.windows):
-            if window.state != "open" and window.import_id not in receipts:
+            received = next((import_id for import_id in window.ids() if import_id in receipts), None)
+            if window.state != "open" and received is None:
                 self.progress.say(f"The cell has no receipt for window {self.series.windows.index(window) + 1}; sending it again.")
                 self.series.windows.remove(window)
-            elif window.state == "open" and window.import_id in receipts:
-                window.state = "landed"  # The import finished, and the stop came before the record said so.
+            elif received is not None:
+                window.attempts = [import_id for import_id in window.ids() if import_id != received]
+                window.import_id = received
+                if window.state == "open":
+                    window.state = "landed"  # The import finished, and the stop came before the record said so.
         self.series.write(self.record)
         for window in list(self.series.windows):
             if window.state == "open":
@@ -466,7 +494,8 @@ class _Run:
         final = await self.cell.status()
         keep = Reading.of(final).keep_source
         if self.series.skipped:
-            keep = {"keep": True, "message": f"Keep the source folder: {len(self.series.skipped):,} files were not sent."}
+            cell_says = keep["message"] if keep and keep.get("keep") and keep.get("message") else "Keep the source folder."
+            keep = {"keep": True, "message": f"{cell_says} {len(self.series.skipped):,} files were not sent."}
         if keep is None or keep.get("keep"):
             self.progress.say("The upload is done and filing continues. " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
         else:
@@ -518,8 +547,8 @@ def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
     inline = reading.inline_text_limit
     if inline is None:
         text = adoption_run.reads_as_text(kept.rel, kept.size)
-    else:  # A size of 0 asks for the suffix rule alone; the cell's inline limit replaces the local size limit.
-        text = adoption_run.reads_as_text(kept.rel, 0) and kept.size <= inline
+    else:  # The suffix rule alone; the cell's inline limit replaces the local size limit.
+        text = adoption_run.has_text_suffix(kept.rel) and kept.size <= inline
     if reading.largest_offloadable is None:
         return Member(kept.rel, kept.size, kept.mtime_ns, reading.bounds.classify(kept.size, text=text))
     klass = TEXT if text else OFFLOADABLE if kept.size <= reading.largest_offloadable else RESIDENT
@@ -556,6 +585,14 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
                                "at its top level, a name that Exomem reserves for a series; rename it and run the command again", resume=False)
     if checkpoint.is_relative_to(source):
         raise CloudImportError(PREFLIGHT, "CHECKPOINT_INSIDE_SOURCE", "the checkpoint folder must be outside the source folder")
+    # The record is read before any network call, so a failure on the first call still says what is not in Exomem.
+    _ensure_private_directory(checkpoint)
+    record = checkpoint / (RESEND_RECORD if resend else SERIES_RECORD)
+    series = Series.read(record)
+    if series is not None and (series.source, series.api_base_url) != (str(source), config.api_base_url):
+        raise CloudImportError(PREFLIGHT, "CHECKPOINT_MISMATCH", "the checkpoint belongs to another source or Cloud endpoint")
+    if series is not None:
+        held.append(series)
     base = config.api_base_url.rstrip("/") + "/api/exomem/cloud/imports"
     response = await api.request("GET", base)
     response.raise_for_status()
@@ -564,11 +601,6 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
     options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
     settings = {"cell": cell, "api": api, "uploads": uploads, "limits": limits, "progress": progress,
                 "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock}
-    _ensure_private_directory(checkpoint)
-    record = checkpoint / (RESEND_RECORD if resend else SERIES_RECORD)
-    series = Series.read(record)
-    if series is not None and (series.source, series.api_base_url) != (str(source), config.api_base_url):
-        raise CloudImportError(PREFLIGHT, "CHECKPOINT_MISMATCH", "the checkpoint belongs to another source or Cloud endpoint")
     if resend:
         return await _resend(source, config, checkpoint, record, series, first, options, settings, held)
     if first.older_cell:
@@ -578,7 +610,8 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
         return await _older_cell(source, config, checkpoint, limits, options, **{k: settings[k] for k in ("api", "uploads", "progress", "poll_seconds")})
     if series is None:
         series = await _begin(source, config, record, first, options, settings)
-    held.append(series)
+    if series not in held:
+        held.append(series)
     run = _Run(series, record, source, config, **settings)
     return await run.drive()
 
@@ -681,7 +714,8 @@ async def _resend(source, config, checkpoint, record, series, first, options, se
         for import_id, paths in by_record.items():
             await cell.acknowledge(import_id, paths)
 
-    held.append(series)
+    if series not in held:
+        held.append(series)
     run = _Run(series, record, source, config, on_landed=clear, **settings)
     result = await run.drive()
     record.unlink(missing_ok=True)
