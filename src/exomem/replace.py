@@ -45,6 +45,8 @@ from .vault import (
     PathGuard,
     PathGuardError,
     PlannedWrite,
+    VaultPathError,
+    admit_write_target,
     append_frontmatter_list_item,
     batch_atomic_write,
     document_newline,
@@ -322,6 +324,10 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
     # Shared with `edit._resolve` and the hosted protected-tree guard. See
     # `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
+    try:
+        admit_write_target(vault_root, rel)
+    except VaultPathError as refusal:
+        raise ReplaceError(code=refusal.code, missing=[], reason=refusal.reason) from None
     # The literal (NFKC) spelling may be absent because the on-disk name is a
     # different Unicode normalization -- a macOS-origin NFD name on a
     # byte-exact filesystem (Linux ext4) -- or it may sit beside such a twin.

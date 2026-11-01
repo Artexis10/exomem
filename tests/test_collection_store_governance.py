@@ -994,12 +994,16 @@ def test_create_request_identity_conflict_does_not_expose_withheld_receipt(store
 
 
 def test_create_at_another_path_does_not_disclose_a_withheld_identity_conflict(store):
-    """An alternate path cannot probe an existing withheld canonical collection id."""
+    """An alternate path cannot probe an existing withheld canonical collection id.
+
+    A non-owner audience with no client entry writes nothing, and the refusal is decided
+    before the store looks for the identity, so the answer cannot depend on it.
+    """
     create(store)
     withhold(store)
     before = tuple(store.connection.iterdump())
     with request_scope(_external()):
-        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+        with pytest.raises(collections.CollectionError, match="WRITE_REFUSED: target is unavailable"):
             store.create_collection("Knowledge Base/Records/Other/_collection.md", manifest_text(), why="create")
     assert tuple(store.connection.iterdump()) == before
 

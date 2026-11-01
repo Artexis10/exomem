@@ -29,8 +29,10 @@ import pytest
 
 from exomem import commands, epistemic_graph, graph_sync, writer_lease
 from exomem import find as find_module
-from exomem.governance import egress
+from exomem.governance import connector_boundary, egress
 from exomem.governance.principal import (
+    ClientBinding,
+    OriginSessionBinding,
     RequestPrincipal,
     library_scope,
     owner_principal,
@@ -41,6 +43,8 @@ KB = "Knowledge Base"
 NOTES = f"{KB}/Notes"
 WITHHELD_DIR = f"{NOTES}/Withheld"
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+GRANT_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+ISSUER = "https://memory.example.test"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 FIXED_MTIME = 1_780_000_000
 PRINCIPAL_AUDIENCE = "principal:" + "ab" * 32
@@ -82,6 +86,11 @@ def _govern(vault: Path, audience: str, scope: str = "Notes/Withheld/**") -> Non
         f"audience: {audience}\nceiling: {egress.LEVEL_NONE}\n",
         encoding="utf-8",
     )
+    if os.environ.get(connector_boundary.CONFIG_ENV):
+        # The granted writer's writable scope selects the whole knowledge base, its capture path.
+        (governance / "scopes" / "granted.yaml").write_text(
+            f'governance_version: 1\nid: {GRANT_ID}\nname: Granted\npaths: ["**"]\n', encoding="utf-8",
+        )
 
 
 def _reset() -> None:
@@ -102,6 +111,8 @@ def _materialize(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
     _govern(vault, audience, scope)
+    if os.environ.get(connector_boundary.CONFIG_ENV):
+        _arm(vault)
     for dirpath, _dirnames, filenames in os.walk(vault):
         for name in filenames:
             os.utime(os.path.join(dirpath, name), (FIXED_MTIME, FIXED_MTIME))
@@ -134,6 +145,50 @@ def _twins(
 
 def _principal(audience: str) -> RequestPrincipal:
     return RequestPrincipal(audience_id=audience, surface="mcp", resolved=True)
+
+
+@pytest.fixture
+def granted_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Host configuration for a client-bound writer that may write the whole knowledge base but the withheld scope.
+
+    A non-owner audience with no client entry holds no write authority, so a test that needs a
+    successful write by a restricted caller models the caller as this writer. The capture path
+    is the knowledge base and the grant scope selects all of it, so its inbox is every path a
+    withheld scope does not also select.
+    """
+    config = tmp_path / "host-boundary.json"
+    config.write_text(json.dumps({
+        "version": 1, "default_denied_scope_ids": [SCOPE_ID, GRANT_ID], "capture_paths": [KB],
+        "clients": [{"issuer": ISSUER, "client_id": "writer", "denied_scope_ids": [SCOPE_ID],
+                     "writable_scope_ids": [GRANT_ID]}],
+    }), encoding="utf-8")
+    monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(config))
+
+
+def _writer(audience: str) -> RequestPrincipal:
+    """The audience under test, reached through the granted writer's client entry."""
+    return RequestPrincipal(
+        audience_id=audience, surface="mcp", resolved=True,
+        client_binding=ClientBinding(ISSUER, "writer"),
+        origin_session=OriginSessionBinding("session", "generation", audience),
+    )
+
+
+def _arm(vault: Path) -> None:
+    from conftest import initialize_vault_state_offline
+
+    from exomem import state_migration
+    from exomem.activation_manifest import ensure_manifest
+
+    configured = os.environ.pop(connector_boundary.CONFIG_ENV)  # state is initialised before the boundary is armed
+    try:
+        initialize_vault_state_offline(vault, source="granted writer vault")
+    finally:
+        os.environ[connector_boundary.CONFIG_ENV] = configured
+    with request_scope(owner_principal(surface="library")):
+        ensure_manifest(vault)
+    authority = state_migration.assert_offline_migration_authority(source="granted writer stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
 
 
 def _call(vault: Path, principal: RequestPrincipal | None, command: str, **kwargs: Any) -> Any:
@@ -593,6 +648,7 @@ def _written(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
     }
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
     tmp_path: Path, audience: str
@@ -600,7 +656,7 @@ def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
     base, withheld = _writer_fixture()
     vaults = _twins(tmp_path, base, withheld, audience)
 
-    written = {variant: _written(vault, _principal(audience)) for variant, vault in vaults.items()}
+    written = {variant: _written(vault, _writer(audience)) for variant, vault in vaults.items()}
 
     # The writer's own guesses stay as it wrote them; none is rewritten onto a
     # withheld page, and the warnings and unpaged mentions match the twin.
@@ -680,6 +736,7 @@ def _candidate_world(vault: Path, variant: str, scenario: str) -> None:
         )
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize(
     "scenario", ["withheld-only-linker", "withheld-second-linker", "withheld-entity"]
 )
@@ -707,7 +764,7 @@ def test_a_restricted_writers_entity_candidate_is_decided_over_its_view(
         _candidate_world(vault, variant, scenario)
         capture_sweep.reset_state()
         answer = _remember_reviewed(
-            vault, _principal(audience), title="Open Second", slug="open-second",
+            vault, _writer(audience), title="Open Second", slug="open-second",
             content=f"Second visit to [[{_CANDIDATE_NAME}]].",
         )
         written[variant] = {
@@ -725,6 +782,7 @@ def test_a_restricted_writers_entity_candidate_is_decided_over_its_view(
         assert identity["pages"] == sorted([f"{NOTES}/Insights/open-first.md", written["B"]["path"]])
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("detail", ["compact", "legacy"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_writers_relations_are_judged_over_its_view(
@@ -750,7 +808,7 @@ def test_a_restricted_writers_relations_are_judged_over_its_view(
             _text(
                 _call(
                     vault,
-                    _principal(audience),
+                    _writer(audience),
                     "remember",
                     content=body,
                     title="Probe Page",
@@ -789,74 +847,37 @@ def _drafted_fixture() -> tuple[dict[str, str], dict[str, str]]:
     return base, withheld
 
 
-@pytest.mark.parametrize("detail", ["compact", "full"])
+@pytest.mark.parametrize("caller", ["unbound-non-owner", "granted-writer"])
 @pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_restricted_draft_is_judged_without_what_withheld_pages_author(
-    tmp_path: Path, audience: str, detail: str
+def test_a_restricted_previews_answer_alike_with_and_without_a_withheld_page(
+    tmp_path: Path, request: pytest.FixtureRequest, audience: str, caller: str
 ) -> None:
-    """A relation a withheld page authors toward the draft, and a body link only
-    a withheld page answers, neither qualify the draft nor show in its review."""
+    """A draft and a reclassification proposal neither judge nor name a page withheld from the caller.
+
+    A non-owner with no client entry holds no write authority, so its previews are refused before
+    any page is read. A granted writer's previews name a path that does not exist yet, which the
+    release plane withholds. Either answer is the same with and without the withheld page.
+    """
+    if caller == "granted-writer":
+        request.getfixturevalue("granted_writer")
+    source = f"{KB}/Sources/Web/target-source.md"
     base, withheld = _drafted_fixture()
+    base[source] = _page("Target Source", "Body.", type="source", source_type="article")
+    withheld[f"{WITHHELD_DIR}/links-source.md"] = _page("Linker", f"Cites [[{source[:-3]}]].", type="evidence")
     vaults = _twins(tmp_path, base, withheld, audience)
-    drafts = {
-        "inbound": ("Nimbus Plan", f"Draft page.{_UNIT}"),
-        "body-link": ("Other Guess", f"Draft page, see [[Memo]].{_UNIT}"),
+    who = _principal(audience) if caller == "unbound-non-owner" else _writer(audience)
+    previews = {
+        "draft": ("remember", {"content": f"Draft page, see [[Memo]].{_UNIT}", "title": "Nimbus Plan",
+                               "note_type": "insight", "validate_only": True, "response_detail": "full"}),
+        "reclassification": ("manage_memory_file", {"operation": "propose-reclassification", "path": source,
+                                                   "source_kind": "article"}),
     }
 
-    def drafted(vault: Path, title: str, content: str) -> str:
-        answer = _call(
-            vault,
-            _principal(audience),
-            "remember",
-            content=content,
-            title=title,
-            note_type="insight",
-            validate_only=True,
-            response_detail=detail,
-        )
-        answer.pop("draft_token", None)  # carries its issue time
-        return _VOLATILE_TEXT.sub("<v>", _text(answer))
-
-    for label, (title, content) in drafts.items():
-        answers = {variant: drafted(vault, title, content) for variant, vault in vaults.items()}
-
-        assert '"__error__"' not in answers["A"], (label, answers["A"])
-        assert answers["A"] == answers["B"], label
-        assert answers["C"] == answers["B"], label
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_restricted_writers_first_page_bootstraps_as_in_an_empty_vault(
-    tmp_path: Path, audience: str
-) -> None:
-    """A writer that sees no governed page bootstraps its first one, whether or
-    not a governed page withheld from it exists."""
-    base = {f"{KB}/Sources/s1.md": _page("S", "Raw.", type="source")}
-    withheld = {
-        f"{WITHHELD_DIR}/memo.md": _page(
-            "Memo", f"Withheld body text.{_UNIT}", type="insight", status="active"
-        )
-    }
-    vaults = _twins(tmp_path, base, withheld, audience)
-
-    def drafted(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
-        answer = _call(
-            vault, principal, "remember", content=f"First page.{_UNIT}", title="First Page",
-            note_type="insight", validate_only=True, response_detail="full",
-        )
-        answer.pop("draft_token", None)  # carries its issue time
-        return answer
-
-    answers = {
-        variant: _VOLATILE_TEXT.sub("<v>", _text(drafted(vault, _principal(audience))))
-        for variant, vault in vaults.items()
-    }
-
-    assert '"__error__"' not in answers["B"], answers["B"]
-    assert '"bootstrap"' in answers["B"], answers["B"]
-    assert answers["A"] == answers["B"]
-    assert answers["C"] == answers["B"]
-    assert '"bootstrap"' not in _text(drafted(vaults["A"], None))
+    for name, (command, arguments) in previews.items():
+        answers = {variant: _text(_call(vault, who, command, **arguments)) for variant, vault in vaults.items()}
+        assert answers["A"] == answers["B"] == answers["C"], name
+        if caller == "unbound-non-owner":
+            assert "WRITE_REFUSED: target is unavailable" in answers["B"], answers["B"]
 
 
 @pytest.mark.parametrize("audience", AUDIENCES)
@@ -893,52 +914,6 @@ def test_a_restricted_moves_review_carry_reads_over_its_view(
     assert restricted["A"] == restricted["B"]
     assert restricted["C"] == restricted["B"]
     assert signature(vaults["A"], None) != signature(vaults["B"], None)
-
-
-_SCOPED_REGISTRY = (
-    "schema_version: 1\nextensions:\n  science.replicates:\n    parent: supports\n"
-    "    description: Replicates\n    aliases: [replicates]\n    source_kinds: [file]\n"
-    "    target_kinds: [file]\n"
-)
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_restricted_drafts_registry_scope_reads_over_its_view(
-    tmp_path: Path, audience: str
-) -> None:
-    """A relation scoped to file targets is judged against the target the
-    writer's view resolves: one only a withheld page answers is unresolved."""
-    base = {
-        **_filler(),
-        f"{KB}/_Schema/relation-registry.yaml": _SCOPED_REGISTRY,
-        f"{NOTES}/beta.md": _page("Beta", f"Beta.{_UNIT}", type="insight", status="active"),
-    }
-    withheld = {
-        f"{WITHHELD_DIR}/memo.md": _page(
-            "Hidden Target", f"Withheld body text.{_UNIT}", type="insight", title="Hidden Target"
-        )
-    }
-    vaults = _twins(tmp_path, base, withheld, audience)
-    content = (
-        f"Draft page, see [[{NOTES}/beta]].{_UNIT}\n## Relations\n\n"
-        "- replicates [[Hidden Target]]\n"
-    )
-
-    def drafted(vault: Path, principal: RequestPrincipal | None) -> str:
-        answer = _call(
-            vault, principal, "remember", content=content, title="Draft Page",
-            note_type="insight", validate_only=True, response_detail="full",
-        )
-        answer.pop("draft_token", None)  # carries its issue time
-        return _VOLATILE_TEXT.sub("<v>", _text(answer))
-
-    answers = {variant: drafted(vault, _principal(audience)) for variant, vault in vaults.items()}
-
-    assert '"__error__"' not in answers["B"], answers["B"]
-    assert "scope_violation" in answers["B"], answers["B"]
-    assert answers["A"] == answers["B"]
-    assert answers["C"] == answers["B"]
-    assert "scope_violation" not in drafted(vaults["A"], None)
 
 
 def test_the_owner_still_judges_a_draft_by_every_page(tmp_path: Path) -> None:
@@ -1370,9 +1345,9 @@ def _occupied_answer(vault: Path, principal: RequestPrincipal, door: str, folder
 def test_a_withheld_occupant_is_refused_as_any_occupied_path(
     tmp_path: Path, audience: str, door: str
 ) -> None:
-    """DOCUMENTED RESIDUAL: a creation door reveals that a path is occupied by
-    refusing it. The refusal for a withheld occupant is the door's ordinary
-    occupied-path refusal, and the withheld page is never changed."""
+    """A restricted writer's creation is decided before any existence check, so a
+    withheld occupant and a visible one both answer as an unavailable target, and
+    the withheld page is never changed."""
     visible_dir = f"{NOTES}/Visible"
     occupant = _page("Hidden Draft", "Withheld body text.", type="insight")
     files = {
@@ -1383,15 +1358,12 @@ def test_a_withheld_occupant_is_refused_as_any_occupied_path(
     principal = _principal(audience)
     withheld_vault = _materialize(tmp_path / "w" / "vault", files, audience)
     visible_vault = _materialize(tmp_path / "v" / "vault", files, audience)
-    # The ordinary occupied-path refusal: without `overwrite` for the
-    # overwrite door, which succeeds on a visible occupant.
-    ordinary = "create" if door == "create-overwrite" else door
 
     withheld = _occupied_answer(withheld_vault, principal, door, WITHHELD_DIR)
-    visible = _occupied_answer(visible_vault, principal, ordinary, visible_dir)
+    visible = _occupied_answer(visible_vault, principal, door, visible_dir)
 
     assert withheld == visible
-    assert '"__error__"' in withheld
+    assert "WRITE_REFUSED: target is unavailable" in withheld
     assert (withheld_vault / WITHHELD_DIR / _OCCUPANT).read_text(encoding="utf-8") == occupant
 
 
@@ -1419,7 +1391,7 @@ def test_an_entity_destination_a_withheld_entity_holds_is_refused_as_any_occupie
         assert (vault / person).read_text(encoding="utf-8") == text
 
     assert answers["withheld"] == answers["visible"]
-    assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
+    assert answers["withheld"]["message"].startswith("WRITE_REFUSED: target is unavailable")
 
 
 @pytest.mark.parametrize("audience", AUDIENCES)
@@ -1448,7 +1420,7 @@ def test_a_slug_destination_a_withheld_entity_holds_is_refused_as_any_occupied_o
         assert (vault / occupied).read_text(encoding="utf-8") == entity
 
     assert answers["withheld"] == answers["visible"]
-    assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
+    assert answers["withheld"]["message"].startswith("WRITE_REFUSED: target is unavailable")
 
 
 _FOLDERS = {
@@ -1459,19 +1431,22 @@ _FOLDERS = {
 }
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("recursive", [True, False])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_writer_deletes_no_folder(
     tmp_path: Path, audience: str, recursive: bool
 ) -> None:
-    """One refusal for a folder the writer may see, whatever it holds; a
-    folder holding only withheld pages answers as a missing path, as listing
-    it does; file deletes are unchanged."""
+    """One refusal for a folder the writer may see, whatever it holds. A folder
+    holding only withheld pages answers as an absent path at the same place does:
+    a missing path, or a write target the writer may not write, as listing it does;
+    file deletes are unchanged."""
     files = {
         f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
         f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
         f"{NOTES}/Mixed/open.md": _page("Open", "Open text.", type="insight"),
         f"{WITHHELD_DIR}/hidden.md": _page("Hidden Draft", "Withheld body text."),
+        f"{WITHHELD_DIR}/Sub/deep.md": _page("Deep Draft", "Withheld body text."),
     }
     vault = _materialize(
         tmp_path / "vault", files, audience, scope="Notes/Withheld/**,Notes/Mixed/hidden.md"
@@ -1479,7 +1454,7 @@ def test_a_restricted_writer_deletes_no_folder(
     (vault / NOTES / "Mixed" / "hidden.md").write_text(
         _page("Hidden Draft", "Withheld body text."), encoding="utf-8"
     )
-    principal = _principal(audience)
+    principal = _writer(audience)
 
     def delete(folder: str, **kwargs: Any) -> Any:
         answer = _call(
@@ -1488,8 +1463,9 @@ def test_a_restricted_writer_deletes_no_folder(
         )
         return _text(answer).replace(folder, "<folder>")
 
-    answers = {label: delete(folder, confirm=True) for label, folder in _FOLDERS.items()}
-    unconfirmed = {label: delete(folder) for label, folder in _FOLDERS.items()}
+    folders = {**_FOLDERS, "withheld-sub": f"{WITHHELD_DIR}/Sub", "missing-withheld": f"{WITHHELD_DIR}/Nowhere"}
+    answers = {label: delete(folder, confirm=True) for label, folder in folders.items()}
+    unconfirmed = {label: delete(folder) for label, folder in folders.items()}
 
     refused = _text(
         {
@@ -1498,20 +1474,20 @@ def test_a_restricted_writer_deletes_no_folder(
         }
     )
     assert answers["visible"] == answers["mixed"] == refused, answers
-    assert answers["withheld-only"] == answers["missing"], answers
-    assert unconfirmed["withheld-only"] == unconfirmed["missing"], unconfirmed
+    for hidden_folder, absent_folder in {"withheld-only": "missing", "withheld-sub": "missing-withheld"}.items():
+        assert answers[hidden_folder] == answers[absent_folder], answers
+        assert unconfirmed[hidden_folder] == unconfirmed[absent_folder], unconfirmed
     if recursive:
-        assert answers["missing"] == refused, answers
+        assert answers["missing"] == answers["missing-withheld"] == refused, answers
     else:
         assert "NOT_FOUND" in answers["missing"], answers
+        assert "WRITE_REFUSED: target is unavailable" in answers["missing-withheld"], answers
         listed = _call(vault, principal, "browse_memory", mode="list", path=WITHHELD_DIR)
         assert "NOT_FOUND" in _text(listed), listed
     assert sorted(p.name for p in (vault / NOTES / "Mixed").iterdir()) == ["hidden.md", "open.md"]
     assert (vault / WITHHELD_DIR / "hidden.md").is_file()
-    deleted = _call(
-        vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True
-    )
-    assert "__error__" not in deleted, deleted
+    _call(vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True)
+    assert not (vault / NOTES / "alpha.md").exists()  # the writer's own page is trashed
 
 
 #: Run-specific values in a write's answer: request and receipt ids, hashes,
@@ -1522,12 +1498,14 @@ _VOLATILE_TEXT = re.compile(
 )
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("detail", ["legacy", "full", "compact"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_move_reports_the_links_it_may_see(
     tmp_path: Path, audience: str, detail: str
 ) -> None:
-    """Every linking page is rewritten; the report covers the visible ones."""
+    """The move rewrites a linking page the writer may write and leaves a withheld one as it was; the
+    report covers the visible ones."""
     base = {
         **_filler(),
         f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
@@ -1536,6 +1514,7 @@ def test_a_restricted_move_reports_the_links_it_may_see(
     hidden = f"{WITHHELD_DIR}/hidden-linker.md"
     withheld = {hidden: _page("Hidden Draft", "Also [[Knowledge Base/Notes/alpha]] and [[alpha]].")}
     vaults = _twins(tmp_path, base, withheld, audience)
+    hidden_before = (vaults["A"] / hidden).read_text(encoding="utf-8")
 
     answers = {
         variant: _VOLATILE_TEXT.sub(
@@ -1543,7 +1522,7 @@ def test_a_restricted_move_reports_the_links_it_may_see(
             _text(
                 _call(
                     vault,
-                    _principal(audience),
+                    _writer(audience),
                     "manage_memory_file",
                     operation="move",
                     old_path=f"{NOTES}/alpha.md",
@@ -1557,9 +1536,7 @@ def test_a_restricted_move_reports_the_links_it_may_see(
 
     assert '"__error__"' not in answers["A"], answers["A"]
     assert answers["A"] == answers["B"] == answers["C"]
-    assert "[[Knowledge Base/Notes/alpha-moved]]" in (vaults["A"] / hidden).read_text(
-        encoding="utf-8"
-    )
+    assert (vaults["A"] / hidden).read_text(encoding="utf-8") == hidden_before
 
 
 INSIGHTS = f"{NOTES}/Insights"
@@ -1581,14 +1558,15 @@ def _semantic_move_fixture() -> dict[str, str]:
     }
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("detail", [None, "compact", "full", "legacy"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     tmp_path: Path, audience: str, detail: str | None
 ) -> None:
-    """The answer carries nothing the rewrite of a withheld linking page
-    produced: no graph or index outcome, no contract result for it, and the
-    same shape on every later move, of that page or another."""
+    """The answer carries nothing about a withheld linking page, which the
+    confined mover cannot rewrite and leaves as it was: no graph or index
+    outcome, no contract result for it, and the same shape on every later move."""
     scope = "Notes/Withheld/**, Notes/Insights/Withheld/**"
     base = {
         **_semantic_move_fixture(),
@@ -1606,6 +1584,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
         for variant, files in variants.items()
     }
     extra = {} if detail is None else {"response_detail": detail}
+    hidden_before = (vaults["A"] / hidden).read_text(encoding="utf-8")
 
     moves = (("gamma", "gamma-x"), ("gamma-x", "gamma-y"), ("solo", "solo-x"))
 
@@ -1615,7 +1594,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
                 "<v>",
                 _text(
                     _call(
-                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        vault, _writer(audience), "manage_memory_file", operation="move",
                         old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
                     )
                 ),
@@ -1626,7 +1605,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
             # figures the mover may see.
             _VOLATILE_TEXT.sub(
                 "<v>",
-                _text(_call(vault, _principal(audience), "read_memory", path=f"{KB}/log.md")["body"]),
+                _text(_call(vault, _writer(audience), "read_memory", path=f"{KB}/log.md")["body"]),
             )
         ]
 
@@ -1636,7 +1615,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     for step in range(len(moves) + 1):
         assert answers["A"][step] == answers["B"][step], step
         assert answers["C"][step] == answers["B"][step], step
-    assert f"[[{INSIGHTS}/gamma-y]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
+    assert (vaults["A"] / hidden).read_text(encoding="utf-8") == hidden_before
 
 
 _CLOSURE_TARGETS = {
@@ -1645,6 +1624,7 @@ _CLOSURE_TARGETS = {
 }
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("target", sorted(_CLOSURE_TARGETS))
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_move_judges_no_page_only_a_withheld_relation_reaches(
@@ -1679,7 +1659,7 @@ def test_a_restricted_move_judges_no_page_only_a_withheld_relation_reaches(
                 "<v>",
                 _text(
                     _call(
-                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        vault, _writer(audience), "manage_memory_file", operation="move",
                         old_path=f"{INSIGHTS}/zeta.md",
                         new_path=f"{INSIGHTS}/Other/target-x.md", **extra,
                     )
@@ -1701,6 +1681,7 @@ _UNREWRITTEN_CASES = {
 }
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("case", sorted(_UNREWRITTEN_CASES))
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_withheld_page_the_move_does_not_rewrite_never_blocks_it(
@@ -1737,7 +1718,7 @@ def test_a_withheld_page_the_move_does_not_rewrite_never_blocks_it(
                 "<v>",
                 _text(
                     _call(
-                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        vault, _writer(audience), "manage_memory_file", operation="move",
                         old_path=f"{INSIGHTS}/zeta.md",
                         new_path=f"{INSIGHTS}/{destination}.md",
                         update_wikilinks=update, **extra,
@@ -1771,6 +1752,7 @@ def _withheld_linkers(target: str) -> dict[str, tuple[str, str]]:
     }
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
 @pytest.mark.parametrize("linker", ["non-compliant", "sources", "compliant"])
 @pytest.mark.parametrize("audience", AUDIENCES)
@@ -1778,9 +1760,9 @@ def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
     tmp_path: Path, audience: str, linker: str, guess: str
 ) -> None:
     """Moving a page onto a guessed name and away again reads the same whether
-    or not a withheld page links that name. A withheld linker the move cannot
-    rewrite cleanly is left as it is and its link dangles, which the owner's
-    audit reports; one it can rewrite is rewritten."""
+    or not a withheld page links that name. A confined mover cannot write a
+    withheld linker, so every one is left as it is and its link dangles, which
+    the owner's audit reports."""
     from exomem import audit as audit_module
 
     scope = "Notes/Insights/Withheld/**, Sources/Withheld/**"
@@ -1806,7 +1788,7 @@ def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
                     "<v>",
                     _text(
                         _call(
-                            vault, _principal(audience), "manage_memory_file", operation="move",
+                            vault, _writer(audience), "manage_memory_file", operation="move",
                             old_path=old, new_path=new, update_wikilinks=True, **extra,
                         )
                     ),
@@ -1814,26 +1796,23 @@ def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
                 for old, new in moves
             ]
             if variant == "A":
-                stored = (vault / hidden).read_text(encoding="utf-8")
-                if linker == "compliant" and guess == _GUESSED:
-                    assert "moved-on]]" in stored and _GUESSED not in stored, stored
-                else:
-                    assert stored == text
-                    if guess == _GUESSED and detail is None:
-                        _reset()
-                        with library_scope():
-                            report = audit_module.audit(
-                                vault, categories=["broken_wikilink", "forward_reference"]
-                            )
-                        assert any(
-                            finding.path == hidden and _GUESSED in finding.detail
-                            for finding in report.findings
-                        ), [finding.as_dict() for finding in report.findings]
+                assert (vault / hidden).read_text(encoding="utf-8") == text
+                if guess == _GUESSED and detail is None:
+                    _reset()
+                    with library_scope():
+                        report = audit_module.audit(
+                            vault, categories=["broken_wikilink", "forward_reference"]
+                        )
+                    assert any(
+                        finding.path == hidden and _GUESSED in finding.detail
+                        for finding in report.findings
+                    ), [finding.as_dict() for finding in report.findings]
         assert '"__error__"' not in _text(answers["B"]), (detail, answers["B"])
         assert answers["A"] == answers["B"], (detail, answers["A"])
         assert answers["C"] == answers["B"], detail
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_file_delete_counts_the_links_it_may_see(
@@ -1867,7 +1846,7 @@ def test_a_restricted_file_delete_counts_the_links_it_may_see(
             vault = _materialize(
                 tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
             )
-            principal = _principal(audience)
+            principal = _writer(audience)
             steps = [
                 _call(vault, principal, "manage_memory_file", operation="move",
                       old_path=f"{INSIGHTS}/zeta.md", new_path=target, **extra),
@@ -2721,8 +2700,6 @@ def test_a_guests_whole_vault_aggregates_read_as_if_the_marked_page_were_absent(
 _HOSTED_SCOPE = "A" * 43
 
 
-
-
 @pytest.mark.parametrize("query", ["orchard", "", "privateorchard"])
 def test_raw_recall_admits_before_selection_and_keeps_owner_cache_separate(tmp_path: Path, query: str) -> None:
     """Protected matches cannot occupy a guest's slots, including after an owner search."""
@@ -2920,8 +2897,6 @@ def test_recall_authorizes_a_declared_missing_parent_without_hiding_public_orpha
         result = commands.op_ask_memory(tmp_path, **args)
     assert child in _text(owner)
     assert (child in _text(result)) is not protected_parent
-
-
 
 
 def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
@@ -3275,79 +3250,6 @@ def test_a_restricted_abstention_and_its_token_carry_no_index_generation(
         decoded = working_set_runtime.decode_continuity(token)
         assert decoded is not None and decoded["generation"] == 0, token
         assert decoded["refs"] == []
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_restricted_reclassification_proposal_counts_the_links_it_may_see(
-    tmp_path: Path, audience: str
-) -> None:
-    """A proposal to reclassify a visible Source reports the references the
-    writer may see, so a withheld page linking that Source leaves no trace."""
-    source = f"{KB}/Sources/Web/target-source.md"
-    base = {
-        source: _page("Target Source", "Body.", type="source", source_type="article"),
-        f"{INSIGHTS}/visible-linker.md": _typed("Visible", "V.", source[:-3]),
-    }
-    hidden = f"{INSIGHTS}/Withheld/w.md"
-    variants = {
-        "B": base,
-        "A": {**base, hidden: _typed("W", "W.", source[:-3])},
-        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/visible-linker")},
-    }
-    answers = {}
-    for variant, files in variants.items():
-        vault = _materialize(
-            tmp_path / variant / "vault", files, audience, scope="Notes/Insights/Withheld/**"
-        )
-        answers[variant] = _call(
-            vault, _principal(audience), "manage_memory_file",
-            operation="propose-reclassification", path=source, source_kind="article",
-        )
-
-    assert "__error__" not in answers["B"], answers["B"]
-    assert answers["A"] == answers["B"]
-    assert answers["C"] == answers["B"]
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_restricted_reclassification_preview_answers_as_if_no_withheld_page_linked_it(
-    tmp_path: Path, audience: str
-) -> None:
-    """A withheld Evidence page that links a source by path refuses the owner's
-    move. The restricted mover's preview neither names that page nor reports
-    its refusal, exactly as in a vault without it."""
-    source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
-    base = {
-        source: _page("Tide table", "High water 06:12.", type="source", source_type="other"),
-        f"{KB}/Evidence/Harbor/tide-proof.md": _page(
-            "Proof", "See [[2026-01-02-tide-table]].", type="evidence"
-        ),
-        f"{INSIGHTS}/tide-note.md": _typed("Tide note", "See the table.", source[:-3]),
-    }
-    withheld = {
-        f"{KB}/Evidence/Withheld/held.md": _page(
-            "Held", f"Cites [[{source.removesuffix('.md')}]].", type="evidence"
-        )
-    }
-    vaults = _twins(
-        tmp_path, base, withheld, audience, scope="Evidence/Withheld/**, Notes/Withheld/**"
-    )
-    preview = {"operation": "propose-reclassification", "path": source,
-               "source_kind": "dataset", "domain": "travel"}
-
-    answers = {
-        variant: _text(_call(vault, _principal(audience), "manage_memory_file", **preview))
-        for variant, vault in vaults.items()
-    }
-    owner = _call(vaults["A"], None, "manage_memory_file", **preview)
-
-    assert [refusal["path"] for refusal in owner["refusals"]] == [
-        f"{KB}/Evidence/Withheld/held.md"
-    ]
-    assert '"__error__"' not in answers["B"], answers["B"]
-    assert f'"rewritten": ["{INSIGHTS}/tide-note.md"]' in answers["B"]
-    assert answers["A"] == answers["B"]
-    assert answers["C"] == answers["B"]
 
 
 @pytest.mark.parametrize("audience", AUDIENCES)

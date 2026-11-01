@@ -43,6 +43,7 @@ from .vault import (
     PathGuard,
     PlannedWrite,
     VaultPathError,
+    admit_write_target,
     batch_atomic_write,
     find_inbound_wikilinks,
     parse_frontmatter,
@@ -173,6 +174,10 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
         rel = f"{kb_dirname()}/{rel}"
     if not rel.lower().endswith(".md"):
         rel = f"{rel}.md"
+    try:
+        admit_write_target(vault_root, rel)
+    except VaultPathError as refusal:
+        raise ReclassifyError(refusal.code, refusal.reason) from None
     prefix = f"{_sources_root()}/"
     if not rel.startswith(prefix):
         raise ReclassifyError(

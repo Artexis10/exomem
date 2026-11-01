@@ -17,8 +17,8 @@ Every fixture here is synthetic.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
-import json
 import shutil
 from pathlib import Path
 
@@ -126,10 +126,7 @@ def test_owner_connector_source_counts_and_capture_debt_ignore_hidden_sources(
     from exomem import state_migration
     from exomem.governance import principal, raw_protection
 
-    config, authenticate = configured_boundary
-    configuration = json.loads(config.read_text())
-    configuration["capture_paths"].append(f"{KB}/Sources/Sessions")
-    config.write_text(json.dumps(configuration))
+    _, authenticate = configured_boundary
     clients = {name: authenticate(name) for name in ("limited", "full")}
     assert all(raw_protection.is_owner(who) for who in clients.values())
     assert clients["limited"].audience_id == clients["full"].audience_id
@@ -166,7 +163,8 @@ def test_owner_connector_source_counts_and_capture_debt_ignore_hidden_sources(
                 )
                 terminal = _committed_envelope(leaf)
             path = leaf["source"]["path"]
-            assert path.startswith(f"{KB}/Sources/Sessions/")
+            # The limited connector's capture lands in its inbox; the unrestricted owner's in Sources.
+            assert path.startswith(f"{KB}/{'Capture' if name == 'limited' else 'Sources'}/Sessions/")
             assert _frontmatter(root, path)["source_type"] == "session"
             assert content in (root / path).read_text()
             advisories[name].append(terminal.get("structure_suggestion"))
@@ -395,33 +393,26 @@ def test_a_legacy_other_page_counts_as_debt(
 
 
 def test_a_restricted_caller_gets_no_debt_count(
-    vault: Path, source_schema: schema_module.SourceSchema
+    configured_boundary, vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     """The debt count covers pages a restricted caller may not see, so it gets none."""
-    from test_governance_egress import SCOPE_ID, _external, write_rule
-
-    from exomem.governance import egress, membership, policy
+    from exomem import state_migration
     from exomem.governance.principal import request_scope
 
+    _, authenticate = configured_boundary
     _legacy_other_page(vault)
-    scope = vault / KB / "_Governance" / "scopes" / "withheld.yaml"
-    scope.parent.mkdir(parents=True, exist_ok=True)
-    scope.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\n"
-        'paths: ["Sources/Other/**"]\n',
-        encoding="utf-8",
-    )
-    write_rule(vault, ceiling=0)
-    policy._CACHE.clear()
-    membership.clear_memo()
-    egress.clear_decision_memo()
+    authority = state_migration.assert_offline_migration_authority(source="isolated debt-count stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    # A bound non-owner: the limited client's binding under another audience.
+    non_owner = dataclasses.replace(authenticate("limited"), audience_id="principal:" + "ab" * 32)
 
-    with request_scope(_external()):
+    with request_scope(non_owner):
         leaf = commands.op_capture_source(
             vault, source_schema, content="Ridge counts, 06:10.", title="Ridge survey",
-            source_kind="field-notebook",
+            source_kind="session",
         )
 
+    assert leaf["source"]["path"].startswith(f"{KB}/Capture/Sessions/")
     assert "structure_suggestion" not in leaf["source"]
 
 

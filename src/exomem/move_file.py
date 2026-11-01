@@ -28,6 +28,7 @@ from typing import Any
 from . import (
     call_spans,
     originals,
+    recap_folder,
     reserved_paths,
     semantic_index,
     semantic_writes,
@@ -106,14 +107,16 @@ class MoveFileValidation:
     atomic_supported: bool
 
 
-def _in_episode_folder(rel: str) -> bool:
-    """Whether `rel` lies anywhere under `Sources/Episodes/`, case-insensitively.
+def _in_episode_folder(vault_root: Path, rel: str) -> bool:
+    """Whether `rel` lies anywhere under `Sources/Episodes/` or a capture path's `Episodes/`, case-insensitively.
 
     A recap's revisions are found by one listing of that one folder, by a
     filename token. A move into it plants a page that listing may take for a
     recap; a move out of it, into a subfolder or by a rename that strips the
     token hides a live revision from it, so the next record leaves two live.
     """
+    if recap_folder.in_inbox(vault_root, rel, casefold=True):
+        return True
     parts = rel.replace("\\", "/").split("/")
     if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
         parts = parts[1:]
@@ -575,7 +578,7 @@ def _move_file_local(
     _admit_destination(vault_root, new_rel)
     # Decided before any destination existence check, so it cannot tell a withheld view from none.
     collection_authority.refuse_view_paths(vault_root, (new_rel,), MoveFileError)
-    if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
+    if _in_episode_folder(vault_root, old_rel) or _in_episode_folder(vault_root, new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
             reason=(

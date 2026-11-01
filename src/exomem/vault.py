@@ -6113,6 +6113,19 @@ def _batch_state_target(vault_root: Path, target: Path) -> bool:
     )
 
 
+def _is_activity_page(rel: str) -> bool:
+    """Whether `rel` is a log or index page that a write door updates alongside the page it names.
+
+    These names are fixed by the vault layout, not by a customer's vocabulary. The door has
+    already decided its named target, so a restricted writer's batch carries these as system effects.
+    """
+    parts = rel.split("/")
+    archive = (kb_dirname(), "_archive", "logs")
+    return (parts[-1].casefold() == "index.md"  # nosemgrep: ep-word-set -- the layout fixes the index page name
+            or (len(parts) == 2 and parts[0] == kb_dirname() and parts[1].casefold() == "log.md")  # nosemgrep: ep-word-set -- the layout fixes the log page name
+            or tuple(parts[:3]) == archive)
+
+
 def _validate_batch_write_access(
     vault_root: Path,
     writes: Iterable[PlannedWrite],
@@ -6176,7 +6189,7 @@ def _validate_batch_write_access(
                     connector_boundary.require_write(
                         vault_root, rel,
                         content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
-                        proposed=proposed_by_path,
+                        proposed=proposed_by_path, derived=_is_activity_page(rel),
                     )
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
@@ -6529,6 +6542,27 @@ def missing_path_reason(path: str) -> str:
     return f"path does not exist: {requested}"
 
 
+def admit_write_target(vault_root: Path, lexical: str, resolved: Path | None = None) -> None:
+    """Decide a restricted writer's target, in both spellings, before any existence check.
+
+    Raises `VaultPathError` with `WRITE_REFUSED`; for any other caller it does nothing.
+    """
+    from .governance import connector_boundary
+
+    forms = {lexical}
+    try:
+        if resolved is None:
+            resolved = (vault_root / lexical).resolve()
+        forms.add(_canonical_kb_segment(resolved.relative_to(vault_root.resolve()).as_posix()))
+    except (ValueError, OSError):
+        pass
+    try:
+        for form in forms:
+            connector_boundary.require_target(vault_root, form)
+    except ValueError:
+        raise VaultPathError(code="WRITE_REFUSED", reason="target is unavailable") from None
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -6553,9 +6587,11 @@ def resolve_under_vault(
     can't sneak a write to a vault-root sibling of KB). Governed content writers
     (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
 
-    `refuse_withheld` is for write doors: with `must_exist`, an existing file
-    the caller may not see (`egress.write_target_withheld`) raises exactly the
-    NOT_FOUND an absent path raises.
+    `refuse_withheld` is for write doors. A restricted writer's target is decided
+    first, from scope sets alone, so a withheld, an absent and a read-only target
+    raise the same `WRITE_REFUSED`. For any other caller, with `must_exist`, an
+    existing file it may not see (`egress.write_target_withheld`) raises exactly
+    the NOT_FOUND an absent path raises.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -6611,6 +6647,8 @@ def resolve_under_vault(
                 ),
             ) from None
 
+    if refuse_withheld:
+        admit_write_target(vault_root, rel, resolved)
     if must_exist and (
         not candidate.exists()
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))

@@ -339,6 +339,28 @@ def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
     return None
 
 
+def public_storage(root: Path, path: str) -> bool:
+    """Whether `path` is a registry overlay or history file of the public instance.
+
+    A version-2 binding answers this through `bound_scopes`; this answers it for
+    an unarmed or version-1 vault, where the shipped storage paths are the public instance's.
+    """
+    from .. import registry_history
+    from . import registry_specs
+
+    root = Path(root)
+    for spec in registry_specs().values():
+        try:
+            chosen = select(root, spec)
+        except AssignmentRequired:
+            chosen = spec  # version 1 assigns nothing, so the shipped paths are public
+        overlay = chosen.overlay(root).relative_to(root).as_posix()
+        history = registry_history.history_dir(root, chosen.stem).relative_to(root).as_posix()
+        if (_contains(overlay, path) and _contains(path, overlay)) or _contains(history, path):
+            return True
+    return False
+
+
 def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str | None = None,
                prospective: bool = False) -> str | None:
     """Resolve canonical page membership before looking up any definition or folder."""

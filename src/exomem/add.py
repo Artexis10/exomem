@@ -305,10 +305,13 @@ def admit_source_destination(vault_root: Path, prepared: PreparedSourceMetadata,
     from .governance import connector_boundary
 
     folder = kb_root(vault_root).joinpath(*prepared.segments)
+    leaf = f"{date_iso}-{prepared.filename_slug}.md"
     try:
-        connector_boundary.require_create(
-            vault_root, (folder / f"{date_iso}-{prepared.filename_slug}.md").relative_to(vault_root).as_posix(),
-        )
+        # A restricted writer's capture keeps its kind folder under its inbox; the owner's stays in Sources.
+        inbox = connector_boundary.inbox_destination(vault_root, "/".join(prepared.segments[1:]), leaf)
+        if inbox is not None:
+            folder = vault_root / inbox
+        connector_boundary.require_create(vault_root, (folder / leaf).relative_to(vault_root).as_posix())
     except ValueError as error:
         raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
     return folder
@@ -541,6 +544,7 @@ def add(
     segments = prepared.segments
     folder_name = segments[1]
     folder_path = admit_source_destination(vault_root, prepared, date_iso)
+    in_sources = folder_path == kb_root(vault_root).joinpath(*segments)  # a restricted writer's capture sits in its inbox
     identity_warnings: list[str] = []
     if source_identity is not None:
         existing = source_capture.find_capture(vault_root, source_identity, warnings=identity_warnings)
@@ -673,7 +677,8 @@ def add(
             kb_root(vault_root) / "Sources", on_error=count_errors.append
         )
     post_counts = dict(pre_counts)
-    post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
+    if in_sources:
+        post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
 
     activity_summary = _activity_summary(
         rel_source_no_ext=rel_source_no_ext,
@@ -697,6 +702,7 @@ def add(
             folder_description=taxonomy.category_description(folder_name),
             rel_source_path=(
                 f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
+                if in_sources else rel_source_no_ext
             ),
             date_iso=date_iso,
             stamp_iso=stamp_iso,

@@ -1157,3 +1157,85 @@ def test_legacy_identity_does_not_change_nonidentity_membership(vault: Path, sel
                 "exomem_id: legacy-id\nproject: alpha\ntags: [alpha]")
     parsed = _parse(vault, "Knowledge Base/Notes/legacy.md")
     assert membership.evaluate(parsed, policy.load(vault)) == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+
+
+# ---------------------------------------------------------------------------
+# The residual scope
+# ---------------------------------------------------------------------------
+
+_MATTER = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+_RESIDUAL = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+_SECOND_RESIDUAL = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+
+
+def _residual_vault(vault: Path) -> policy.Policy:
+    _write_scope(vault, "matter", f"governance_version: 1\nid: {_MATTER}\nprojects: [matter]\n")
+    _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: true\n")
+    compiled = policy.load(vault)
+    assert not compiled.blocked
+    return compiled
+
+
+def test_the_residual_scope_takes_exactly_the_pages_no_other_scope_selects(vault: Path) -> None:
+    compiled = _residual_vault(vault)
+    _write_page(vault, "Knowledge Base/Notes/in-matter.md", "project: matter")
+    _write_page(vault, "Knowledge Base/Notes/unclassified.md", "project: elsewhere")
+
+    assert membership.evaluate(_parse(vault, "Knowledge Base/Notes/in-matter.md"), compiled) == {_MATTER}
+    assert membership.evaluate(_parse(vault, "Knowledge Base/Notes/unclassified.md"), compiled) == {_RESIDUAL}
+
+
+def test_a_page_leaves_the_residual_scope_once_another_scope_selects_it(vault: Path) -> None:
+    compiled = _residual_vault(vault)
+    page = _write_page(vault, "Knowledge Base/Notes/moving.md", "project: elsewhere")
+    assert membership.evaluate(_parse(vault, "Knowledge Base/Notes/moving.md"), compiled) == {_RESIDUAL}
+
+    page.write_text("---\nproject: matter\n---\nbody\n", encoding="utf-8")
+
+    assert membership.evaluate(_parse(vault, "Knowledge Base/Notes/moving.md"), compiled) == {_MATTER}
+
+
+def test_the_residual_scope_never_selects_a_directory(vault: Path) -> None:
+    """A folder holds items but is no item: only the files in it take the residual scope."""
+    _write_scope(vault, "matter", f"governance_version: 1\nid: {_MATTER}\npaths: [\"Notes/Matter/**\"]\n")
+    _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: true\n")
+    compiled = policy.load(vault)
+    assert not compiled.blocked
+    (vault / "Knowledge Base/Notes").mkdir(parents=True, exist_ok=True)
+    (vault / "Knowledge Base/Notes/photo.png").write_bytes(b"\x89PNG")
+
+    folder = membership.evaluate_path_only(vault, "Knowledge Base/Notes", compiled)
+    leaf = membership.evaluate_path_only(vault, "Knowledge Base/Notes/photo.png", compiled)
+
+    assert folder.require_classified() == frozenset()
+    assert leaf.require_classified() == {_RESIDUAL}
+
+
+def test_a_policy_without_a_residual_scope_gives_the_membership_it_always_gave(vault: Path) -> None:
+    _write_scope(vault, "matter", f"governance_version: 1\nid: {_MATTER}\nprojects: [matter]\n")
+    compiled = policy.load(vault)
+    _write_page(vault, "Knowledge Base/Notes/unclassified.md", "project: elsewhere")
+
+    assert compiled.residual_scope_id is None
+    assert membership.evaluate(_parse(vault, "Knowledge Base/Notes/unclassified.md"), compiled) == frozenset()
+
+
+@pytest.mark.parametrize("extra", ["projects: [matter]", "paths: [\"Notes/**\"]", "exclude: {projects: [matter]}"])
+def test_a_residual_scope_with_a_selector_blocks_the_policy(vault: Path, extra: str) -> None:
+    _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: true\n{extra}\n")
+
+    assert policy.load(vault).blocked
+
+
+def test_a_second_residual_scope_blocks_the_policy(vault: Path) -> None:
+    _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: true\n")
+    _write_scope(vault, "another", f"governance_version: 1\nid: {_SECOND_RESIDUAL}\nresidual: true\n")
+
+    assert policy.load(vault).blocked
+
+
+@pytest.mark.parametrize("value", ['"true"', "1", "[true]"])
+def test_a_residual_flag_that_is_not_a_boolean_blocks_the_policy(vault: Path, value: str) -> None:
+    _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: {value}\n")
+
+    assert policy.load(vault).blocked

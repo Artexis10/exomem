@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_connector_boundary import SCOPE
+from test_connector_boundary import INBOX, SCOPE
 from test_connector_boundary import configured_boundary as configured_boundary
 
 from exomem import entity_types, registry_history
@@ -33,12 +33,13 @@ def private_instances(configured_boundary, vault):
         "destinations": {},
         "selections": {},
     }
-    # A limited client creates only under capture paths, so one entity folder is one.
-    data["capture_paths"] += [
-        "Knowledge Base/_Schema/public", "Knowledge Base/_Schema/history/public",
-        "Knowledge Base/Entities/Venues",
-    ]
+    # A limited client writes only its inbox, so an entity folder and a meeting folder are inboxes.
+    data["capture_paths"] += ["Knowledge Base/Entities/Venues", "Knowledge Base/Notes/Meetings"]
     config.write_text(json.dumps(data))
+    (vault / "Knowledge Base/_Governance/scopes/inbox.yaml").write_text(
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Entities/Venues/**", "Notes/Meetings/**"]\n',
+        encoding="utf-8",
+    )
     authority = state_migration.assert_offline_migration_authority(source="private vocabulary fixture")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
     return authenticate
@@ -711,35 +712,24 @@ def test_bootstrap_does_not_reuse_history_after_session_closes(
         assert "new_since" not in result
 
 
-@pytest.mark.parametrize(("client", "destination_allowed"), [
-    ("full", False), ("limited", True), ("limited", False),
-])
+@pytest.mark.parametrize("client", ["full", "limited"])
 def test_first_use_capture_registers_in_selected_storage_and_can_rearm(
-    private_instances, configured_boundary, vault, source_schema, client, destination_allowed,
+    private_instances, vault, source_schema, client,
 ):
-    """A new source kind must remain usable without creating an unassigned overlay."""
+    """A new source kind registers in the selected storage; a restricted writer cannot publish it."""
     from test_source_taxonomy import _capture
 
-    from exomem import add, source_taxonomy, state_migration
+    from exomem import source_taxonomy, state_migration
     from exomem.governance import principal
     from exomem.vocabulary import instances
-
-    if destination_allowed:
-        config, _authenticate = configured_boundary
-        document = json.loads(config.read_text())
-        document["capture_paths"].append("Knowledge Base/Sources/Field Notebook")
-        config.write_text(json.dumps(document))
-        authority = state_migration.assert_offline_migration_authority(source="capture fixture setup")
-        state_migration.arm_connector_boundary_offline(vault, authority=authority)
 
     legacy = source_taxonomy.registry_path(vault)
     with principal.request_scope(private_instances(client)):
         selected = instances.select(vault, source_taxonomy.KIND_SPEC).overlay(vault)
-        if client == "limited" and not destination_allowed:
-            with pytest.raises(add.AddError) as denied:
+        if client == "limited":
+            # Registering the kind publishes a public overlay, which no restricted writer may.
+            with pytest.raises(ValueError, match="WRITE_REFUSED: target is unavailable"):
                 _capture(vault, source_schema, source_type="field-notebook", title="Bound source capture")
-            assert denied.value.code == "WRITE_REFUSED"
-            assert denied.value.reason
             assert not selected.exists() and not legacy.exists()
             assert source_taxonomy.load_taxonomy(vault).resolve_kind("field-notebook").status == "unregistered"
             return
@@ -1204,12 +1194,12 @@ def test_authenticated_private_promotion_cannot_change_public_observations(priva
         (vault / history_note).write_text("# Private history explanation\n", encoding="utf-8")
         assert not egress.quick_page_visible(vault, history_note.as_posix(), principal=limited)
         assert commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)["available"] is False
+    with principal.request_scope(full):
         public_saved = commands.op_schema_memory(
             vault, "save", subject="entity-types", proposal=proposal,
             expected_hash=before["content_hash"], why="Public recurring places",
         )
         assert public_saved["valid"]
-    with principal.request_scope(full):
         private_after = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
         assert private_after["content_hash"] == saved["saved"]["content_hash"]
         history = commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)
@@ -1226,6 +1216,32 @@ def test_authenticated_private_promotion_cannot_change_public_observations(priva
     assert b"Retain only the private core" not in (vault / "Knowledge Base/log.md").read_bytes()
     assert b"Public recurring places" in (vault / "Knowledge Base/log.md").read_bytes()
     assert shared_log != (vault / "Knowledge Base/log.md").read_bytes()
+
+
+def test_a_limited_client_cannot_publish_a_public_registry_overlay(private_instances, vault):
+    """Public vocabulary storage has no scope, so a restricted writer's save is refused and the owner's lands."""
+    from exomem import commands
+    from exomem.governance import principal
+
+    proposal = {"upsert": {"venue": {
+        "label": "Venue", "guidance": "A place for recurring meetings.", "parent": "concept",
+        "attributes": {"folder": "Venues"},
+    }}}
+
+    def save(client):
+        with principal.request_scope(private_instances(client)):
+            inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types")
+            return commands.op_schema_memory(
+                vault, "save", subject="entity-types", proposal=proposal,
+                expected_hash=inspected["content_hash"], why="A public place type",
+            )
+
+    with pytest.raises(ValueError, match="WRITE_REFUSED: target is unavailable"):
+        save("limited")
+    assert entity_types.load_entity_types(vault).resolve("venue") is None
+
+    assert save("full")["valid"]
+    assert entity_types.load_entity_types(vault).resolve("venue") is not None
 
 
 def test_prospective_selector_never_overrides_canonical_destination(private_instances, vault):
@@ -1547,7 +1563,8 @@ def test_a_live_revocation_withholds_warm_private_units_but_keeps_the_page_reada
 ):
     """Warm private meaning never outlives the caller's admission; the raw page stays useful.
 
-    The host denies the full client the Scope over the private instance's storage.
+    The host denies the full client the Scope over the private instance's storage, and the
+    limited client's inbox, which every other fenced client must be denied.
     The private page stays readable, but its private definitions are withheld.
     This catches a warm projection that keeps serving the private interpretation,
     and a refusal that withholds the readable page along with its definitions.
@@ -1602,7 +1619,7 @@ def test_a_live_revocation_withholds_warm_private_units_but_keeps_the_page_reada
 
     config, _ = configured_boundary
     data = json.loads(config.read_text())
-    data["clients"][1]["denied_scope_ids"] = [storage_scope]
+    data["clients"][1]["denied_scope_ids"] = [storage_scope, INBOX]
     config.write_text(json.dumps(data))
     revoked = observe()
 
@@ -2062,7 +2079,7 @@ def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_inst
     """Each response names the overlay that the bound public instance reads and writes.
 
     They used to name the unbound default path while the bytes went to the bound
-    path, and the relation save gated a limited client on that default path.
+    path. A limited client reads the bootstrap; only the owner saves a public overlay.
     """
     from exomem import commands, relation_registry
     from exomem.governance import principal
@@ -2075,7 +2092,6 @@ def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_inst
         entities = commands.op_schema_memory(
             vault, operation="save-entity-types", proposal=venue, why="Public meeting places",
         )
-    with principal.request_scope(private_instances("limited")):
         relations = commands.op_schema_memory(
             vault, subject="relations", operation="save-relations", why="Public meeting places",
             expected_hash=relation_registry.load_registry(vault).extension_hash,
@@ -2083,6 +2099,7 @@ def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_inst
                 "parent": "relates_to", "description": "A venue hosts an event.",
             }}},
         )
+    with principal.request_scope(private_instances("limited")):
         bootstrap = commands.op_bootstrap(vault, profile="full")
     assert entities["saved"]["path"] == "Knowledge Base/_Schema/public/entity-types.yaml"
     assert "venue" in (vault / entities["saved"]["path"]).read_text(encoding="utf-8")
