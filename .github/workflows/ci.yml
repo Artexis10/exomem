@@ -21,7 +21,7 @@ env:
   # The newest release one store schema back; move it to the next one with each schema bump.
   EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
-  # with its published wheel's SHA-256. A store schema bump empties both, because no earlier
+  # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
   EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.151.1"
   EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: "1688692e3d2c73bda8ac8f5f8f5c9b57cc81273fa222f4ca0142948e11c7842d"
