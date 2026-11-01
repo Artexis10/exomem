@@ -1639,6 +1639,10 @@ def evict_to_target(vault: Path) -> int:
 # Knowledge Base rare while a restore that brings back evicted originals is seen within the hour.
 CENSUS_INTERVAL_SECONDS = 3600
 
+# An unknown census names this many blocking originals at most, in path order: enough for the owner to start
+# on, small enough that a vault with many damaged companions grows neither the ledger row nor the status.
+CENSUS_BLOCKERS_SHOWN = 5
+
 
 # What a drain pass yielded to; the codes of a busy slot or store are the hydration's own.
 WAIT_OWNER_READ, WAIT_PENDING_JOB = "OWNER_READ_RECENT", "PENDING_JOB"
@@ -1655,6 +1659,7 @@ class DrainRecord:
     attempted_at: str
     attempt_failed: bool  # The latest attempt could not count, so the figures above are from an earlier census.
     waiting: str | None
+    blocked_by: tuple[str, ...]  # The originals whose companion stopped the latest attempt, vault-relative.
 
 
 def drain_record(vault: Path) -> DrainRecord | None:
@@ -1666,13 +1671,13 @@ def drain_record(vault: Path) -> DrainRecord | None:
         with closing(ledger._connect(readonly=True)) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_drain'").fetchone() is None:
                 return None  # A ledger from before the record has no table.
-            row = conn.execute("SELECT evicted, bytes, captured_at, latched, attempted_at, attempt_failed, waiting FROM media_drain").fetchone()
+            row = conn.execute("SELECT evicted, bytes, captured_at, latched, attempted_at, attempt_failed, waiting, blocked_by FROM media_drain").fetchone()
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     if row is None:
         return None
     return DrainRecord(row["evicted"], row["bytes"], row["captured_at"], bool(row["latched"]), row["attempted_at"],
-                       bool(row["attempt_failed"]), row["waiting"])
+                       bool(row["attempt_failed"]), row["waiting"], tuple(json.loads(row["blocked_by"] or "[]")))
 
 
 def evicted_above_capacity(vault: Path, config: dict[str, object]) -> int:
@@ -1734,18 +1739,38 @@ def _require_released(vault: Path, relative: str) -> None:
         raise ValueError("a companion holds a reference that the census did not count")
 
 
+class _CompanionBlocks(ValueError):
+    """Originals with no bytes whose companion is no release; `blocked` holds their paths, kept off the message that the worker logs."""
+
+    def __init__(self, blocked: list[str]) -> None:
+        super().__init__("a companion that is no release stands where an original with no bytes has its own")
+        self.blocked = blocked
+
+
 def _released_rows(vault: Path, ledger: MediaJobStore, evicted: Iterable[str]) -> list[str]:
     """The ledger's evicted rows that the walk did not confirm, each shown to be an original that is no longer evicted.
 
-    A row stays out of this list, and the census is unknown, when its bytes are gone and its companion is not.
+    Every ledger row that the walk did not count is checked, whatever its mark: a stopped eviction leaves the
+    bytes gone from a row not yet marked, and a damaged companion hides such an original from the walk. Raises
+    `_CompanionBlocks` for the rows whose bytes are gone and whose companion is not released.
     """
     counted = {ledger._relative(ledger.vault_root / path) for path in evicted}
     with closing(ledger._connect(readonly=True)) as conn:
-        unconfirmed = [row[0] for row in conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 1") if row[0] not in counted]
-    for relative in unconfirmed:
-        if not _on_volume(vault, relative):
+        rows = [(row[0], bool(row[1])) for row in conn.execute("SELECT binary_rel, evicted FROM media_cache ORDER BY binary_rel")
+                if row[0] not in counted]
+    blocked: list[str] = []
+    for relative, _marked in rows:
+        if _on_volume(vault, relative):
+            continue
+        try:
             _require_released(vault, relative)
-    return unconfirmed
+        except ValueError:  # A damaged companion: the cause may name a path, so it is not chained.
+            blocked.append(relative)
+            if len(blocked) == CENSUS_BLOCKERS_SHOWN:
+                break
+    if blocked:
+        raise _CompanionBlocks(blocked)
+    return [relative for relative, marked in rows if marked]
 
 
 def _align_ledger(conn: sqlite3.Connection, ledger: MediaJobStore,
@@ -1766,8 +1791,8 @@ def drain_census(vault: Path) -> tuple[int, int]:
     The walk, the ledger write and the latch share one hold of the consistency guard, which an eviction also
     takes, so no eviction runs between the count and the latch. A complete zero latches eviction off while the
     store is turned off; a complete count above zero clears the latch. Raises `MediaStoreError` when any
-    companion or path cannot be read, or when an evicted row's companion is damaged: an unknown census changes
-    neither the latch nor the record.
+    companion or path cannot be read, or when the companion of a ledger row with no bytes is damaged: an unknown
+    census changes neither the latch nor the record, and names the first such originals for the status.
     """
     from .writer_lease import get_manager
 
@@ -1791,7 +1816,7 @@ def drain_census(vault: Path) -> tuple[int, int]:
                         "INSERT INTO media_drain(singleton, evicted, bytes, captured_at, latched, attempted_at) "
                         "VALUES (1, :count, :size, :at, :latched, :at) ON CONFLICT(singleton) DO UPDATE SET "
                         "evicted = :count, bytes = :size, captured_at = :at, latched = :latched, attempted_at = :at, "
-                        "attempt_failed = 0",
+                        "attempt_failed = 0, blocked_by = NULL",
                         {"count": count, "size": size, "at": now.isoformat(timespec="seconds"),
                          "latched": int(count == 0 and config.get("enabled") is False)})
                     conn.commit()
@@ -1800,9 +1825,11 @@ def drain_census(vault: Path) -> tuple[int, int]:
                     raise
     except (*media_allowance.UNREADABLE, sqlite3.Error) as error:
         with suppress(*_LEDGER_UNREADABLE), closing(ledger._connect()) as conn, conn:
-            conn.execute("INSERT INTO media_drain(singleton, attempted_at, attempt_failed) VALUES (1, ?, 1) "
-                         "ON CONFLICT(singleton) DO UPDATE SET attempted_at = excluded.attempted_at, attempt_failed = 1",
-                         (now.isoformat(timespec="seconds"),))
+            conn.execute("INSERT INTO media_drain(singleton, attempted_at, attempt_failed, blocked_by) VALUES (1, ?, 1, ?) "
+                         "ON CONFLICT(singleton) DO UPDATE SET attempted_at = excluded.attempted_at, attempt_failed = 1, "
+                         "blocked_by = excluded.blocked_by",
+                         (now.isoformat(timespec="seconds"),
+                          json.dumps(error.blocked) if isinstance(error, _CompanionBlocks) else None))
         raise MediaStoreError("MEDIA_CENSUS_UNKNOWN", f"the companions or the ledger cannot be read ({type(error).__name__})") from error
     # The ledger commit comes first: a record that said zero before the latch held could be acted on too early.
     media_drain_record.write(vault, count, size, now)

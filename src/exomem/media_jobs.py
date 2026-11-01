@@ -774,13 +774,14 @@ class MediaJobStore:
                              "used_bytes INTEGER, observed_at TEXT NOT NULL)")
                 # The last complete census of a draining cell's evicted originals, and whether that census found
                 # none (D12): one row. The evicted, bytes and captured_at columns are NULL until a census completes.
-                # `attempt_failed` marks a latest attempt that could not count; `waiting` is what the last drain
+                # `attempt_failed` marks a latest attempt that could not count, and `blocked_by` (a JSON list of
+                # vault-relative paths) the originals whose companion stopped it; `waiting` is what the last drain
                 # pass yielded to, or NULL when it did not yield.
                 conn.execute("CREATE TABLE IF NOT EXISTS media_drain ("
                              "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
                              "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
                              "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL, "
-                             "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT)")
+                             "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT, blocked_by TEXT)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.

@@ -431,6 +431,8 @@ def _retained_section(root: Path, config: dict) -> dict:
         if record is not None and record.attempt_failed:
             # The latest attempt could not count; the last complete figures stay as history, never as the answer.
             census = {"unknown": "the latest census could not count the evicted originals", "attempted_at": record.attempted_at}
+            if record.blocked_by:
+                census["blocked_by"] = list(record.blocked_by)  # The owner's own originals, for the owner to find.
             if complete is not None:
                 census["last_complete"] = complete
         else:

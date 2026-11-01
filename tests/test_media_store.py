@@ -3123,6 +3123,75 @@ def test_a_census_clears_the_row_of_an_original_that_its_companion_no_longer_ref
     assert media_store.drain_record(vault).latched
 
 
+def test_a_census_is_unknown_when_the_companion_of_a_cached_row_that_lost_its_bytes_is_damaged(vault: Path, selected_store):
+    """Catches a census that checks only the rows marked evicted, so a stopped eviction with a damaged companion reads as zero."""
+    from exomem import media_drain_record, media_store
+
+    path = _stored(vault, "stopped", 300)
+    path.unlink()  # An eviction that stopped after it removed the bytes and before it marked the row.
+    _companion(path).write_bytes(b"")
+    _retained(selected_store, vault)
+    assert _ledger_rows(vault)[path.relative_to(vault).as_posix()][0] == 0
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+
+    assert unknown.value.code == "MEDIA_CENSUS_UNKNOWN"
+    assert not media_store.drain_record(vault).latched
+    assert not media_drain_record.record_path(vault).exists()
+
+
+def test_a_census_stays_complete_for_a_cached_row_whose_original_was_deleted(vault: Path, selected_store):
+    """Catches a census that stays unknown for every stale cache row of a deleted original, so its cell never drains."""
+    from exomem import media_store
+
+    path = _stored(vault, "deleted", 300)
+    path.unlink()
+    _companion(path).unlink()
+    _retained(selected_store, vault)
+
+    assert media_store.drain_census(vault) == (0, 0)
+
+    assert media_store.drain_record(vault).latched
+
+
+def test_the_retained_status_names_the_original_whose_companion_blocks_the_census(vault: Path, selected_store):
+    """Catches an unknown census that gives the operator no original to look at, or that puts its path in the error."""
+    from exomem import commands, media_store
+
+    path = _stored(vault, "evicted", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    _companion(path).write_bytes(b"")  # A plain note where the companion stood.
+    relative = path.relative_to(vault).as_posix()
+
+    with pytest.raises(media_store.MediaStoreError) as unknown:
+        media_store.drain_census(vault)
+
+    census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
+    assert census["blocked_by"] == [relative]
+    assert relative not in str(unknown.value) and relative not in str(unknown.value.__cause__)  # The worker logs both.
+
+
+def test_the_status_names_no_more_than_the_first_blocking_originals(vault: Path, selected_store, monkeypatch):
+    """Catches a status and a ledger that grow with every damaged companion of a large vault."""
+    from exomem import commands, media_store
+
+    paths = [_stored(vault, f"evicted-{number}", 100) for number in range(3)]
+    for path in paths:
+        assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    for path in paths:
+        _companion(path).write_bytes(b"")
+    monkeypatch.setattr(media_store, "CENSUS_BLOCKERS_SHOWN", 2)
+
+    with pytest.raises(media_store.MediaStoreError):
+        media_store.drain_census(vault)
+
+    census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
+    assert census["blocked_by"] == sorted(path.relative_to(vault).as_posix() for path in paths)[:2]
+
+
 def test_an_eviction_that_read_a_served_policy_still_honours_a_latch_set_before_its_guard(vault: Path, selected_store, monkeypatch):
     """Catches an eviction that decided on a policy read from before the guard, after the store was turned off and counted."""
     from exomem import media_store
