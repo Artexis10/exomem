@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -18,7 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,6 +44,8 @@ from .media_jobs import (
     process_start,
 )
 from .originals import OriginalSnapshot, StoredObject, original_state
+
+log = logging.getLogger(__name__)
 
 
 class MediaStoreError(RuntimeError):
@@ -1318,8 +1321,10 @@ def _evict_one(vault: Path, path: Path) -> str:
             relative = ledger._relative(path)
             _clear_dead_access(conn, ledger, conn.execute(
                 "SELECT * FROM media_access WHERE binary_rel = ?", (relative,)).fetchall())
-            if config.get("enabled") is False and conn.execute("SELECT 1 FROM media_drain WHERE latched = 1").fetchone():
+            if conn.execute("SELECT 1 FROM media_drain WHERE latched = 1").fetchone():
                 # A census found no evicted original and cellctl may now act on it, so nothing evicts again (D12).
+                # The policy read above may be stale, so the latch decides whatever it said; the next drain tick
+                # clears a latch that a served store still holds.
                 conn.rollback()
                 return KEPT
             row = conn.execute("SELECT owner_read FROM media_cache WHERE binary_rel = ?", (relative,)).fetchone()
@@ -1635,6 +1640,10 @@ def evict_to_target(vault: Path) -> int:
 CENSUS_INTERVAL_SECONDS = 3600
 
 
+# What a drain pass yielded to; the codes of a busy slot or store are the hydration's own.
+WAIT_OWNER_READ, WAIT_PENDING_JOB = "OWNER_READ_RECENT", "PENDING_JOB"
+
+
 @dataclass(frozen=True, slots=True)
 class DrainRecord:
     """The last complete census, and whether it latched; `evicted` is None until one completes."""
@@ -1644,6 +1653,8 @@ class DrainRecord:
     captured_at: str | None
     latched: bool
     attempted_at: str
+    attempt_failed: bool  # The latest attempt could not count, so the figures above are from an earlier census.
+    waiting: str | None
 
 
 def drain_record(vault: Path) -> DrainRecord | None:
@@ -1655,10 +1666,13 @@ def drain_record(vault: Path) -> DrainRecord | None:
         with closing(ledger._connect(readonly=True)) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_drain'").fetchone() is None:
                 return None  # A ledger from before the record has no table.
-            row = conn.execute("SELECT evicted, bytes, captured_at, latched, attempted_at FROM media_drain").fetchone()
+            row = conn.execute("SELECT evicted, bytes, captured_at, latched, attempted_at, attempt_failed, waiting FROM media_drain").fetchone()
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
-    return None if row is None else DrainRecord(row["evicted"], row["bytes"], row["captured_at"], bool(row["latched"]), row["attempted_at"])
+    if row is None:
+        return None
+    return DrainRecord(row["evicted"], row["bytes"], row["captured_at"], bool(row["latched"]), row["attempted_at"],
+                       bool(row["attempt_failed"]), row["waiting"])
 
 
 def evicted_above_capacity(vault: Path, config: dict[str, object]) -> int:
@@ -1677,6 +1691,17 @@ def evicted_above_capacity(vault: Path, config: dict[str, object]) -> int:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
 
 
+def _on_volume(vault: Path, relative: str) -> bool:
+    """Whether the file is on the volume; raises when the volume cannot say."""
+    try:
+        reserved_paths.inspect_generic_file(vault, relative)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            raise
+        return False
+    return True
+
+
 def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str, tuple[originals.BinaryBinding, StoredObject]]:
     """The originals whose companion binds a reference to the store and whose bytes are not on the volume.
 
@@ -1686,13 +1711,7 @@ def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str
     for companion, binary, reference in media_allowance.bound_references(vault, binding):
         in_trash = trash_metadata.is_trash_path(companion)
         # A Trash companion sits beside its payload, not at the path that it binds; task 5.5 places those originals.
-        payload = companion.removesuffix(".md") if in_trash else binary.path
-        try:
-            reserved_paths.inspect_generic_file(vault, payload)
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code != "MISSING":
-                raise
-        else:
+        if _on_volume(vault, companion.removesuffix(".md") if in_trash else binary.path):
             continue
         if in_trash:
             raise ValueError("a stored reference in Trash has no original beside it")
@@ -1700,20 +1719,45 @@ def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str
     return found
 
 
+def _require_released(vault: Path, relative: str) -> None:
+    """Raise unless the companion of an original with no bytes is gone or holds no reference to it.
+
+    The walk reads a file without a front matter fence as a note, and an undecodable one not at all. A
+    companion that is empty, plain text, undecodable, cut off or bound to another path may be the one that held
+    this original's reference, so it is no release: the census cannot call the original gone and stays unknown.
+    """
+    found = originals.bound_companion(vault, relative)  # Raises on bytes that are not a front matter.
+    if found is None:
+        if any(True for _ in originals.companion_candidates(vault, relative)):
+            raise ValueError("a companion that binds no path stands where an evicted original's belongs")
+    elif "stored_object" in found[1]:
+        raise ValueError("a companion holds a reference that the census did not count")
+
+
+def _released_rows(vault: Path, ledger: MediaJobStore, evicted: Iterable[str]) -> list[str]:
+    """The ledger's evicted rows that the walk did not confirm, each shown to be an original that is no longer evicted.
+
+    A row stays out of this list, and the census is unknown, when its bytes are gone and its companion is not.
+    """
+    counted = {ledger._relative(ledger.vault_root / path) for path in evicted}
+    with closing(ledger._connect(readonly=True)) as conn:
+        unconfirmed = [row[0] for row in conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 1") if row[0] not in counted]
+    for relative in unconfirmed:
+        if not _on_volume(vault, relative):
+            _require_released(vault, relative)
+    return unconfirmed
+
+
 def _align_ledger(conn: sqlite3.Connection, ledger: MediaJobStore,
-                  evicted: dict[str, tuple[originals.BinaryBinding, StoredObject]]) -> None:
-    """Make the ledger's evicted rows the census: mark each counted original with its size, clear the rest."""
-    counted = set()
+                  evicted: dict[str, tuple[originals.BinaryBinding, StoredObject]], released: list[str]) -> None:
+    """Make the ledger's evicted rows the census: mark each counted original with its size, clear the released rows."""
     for path, (binary, reference) in evicted.items():
-        relative = ledger._relative(ledger.vault_root / path)
-        counted.add(relative)
         conn.execute(
             "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted) "
             "VALUES (?, ?, ?, '', ?, ?, 1) ON CONFLICT(binary_rel) DO UPDATE SET size = excluded.size, evicted = 1",
-            (relative, _reference_key(reference), binary.sha256, time.time(), binary.size))
-    for (relative,) in conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 1").fetchall():
-        if relative not in counted:
-            conn.execute("UPDATE media_cache SET evicted = 0 WHERE binary_rel = ?", (relative,))
+            (ledger._relative(ledger.vault_root / path), _reference_key(reference), binary.sha256, time.time(), binary.size))
+    for relative in released:
+        conn.execute("UPDATE media_cache SET evicted = 0 WHERE binary_rel = ?", (relative,))
 
 
 def drain_census(vault: Path) -> tuple[int, int]:
@@ -1722,7 +1766,8 @@ def drain_census(vault: Path) -> tuple[int, int]:
     The walk, the ledger write and the latch share one hold of the consistency guard, which an eviction also
     takes, so no eviction runs between the count and the latch. A complete zero latches eviction off while the
     store is turned off; a complete count above zero clears the latch. Raises `MediaStoreError` when any
-    companion or path cannot be read: an unknown census changes neither the latch nor the record.
+    companion or path cannot be read, or when an evicted row's companion is damaged: an unknown census changes
+    neither the latch nor the record.
     """
     from .writer_lease import get_manager
 
@@ -1735,16 +1780,18 @@ def drain_census(vault: Path) -> tuple[int, int]:
     try:
         with get_manager().consistency_guard(vault, operation="media_drain_census", holder_kind="background"):
             evicted = _evicted_originals(vault, binding)
+            released = _released_rows(vault, ledger, evicted)
             count, size = len(evicted), sum(binary.size for binary, _reference in evicted.values())
             with closing(ledger._connect()) as conn:
                 conn.execute("PRAGMA synchronous=FULL")  # A latch that a power loss drops would let eviction resume.
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    _align_ledger(conn, ledger, evicted)
+                    _align_ledger(conn, ledger, evicted, released)
                     conn.execute(
                         "INSERT INTO media_drain(singleton, evicted, bytes, captured_at, latched, attempted_at) "
                         "VALUES (1, :count, :size, :at, :latched, :at) ON CONFLICT(singleton) DO UPDATE SET "
-                        "evicted = :count, bytes = :size, captured_at = :at, latched = :latched, attempted_at = :at",
+                        "evicted = :count, bytes = :size, captured_at = :at, latched = :latched, attempted_at = :at, "
+                        "attempt_failed = 0",
                         {"count": count, "size": size, "at": now.isoformat(timespec="seconds"),
                          "latched": int(count == 0 and config.get("enabled") is False)})
                     conn.commit()
@@ -1753,8 +1800,8 @@ def drain_census(vault: Path) -> tuple[int, int]:
                     raise
     except (*media_allowance.UNREADABLE, sqlite3.Error) as error:
         with suppress(*_LEDGER_UNREADABLE), closing(ledger._connect()) as conn, conn:
-            conn.execute("INSERT INTO media_drain(singleton, attempted_at) VALUES (1, ?) "
-                         "ON CONFLICT(singleton) DO UPDATE SET attempted_at = excluded.attempted_at",
+            conn.execute("INSERT INTO media_drain(singleton, attempted_at, attempt_failed) VALUES (1, ?, 1) "
+                         "ON CONFLICT(singleton) DO UPDATE SET attempted_at = excluded.attempted_at, attempt_failed = 1",
                          (now.isoformat(timespec="seconds"),))
         raise MediaStoreError("MEDIA_CENSUS_UNKNOWN", f"the companions or the ledger cannot be read ({type(error).__name__})") from error
     # The ledger commit comes first: a record that said zero before the latch held could be acted on too early.
@@ -1771,7 +1818,7 @@ def _census_due(vault: Path) -> bool:
             return True
     except ValueError:
         return True
-    if record.latched or record.captured_at != record.attempted_at:
+    if record.latched or record.attempt_failed:
         return False  # Drained, or the last census was unknown and waits out its hour.
     # The last census completed and the ledger shows no evicted original: the zero may be here now.
     ledger = MediaJobStore(Path(vault).resolve(), create=False)
@@ -1796,31 +1843,42 @@ def hydrate_evicted(vault: Path, path: Path) -> bool:
     return True
 
 
-def drain_step(vault: Path) -> int:
+def drain_step(vault: Path, claimable: Callable[[], object | None] | None = None) -> int:
     """Hydrate evicted originals back, smallest first, while they fit below the growth threshold (D12).
 
     It runs only in the draining mode: offload off and eviction on. It starts only when the evicted bytes
     fit in the room less the eviction margin, and then eviction, which runs only while they do not fit, never
     undoes it. It leaves the volume to owner reads and jobs: it waits out the idle time, yields to a pending job
     and ends on a busy hydration slot. An original above the hydration capacity stays evicted and counted.
-    Returns the number hydrated; raises `MediaStoreError` when the ledger or the volume cannot say.
+    `claimable` answers the job that the worker would claim now; the default is the oldest pending job.
+    The record keeps what the pass yielded to, for the status. Returns the number hydrated; raises
+    `MediaStoreError` when the ledger or the volume cannot say.
     """
     vault = Path(vault).resolve()
+    hydrated, waiting = _drain_pass(vault, claimable)
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_drain SET waiting = ? WHERE singleton = 1 AND waiting IS NOT ?", (waiting, waiting))
+    return hydrated
+
+
+def _drain_pass(vault: Path, claimable: Callable[[], object | None] | None) -> tuple[int, str | None]:
+    """One pass of `drain_step`: the number hydrated, and what the pass yielded to, if anything."""
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not False or config.get("eviction_enabled") is not True:
-        return 0
+        return 0, None
     threshold, bounds = media_capacity.growth_threshold(config), media_capacity.bounds_for(config, vault)
     try:
         margin, idle = float(config["eviction_margin"]), float(config["minimum_idle_seconds"])
     except (KeyError, TypeError, ValueError):
-        return 0
+        return 0, None
     record = drain_record(vault)
     if threshold is None or bounds is None or (record is not None and record.latched):
-        return 0
+        return 0, None
     evicted, room, total = _retained_figures(vault, config)
     if evicted > room - int(margin * total):
-        return 0  # Inside the margin band neither this nor eviction moves a byte.
+        return 0, None  # Inside the margin band neither this nor eviction moves a byte.
     ledger = MediaJobStore(vault)
+    claimable = claimable or ledger.next_pending
     hydrated = skipped = 0
     while True:
         with closing(ledger._connect(readonly=True)) as conn:
@@ -1830,38 +1888,52 @@ def drain_step(vault: Path) -> int:
             fits = min(bounds.hydration_bytes, int(threshold * usage.total) - int(margin * usage.total) - usage.used)
             row = conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 1 AND size IS NOT NULL AND size <= ? "
                                "ORDER BY size, binary_rel LIMIT 1 OFFSET ?", (fits, skipped)).fetchone()
-        if row is None or (owner_read is not None and time.time() - owner_read < idle) or ledger.next_pending() is not None:
-            return hydrated
+        if row is None:
+            return hydrated, None
+        if owner_read is not None and time.time() - owner_read < idle:
+            return hydrated, WAIT_OWNER_READ
+        if claimable() is not None:
+            return hydrated, WAIT_PENDING_JOB
         try:
             done = hydrate_evicted(vault, vault / row["binary_rel"])
         except MediaStoreError as error:
             if error.code in RETRYABLE_HYDRATION_CODES:
-                return hydrated  # An outage or a busy slot ends the pass; the next tick asks again.
+                return hydrated, error.code  # An outage or a busy slot ends the pass; the next tick asks again.
             skipped += 1  # An original that fails its check stays counted, and the pass goes on to the next.
             continue
         hydrated += done
         skipped += not done
 
 
-def drain_tick(vault: Path) -> None:
+def clear_served_drain(vault: Path) -> None:
+    """Drop the record and the latch of a store that is served: a later turn-off must count afresh (D12).
+
+    The runtime start and each drain tick call it, so a zero from an earlier turn-off cannot outlive the turn-on.
+    """
+    vault = Path(vault).resolve()
+    config = originals.configuration(vault)
+    if config is None or config.get("enabled") is not True:
+        return
+    if drain_record(vault) is not None:
+        with closing(MediaJobStore(vault)._connect()) as conn, conn:
+            conn.execute("DELETE FROM media_drain")
+    media_drain_record.remove(vault)
+
+
+def drain_tick(vault: Path, claimable: Callable[[], object | None] | None = None) -> None:
     """One tick of a retained store's drain, after eviction: hydrate what fits, then count when a census is due.
 
     A served policy clears the record and the latch. A store that is off counts, so that a restore that brings
     evicted originals back is seen and cellctl keys the cell again.
     """
     vault = Path(vault).resolve()
+    clear_served_drain(vault)
     config = originals.configuration(vault)
-    if config is None:
+    if config is None or config.get("enabled") is not False:
         return
-    if config.get("enabled") is True:
-        if drain_record(vault) is not None:
-            with closing(MediaJobStore(vault)._connect()) as conn, conn:
-                conn.execute("DELETE FROM media_drain")
-        media_drain_record.remove(vault)
-    elif config.get("enabled") is False:
-        try:
-            drain_step(vault)
-        except MediaStoreError:
-            pass  # An unknown figure hydrates nothing, and the census below is what repairs a missing size.
-        if _census_due(vault):
-            drain_census(vault)
+    try:
+        drain_step(vault, claimable)
+    except Exception:  # noqa: BLE001 - a failed step hydrates nothing; the census below is what repairs a missing size
+        log.warning("media drain: hydration step skipped", exc_info=True)
+    if _census_due(vault):
+        drain_census(vault)

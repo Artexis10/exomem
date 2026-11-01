@@ -143,11 +143,17 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["cell-media-census"]:
+        # The backup Job bounds this command in seconds on one CPU, and it reads one file, so it loads no CLI,
+        # server framework or native runtime.
+        from .cell_media_census import main as census_main
+
+        return census_main(raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
     preload_local_dotenv_policy()
     bootstrap()
-    raw = list(sys.argv[1:] if argv is None else argv)
     # Named commands and identification/help keep their completion wait. A
     # serving route skips it only when its managed lifecycle already joined.
     serving = (not raw or raw[0].startswith("-")) and not any(
@@ -312,9 +318,6 @@ def _dispatch_main(raw: list[str]) -> int:
     if raw and raw[0] == "cell-export":
         from .cloud_export import main as export_main
         return export_main(raw[1:])
-    if raw and raw[0] == "cell-media-census":
-        from .cell_media_census import main as census_main
-        return census_main(raw[1:])
     if raw and raw[0] == "cell-init":
         return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context

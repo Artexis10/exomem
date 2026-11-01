@@ -967,6 +967,11 @@ def _start_media_worker(vault_root: Path) -> Any | None:
         media_store.clear_dead_reservations(vault_root)
     except Exception:  # noqa: BLE001 - media must never deny the core service
         log.warning("media reservations not cleared at start; the next reservation clears them", exc_info=True)
+    try:
+        # A zero from an earlier turn-off must not outlive the turn-on (D12).
+        media_store.clear_served_drain(vault_root)
+    except Exception:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media drain record not cleared at start; the next drain tick clears it", exc_info=True)
     worker = _create_media_worker(vault_root)
     unavailable_reason: str | None = None
     unavailable_action: str | None = None

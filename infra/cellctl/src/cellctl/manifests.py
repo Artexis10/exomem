@@ -552,8 +552,7 @@ def check_media_store_policy(policy: dict[str, bool | int | float]) -> None:
 
 
 def media_store_identity(cell_id: str) -> str:
-    """The store identity is per cell, so a reference restored into another cell counts as none.
-    The backup Job's census names it too, because the Job has no copy of the policy."""
+    """The store identity is per cell, so a reference restored into another cell counts as none."""
     return f"media-edge:{cell_id}"
 
 

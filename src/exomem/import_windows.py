@@ -413,26 +413,36 @@ def report(root: Path, *, after: str | None = None, series_id: str | None = None
 
 
 def _retained_section(root: Path, config: dict) -> dict:
-    """A turned-off store's drain: the shortfall, the last complete census, whether it latched, and what cannot hydrate (D12)."""
+    """A turned-off store's drain: the shortfall, the census, whether it latched, what it waits for and what cannot hydrate (D12)."""
     def shortfall() -> int:
         try:
             return media_store.retained_shortfall(root, config)
         except media_store.MediaStoreError as error:
             raise _Unknown(str(error)) from error
 
+    waiting = None
     try:
         record = media_store.drain_record(root)
     except media_store.MediaStoreError as error:
         census = drained = {"unknown": str(error)}
     else:
-        census = ({"unknown": "no census has completed"} if record is None or record.evicted is None else
-                  {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at})
+        complete = (None if record is None or record.evicted is None else
+                    {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at})
+        if record is not None and record.attempt_failed:
+            # The latest attempt could not count; the last complete figures stay as history, never as the answer.
+            census = {"unknown": "the latest census could not count the evicted originals", "attempted_at": record.attempted_at}
+            if complete is not None:
+                census["last_complete"] = complete
+        else:
+            census = complete or {"unknown": "no census has completed"}
         drained = record is not None and record.latched
+        waiting = None if record is None else record.waiting
     try:
         above = {"count": media_store.evicted_above_capacity(root, config)}
     except media_store.MediaStoreError as error:
         above = {"unknown": str(error)}
-    return {"shortfall": _figure(shortfall), "census": census, "drained": drained, "above_hydration_capacity": above}
+    return {"shortfall": _figure(shortfall), "census": census, "drained": drained, "drain_waiting": waiting,
+            "above_hydration_capacity": above}
 
 
 def _census_or_unknown(root: Path) -> list[Window]:

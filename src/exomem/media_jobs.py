@@ -774,10 +774,13 @@ class MediaJobStore:
                              "used_bytes INTEGER, observed_at TEXT NOT NULL)")
                 # The last complete census of a draining cell's evicted originals, and whether that census found
                 # none (D12): one row. The evicted, bytes and captured_at columns are NULL until a census completes.
+                # `attempt_failed` marks a latest attempt that could not count; `waiting` is what the last drain
+                # pass yielded to, or NULL when it did not yield.
                 conn.execute("CREATE TABLE IF NOT EXISTS media_drain ("
                              "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
                              "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
-                             "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL)")
+                             "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL, "
+                             "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
@@ -2144,6 +2147,14 @@ class MediaJobStore:
     def clear_gpu_wait(self) -> None:
         """End the record of a GPU wait; a no-op that writes nothing when none is recorded."""
         self._clear_meta(GPU_WAIT_KEY)
+
+    def gpu_waiting(self) -> bool:
+        """Whether speech work waits for a busy GPU now, so that the worker claims no speech job."""
+        conn = self._connect(readonly=True)
+        try:
+            return _read_meta_json(conn, GPU_WAIT_KEY) is not None
+        finally:
+            conn.close()
 
     def record_gpu_preflight(self, result: str, reason: str | None, *, serving_worker_cuda_hidden: bool) -> None:
         """Record the preflight verdict ("passed", "failed" or "not tested", and why) and how CUDA is split.

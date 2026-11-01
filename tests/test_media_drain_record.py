@@ -83,3 +83,14 @@ def test_a_record_the_job_cannot_trust_reports_unknown_at_the_hold_start(vault: 
                            "no zone": "0 0 2026-11-01T12:30:15\n"}[shape], encoding="utf-8")
 
     assert _termination_message(vault, tmp_path) == f"0123 1 2\nunknown unknown {HOLD_START}"
+
+
+def test_the_census_command_starts_without_the_server_framework(vault: Path) -> None:
+    """Catches a census command that loads the whole CLI: on the Job's one CPU it outlasts the Job's bound."""
+    media_drain_record.write(vault, 3, 4096, CENSUS_TIME)
+    probe = ("import sys; from exomem.__main__ import main; "
+             "print(main(['cell-media-census', '--vault', sys.argv[1]])); print('fastmcp' in sys.modules)")
+
+    run = subprocess.run([sys.executable, "-c", probe, str(vault)], check=True, capture_output=True, text=True)
+
+    assert run.stdout.splitlines() == [f"3 4096 {CENSUS_TIME.isoformat()}", "0", "False"]
