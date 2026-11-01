@@ -43,12 +43,9 @@ from .state import (
     RolloutRow,
     row_hold_kind,
 )
-from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, StorageConfig
+from .storage_config import DEFAULT_STORAGE, GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS, StorageConfig
 
 _SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
-# move-cloud-cells-to-local-storage D10: a local cell grows once its backup
-# finds the filesystem past this share of its size.
-GROWTH_THRESHOLD_PERCENT = 80
 
 
 @dataclass(frozen=True)
@@ -60,6 +57,8 @@ class ReconcileConfig:
     import_growth_deadline: timedelta = timedelta(minutes=60)
     import_cleanup_deadline: timedelta = timedelta(minutes=2)
     import_cleanup_retry: timedelta = timedelta(hours=1)
+    # The cell stops for each attempt, and a person settles the cause of an owner refusal, so retry daily.
+    import_cleanup_owner_retry: timedelta = timedelta(hours=24)
     # C6: an export hold not finished this long per started 10 GiB of its cap
     # (exports.export_deadline) fails, and the cell starts again. A ready export
     # is kept for export_ttl (EXOMEM_EXPORT_TTL_HOURS), and each download link

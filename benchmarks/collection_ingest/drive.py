@@ -11,6 +11,10 @@ collection is copied into the vault, so the originals under
 
 ``personal`` leaves the media engines at their default (all on). ``cloud-like`` sets
 ``EXOMEM_MEDIA_ENGINES=documents,ocr`` (no speech), as the hosted image does.
+
+``--existing-pages SPEC`` imports into a vault that already holds pages: the driver writes
+the pages of SPEC (the ``*.vault-pages.json`` that the raw profiles write beside their key)
+into the new vault before the first journey, and records their bytes in the log.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import shutil
 import subprocess
@@ -28,7 +33,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp_session import McpSession, isolated_env  # noqa: E402
+from mcp_session import LedgerSession, McpSession, isolated_env  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_FORMAT = 1
@@ -44,6 +49,21 @@ RULE_PROBE = {
     "areas/travel": ("manual-documentation", "travel"),
 }
 PROFILE_ENV = {"personal": {}, "cloud-like": {"EXOMEM_MEDIA_ENGINES": "documents,ocr"}}
+# A hosted cell serves the same journey as ``import_memory`` and ``read_import`` operations. The product's tool
+# schema fixes which of the journey's actions are reads, so this is a closed set, not a vocabulary.
+READ_ACTIONS = frozenset({"status", "work-item"})
+
+
+def local_request(action: str, fields: dict[str, Any], detail: str) -> tuple[str, dict[str, Any]]:
+    """The stdio server's one ``adoption_studio`` tool, selected by ``action``."""
+    return "adoption_studio", {"action": action, "response_detail": detail, **fields}
+
+
+def hosted_request(action: str, fields: dict[str, Any], detail: str) -> tuple[str, dict[str, Any]]:
+    """A hosted cell's operation tools; ``response_detail`` is a top-level argument of the write tool only."""
+    if action in READ_ACTIONS:
+        return "read_import", {"operation": {"kind": action, **fields}}
+    return "import_memory", {"operation": {"kind": action, **fields}, "response_detail": detail}
 
 
 def place_collection(source: Path, target: Path) -> int:
@@ -67,6 +87,26 @@ def every_other_file(collection_dir: Path, name: str) -> list[str]:
         and path.suffix.lower() != ".md"
         and not any(part.startswith(".") for part in path.relative_to(collection_dir).parts)
     )
+
+
+def seed_existing_pages(spec_file: Path, vault: Path, today: dt.date) -> dict[str, Any]:
+    """Write the spec's pages into the vault; return what was written, for the scorer to compare.
+
+    ``{today}`` in a path or a body is the day of this drive, the day that the server dates its pages.
+    """
+    spec = json.loads(spec_file.read_text(encoding="utf-8"))
+    rows = []
+    for page in spec["pages"]:
+        rel = page["path"].replace("{today}", today.isoformat())
+        data = page["content"].replace("{today}", today.isoformat()).encode("utf-8")
+        target = vault / rel
+        if target.exists():
+            raise SystemExit(f"existing page {rel} is already in the new vault")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        rows.append({"id": page["id"], "path": rel, "bytes": len(data),
+                     "sha256": hashlib.sha256(data).hexdigest()})
+    return {"seeded": True, "spec": spec_file.name, "day": today.isoformat(), "pages": rows}
 
 
 def init_vault(python: Path, env: dict[str, str], vault: Path, state: Path) -> dict[str, Any]:
@@ -112,15 +152,28 @@ def counts_by_code(rows: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+def local_media_status() -> tuple[str, dict[str, Any]]:
+    return "process_media", {"operation": "status"}
+
+
+def hosted_media_status() -> tuple[str, dict[str, Any]]:
+    return "read_media", {"operation": {"kind": "status"}}
+
+
 class Journey:
     """One start->finish pass; accumulates what the product refused along the way."""
 
-    def __init__(self, session: McpSession, name: str, collection: str, collection_dir: Path,
-                 overrides: list[str]):
+    def __init__(self, session: LedgerSession, name: str, collection: str, collection_dir: Path,
+                 overrides: list[str], *, path: str | None = None,
+                 request: Any = local_request, initialize_kb: bool = True):
+        """``collection`` is the label; ``path`` is where the product reads it, vault-relative (default: the label)."""
         self.session = session
         self.overrides = overrides
+        self.request = request
+        self.initialize_kb = initialize_kb
         self.name = name
         self.collection = collection
+        self.path = path or collection
         self.collection_dir = collection_dir
         self.run_id: str | None = None
         self.phase_ms: dict[str, float] = {}
@@ -128,13 +181,14 @@ class Journey:
         self.final: dict[str, Any] = {}
         self.notes: dict[str, Any] = {}
 
-    async def adoption(self, step: str, args: dict[str, Any]) -> tuple[str, Any, dict[str, Any]]:
+    async def adoption(self, step: str, args: dict[str, Any], *,
+                       detail: str = "compact") -> tuple[str, Any, dict[str, Any]]:
+        """Call one action. ``full`` carries the whole run, megabytes on a large collection,
+        so only the steps that read the run ask for it."""
         started = time.perf_counter()
-        full = {"action": step.split(":")[0], "response_detail": "full", **args}
-        outcome, data, record = await self.session.call(
-            "adoption_studio", full, journey=self.name, step=step
-        )
         key = step.split(":")[0]
+        tool, request = self.request(key, args, detail)
+        outcome, data, record = await self.session.call(tool, request, journey=self.name, step=step)
         self.phase_ms[key] = round(
             self.phase_ms.get(key, 0.0) + (time.perf_counter() - started) * 1000.0, 1
         )
@@ -157,27 +211,40 @@ class Journey:
                 self.refusals[key] = {"stage": "apply.failed", "path": path,
                                       "code": outcome.get("code"), "reason": outcome.get("reason")}
 
-    async def follow(self, step: str, args: dict[str, Any]) -> tuple[str, Any, int]:
-        """Call ``step`` and repeat it with the returned ``continuation`` until none comes back."""
+    async def follow(self, step: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], int]:
+        """Call ``step`` and repeat it with the returned ``continuation`` until none comes back.
+
+        Each page asks for the compact reply, which carries no refusals. After the last page,
+        or after the page that failed, one ``status`` call reads the run for the refusals and
+        the plan. Returns the outcome, the call record that decided it, that run and the page
+        count.
+        """
         pages = 0
-        outcome, data = "ok", None
+        outcome, record = "ok", {}
         while pages < MAX_PAGES:
             pages += 1
-            outcome, data, _ = await self.adoption(f"{step}:p{pages}", args)
+            outcome, data, record = await self.adoption(f"{step}:p{pages}", args)
             if outcome != "ok":
                 break
-            self.note_refusals(step, data)
             token = find_field(data, "continuation")
             if token is None:
                 break
             args = {**args, "continuation": token}
-        return outcome, data, pages
+        read, status, status_record = await self.adoption(
+            f"status:after-{step}", {"run_id": self.run_id}, detail="full")
+        run: dict[str, Any] = {}
+        if read == "ok":
+            self.note_refusals(step, status)
+            run = run_object(status)
+        elif outcome == "ok":
+            outcome, record = read, status_record
+        return outcome, record, run, pages
 
     async def run(self, *, collection_label: str, rules_state: dict[str, Any],
                   probe_rules: bool, include_rules: list[dict[str, Any]]) -> dict[str, Any]:
         """Execute the five steps; every step's raw outcome is in the session ledger."""
-        include = [self.collection]
-        start_args: dict[str, Any] = {"path": self.collection, "initialize_kb": True}
+        include = [self.path]
+        start_args: dict[str, Any] = {"path": self.path, "initialize_kb": self.initialize_kb}
         if collection_label != "unsupported":
             start_args["collection"] = self.collection
         outcome, data, record = await self.adoption("start", start_args)
@@ -200,20 +267,20 @@ class Journey:
             outcome, data, record = await self.adoption(
                 "select:rules", {"run_id": self.run_id,
                                  "include": include_rules,
-                                 "include_junk": False, **self._override_args()})
+                                 "include_junk": False, **self._override_args()}, detail="full")
             rules_state["folder_kind_rules"] = "explicit"
             if outcome != "ok":
                 return self._stop("select:rules", record)
             selected = True
         elif probe_rules and rules_state.get("folder_kind_rules") != "unsupported":
             rules = [
-                {"path": f"{self.collection}/{folder}", "source_kind": kind, "domain": domain}
+                {"path": f"{self.path}/{folder}", "source_kind": kind, "domain": domain}
                 for folder, (kind, domain) in RULE_PROBE.items()
                 if (self.collection_dir / folder).is_dir()
             ]
-            rule_args = {"run_id": self.run_id, "include": [*rules, {"path": self.collection}],
+            rule_args = {"run_id": self.run_id, "include": [*rules, {"path": self.path}],
                          "include_junk": False, **self._override_args()}
-            outcome, data, record = await self.adoption("select:rules", rule_args)
+            outcome, data, record = await self.adoption("select:rules", rule_args, detail="full")
             if outcome == "ok":
                 rules_state["folder_kind_rules"] = "accepted"
                 selected = True
@@ -224,18 +291,18 @@ class Journey:
         if not selected:
             outcome, data, record = await self.adoption(
                 "select", {"run_id": self.run_id, "include": include, "include_junk": False,
-                           **self._override_args()})
+                           **self._override_args()}, detail="full")
             if outcome != "ok":
                 return self._stop("select", record)
         self.note_refusals("select", data)
 
-        outcome, data, pages = await self.follow("plan", {"run_id": self.run_id})
+        outcome, record, run, pages = await self.follow("plan", {"run_id": self.run_id})
         if outcome != "ok":
-            return self._stop("plan", self.session.calls[-1])
-        plan = run_object(data).get("plan") or {}
+            return self._stop("plan", record)
+        plan = run.get("plan") or {}
         plan_id = plan.get("plan_id")
         self.notes["plan_pages"] = pages
-        self.notes["plan_items_last_page"] = len(plan.get("items") or [])
+        self.notes["plan_items_after_plan"] = len(plan.get("items") or [])
 
         retried_failed = False
         apply_passes = 0
@@ -244,10 +311,10 @@ class Journey:
             args = {"run_id": self.run_id, "plan_id": plan_id}
             if retried_failed:
                 args["retry_failed"] = True
-            outcome, data, pages = await self.follow("apply", args)
+            outcome, record, run, pages = await self.follow("apply", args)
             if outcome != "ok":
-                return self._stop("apply", self.session.calls[-1])
-            phase = run_object(data).get("phase")
+                return self._stop("apply", record)
+            phase = run.get("phase")
             if phase == "partial" and not retried_failed:
                 retried_failed = True  # one bounded retry of the failed subset, then move on
                 continue
@@ -257,7 +324,7 @@ class Journey:
         self.notes["retry_failed_used"] = retried_failed
 
         outcome, data, record = await self.adoption(
-            "finish", {"run_id": self.run_id, "write_manifest": False})
+            "finish", {"run_id": self.run_id, "write_manifest": False}, detail="full")
         if outcome != "ok":
             return self._stop("finish", record)
         run = run_object(data)
@@ -301,15 +368,16 @@ def counts_by_status(outcomes: dict[str, Any]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
-async def wait_for_media(session: McpSession, journey: str, deadline_s: float) -> dict[str, Any]:
+async def wait_for_media(session: LedgerSession, journey: str, deadline_s: float,
+                         status_request: Any = local_media_status) -> dict[str, Any]:
     """Poll ``process_media status`` until the job queue and index refresh drain, or time runs out."""
     started = time.perf_counter()
     polls: list[dict[str, Any]] = []
     quiet = 0
     data: Any = None
     while True:
-        outcome, data, _ = await session.call(
-            "process_media", {"operation": "status"}, journey=journey, step="media-status")
+        tool, request = status_request()
+        outcome, data, _ = await session.call(tool, request, journey=journey, step="media-status")
         counts = data.get("counts") if isinstance(data, dict) else None
         refresh = (data.get("index_refresh") or {}).get("count") if isinstance(data, dict) else None
         polls.append({"t_s": round(time.perf_counter() - started, 1), "outcome": outcome,
@@ -357,6 +425,8 @@ async def drive(args: argparse.Namespace) -> dict[str, Any]:
     init = init_vault(args.python, env, vault, state)
     if init["exit_code"] != 0:
         raise SystemExit(f"exomem init failed: {init}")
+    existing = (seed_existing_pages(args.existing_pages, vault, dt.date.today())
+                if args.existing_pages else {"seeded": False})
 
     rules_state: dict[str, Any] = {"folder_kind_rules": "not-probed", "collection_label": "not-tried"}
     log: dict[str, Any] = {
@@ -370,7 +440,7 @@ async def drive(args: argparse.Namespace) -> dict[str, Any]:
         "include_rules": args.include_rule,
         "env": {k: v for k, v in env.items() if k.startswith(("EXOMEM_", "HF_"))},
         "search_mode_note": "EXOMEM_DISABLE_EMBEDDINGS=1: search_memory runs its lexical lane only",
-        "collection_files_placed": placed, "init": init,
+        "collection_files_placed": placed, "init": init, "existing_vault": existing,
     }
     total_started = time.perf_counter()
     async with McpSession(python=args.python, state=state, env=env, timeout=args.timeout) as session:
@@ -436,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="JSON selection rule; repeat to select more paths; replaces the default rules; refusal stops the run")
     parser.add_argument("--select-every-file", action="store_true",
                         help="also name every visible non-markdown file in `overrides` (observes per-file refusals)")
+    parser.add_argument("--existing-pages", type=Path, default=None, metavar="SPEC",
+                        help="page spec (<key>.vault-pages.json) to write into the vault before the import")
     parser.add_argument("--label", default="", help="free-text run label stored in the log")
     parser.add_argument("--log", type=Path, required=True, help="drive log JSON to write")
     args = parser.parse_args(argv)

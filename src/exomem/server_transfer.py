@@ -103,8 +103,11 @@ def _preserve_under_guard(
     preserve_stream: Any,
     **kwargs: Any,
 ) -> Any:
-    """Run the complete upload read-plan-write path under vault authority."""
-    with manager.mutation_guard(vault_root):
+    """Run the complete upload read-plan-write path under vault authority.
+
+    The stream is read only once the guard is held, so only the acquire waits out contention.
+    """
+    with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
         return preserve_stream(vault_root, **kwargs)
 
 
@@ -113,7 +116,9 @@ def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any)
     from . import archive_members
 
     return archive_members.preserve_members(
-        vault_root, guard=lambda: manager.mutation_guard(vault_root), **kwargs
+        vault_root,
+        guard=lambda: manager.absorbing_mutation_guard(vault_root, operation="upload_manifest"),
+        **kwargs,
     )
 
 
@@ -153,7 +158,7 @@ def _capture_source_under_guard(
                 if written > max_bytes:
                     raise ValueError("TOO_LARGE: upload exceeds the configured limit")
                 sink.write(chunk)
-        with manager.mutation_guard(vault_root):
+        with manager.absorbing_mutation_guard(vault_root, operation="upload_capture"):
             return add_module.add(
                 vault_root,
                 source_schema,
@@ -178,7 +183,8 @@ def _reconcile_under_guard(
     media_processing = _media_processing_module()
     if media_processing.classify_media(binary_path) is None:
         return None
-    with manager.mutation_guard(vault_root):
+    # The upload has committed and a failed reconcile only logs, so it does not wait out contention.
+    with manager.mutation_guard(vault_root, operation="upload_reconcile"):
         return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
 
 
@@ -238,28 +244,26 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             raise
         return _source_upload_receipt(root, result)
 
-    # A lane token carries no caller identity. Keep the same transfer floor across startup recovery.
-    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
-        try:
-            result = invoke_command(
-                Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
-                        cli_writes=True, response_detail="legacy"),
-                vault_root,
-                target=record["target"], length=record["length"],
-                sha256=record["sha256"], session_id=record["id"],
-                idempotency_key=record["id"], public_idempotency_key=None,
-            )
-        except OpError as error:
-            raise upload_sessions.CommitFailed(
-                error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
-            ) from error
-        if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
-            # Signed receipt recovery can prove a commit without recovering its complete leaf result.
-            raise upload_sessions.CommitFailed(
-                "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
-            )
-        # Also project older cached results before they leave the transfer principal's scope.
-        return _source_upload_receipt(vault_root, result)
+    try:
+        result = invoke_command(
+            Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
+                    cli_writes=True, response_detail="legacy"),
+            vault_root,
+            target=record["target"], length=record["length"],
+            sha256=record["sha256"], session_id=record["id"],
+            idempotency_key=record["id"], public_idempotency_key=None,
+        )
+    except OpError as error:
+        raise upload_sessions.CommitFailed(
+            error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
+        ) from error
+    if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
+        # Signed receipt recovery can prove a commit without recovering its complete leaf result.
+        raise upload_sessions.CommitFailed(
+            "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
+        )
+    # Also project older cached results before they leave the transfer principal's scope.
+    return _source_upload_receipt(vault_root, result)
 
 
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -270,6 +274,13 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     as an archive whose manifest is recorded already is. A refusal of the bytes
     or the target fails the session; anything else leaves it to a retry.
     """
+    # A lane token carries no caller identity. Every commit runs under the same transfer floor:
+    # the first attempt, a re-attempt by the server's own timer and startup recovery alike.
+    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
+        return _commit_session(vault_root, part, record)
+
+
+def _commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     from . import archive_members
     from .cli_ops import OpError, error_dict
     from .writer_lease import get_manager
@@ -497,6 +508,18 @@ _RECOVERY_HEADERS = {
 }
 
 
+def _hydration_too_large(error: BaseException | None) -> JSONResponse | None:
+    """The final refusal for an original larger than the whole hydration capacity (D3, M4).
+
+    A 4xx status and no `retry-after`: waiting never clears it, so no client retries it.
+    """
+    if not isinstance(error, media_store.MediaStoreError) or error.code != media_store.HYDRATION_TOO_LARGE_CODE:
+        return None
+    return JSONResponse({"code": media_store.HYDRATION_TOO_LARGE_CODE,
+                         "reason": "the original is larger than this cell can bring back from its store"},
+                        status_code=409, headers=_RECOVERY_HEADERS)
+
+
 class _OriginalDownloadResponse(Response):
     """Starlette sends only a private verified spool; this response owns its lifetime."""
 
@@ -705,6 +728,8 @@ class _CloudOriginalDownloadResponse(Response):
             if isinstance(error, artifact_recovery.RecoveryBusy):
                 refusal = JSONResponse({"code": "ORIGINAL_BUSY", "reason": "other downloads are in progress; retry shortly"},
                     status_code=503, headers={**_RECOVERY_HEADERS, "retry-after": "5"})
+            elif too_large := _hydration_too_large(error.__cause__):
+                refusal = too_large
             elif isinstance(error.__cause__, media_store.MediaStoreError):
                 refusal = JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "the original is stored off this cell and the store is unreachable"},
                     status_code=503, headers=_RECOVERY_HEADERS)
@@ -831,7 +856,7 @@ def register_transfer_routes(
                 status_code=401,
             )
         from .cli_ops import OpError, error_dict, http_status_for
-        from .writer_lease import get_manager
+        from .writer_lease import get_manager, record_caller_refusal
 
         max_bytes = (
             config.local_upload_max_bytes
@@ -991,6 +1016,7 @@ def register_transfer_routes(
                 status_code={archive_members.TOO_LARGE: 413, archive_members.NO_SPACE: 507}.get(exc.code, 400),
             )
         except (OpError, ValueError) as exc:
+            record_caller_refusal(exc, tool="upload", targets=[str(vault_root)])
             error = error_dict(exc)
             return JSONResponse(
                 {"code": error["code"], "reason": error["message"]},
@@ -1378,12 +1404,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             try:
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
-                with media_store.local_originals(vault_root, (rel,)):
+                with media_store.local_originals(vault_root, (rel,), read=True):
                     snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
-            except media_store.MediaStoreError:
-                return JSONResponse(
+            except media_store.MediaStoreError as error:
+                return _hydration_too_large(error) or JSONResponse(
                     {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},
                     status_code=503,
                 )

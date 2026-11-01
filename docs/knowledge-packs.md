@@ -128,7 +128,7 @@ Packs do not bypass governance. They help agents choose product commands:
 | `review` | `review_memory` |
 | `connect` | `connect_memory` |
 | `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |
-| `maintain` | Remote `maintain_memory` audit/dry-run; host-operator `exomem maintain --fix` / `--reconcile` for repairs |
+| `maintain` | `maintain_memory` audit and dry-run; a remote `fix`, `backfill-ids` or `reconcile` write starts as a maintenance job from a dry run's `plan_id` and a `why`; the local CLI is `exomem maintain --fix` / `--reconcile` |
 | `record` observed state | `record_memory`: `inspect`, `create`, `query`, `append`, or `update` |
 
 Agents should speak in product language. The user can say "save this warranty

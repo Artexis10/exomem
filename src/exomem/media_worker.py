@@ -103,6 +103,8 @@ def _is_canonical_sidecar(sidecar: Path, binary: Path) -> bool:
 _COMPLETE = "complete"
 _HANDOFF = "handoff"
 _STALE = "stale"
+# A hydration failure that returns the job to the queue with no attempt spent (D3, M4).
+_RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
 _LANGUAGE_ACTION = (
@@ -175,6 +177,8 @@ _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: cost being removed below is the store open, not the wakeup, and stretching
 #: this is what would actually delay a job.
 _SUPERVISE_POLL_SECONDS = 0.5
+#: How often the supervisor checks the eviction target between jobs (D3, M3).
+_EVICTION_INTERVAL_SECONDS = 60.0
 #: Backstop for the writes a signature comparison cannot separate from its own.
 #: Two of them: a foreign worker pid dying without writing anything at all, and
 #: a commit that lands between `needs_worker()`'s read and the signature taken
@@ -264,6 +268,24 @@ def _authority_recheck_seconds(code: str) -> float:
 class _ProcessOutcome:
     state: str
     error: str | None = None
+    blocked_reason: str | None = None
+
+
+def _hydration_outcome(error: Exception) -> _ProcessOutcome:
+    """Map a failure to bring a job's original onto the volume (D3, M4).
+
+    Transport and capacity failures return the job, and an original larger than the
+    whole capacity blocks it. Any other error, a verification mismatch included,
+    propagates and fails the job.
+    """
+    from . import media_store
+
+    assert isinstance(error, media_store.MediaStoreError)
+    if error.code in media_store.RETRYABLE_HYDRATION_CODES:
+        return _ProcessOutcome(_RETURNED, str(error))
+    if error.code == media_store.HYDRATION_TOO_LARGE_CODE:
+        return _ProcessOutcome(BLOCKED, str(error), media_jobs.HYDRATION_TOO_LARGE)
+    raise error
 
 
 def _content_digest(path: Path) -> str | None:
@@ -364,7 +386,11 @@ class MediaWorker:
         execution_mode: str | None = None,
         idle_seconds: float | None = None,
     ) -> None:
+        from . import media_store
+
         self._vault_root = vault_root
+        #: The owner census that consecutive offloads share; it ends when this worker has no job left (D10).
+        self._offload_batch = media_store.OffloadBatch(vault_root)
         selected = execution_mode or os.environ.get("EXOMEM_MEDIA_WORKER_MODE", "process")
         if selected not in {"process", "inline"}:
             raise ValueError("media worker mode must be process or inline")
@@ -520,6 +546,9 @@ class MediaWorker:
                 if job is None:
                     return
                 self._process(job)
+                if self._q.empty():
+                    self._offload_batch.end()
+                _evict(self._vault_root)
             except Exception:  # noqa: BLE001 — a bad job must never kill the worker
                 log.exception("media worker job crashed: %s", getattr(job, "binary_path", "?"))
             finally:
@@ -533,7 +562,7 @@ class MediaWorker:
         # A store outage leaves its generation pending while extraction continues.
         if job.do_offload:
             try:
-                media_store.offload(self._vault_root, job.binary_path)
+                media_store.offload(self._vault_root, job.binary_path, batch=self._offload_batch)
             except (media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OSError) as error:
                 offload_error = error
             else:
@@ -553,13 +582,24 @@ class MediaWorker:
             if job.do_ocr or job.do_clip:
                 original = (media_store.open_original(self._vault_root, job.binary_path)
                             if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
-                with original:
-                    outcome = self._process_original(job)
+                with contextlib.ExitStack() as held:
+                    try:
+                        held.enter_context(original)
+                    except media_store.MediaStoreError as error:
+                        outcome = _hydration_outcome(error)
+                    else:
+                        outcome = self._process_original(job)
             elif job.do_reembed:
                 self._run_reembed(job)
         if outcome.state == _HANDOFF:
             return outcome
         if offload_error is not None:
+            # An offload that waits for the shared capacity spends no attempt (D12, choice 3).
+            if isinstance(offload_error, media_store.MediaStoreError) and offload_error.code == media_store.STORE_BUSY_CODE:
+                if not (job.do_ocr or job.do_clip or job.do_reembed):
+                    return _ProcessOutcome(_RETURNED, str(offload_error))
+                # The other stages ran, so the row keeps only its offload stage when it completes.
+                return outcome
             raise offload_error
         return outcome
 
@@ -1727,6 +1767,8 @@ class MediaWorker:
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
+        eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
+        eviction: threading.Thread | None = None
         #: The last child exited because the GPU is busy, and the supervisor waits to ask again.
         gpu_hold = False
         #: The store signature this wait last looked at for work that needs no GPU.
@@ -1753,6 +1795,13 @@ class MediaWorker:
                 except Exception:  # noqa: BLE001 - convergence retries at the next start
                     log.warning("media worker: engine convergence deferred", exc_info=True)
             while not self._stop_event.is_set():
+                if _clock() >= eviction_at:
+                    # A pass may wait on the store, so it runs beside this watchdog, one pass at a time.
+                    if eviction is None or not eviction.is_alive():
+                        eviction = threading.Thread(target=_evict, args=(self._vault_root,),
+                                                    name="exomem-media-eviction", daemon=True)
+                        eviction.start()
+                    eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
                 child = self._child
                 running = child is not None and child.poll() is None
                 if brakes and (running or self._pressure_high):
@@ -2526,6 +2575,16 @@ def _idle_seconds() -> float:
         return 300.0
 
 
+def _evict(vault_root: Path) -> None:
+    """Check the eviction target after a job or on the timer; a failure never stops the worker (D3, M3)."""
+    from . import media_store
+
+    try:
+        media_store.evict_to_target(vault_root)
+    except Exception:  # noqa: BLE001 - the next job or tick checks again
+        log.warning("media worker: eviction deferred", exc_info=True)
+
+
 def run_child(
     vault_root: Path,
     *,
@@ -2610,6 +2669,7 @@ def run_child(
                 log.info("media worker: admission refused the next job (exit %d); child exiting", refusal[0])
                 return refusal[0]
             if job is None:
+                worker._offload_batch.end()
                 if gpu_busy:
                     log.info("media worker: only speech work is left and the GPU is busy; child exiting")
                     return _GPU_BUSY_EXIT_CODE
@@ -2623,7 +2683,7 @@ def run_child(
                 continue
             if job.id in deferred_for_gpu:
                 # The claim skips speech work once the GPU is busy; a job back here anyway would spin.
-                store.defer(job)
+                store.defer(job, free_hydration_slot=True)
                 return _GPU_BUSY_EXIT_CODE
             idle_signature = None
             last_work = _clock()
@@ -2665,7 +2725,8 @@ def run_child(
                 return _TRANSIENT_EXIT_CODE
             except asr_runtime.ASRGpuBusy as exc:
                 assert job.id is not None
-                store.defer(job)
+                # The GPU wait has no known end: the job gives up its hydration slot but keeps its original.
+                store.defer(job, free_hydration_slot=True)
                 gpu_busy = True
                 deferred_for_gpu.add(job.id)
                 store.note_gpu_wait(str(exc))
@@ -2718,9 +2779,12 @@ def run_child(
                         return 0  # one job per child under the brakes
                     continue
                 if outcome.state == BLOCKED:
-                    store.mark(job, BLOCKED, outcome.error)
+                    store.mark(job, BLOCKED, outcome.error, blocked_reason=outcome.blocked_reason)
                 elif outcome.state == FAILED:
                     fail(job, outcome.error)
+                elif outcome.state == _RETURNED:
+                    store.return_for_retry(job, outcome.error)
+                    log.info("media worker: returned %s to the queue: %s", job.binary_path, outcome.error)
                 elif outcome.state == _STALE:
                     try:
                         current_content = job.sidecar_path.read_text(encoding="utf-8")
@@ -2749,6 +2813,7 @@ def run_child(
                         fail(job, outcome.error or "stale extraction commit")
                 else:
                     store.complete(job)
+            _evict(vault_root)
             if brakes:
                 # One job per child: the next starts fresh, with no growth from this
                 # one, and the supervisor's watchdog times exactly one job.

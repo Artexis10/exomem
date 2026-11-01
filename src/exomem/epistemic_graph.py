@@ -304,6 +304,26 @@ _TOPOLOGY_CARRY_KEY = "recall_resolver_topology_carry"
 TOPOLOGY_CARRY_LIMIT = 256
 _READ_BARRIER_KEY = "read_barrier"
 _GRAPH_SYNC_CHECKPOINT_KEY = "graph_sync_checkpoint"
+#: Present, with this value, only while `graph_dependency_coverage` and
+#: `graph_dependencies` agree with every file row: the stored answer to
+#: `_dependency_index_complete`, so a check is a lookup instead of a scan of the
+#: whole dependency table (tens of seconds on a cold page cache at 15,000
+#: pages). Triggers delete it on any row change to the three tables, so no
+#: writer can leave a stale one; a writer that keeps the index complete records
+#: it again, in its own transaction, after proving the sources it changed.
+_DEPENDENCY_PROOF_KEY = "dependency_index_complete"
+#: Names the triggers and joins the record's value. Raise it when a trigger body, the
+#: rule in `_dependency_rows_agree` or an input of that rule changes: triggers are created
+#: once per name, and a record of the old rule must not be read as one of the new rule.
+_DEPENDENCY_PROOF_VERSION = 1
+#: SQLite's default cap on bound variables is 999; a batch of `IN (?, ...)` stays below it.
+_SQL_PARAMETER_BATCH = 900
+#: The tables the proof describes, each with whether only its file rows count.
+_DEPENDENCY_PROOF_TABLES = (
+    ("graph_nodes", True),
+    ("graph_dependencies", False),
+    ("graph_dependency_coverage", False),
+)
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -1178,7 +1198,8 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     unavailable until the stall escalation, longer than a reader waits. Nor
     does a queue whose oldest receipt has waited the drain's stall threshold:
     one receipt that never drains, behind writes that do, held the barrier for
-    good, because their progress restarts the stall escalation's clock.
+    good, because their progress restarts the stall escalation's clock. A queue
+    that only loses races to live commits stays the queue's, whatever its age.
     """
     from . import freshness
 
@@ -1208,8 +1229,12 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
     not refused by the epoch or by an unready vault. The oldest receipt's age
     bounds it: a requeue keeps a receipt's first enqueue time, so a receipt
     that never drains ages past the threshold however much drains around it.
-    An unreadable queue reads as empty, which leaves recovery to the reasons
-    after this one.
+    The age does not bound a queue whose latest pass cleared nothing only
+    because live commits won the race for it
+    (`graph_drain.per_path_repair_raced`): that queue is old because writes keep
+    coming, and a whole-vault pass would lose to the same writes at far greater
+    cost. It drains once they pause. An unreadable queue reads as empty, which
+    leaves recovery to the reasons after this one.
     """
     from . import graph_drain
 
@@ -1220,7 +1245,10 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
         return (
             count > 0
             and oldest_age is not None
-            and oldest_age < graph_drain.stall_seconds()
+            and (
+                oldest_age < graph_drain.stall_seconds()
+                or graph_drain.per_path_repair_raced(vault_root)
+            )
             and deferred_index.graph_full_rebuild_pending(vault_root) is None
         )
     except Exception:  # noqa: BLE001 - an unreadable queue owns no repair
@@ -2017,6 +2045,37 @@ def _dependency_records(
     return records
 
 
+def _dependency_proof_value() -> str:
+    """What a recorded proof says: the dependency format and the rule version it was proved in."""
+    return f"{_DEPENDENCY_FORMAT}.{_DEPENDENCY_PROOF_VERSION}"
+
+
+def _dependency_proof_triggers() -> list[tuple[str, str]]:
+    """Name and SQL of the triggers that retire the recorded proof when a row it describes changes.
+
+    A row-level trigger fires for every writer on every connection, including a
+    process of an older release and a repair that edits rows directly, which no
+    list of call sites could promise. Only a file row of `graph_nodes` is read by
+    the proof, so unit rows do not retire it.
+    """
+    retire = f"DELETE FROM graph_meta WHERE key = '{_DEPENDENCY_PROOF_KEY}'"
+    triggers: list[tuple[str, str]] = []
+    for table, file_rows_only in _DEPENDENCY_PROOF_TABLES:
+        for event, rows in (("INSERT", ("NEW",)), ("UPDATE", ("OLD", "NEW")), ("DELETE", ("OLD",))):
+            when = (
+                "WHEN " + " OR ".join(f"{row}.kind = 'file'" for row in rows)
+                if file_rows_only
+                else ""
+            )
+            name = f"trg_{table}_dependency_proof_v{_DEPENDENCY_PROOF_VERSION}_{event.lower()}"
+            statement = (
+                f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {event} ON {table} {when} "
+                f"BEGIN {retire}; END"
+            )
+            triggers.append((name, statement))
+    return triggers
+
+
 def _dependency_changed_keys(
     rels: set[str], *resolvers: vault_module.WikilinkResolver
 ) -> set[str]:
@@ -2258,7 +2317,8 @@ class EpistemicGraphIndex:
             "activation_provenance_relations",
             "activation_unregistered",
         }
-        if node_columns and not required_node_columns <= node_columns:
+        nodes_dropped = bool(node_columns) and not required_node_columns <= node_columns
+        if nodes_dropped:
             conn.execute("DROP TABLE graph_nodes")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_nodes (
@@ -2316,6 +2376,9 @@ class EpistemicGraphIndex:
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
         )
+        if nodes_dropped:
+            # `DROP TABLE` fires no row trigger, and it took the file rows with it.
+            conn.execute("DELETE FROM graph_meta WHERE key = ?", (_DEPENDENCY_PROOF_KEY,))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)")
         conn.execute(
@@ -2373,6 +2436,19 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
             "ON graph_dependencies(lookup_key, source_path)"
         )
+        current = set()
+        for name, statement in _dependency_proof_triggers():
+            current.add(name)
+            conn.execute(statement)
+        # A trigger of an earlier version is not replaced by name, so it would keep retiring the
+        # record by its old body after the current one is narrowed.
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+            f"AND tbl_name IN ({','.join('?' for _ in _DEPENDENCY_PROOF_TABLES)})",
+            [table for table, _file_rows_only in _DEPENDENCY_PROOF_TABLES],
+        ).fetchall():
+            if "dependency_proof" in name and name not in current:
+                conn.execute(f'DROP TRIGGER "{name}"')
 
     def _connect_existing(
         self,
@@ -2811,8 +2887,9 @@ class EpistemicGraphIndex:
     def republish_availability_if_current(self) -> bool | None:
         """Restore a withdrawn availability marker once nothing is queued against it.
 
-        True restores availability, False declines the proof, and None defers for
-        foreground work. Deferral must not turn an intact graph into rebuild debt.
+        True restores availability, False declines the proof, and None defers:
+        for foreground work, or for an external change the watcher has yet to
+        repair. Deferral must not turn an intact graph into rebuild debt.
 
         Every route that withdraws -- the path-scoped fence, the cold-resolver
         defer, an adopted residue -- pairs the withdrawal with durable repair,
@@ -2868,11 +2945,12 @@ class EpistemicGraphIndex:
         if freshness.external_pending(self.vault_root):
             # The watcher owns that repair and republishes through its own
             # route when it lands. Proving here would spend the whole corpus to
-            # reach a refusal that is already known. A watcher that is dead or
-            # exhausted does not strand the graph on this: the drain daemon's
-            # availability arm falls through to `_request_full_rebuild`, so an
-            # unreadable graph nobody is repairing still gets its repair.
-            return False
+            # reach a refusal that is already known. That makes this a deferral,
+            # not a declined proof. A watcher that is dead or exhausted does not
+            # strand the graph on it: the drain daemon's availability arm queues
+            # a whole-vault rebuild once the same change has stood for
+            # `graph_drain.stall_seconds()`.
+            return None
         if not self._republish_attempt_due():
             return False
         # Parse and reconstruct topology without excluding canonical writers.
@@ -4911,8 +4989,9 @@ class EpistemicGraphIndex:
             if created is None:
                 return False
             with conn:
-                for rel in sorted(created):
-                    self._drop_own_rows(conn, rel)
+                with self._keeping_dependency_proof(conn, created):
+                    for rel in sorted(created):
+                        self._drop_own_rows(conn, rel)
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?", (_AVAILABILITY_FRESHNESS_KEY,)
                 )
@@ -5044,7 +5123,7 @@ class EpistemicGraphIndex:
             indexed = 0
             kb = self.vault_root / kb_dirname()
             type_basis = _producer_type_basis(self.vault_root)
-            with conn:
+            with conn, self._keeping_dependency_proof(conn, None):
                 if kb.is_dir():
                     for md in find_module._walk_md(kb):
                         # The pass writes only its private sidecar, so a
@@ -5850,6 +5929,63 @@ class EpistemicGraphIndex:
         return entries
 
     def _dependency_index_complete(self, conn: sqlite3.Connection) -> bool:
+        """Whether raw dependencies cover every file row, in the caller's snapshot.
+
+        A proof recorded by the writer that left these rows answers from one
+        lookup. Without one (a sidecar older than the record, or rows a repair
+        edited) the whole dependency table is read.
+        """
+        return self._dependency_proof_recorded(conn) or self._prove_dependency_index(conn)
+
+    @staticmethod
+    def _dependency_proof_recorded(conn: sqlite3.Connection) -> bool:
+        try:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM graph_meta WHERE key = ? AND value = ?",
+                    (_DEPENDENCY_PROOF_KEY, _dependency_proof_value()),
+                ).fetchone()
+                is not None
+            )
+        except sqlite3.Error:
+            return False
+
+    @staticmethod
+    def _dependency_triggers_present(conn: sqlite3.Connection) -> bool:
+        """A proof is recorded only where a later row change is certain to retire it."""
+        names = [name for name, _statement in _dependency_proof_triggers()]
+        try:
+            (present,) = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+                f"AND name IN ({','.join('?' for _ in names)})",
+                names,
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        return present == len(names)
+
+    @staticmethod
+    def _dependency_rows_agree(
+        files: dict[str, str],
+        coverage: dict[str, tuple[str, int, int]],
+        counts: dict[str, int],
+    ) -> bool:
+        """The one rule: each file row has a coverage row for its bytes and as many dependencies.
+
+        A change to this rule must raise `_DEPENDENCY_PROOF_VERSION`, and a table that the rule
+        starts to read must join `_DEPENDENCY_PROOF_TABLES`, or a stored proof outlives it.
+        """
+        if set(files) != set(coverage) or not set(counts) <= set(coverage):
+            return False
+        return all(
+            source_hash == files[source_path]
+            and dependency_format == _DEPENDENCY_FORMAT
+            and expected_count >= 0
+            and expected_count == counts.get(source_path, 0)
+            for source_path, (source_hash, dependency_format, expected_count) in coverage.items()
+        )
+
+    def _prove_dependency_index(self, conn: sqlite3.Connection) -> bool:
         """Prove in one snapshot that raw dependencies cover every file row."""
         try:
             files = {
@@ -5873,15 +6009,76 @@ class EpistemicGraphIndex:
             }
         except (sqlite3.Error, TypeError, ValueError):
             return False
-        if set(files) != set(coverage) or not set(counts) <= set(coverage):
+        return self._dependency_rows_agree(files, coverage, counts)
+
+    def _prove_dependency_sources(self, conn: sqlite3.Connection, rels: set[str]) -> bool:
+        """`_prove_dependency_index` restricted to `rels`: the rule, over their rows only."""
+        files: dict[str, str] = {}
+        coverage: dict[str, tuple[str, int, int]] = {}
+        counts: dict[str, int] = {}
+        ordered = sorted(rels)
+        try:
+            for start in range(0, len(ordered), _SQL_PARAMETER_BATCH):
+                batch = ordered[start : start + _SQL_PARAMETER_BATCH]
+                marks = ",".join("?" for _ in batch)
+                files.update(
+                    (str(path), str(source_hash))
+                    for path, source_hash in conn.execute(
+                        "SELECT path, source_hash FROM graph_nodes "
+                        f"WHERE kind = 'file' AND path IN ({marks})",
+                        batch,
+                    )
+                )
+                coverage.update(
+                    (str(source_path), (str(source_hash), int(dependency_format), int(expected)))
+                    for source_path, source_hash, dependency_format, expected in conn.execute(
+                        "SELECT source_path, source_hash, dependency_format, expected_count "
+                        f"FROM graph_dependency_coverage WHERE source_path IN ({marks})",
+                        batch,
+                    )
+                )
+                counts.update(
+                    (str(source_path), int(count))
+                    for source_path, count in conn.execute(
+                        "SELECT source_path, COUNT(*) FROM graph_dependencies "
+                        f"WHERE source_path IN ({marks}) GROUP BY source_path",
+                        batch,
+                    )
+                )
+        except (sqlite3.Error, TypeError, ValueError):
             return False
-        return all(
-            source_hash == files[source_path]
-            and dependency_format == _DEPENDENCY_FORMAT
-            and expected_count >= 0
-            and expected_count == counts.get(source_path, 0)
-            for source_path, (source_hash, dependency_format, expected_count) in coverage.items()
-        )
+        return self._dependency_rows_agree(files, coverage, counts)
+
+    @contextmanager
+    def _keeping_dependency_proof(
+        self, conn: sqlite3.Connection, touched: Iterable[str] | None
+    ) -> Iterator[None]:
+        """Write rows of `touched` sources only, and record the proof they leave.
+
+        The write lock comes first, so "was the proof recorded" is read from the
+        state this transaction then changes. Recorded, only `touched` can
+        disagree, and they are proved alone. Otherwise, or when `touched` is None
+        because the writer may change any source, the whole table is proved,
+        which is the cost the record saves a later reader. Recorded last but
+        before any publication hook, so a hook that edited a row outside
+        `touched` would retire it again. It records only where all the retiring
+        triggers exist, so a record never sits in a database that cannot retire
+        it. A failure leaves nothing recorded, and the rows roll back with the
+        caller's transaction.
+        """
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        was_recorded = touched is not None and self._dependency_proof_recorded(conn)
+        yield
+        if self._dependency_triggers_present(conn) and (
+            self._prove_dependency_sources(conn, set(touched or ()))
+            if was_recorded
+            else self._prove_dependency_index(conn)
+        ):
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                (_DEPENDENCY_PROOF_KEY, _dependency_proof_value()),
+            )
 
     @staticmethod
     def _dependency_sources_for_keys(
@@ -5890,8 +6087,8 @@ class EpistemicGraphIndex:
         if not keys:
             return set()
         rows: set[tuple[str, str]] = set()
-        for start in range(0, len(keys), 900):
-            batch = sorted(keys)[start : start + 900]
+        for start in range(0, len(keys), _SQL_PARAMETER_BATCH):
+            batch = sorted(keys)[start : start + _SQL_PARAMETER_BATCH]
             placeholders = ",".join("?" for _ in batch)
             rows.update(
                 (str(source_path), str(raw_target))
@@ -6036,7 +6233,7 @@ class EpistemicGraphIndex:
                                 self._delete_path(conn, rel)
                     finally:
                         conn.close()
-            return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+            return {"indexed_files": 0, "disabled": 1}
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
         ):
@@ -6099,7 +6296,7 @@ class EpistemicGraphIndex:
                     reason="external_event_covers_these_paths",
                     graph_checkpoint=graph_checkpoint,
                 )
-                report: dict[str, Any] = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+                report: dict[str, Any] = {"indexed_files": 0, "deferred": 1}
                 if queued:
                     report["queued"] = 1
                     report["external_pending"] = 1
@@ -6133,7 +6330,7 @@ class EpistemicGraphIndex:
                     "graph replay left its repair to the drain marker_stands=%s",
                     marker_stands,
                 )
-                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+                return {"indexed_files": 0, "deferred": 1, "queued": 1}
             if not _parent_receipted_graph_handoff_active(
                 self.vault_root, self._mutation_coordinator.state_root
             ):
@@ -6142,7 +6339,7 @@ class EpistemicGraphIndex:
                 index_sync.drain_graph_work(self.vault_root, paths=scope)
                 if not deferred_index.snapshot_graph(self.vault_root, limit=1, paths=scope):
                     # A standing marker drained through its whole-vault pass.
-                    report = {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    report = {"indexed_files": 0}
                     if marker_stands:
                         report["whole_vault"] = 1
                     return report
@@ -6156,7 +6353,7 @@ class EpistemicGraphIndex:
             ) and self._leave_rebuild_to_the_drain(
                 graph_checkpoint, durable_before_rebuild=durable_before_rebuild
             ):
-                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+                return {"indexed_files": 0, "deferred": 1, "queued": 1}
             try:
                 with _logged_whole_vault_rebuild(
                     graph_checkpoint.generation
@@ -6189,8 +6386,6 @@ class EpistemicGraphIndex:
                     )
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "deferred": 1,
                     "queued": 1,
                     "coalesced": 1,
@@ -6301,8 +6496,6 @@ class EpistemicGraphIndex:
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "_rebuild_after_release": 1,
                     "_durable_before_rebuild": 1,
                 }
@@ -6312,7 +6505,7 @@ class EpistemicGraphIndex:
             # may tell the dispatch layer the queue owns this repair; without
             # the distinction that layer reads an unregistered, unacknowledged
             # checkpoint as a missing rebuild and schedules the vault anyway.
-            report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+            report = {"indexed_files": 0, "deferred": 1, "queued": 1}
             if reason == "resolver_snapshot_unavailable":
                 # Dispatch has to tell this pending outcome from the others. A
                 # standalone caller is told pending here, as it is for a fenced
@@ -6353,8 +6546,6 @@ class EpistemicGraphIndex:
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "_rebuild_after_release": 1,
                 }
             self._mark_unavailable()
@@ -6364,7 +6555,7 @@ class EpistemicGraphIndex:
                 lambda checkpoint: _registered_rebuild_outcome(self, checkpoint),
                 state_root=self._mutation_coordinator.state_root,
             )
-            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+            return {"indexed_files": 0, "deferred": 1}
 
         if graph_checkpoint is not None:
             refused = _checkpoint_binding_refusal(
@@ -6427,7 +6618,7 @@ class EpistemicGraphIndex:
                         graph_checkpoint.generation,
                         acknowledged.generation,
                     )
-                    return {"indexed_files": 0, "nodes": 0, "edges": 0}
+                    return {"indexed_files": 0}
                 return fallback("acknowledgement_is_not_the_predecessor")
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
@@ -6498,8 +6689,6 @@ class EpistemicGraphIndex:
                     return fallback("caller_path_outside_delta")
                 return {
                     "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
                     "_drain_after_release": sorted(deferred_scope),
                 }
             log.info(
@@ -6511,7 +6700,7 @@ class EpistemicGraphIndex:
             if not delta_paths:
                 # Nothing moved since the stored checkpoint and the caller's
                 # pages are already what the rows say: the replay owes nothing.
-                return {"indexed_files": 0, "nodes": 0, "edges": 0}
+                return {"indexed_files": 0}
             paths = [path for path in paths if str(path) in delta_paths]
             # Proved current, so neither a created page outside the delta: left
             # in, it is a created path without a delta row to vouch for it.
@@ -6895,27 +7084,31 @@ class EpistemicGraphIndex:
         conn = self._connect()
         indexed = 0
         type_basis = _producer_type_basis(self.vault_root)
+        touched = {
+            rel for path in paths if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+        }
         try:
             with conn:
-                for path in paths:
-                    if self._index_path(
-                        conn,
-                        path,
-                        resolver=resolver,
-                        commit=False,
-                        indexed_versions=indexed_versions,
-                        type_basis=type_basis,
-                    ):
-                        indexed += 1
+                with self._keeping_dependency_proof(conn, touched):
+                    for path in paths:
+                        if self._index_path(
+                            conn,
+                            path,
+                            resolver=resolver,
+                            commit=False,
+                            indexed_versions=indexed_versions,
+                            type_basis=type_basis,
+                        ):
+                            indexed += 1
                 if resolver_fingerprint is not None:
                     self._write_resolver_topology(conn, resolver_fingerprint)
                 if before_commit is not None:
                     before_commit(conn)
-                n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
-                n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
         finally:
             conn.close()
-        return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
+        # No row totals: counting `graph_edges` inside the hold read the whole table, which took
+        # about 13 s at 15,000 pages on a cold page cache, and no caller reads the totals.
+        return {"indexed_files": indexed}
 
     def _topology_affected_sources(
         self,
@@ -7068,8 +7261,6 @@ class EpistemicGraphIndex:
         """
         report: dict[str, Any] = {
             "indexed_files": 0,
-            "nodes": 0,
-            "edges": 0,
             "published": False,
             "indexed": (),
         }
@@ -7114,7 +7305,10 @@ class EpistemicGraphIndex:
                 or freshness.external_pending_epoch(self.vault_root) != external_epoch
             ):
                 log.info("deferred graph drain outcome=moved_before_pass queued=%d", len(paths))
-                return {**report, "moved": 1}
+                # A commit landed between sampling and the lock: a live writer
+                # won the race, not a fault of this pass's pages. Callers tell
+                # it apart from a pass that failed for a reason of its own.
+                return {**report, "moved": 1, "commit_race": 1}
             before = _incremental_projection_identity(self.vault_root)
             queued_rels = {
                 rel
@@ -7376,8 +7570,8 @@ class EpistemicGraphIndex:
                             "DELETE FROM graph_parent_refs WHERE path = ?", (path,)
                         ).rowcount
                     for column, raw_values in values.items():
-                        for start in range(0, len(raw_values), 900):
-                            batch = raw_values[start : start + 900]
+                        for start in range(0, len(raw_values), _SQL_PARAMETER_BATCH):
+                            batch = raw_values[start : start + _SQL_PARAMETER_BATCH]
                             placeholders = ",".join("?" for _ in batch)
                             changed += conn.execute(
                                 f"DELETE FROM graph_edges WHERE {column} IN ({placeholders})",
@@ -7630,7 +7824,11 @@ class EpistemicGraphIndex:
         *,
         commit: bool = True,
     ) -> int:
-        with conn if commit else nullcontext():
+        with ExitStack() as transaction:
+            if commit:
+                # Inside a caller's transaction (`commit=False`), that caller keeps the proof.
+                transaction.enter_context(conn)
+                transaction.enter_context(self._keeping_dependency_proof(conn, {rel_path}))
             conn.execute(
                 "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_page_key = ?",
                 (rel_path, _file_key(rel_path), _file_key(rel_path)),

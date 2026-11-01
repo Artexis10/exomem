@@ -1,0 +1,49 @@
+[project]
+name = "exomem-diarizer"
+version = "0.1.0"
+description = "Isolated diarization sidecar for exomem: pyannote on standard CUDA torch, invoked as a subprocess. GPU-capable (Blackwell sm_120) with CPU fallback."
+# <3.13 on purpose: the pinned torch 2.9.x line ships cp311/cp312 wheels; uv auto-fetches a
+# compatible interpreter for this venv (decoupled from the main service's Python).
+requires-python = ">=3.11,<3.13"
+
+# ⚠️ THESE PINS ARE LOAD-BEARING — DO NOT `uv lock --upgrade` THEM. ⚠️
+# This mirrors a PROVEN Blackwell-GPU diarization stack (verified end-to-end on an RTX 5080:
+# 47s vs 18min CPU for a 37-min track). The sidecar exists because the main service's bleeding-edge
+# torch-2.12+cu132 is incompatible with pyannote (torchaudio 2.11 dropped AudioMetaData /
+# set_audio_backend, etc.). torch 2.9.1+cu130 is the sweet spot: it has Blackwell sm_120 kernels
+# AND works with pyannote — "cu130 required; cu126 lacks sm_120" (a reference deployment's Dockerfile). Key choices:
+#   - pyannote.audio 4.x PACKAGE (drops the dead torchaudio set_audio_backend/AudioMetaData calls
+#     the 3.1 package made) while the worker still loads the speaker-diarization-3.1 MODEL (faster
+#     than the v4 pipeline; the reference deployment does the same). The 4.x output is a DiarizeOutput wrapper — the worker
+#     pulls the Annotation off it.
+#   - No speechbrain: the sidecar ONLY diarizes; ECAPA named-attribution runs in the main venv.
+#   - torchcodec rides along (pyannote 4 dep) but is NEVER used — we pre-decode via faster-whisper
+#     and pass pyannote a {waveform, sample_rate} dict, so its Windows libtorchcodec load failure is
+#     a harmless warning (pyannote itself documents the waveform-dict path as the fix).
+dependencies = [
+    "pyannote.audio>=4.0",
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    # Bundles PyAV/ffmpeg + provides decode_audio — the SAME decoder the main venv's ASR uses, so
+    # diarization turns share the whisper timebase and segment↔turn assignment can't drift.
+    "faster-whisper>=1.0",
+    "soundfile>=0.13",
+]
+
+[tool.uv]
+package = false
+
+# torch source is platform-conditional so this sidecar builds on Windows / Linux / macOS:
+#   - win32 + linux → the CUDA-13.0 (cu130) index → Blackwell sm_120 GPU kernels (a cu130 build
+#     also runs on CPU, so a GPU-less Linux box still works, just slower).
+#   - macOS (and anything else) → default PyPI → the CPU/MPS wheels (cu130 has no macOS wheels;
+#     pinning it unconditionally would break `uv sync` on a Mac). The worker's device=auto falls
+#     back to CPU there. Mirrors the marker pattern in the main pyproject's [tool.uv.sources].
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

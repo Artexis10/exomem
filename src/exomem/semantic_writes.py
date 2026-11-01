@@ -645,6 +645,23 @@ def _posthoc_relative_path(root: Path, path: Path | str) -> str | None:
     return vault.canonical_vault_rel(root, value)
 
 
+def build_posthoc_corpus(
+    vault_root: Path, *, status_basis: lifecycle_statuses.Basis
+) -> tuple[semantic_contract.SemanticCorpusContext, semantic_language_registry.SemanticLanguageRegistry]:
+    """The corpus and language registry a posthoc pass reads.
+
+    A caller that needs the corpus before it evaluates builds it here, then passes both back to
+    `evaluate_posthoc_batch`, so one pass reads the vault once.
+    """
+    root = Path(vault_root)
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language, status_basis=status_basis
+    )
+    return corpus, language
+
+
 def evaluate_posthoc_batch(
     vault_root: Path,
     *,
@@ -664,12 +681,8 @@ def evaluate_posthoc_batch(
         )
     root = Path(vault_root)
     if corpus is None:
-        registry = relation_registry.load_registry(root)
-        language = semantic_language_registry.load_registry(root)
+        corpus, language = build_posthoc_corpus(root, status_basis=status_basis)
         resolved_saved_contracts = memory_schema.load_saved_contracts(root)
-        corpus = semantic_contract.build_corpus_context(
-            root, registry=registry, language_registry=language, status_basis=status_basis
-        )
     else:
         language = language_registry or semantic_language_registry.load_registry(root)
         resolved_saved_contracts = (
@@ -1426,6 +1439,11 @@ def _existing_transition_token(
     # validated ones instead of drifting whenever the clock ticks between calls.
     if stamp is not None:
         payload["stamp"] = stamp
+    # The release that planned the transition rides in the token, so an exact
+    # retry after an upgrade re-plans the same history bytes.
+    from . import __version__
+
+    payload["exomem_version"] = __version__
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -1549,13 +1567,19 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     }
     # `stamp` is optional so a token minted before this field existed still
     # decodes; a token that omits it simply cannot pin the writer's instant.
-    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at"})):
+    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at", "exomem_version"})):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
     if value["version"] != 1 or any(
         type(value[key]) is not str
         for key in ("transition_id", "operation", "path", "before_hash", "after_hash")
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    if "exomem_version" in value and (
+        type(value["exomem_version"]) is not str or not value["exomem_version"]
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
@@ -2509,8 +2533,20 @@ def _commit_existing_locked(
                 _vocabulary_auxiliaries=manifest,
                 _validate_prepared_bindings=validate_bindings,
             )
-    except vault.PathGuardError:
+    except vault.PathGuardError as error:
         _recheck_origin_guards(root, origin_guards)
+        if error.code != "PATH_VARIANT_EXISTS":
+            vault.refuse_busy_if_planned_write_moved(
+                root,
+                (
+                    preflight.primary_guard,
+                    *required_guards,
+                    *origin_guards,
+                    *preflight.read_dependency_guards,
+                    *source_guards,
+                ),
+                (write for write in writes if write is not primary_write),
+            )
         raise
     try:
         catalog_publication.publish_markdown_batch(catalog_target)
@@ -5115,6 +5151,7 @@ def _commit_structural(
         root, planned, operation=operation, status_basis=status_basis, judged=judged
     )
     writes = [*shared_writes, *(write for item in planned for write in item.auxiliaries)]
+    auxiliary_writes = tuple(writes)
     primary_writes = [
         vault.PlannedWrite(
             root / item.preflight.destination,
@@ -5154,6 +5191,7 @@ def _commit_structural(
         for bound in bound_origins:
             _validate_origin_inputs(root, bound)
 
+    closure_guards = tuple(guard for item in planned for guard in item.closure_plan.required_guards)
     token = semantic_index.set_parent_states(
         {
             destination: semantic_index.from_semantic_page_state(state)
@@ -5173,7 +5211,7 @@ def _commit_structural(
             required_guards=(
                 *vocabulary_guards,
                 *origin_guards,
-                *(guard for item in planned for guard in item.closure_plan.required_guards),
+                *closure_guards,
             ),
             _vocabulary_auxiliaries=manifests[0] if len(manifests) == 1 else manifests,
             _validate_prepared_bindings=validate_bound_origins if bound_origins else None,
@@ -5182,7 +5220,17 @@ def _commit_structural(
         if error.code == "PATH_VARIANT_EXISTS":
             raise SemanticWriteError(error.code, error.reason) from error
         _recheck_origin_guards(root, origin_guards)
-        if vocabulary_guards:
+        vault.refuse_busy_if_planned_write_moved(
+            root,
+            (
+                *vocabulary_guards,
+                *origin_guards,
+                *closure_guards,
+                *(write.guard for write in primary_writes if write.guard is not None),
+            ),
+            auxiliary_writes,
+        )
+        if vault.any_guard_changed(root, vocabulary_guards):
             raise SemanticWriteError(
                 "STALE_VOCABULARY_BINDING",
                 "domain vocabulary changed during commit; validate a fresh draft",
@@ -5386,7 +5434,8 @@ def _commit_creation(
                     semantic_state=semantic_index.from_semantic_page_state(
                         preflight.semantic_state
                     ),
-                    extra_required_guards=(*vocabulary_guards, *closure_plan.required_guards),
+                    vocabulary_guards=vocabulary_guards,
+                    closure_guards=closure_plan.required_guards,
                     origin_required_guards=_origin_commit_guards(
                         root, preflight.origin_inputs, catalog_writes
                     ),

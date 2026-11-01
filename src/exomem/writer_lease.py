@@ -27,7 +27,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections import deque
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
@@ -37,7 +38,7 @@ from typing import Any, get_args
 
 from filelock import ReadWriteLock, Timeout
 
-from . import call_spans, durable_write, mutation_lock, request_budget
+from . import call_spans, durable_write, mutation_journal, mutation_lock, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -81,16 +82,28 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest"})
 # Maintenance modes whose writes remote surfaces admit. Each one is governed by
 # an exact reviewed plan or preview identity, so remote callers get the same
 # capability as the CLI. Closed set: the maintain_memory mode literal fixes it.
-REMOTE_WRITE_MAINTENANCE_MODES = frozenset({"structured-files", "tag-variants", "curation"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+REMOTE_WRITE_MAINTENANCE_MODES = frozenset({  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
+    "structured-files", "tag-variants", "curation", "maintenance-job-cancel", "collections-store-adopt-local",
+})
+
+
+def remote_admitted_maintenance_modes() -> frozenset[str]:
+    """Maintenance write modes a request-bound surface admits: the direct ones and the plan-bound job modes."""
+    from .maintenance_jobs import JOB_MODES
+
+    return REMOTE_WRITE_MAINTENANCE_MODES | JOB_MODES
+
+
 REMOTE_MAINTENANCE_MESSAGE = (
     "write-mode maintenance is unavailable through request-bound remote commands"
 )
 
 
+# Only a mode with no remote form reaches this refusal, and today that is `collections-store-export`
+# apply, which runs on the host with the service stopped. A mode that joins it needs its own text.
 REMOTE_MAINTENANCE_REMEDIATION = (
-    "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
-    "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
-    "--no-dry-run`. Use audit or dry_run=true remotely."
+    "Stop the service on the host, then run `exomem collections export --plan-id ID --why REASON` there. "
+    "Preview the export remotely without apply."
 )
 
 # Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
@@ -305,6 +318,8 @@ class _FastAcknowledgementSession:
     advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
     handoff_in_progress: bool = False
+    #: `_owed_proofs` for the batch and pending counts it was read at.
+    owed_proofs: tuple[tuple[int, int], tuple[int, int]] | None = None
 
 
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
@@ -520,6 +535,124 @@ def active_derived_batch_custody(vault_root: Path) -> bool:
     return session is not None and _fast_ack_root_key(vault_root) == _fast_ack_root_key(
         session.vault_root
     )
+
+
+#: Seconds one committed batch took to hand off its custody, per vault: the last few, kept in
+#: memory only, so a new process starts unmeasured. A bulk operation reads them to size the
+#: time it leaves for its own handoff.
+_HANDOFF_SAMPLES_KEPT = 8
+_handoff_samples: dict[Path, deque[float]] = {}
+_handoff_samples_lock = threading.Lock()
+
+
+def _unhanded_batches(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    return [
+        batch
+        for batch in session.batches
+        if batch.handoff_outcome is None and batch.handoff_error is None
+    ]
+
+
+def _custody_proofs(
+    session: _FastAcknowledgementSession,
+    rel_paths: Collection[str],
+    holders: frozenset[str] | None,
+) -> list[_FastAcknowledgementBatch]:
+    """The session's batches, newest first, that a handoff moving `rel_paths` proves.
+
+    Each batch on one of the paths that is not handed off or whose handoff failed, and each
+    earlier one that still holds unretired custody on one of them. An earlier batch whose
+    rows on those paths are all retired handed them on before, to the batch that holds them
+    now, so its re-proof would find nothing to hand on. Without that skip each handoff
+    re-proves every batch that shares an import's index pages, and an import's handoffs
+    cost the square of its batches. Unknown `holders` (unreadable custody) prove every
+    batch on the paths: dearer, never less.
+    """
+    return [
+        batch
+        for batch in reversed(session.batches)
+        if any(path.rel_path in rel_paths for path in batch.receipt.paths)
+        and (
+            batch.handoff_outcome is None
+            or batch.handoff_error is not None
+            or holders is None
+            or batch.receipt.batch_id in holders
+        )
+    ]
+
+
+def _handoff_targets(session: _FastAcknowledgementSession) -> list[_FastAcknowledgementBatch]:
+    """The batches the next handoff proves, newest first: `_custody_proofs` of the unhanded."""
+    unhanded = _unhanded_batches(session)
+    changed = {path.rel_path for batch in unhanded for path in batch.receipt.paths}
+    if not changed:
+        return []
+    from . import derived_receipts
+
+    holders = derived_receipts.open_custody_batches(session.vault_root, changed)
+    return _custody_proofs(session, changed, holders)
+
+
+def _owed_proofs(session: _FastAcknowledgementSession) -> tuple[int, int]:
+    """The batches the session's next handoff proves now, and the ones a later batch adds.
+
+    A batch still to commit moves what the newest batch moved, as each batch of an import
+    rewrites its index and log pages, so it also re-proves the earlier holders of those
+    pages. Read once per commit or handoff: between them custody only retires, so the
+    counts stay an upper bound.
+    """
+    unhanded = _unhanded_batches(session)
+    key = (len(session.batches), len(unhanded))
+    if session.owed_proofs is not None and session.owed_proofs[0] == key:
+        return session.owed_proofs[1]
+    changed = {path.rel_path for batch in unhanded for path in batch.receipt.paths}
+    newest = session.batches[-1:]
+    later = {path.rel_path for batch in newest for path in batch.receipt.paths}
+    counts = (0, 0)
+    if changed or later:
+        from . import derived_receipts
+
+        holders = derived_receipts.open_custody_batches(session.vault_root, changed | later)
+        proved = {batch.receipt.batch_id for batch in _custody_proofs(session, changed, holders)}
+        held = {batch.receipt.batch_id for batch in _custody_proofs(session, later, holders)}
+        counts = (len(proved), len(held - proved))
+    session.owed_proofs = (key, counts)
+    return counts
+
+
+def _timed_handoff(session: _FastAcknowledgementSession) -> None:
+    """Hand off the session's pending batches and keep the seconds each batch it proved took."""
+    began = _fast_ack_monotonic()
+    proved = _handoff_derived_batches(session)
+    if proved:
+        per_batch = max(0.0, _fast_ack_monotonic() - began) / proved
+        with _handoff_samples_lock:
+            _handoff_samples.setdefault(
+                _fast_ack_root_key(session.vault_root), deque(maxlen=_HANDOFF_SAMPLES_KEPT)
+            ).append(per_batch)
+
+
+def owed_custody_handoff_seconds(vault_root: Path, *, more_batches: int) -> float | None:
+    """Seconds the custody handoff will take once `more_batches` more batches have committed.
+
+    The dearest recent time per proved batch, times the batches a handoff would prove
+    (`_owed_proofs`): those it proves now, `more_batches`, and with them the earlier
+    holders of the pages they move. Nothing when no batch is owed. None when no handoff
+    has been measured for this vault.
+    """
+    with _handoff_samples_lock:
+        samples = _handoff_samples.get(_fast_ack_root_key(vault_root))
+        dearest = max(samples) if samples else None
+    if dearest is None:
+        return None
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    if session is None or not active_derived_batch_custody(vault_root):
+        proved, held = 0, 0
+    else:
+        proved, held = _owed_proofs(session)
+    if not proved and not more_batches:
+        return 0.0
+    return dearest * (proved + (more_batches + held if more_batches else 0))
 
 
 #: What the running leaf declared about its default duplicate/overlap sweep:
@@ -859,28 +992,21 @@ def _acknowledgement_component_names() -> tuple[str, ...]:
     )
 
 
-def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
+def _handoff_derived_batches(session: _FastAcknowledgementSession) -> int:
     """Cache exact custody before releasing canonical writers, without waits.
 
     A newer hold can move a path whose earlier receipt was already handed off.
-    Re-prove only those overlapping receipts after publishing the newer custody.
+    Re-prove only the earlier receipts that still hold custody on such a path
+    (`_handoff_targets`), after publishing the newer custody.
     A failed handoff stays pending and cannot escape into canonical rollback.
+    Returns how many receipts it proved, for the handoff's per-batch time.
     """
+    proved = 0
     if session.handoff_in_progress:
-        return
-    pending = [
-        batch
-        for batch in session.batches
-        if batch.handoff_outcome is None and batch.handoff_error is None
-    ]
-    if not pending:
-        return
-    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
-    affected = [
-        batch
-        for batch in reversed(session.batches)
-        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
-    ]
+        return proved
+    affected = _handoff_targets(session)
+    if not affected:
+        return proved
     where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
     # Public proof and publication guards reenter consistency_guard, including
     # on the direct leaf fallback where no enclosing canonical hold exists.
@@ -911,6 +1037,7 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
                     receipt,
                     current_generation=observed_generation,
                 )
+            proved += 1
             where["outcome"] = proof.outcome
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
@@ -949,6 +1076,7 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
                 batch.handoff_error = uncertain
     finally:
         session.handoff_in_progress = False
+    return proved
 
 
 def _acknowledge_derived_batches_timed(
@@ -991,7 +1119,7 @@ def _acknowledge_derived_batches_timed(
             deadline = min(deadline, budget_deadline)
         # Direct leaves without a matching vault hold keep the guarded fallback.
         # Held writes reuse their exact handoff, including a cached failure.
-        _handoff_derived_batches(session)
+        _timed_handoff(session)
         for batch in session.batches:
             if batch.handoff_error is not None:
                 raise batch.handoff_error
@@ -3225,7 +3353,12 @@ class IdempotencyStore:
             if stat.S_IMODE(info.st_mode) != desired_mode:
                 os.chmod(path, desired_mode)
         for owner_lock in owners_dir.glob("*.lock"):
-            info = owner_lock.lstat()
+            # Another process releases its owner lock at any time; one that vanished
+            # after the listing has nothing left to harden.
+            try:
+                info = owner_lock.lstat()
+            except FileNotFoundError:
+                continue
             if (
                 stat.S_ISLNK(info.st_mode)
                 or not stat.S_ISREG(info.st_mode)
@@ -3234,7 +3367,10 @@ class IdempotencyStore:
             ):
                 raise RuntimeError("idempotency owner lock cannot be upgraded safely")
             if stat.S_IMODE(info.st_mode) != 0o600:
-                os.chmod(owner_lock, 0o600)
+                try:
+                    os.chmod(owner_lock, 0o600)
+                except FileNotFoundError:
+                    continue
 
     def _connect(self) -> sqlite3.Connection:
         if self._runtime_state_error is not None:
@@ -4349,17 +4485,17 @@ _CAPTURE_WAIT_CEILING_SECONDS = 600.0
 _CAPTURE_RETRY_FLOOR_SECONDS = 0.05
 _CAPTURE_WAITERS_FULL_REMEDIATION = (
     "The write did not commit. Other writes are already waiting on the boundary and "
-    "the server keeps workers free for reads: retry with the same idempotency key "
-    "after retry_after_ms."
+    "the server keeps workers free for reads: retry after retry_after_ms, with the "
+    "same idempotency key if the write carried one."
 )
 _CAPTURE_HOLDER_OVERDUE_REMEDIATION = (
     "The write did not commit. The mutation boundary's holder has run past its "
     "allowance and looks stuck: inspect coordination_status or cell health, then "
-    "retry with the same idempotency key once it clears."
+    "retry once it clears, with the same idempotency key if the write carried one."
 )
 _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
     "The write did not commit. The boundary stayed busy for the whole bounded wait: "
-    "retry with the same idempotency key after retry_after_ms."
+    "retry after retry_after_ms, with the same idempotency key if the write carried one."
 )
 
 
@@ -4368,6 +4504,26 @@ def _writes_absorb_contention() -> bool:
         "0",
         "false",
     }
+
+
+_CALLER_HOLDS_NO_REQUEST_WORKER: ContextVar[bool] = ContextVar(
+    "exomem_caller_holds_no_request_worker", default=False
+)
+
+
+@contextmanager
+def caller_holds_no_request_worker() -> Iterator[None]:
+    """Mark a write whose caller is a background thread, not an anyio request worker.
+
+    The waiter cap below protects anyio's request workers from a long holder. A background
+    commit thread is not one, so such a write still waits in line and parks, but it neither
+    takes nor counts a waiter slot and so can never make a request's write refuse as full.
+    """
+    token = _CALLER_HOLDS_NO_REQUEST_WORKER.set(True)
+    try:
+        yield
+    finally:
+        _CALLER_HOLDS_NO_REQUEST_WORKER.reset(token)
 
 
 # A waiting write parks one of the process's sync workers (anyio's limiter,
@@ -4422,6 +4578,61 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
             max(0.0, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS - guard_seconds),
         )
     return wait
+
+
+_WARMUP_POLL_SECONDS = 0.25
+
+
+def _wait_out_write_warmup(
+    *, refuse_cause: str | None, deadline: float
+) -> tuple[str | None, str | None, float]:
+    """The component still warming when the wait ends, why it was not waited out, and seconds waited.
+
+    Warm-up ends by itself within seconds (5-20 s per restart on a personal vault,
+    2026-10-25..30), so a keyed write waits it out until `deadline`, the same
+    deadline its busy-boundary wait uses, and on the same parked-worker cap,
+    instead of handing the client a refusal it can only retry. An unkeyed write
+    keeps the immediate refusal: a client that gave up during the wait and resent
+    it would run it twice, and so does an attempt on a collection store's thread,
+    which never parks. `refuse_cause` names either case. The cause is None when
+    nothing was warming, and the seconds are 0 unless this write actually parked.
+    """
+    from . import readiness
+
+    def still_warming() -> str | None:
+        # Readiness components, a closed set that readiness.COMPONENTS fixes.
+        return next(
+            (c for c in ("graph_handoff", "semantic_corpus") if readiness.should_defer(c)),
+            None,
+        )
+
+    warming = still_warming()
+    if warming is None:
+        return None, None, 0.0
+    if refuse_cause is not None:
+        return warming, refuse_cause, 0.0
+    if not _writes_absorb_contention():
+        return warming, "absorb_disabled", 0.0
+    if time.monotonic() >= deadline:
+        return warming, "warm_wait_exhausted", 0.0
+    counted = not _CALLER_HOLDS_NO_REQUEST_WORKER.get()
+    if counted and not _take_capture_waiter_slot():
+        return warming, "capture_waiters_full", 0.0
+    started = time.monotonic()
+    try:
+        while warming is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Polled, not one long wait: a warm that finishes without marking
+            # this component also ends the gate (should_defer turns false).
+            readiness.wait(warming, min(remaining, _WARMUP_POLL_SECONDS))
+            warming = still_warming()
+    finally:
+        if counted:
+            _release_capture_waiter_slot()
+    waited = time.monotonic() - started
+    return warming, None if warming is None else "warm_wait_exhausted", waited
 
 
 @dataclass(frozen=True)
@@ -4514,18 +4725,32 @@ class _ContentionWait:
     Only the thread that waits uses it; an attempt on the store thread reads a `_StoreAttempt`.
     """
 
-    def __init__(self, queue: _FairCaptureQueue, wait_seconds: float) -> None:
+    def __init__(
+        self,
+        queue: _FairCaptureQueue,
+        wait_seconds: float,
+        *,
+        started: float | None = None,
+        deadline: float | None = None,
+    ) -> None:
         self.queue = queue
-        self.started = time.monotonic()
-        self.deadline = self.started + wait_seconds
+        # A write that already waited out warm-up keeps the clock `invoke` started,
+        # so its busy wait neither restarts the bound nor under-reports waited_ms.
+        self.started = time.monotonic() if started is None else started
+        self.deadline = self.started + wait_seconds if deadline is None else deadline
         self.ticket: object | None = None
         self.holds_slot = False
+        # Whether the slot counts against the cap; a caller with no request worker holds one free.
+        self.slot_counted = False
         self.absorbed = 0
         self.last_attempt_seconds = 0.0
 
     def take_slot(self) -> bool:
         if not self.holds_slot:
-            self.holds_slot = _take_capture_waiter_slot()
+            if _CALLER_HOLDS_NO_REQUEST_WORKER.get():
+                self.holds_slot = True
+            else:
+                self.holds_slot = self.slot_counted = _take_capture_waiter_slot()
         return self.holds_slot
 
     def join_line(self) -> None:
@@ -4557,9 +4782,9 @@ class _ContentionWait:
         return round((time.monotonic() - self.started) * 1000)
 
     def close(self) -> None:
-        if self.holds_slot:
+        if self.slot_counted:
             _release_capture_waiter_slot()
-            self.holds_slot = False
+        self.holds_slot = self.slot_counted = False
         if self.ticket is not None:
             self.queue.leave(self.ticket)
             self.ticket = None
@@ -4755,7 +4980,8 @@ class LeaseManager:
             marker = self._collection_file_marker(self._file_store_acquisition)
             return marker is not None and marker == self._file_store_marker
         # A standalone writer re-proves the acquire predicate on every renew, so a
-        # changed marker mid-guard is refused by the coordinator, not assumed.
+        # marker removed, or a create still pending, mid-guard is refused by the
+        # coordinator, not assumed.
         return not self._serves_collection_store and self._offers_collection_store_capability()
 
     def _collection_file_marker(self, acquired=None, *, vault_root=None):
@@ -4953,14 +5179,20 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "unknown",
+        may_borrow: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
-        """Serialize hosted reads with mutations without requiring writer authority."""
+        """Serialize hosted reads with mutations without requiring writer authority.
+
+        `may_borrow` is for a brief derived hold that writes no canonical content: it may
+        also take the boundary that a long mutation lends between its units (`lend_boundary`).
+        """
         mutation = self._mutation_coordinator_for(vault_root)
         outermost = not mutation.current_thread_holds_boundary()
         with mutation.hold(
             request_id=request_id,
             operation=operation,
             holder_kind=holder_kind,
+            may_borrow=may_borrow,
         ):
             try:
                 yield mutation
@@ -4969,7 +5201,55 @@ class LeaseManager:
                 if outermost and session is not None and active_derived_batch_custody(vault_root):
                     # _mutation_boundary has bumped the generation. Keep exact
                     # receipt custody visible before any waiting writer enters.
-                    _handoff_derived_batches(session)
+                    _timed_handoff(session)
+
+    def lend_boundary(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        next_unit_seconds: float,
+        next_unit_batches: int,
+        room_seconds: float,
+    ) -> int:
+        """Let waiting borrowers hold the boundary between two committed units of a long mutation.
+
+        A loan first publishes what a release would: the custody of the fast-acknowledged
+        batches so far, then the commit generation. The holder lends only when that serves a
+        borrower the next lend could not: the earliest borrower gives up before the next unit
+        and the handoff after it end, yet still waits once this handoff ends, and the handoff
+        fits in `room_seconds`, the time the next unit may take. No offer outlives that room.
+        Returns how many borrowers held the boundary.
+        """
+        mutation = self._mutation_coordinator_for(vault_root)
+        due = mutation.next_borrower_deadline()
+        if due is None or not mutation.current_thread_holds_boundary():
+            return 0
+        root = Path(vault_root)
+        session = _ACTIVE_FAST_ACK_SESSION.get()
+        custody = session is not None and active_derived_batch_custody(root)
+        handoff, later = 0.0, 0.0
+        if custody:
+            if any(batch.handoff_error is not None for batch in session.batches):
+                # A failed handoff stays owed to the terminal: a borrower would read
+                # custody that was never published.
+                return 0
+            handoff = owed_custody_handoff_seconds(root, more_batches=0)
+            later = owed_custody_handoff_seconds(root, more_batches=next_unit_batches)
+            if handoff is None or later is None:
+                # Unmeasured, the handoff could take any part of the room.
+                return 0
+        now = time.monotonic()
+        if not now + handoff < due <= now + next_unit_seconds + later or handoff >= room_seconds:
+            return 0
+        if custody:
+            _timed_handoff(session)
+            if any(batch.handoff_error is not None for batch in session.batches):
+                return 0
+        if mutation.next_borrower_deadline() is None:
+            # Every borrower gave up during the handoff, so no reader needs a new generation.
+            return 0
+        _bump_commit_generation(self.config.state_dir, vault_root)
+        return mutation.lend(until=now + room_seconds)
 
     @contextmanager
     def reserved_identity_guard(
@@ -5079,6 +5359,47 @@ class LeaseManager:
             yield mutation
 
     @contextmanager
+    def absorbing_mutation_guard(
+        self, vault_root: os.PathLike[str] | str, *, operation: str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """`mutation_guard`, waiting out an ordinary busy boundary before the body runs.
+
+        For a caller whose writes before it holds the boundary are none, or content-addressed
+        bytes a retry reuses, such as an upload commit: a refusal at the acquire has had no
+        effect. Only the acquire is
+        attempted again, through the keyed writes' wait (arrival order, waiter cap and refusal
+        causes). The body runs once, holding the boundary; a busy it raises is never retried,
+        because it may have consumed the request stream. The caller's place in line and its
+        waiter slot end with the acquire: it no longer waits.
+        """
+        if not _writes_absorb_contention():
+            with self.mutation_guard(vault_root, operation=operation) as mutation:
+                yield mutation
+            return
+
+        def refused_before_the_body(error: OpError) -> bool:
+            return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+
+        with ExitStack() as held:
+
+            def acquire() -> VaultMutationCoordinator:
+                with mutation_lock.absorbing_busy():
+                    return held.enter_context(self.mutation_guard(vault_root, operation=operation))
+
+            yield self._absorb_contention(
+                operation,
+                _ContentionWait(
+                    self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+                ),
+                acquire,
+                absorbable=refused_before_the_body,
+                request_id=str(uuid.uuid4()),
+                join_on_arrival=True,
+                # The /upload route or the session park hands the refusal to its caller and records it.
+                seam_records=True,
+            )
+
+    @contextmanager
     def projection_guard(
         self, vault_root: os.PathLike[str] | str, *, operation: str
     ) -> Iterator[VaultMutationCoordinator]:
@@ -5110,6 +5431,9 @@ class LeaseManager:
         advance_generation: bool,
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, which advances the commit generation, and `projection_guard`, which does not."""
+        if self._mutation_coordinator_for(vault_root).current_thread_borrows_boundary():
+            # A loan falls between two units of another mutation, whose reads must stay valid.
+            raise RuntimeError("a canonical write cannot run on a borrowed mutation boundary")
         direct_boundary: tuple[str, Path] | None = None
         direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
         outer_direct_boundary = False
@@ -5329,6 +5653,7 @@ class LeaseManager:
         idempotency_principal_scope: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
+        absorb_unkeyed: bool = False,
     ) -> Any:
         t_start = time.perf_counter()
         # Same instant on the clock the acknowledgement's own deadlines use, so
@@ -5478,21 +5803,31 @@ class LeaseManager:
             )
         if store_attempt is not None:
             store_attempt.received = True
-        from . import readiness
-
         # The graph handoff joins this gate for the reason the corpus is on it:
         # a write admitted before its delta origin exists does not merely run
         # slower, it registers a whole-vault rebuild for a lineage it could
         # have adopted in the first seconds of the warm. Both refusals are the
         # same retryable shape, and reads are untouched either way.
-        warming = next(
-            (
-                component
-                for component in ("graph_handoff", "semantic_corpus")
-                if readiness.should_defer(component)
+        # One clock for every wait this write makes before it runs: warm-up here,
+        # then a busy boundary, so neither restarts the bound or under-reports it.
+        wait_started = time.monotonic()
+        wait_deadline = wait_started + _capture_wait_seconds(self._mutation_timeout_seconds)
+        warming, warm_cause, warm_waited = _wait_out_write_warmup(
+            refuse_cause=(
+                "unkeyed" if key is None else "store_thread" if store_attempt is not None else None
             ),
-            None,
+            deadline=wait_deadline,
         )
+        warm_waited_ms = round(warm_waited * 1000)
+        if warm_waited_ms > 0:
+            _log_mutation_event(
+                "warmup_waited",
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt or "none",
+                waited_ms=warm_waited_ms,
+                outcome="admitted" if warming is None else warm_cause,
+            )
         if warming is not None:
             details: dict[str, Any] = {
                 "status": "retryable",
@@ -5500,6 +5835,8 @@ class LeaseManager:
                 "retry_after_ms": 750,
                 "request_id": request_id,
                 "receipt_id": receipt,
+                "cause": warm_cause,
+                "waited_ms": warm_waited_ms,
             }
             if effective_public_idempotency_key is not None:
                 details["idempotency_key"] = effective_public_idempotency_key
@@ -5512,7 +5849,19 @@ class LeaseManager:
                 error="MUTATION_WARMING",
             )
             details["warming_component"] = warming
-            raise OpError(
+            # This gate runs ahead of the journaled block below, so the refusal records itself.
+            self._record_mutation_journal(
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt,
+                outcome="failed",
+                error_code="MUTATION_WARMING",
+                duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+                scope=implicit_idempotency_scope or idempotency_principal_scope,
+                targets=[str(mutation_subject)],
+                boundary_timing=(None, None),
+            )
+            warming_refusal = OpError(
                 "MUTATION_WARMING",
                 (
                     "graph handoff warm-up is still in progress"
@@ -5522,6 +5871,9 @@ class LeaseManager:
                 "Retry the same mutation after warm-up completes.",
                 details=details,
             )
+            # Claimed after its row, so a commit that wraps this refusal does not journal it again.
+            mutation_journal.claim_refusal(warming_refusal)
+            raise warming_refusal
 
         def invoke_leaf() -> Any:
             commit_state["leaf_started"] = True
@@ -6217,6 +6569,24 @@ class LeaseManager:
             and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        from . import maintenance_jobs
+
+        # A maintenance job's start only claims a row and launches a thread, and its
+        # cancel only flags one; neither touches the vault. A chunked job's own dispatch
+        # (`plan_id` and `dry_run=False`) holds the boundary per chunk in its leaf, so
+        # a job can start while another writer holds the boundary. A whole-run job's
+        # dispatch keeps the wide boundary (`maintenance_jobs.WHOLE_RUN_MODES`).
+        # `EXOMEM_WIDE_MUTATION_BOUNDARY` widens a job start like every other narrow row.
+        # It never widens a cancel: that must stay able to stop a job that holds the
+        # wide boundary, so it needs no switch to be safe.
+        narrow_maintenance_job_cancel = (
+            command.name == "maintain_memory" and kwargs.get("mode") == maintenance_jobs.MODE_CANCEL
+        )
+        narrow_maintenance_job = (
+            command.name == "maintain_memory"
+            and maintenance_jobs.narrows_boundary(kwargs, getattr(capabilities_module.current_active_surface(), "surface", None))
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         # A curation proposal prepares read-only, then seals; `seal_proposal` takes
         # the mutation boundary itself and re-checks every binding under it, so
         # preparation can run without the lock. Apply, resume and compensation
@@ -6241,6 +6611,8 @@ class LeaseManager:
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_maintenance_job_cancel
+            or narrow_maintenance_job
             or narrow_curation_proposal
             or narrow_episode_record
             or (
@@ -6312,7 +6684,8 @@ class LeaseManager:
                             mutation_subject,
                             request_id=request_id,
                             operation=command.name,
-                            holder_kind="command",
+                            # A whole-run job's dispatch: a blocked writer learns that a job holds the boundary.
+                            holder_kind="maintenance-job" if maintenance_jobs.current_run_id() else "command",
                             session_open_admission=session_open_admission,
                         )
                     )
@@ -6363,10 +6736,13 @@ class LeaseManager:
                 key=key,
                 commit_state=commit_state,
                 request_id=request_id,
+                wait_started=wait_started,
+                wait_deadline=wait_deadline,
                 # A narrow leaf meets the busy only after its own preparation. When
                 # that preparation fetched caller-supplied temporary handles, the
                 # server cannot fetch them again; only the caller can retry.
                 rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
+                absorb_unkeyed=absorb_unkeyed,
             )
             if (
                 vocabulary_replay_terminal is not None
@@ -6439,6 +6815,11 @@ class LeaseManager:
                 store_attempt.deferred_refusal = journal_refusal
             else:
                 journal_refusal()
+                # The refusal leaves invoke here, so this is where a busy becomes visible to the caller.
+                if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+                    _count_busy_once(error)
+                else:
+                    mutation_journal.claim_refusal(error)
             raise
         _log_mutation_event(
             "returned",
@@ -6503,20 +6884,33 @@ class LeaseManager:
         receipt: str | None,
         outcome: str,
         error_code: str | None,
-        duration_ms: float,
+        duration_ms: float | None,
         scope: str | None,
         targets: list[str],
         wide_hold: Mapping[str, Any] | None = None,
+        boundary_timing: tuple[float | None, float | None] | None = None,
     ) -> None:
-        """Best-effort mutation-journal write. Never raises."""
+        """Best-effort mutation-journal write. Never raises.
+
+        `boundary_timing` is the `(wait_ms, hold_ms)` the row reports. A refusal that
+        never held the boundary passes its own, so the row cannot borrow an earlier
+        hold from this context; `None` reads the hold this context just finished.
+        """
+        # A retry of a parked upload session that refuses for the park's own reason adds no row.
+        if outcome == "failed" and mutation_journal.repeats_parked_refusal(error_code):
+            return
         try:
             from .mutation_journal import record_mutation
 
-            timing = (
-                wide_hold["timing"]
-                if wide_hold is not None and "timing" in wide_hold
-                else last_mutation_timing()
-            )
+            if boundary_timing is None:
+                timing = (
+                    wide_hold["timing"]
+                    if wide_hold is not None and "timing" in wide_hold
+                    else last_mutation_timing()
+                )
+                boundary_timing = (
+                    (timing.get("wait_ms"), timing.get("hold_ms")) if timing else (None, None)
+                )
             lease_role = (
                 "standalone"
                 if not self.config.enabled
@@ -6531,8 +6925,8 @@ class LeaseManager:
                 outcome=outcome,
                 error_code=error_code,
                 duration_ms=duration_ms,
-                boundary_wait_ms=timing.get("wait_ms") if timing else None,
-                boundary_hold_ms=timing.get("hold_ms") if timing else None,
+                boundary_wait_ms=boundary_timing[0],
+                boundary_hold_ms=boundary_timing[1],
                 lease_role=lease_role,
                 fencing_token=self._fencing_token,
                 replica_id=self.config.replica_id,
@@ -6550,7 +6944,10 @@ class LeaseManager:
         key: str | None,
         commit_state: Mapping[str, bool],
         request_id: str,
+        wait_started: float | None = None,
+        wait_deadline: float | None = None,
         rerun_safe: bool = True,
+        absorb_unkeyed: bool = False,
     ) -> Any:
         """Run one keyed write, waiting out an ordinary busy boundary.
 
@@ -6563,8 +6960,13 @@ class LeaseManager:
         key commits exactly once; anything that observed a commit is never
         re-run. A write is attempted again only while the request budget still
         fits another attempt as long as the last one.
+
+        `absorb_unkeyed` is the in-process caller's (CLI, terminal UI) own mark: it has no
+        key and no reply it could lose, so a refusal raised before the commit is waited out
+        the same way and nothing is stored. A remote caller never sets it, because one that
+        gave up during the wait and sent the write again would commit it twice.
         """
-        eligible = key is not None and rerun_safe and _writes_absorb_contention()
+        eligible = (key is not None or absorb_unkeyed) and rerun_safe and _writes_absorb_contention()
         store_attempt = _ACTIVE_STORE_ATTEMPT.get()
         if store_attempt is not None:
             return self._run_store_attempt(
@@ -6578,8 +6980,12 @@ class LeaseManager:
                 return run()
             finally:
                 _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
+        # The request's wait clock when `invoke` started it before a warm-up wait.
         wait = _ContentionWait(
-            self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
+            self._capture_queue,
+            _capture_wait_seconds(self._mutation_timeout_seconds),
+            started=wait_started,
+            deadline=wait_deadline,
         )
         preparation_retry = _CapturePreparationRetry(wait.deadline, wait.admit_preparation_retry)
 
@@ -6595,17 +7001,17 @@ class LeaseManager:
             if error.code != "MUTATION_BUSY":
                 return False
             if commit_state["observed"] or error.details.get("committed") is not False:
-                mutation_lock.record_client_visible_busy()
+                _count_busy_once(error)
                 return False
             return True
 
         return self._absorb_contention(
-            command, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
+            command.name, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
         )
 
     def _absorb_contention(
         self,
-        command: Any,
+        command_name: str,
         wait: _ContentionWait,
         attempt: Callable[[], Any],
         *,
@@ -6613,28 +7019,32 @@ class LeaseManager:
         request_id: str,
         join_on_arrival: bool,
         on_refuse: Callable[[OpError], None] | None = None,
+        seam_records: bool = False,
     ) -> Any:
         """Attempt a write until it returns, waiting in line after each refusal `absorbable` admits.
 
         Only the calling thread waits. `absorbable` admits a refusal raised before anything
-        committed; every other error propagates on first sight.
+        committed; every other error propagates on first sight. With `seam_records`, the
+        refusal leaves unclaimed: the caller hands it to a seam that journals and counts it.
         """
         # The last refusal this write absorbed: a wait that runs out in line
         # still names the holder that kept it waiting.
         last_busy: OpError | None = None
 
-        def uncounted_busy() -> OpError:
-            with mutation_lock.absorbing_busy():
-                return _mutation_busy(None, wait_ms=wait.waited_ms())
+        def holderless_busy() -> OpError:
+            return _mutation_busy(None, wait_ms=wait.waited_ms())
 
         def refuse(error: OpError, cause: str, remediation: str) -> OpError:
             if on_refuse is not None:
                 on_refuse(error)
             if error.code != "MUTATION_BUSY":
                 # A handed-back store or preparation refusal keeps its own shape and cause.
+                if not seam_records:
+                    mutation_journal.claim_refusal(error)
                 return error
-            # The one place a busy from this loop becomes client-visible.
-            mutation_lock.record_client_visible_busy()
+            # The one place a busy from this loop becomes client-visible, unless a seam records it.
+            if not seam_records:
+                _count_busy_once(error)
             # waited_ms covers the whole request; one attempt's wait_ms would contradict it.
             error.details.pop("wait_ms", None)
             error.details.update(cause=cause, waited_ms=wait.waited_ms(), absorbed_attempts=wait.absorbed)
@@ -6643,7 +7053,7 @@ class LeaseManager:
                 "contention_refused",
                 level=logging.WARNING,
                 request_id=request_id,
-                command=command.name,
+                command=command_name,
                 cause=cause,
                 waited_ms=error.details["waited_ms"],
             )
@@ -6654,7 +7064,7 @@ class LeaseManager:
                 # Arriving behind others means parking this thread as they do.
                 if not wait.take_slot():
                     raise refuse(
-                        uncounted_busy(),
+                        holderless_busy(),
                         "capture_waiters_full",
                         _CAPTURE_WAITERS_FULL_REMEDIATION,
                     )
@@ -6662,7 +7072,7 @@ class LeaseManager:
             while True:
                 if wait.ticket is not None and not wait.wait_turn():
                     raise refuse(
-                        last_busy or uncounted_busy(),
+                        last_busy or holderless_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
@@ -6705,7 +7115,7 @@ class LeaseManager:
                     _log_mutation_event(
                         "contention_absorbed",
                         request_id=request_id,
-                        command=command.name,
+                        command=command_name,
                         attempts=wait.absorbed + 1,
                         waited_ms=wait.waited_ms(),
                     )
@@ -6756,7 +7166,7 @@ class LeaseManager:
                 if before_commit and eligible and error.details.get("committed") is False:
                     attempt.handed_off = error
                 elif eligible:
-                    mutation_lock.record_client_visible_busy()
+                    _count_busy_once(error)
             elif error.code == "COLLECTION_STORE_BUSY":
                 # A store handoff refused the guard before the leaf ran, so nothing ran, keyed or not.
                 if not commit_state["leaf_started"]:
@@ -6828,14 +7238,26 @@ class LeaseManager:
             try:
                 if server is None:
                     return run()
-                return server.call(run, wake_maintenance=True, read_only=False, extend=extend)
+                return server.call(
+                    run,
+                    wake_maintenance=True,
+                    read_only=False,
+                    extend=extend,
+                    # The queue refuses a write it never took, or still holds, before `invoke` can journal it.
+                    on_refusal=partial(_record_store_queue_refusal, command, call_kwargs, server.root),
+                )
             finally:
                 _ACTIVE_STORE_ATTEMPT.reset(token)
                 received = received or current.received
 
         def absorbable(error: OpError) -> bool:
             if routing:
-                return error.code == "MUTATION_BUSY"
+                if error.code != "MUTATION_BUSY":
+                    return False
+                # Routing refuses before `invoke` runs, so this seam journals the refusal the caller finally sees.
+                refusal_journal[:] = [lambda: _record_store_queue_refusal(
+                    command, call_kwargs, injected[0], error, wait.waited_ms() / 1000)]
+                return True
             if current is None or error is not current.handed_off:
                 return False
             # The journal row, if any, of the refusal the caller would see now.
@@ -6847,7 +7269,7 @@ class LeaseManager:
                 journal()
 
         return self._absorb_contention(
-            command,
+            command.name,
             wait,
             attempt,
             absorbable=absorbable,
@@ -6907,7 +7329,6 @@ class LeaseManager:
         raise OpError(
             "WRITER_FENCED",
             f"writer lease fencing token {fencing_token} is no longer current",
-            "Retry the mutation on the current writer.",
         )
 
     def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
@@ -7631,6 +8052,51 @@ def active_manager() -> LeaseManager:
     return manager if manager is not None else get_manager()
 
 
+def _count_busy_once(error: BaseException) -> None:
+    """Count a `MUTATION_BUSY` as it reaches a caller, once, unless it repeats a recorded park."""
+    if mutation_journal.claim_refusal(error) and not mutation_journal.repeats_parked_refusal("MUTATION_BUSY"):
+        mutation_lock.record_client_visible_busy()
+
+
+def record_caller_refusal(
+    error: BaseException,
+    *,
+    tool: str,
+    code: str | None = None,
+    request_id: str | None = None,
+    targets: Sequence[str] = (),
+    duration_ms: float | None = None,
+) -> None:
+    """Journal and count a refusal that is leaving for a caller without passing `invoke`.
+
+    `invoke` records its own failures. The store queue, the `/upload` route and an
+    upload session's retryable park hand a refusal to a caller from outside it, so
+    those seams call this with the tool or route that was refused. A refusal that
+    already has its row (`invoke` journaled it, or an earlier seam did) records
+    nothing, so each refusal appears once. The boundary wait is the one the refusal
+    carries; a refusal that never reached the boundary reports none. Never raises.
+    """
+    try:
+        if not mutation_journal.claim_refusal(error):
+            return
+        code = code or leaf_contract_code(error) or type(error).__name__
+        active_manager()._record_mutation_journal(
+            request_id=request_id or str(uuid.uuid4()),
+            command=tool,
+            receipt=None,
+            outcome="failed",
+            error_code=code,
+            duration_ms=duration_ms,
+            scope=None,
+            targets=list(targets),
+            boundary_timing=(mutation_journal.boundary_wait_ms(error), None),
+        )
+        if code == "MUTATION_BUSY" and not mutation_journal.repeats_parked_refusal(code):
+            mutation_lock.record_client_visible_busy()
+    except Exception:  # noqa: BLE001 - observability must never change the refusal a caller gets
+        pass
+
+
 def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
@@ -7874,6 +8340,16 @@ def _store_request_is_read_only(command, kwargs):
         return False
 
 
+def _record_store_queue_refusal(command, kwargs, root, error, waited_seconds):
+    record_caller_refusal(
+        error,
+        tool=command.name,
+        request_id=kwargs.get("mutation_request_id"),
+        targets=[str(root)],
+        duration_ms=round(waited_seconds * 1000, 2),
+    )
+
+
 def _collection_store_thread(func):
     """Run a store-routed collection request on the store thread of the service serving its
     vault, in the caller's context (``collection_store.runtime.route``)."""
@@ -7911,6 +8387,10 @@ def _collection_store_thread(func):
                         # every tick after it kept the store thread busy beside the next request.
                         wake_maintenance=not (read_only or import_status),
                         read_only=read_only,
+                        # The queue refuses before `invoke` runs, so a refused write records itself here.
+                        on_refusal=None if read_only else partial(
+                            _record_store_queue_refusal, command, kwargs, server.root
+                        ),
                     )
         return func(command, *injected, **kwargs)
 
@@ -7930,7 +8410,7 @@ def _foreground_priority_request(func):
     def wrapped(command, *injected, **kwargs):
         from . import foreground_priority
 
-        with foreground_priority.foreground():
+        with foreground_priority.request_foreground():
             return func(command, *injected, **kwargs)
 
     return wrapped
@@ -7951,9 +8431,14 @@ def invoke_command(
     idempotency_principal_scope: str | None = None,
     implicit_idempotency_scope: str | None = None,
     mutation_request_id: str | None = None,
+    absorb_unkeyed: bool = False,
     **kwargs: Any,
 ) -> Any:
-    from .commands import invocation_is_read_only, validate_process_media_operation
+    from .commands import (
+        invocation_is_read_only,
+        validate_process_media_operation,
+        writes_through_superseded_maintenance_leaf,
+    )
     from .reserved_paths import (
         _owner_authority_scope,
         mutation_remediation,
@@ -8002,18 +8487,47 @@ def invoke_command(
             )
 
     active_surface = capabilities_module.current_active_surface()
+    job_start = False
     if (
         command.name == "maintain_memory"
-        and kwargs.get("mode") not in REMOTE_WRITE_MAINTENANCE_MODES
         and not read_only
         and selector_error is None
         and active_surface is not None
         and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
     ):
+        from . import maintenance_jobs
+
+        mode = kwargs.get("mode")
+        if mode in maintenance_jobs.JOB_MODES:
+            # Before the writer manager and before any job row: a remote write has no
+            # run without the plan the owner previewed and a reason.
+            maintenance_jobs.require_plan(mode, kwargs)
+            maintenance_jobs.require_owner(injected[0])
+            job_start = True
+            # Reconcile writes by default, so a start may omit `dry_run`: the job's dispatch is explicit.
+            kwargs = {**kwargs, "dry_run": False}
+        if not job_start and mode not in remote_admitted_maintenance_modes():
+            raise OpError(
+                "MAINTENANCE_REQUIRES_CLI",
+                REMOTE_MAINTENANCE_MESSAGE,
+                REMOTE_MAINTENANCE_REMEDIATION,
+                details={"status": "terminal", "committed": False},
+            )
+
+    if (
+        not read_only
+        and selector_error is None
+        and active_surface is not None
+        and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
+        and writes_through_superseded_maintenance_leaf(command, kwargs)
+    ):
+        # The legacy leaf commands still write through the wide boundary with no plan. Refuse before
+        # the writer manager: a remote write is a `maintain_memory` job with a reviewed plan.
         raise OpError(
-            "MAINTENANCE_REQUIRES_CLI",
-            REMOTE_MAINTENANCE_MESSAGE,
-            REMOTE_MAINTENANCE_REMEDIATION,
+            "MAINTENANCE_PLAN_REQUIRED",
+            f"a remote {command.name} write runs as a maintenance job through maintain_memory",
+            f"Use {capabilities_module.active_tools_text('maintain_memory')}: preview with dry_run=true, "
+            "then repeat it with dry_run=false, the preview's plan_id and a why.",
             details={"status": "terminal", "committed": False},
         )
 
@@ -8032,6 +8546,11 @@ def invoke_command(
         validate_process_media_operation(kwargs.get("operation", "process"))
 
     dispatch_command = command
+    if job_start:
+        # A job start returns a handle and a later poll reads the live state: replaying a
+        # stored handle for 600 s after a cancel would hand back a dead job.
+        implicit_idempotency_scope = None
+        dispatch_command = replace(command, leaf=maintenance_jobs.start_leaf(command, injected, kwargs))
     if selector_error is not None:
 
         def reject_uncovered_selector(*_args: Any, **_kwargs: Any) -> Any:
@@ -8059,6 +8578,7 @@ def invoke_command(
                 idempotency_principal_scope=idempotency_principal_scope,
                 implicit_idempotency_scope=implicit_idempotency_scope,
                 mutation_request_id=mutation_request_id,
+                absorb_unkeyed=absorb_unkeyed,
             )
 
     if not injected or not is_vault_root(injected[0]):

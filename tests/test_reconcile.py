@@ -1005,8 +1005,8 @@ def test_reconcile_rebuild_graph_forwards_the_opt_in_flag(
         def as_dict(self) -> dict[str, object]:
             return {"graph_rebuild_requested": True}
 
-    def reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool) -> Report:
-        captured.update(vault_root=vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph)
+    def reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id: str | None) -> Report:
+        captured.update(vault_root=vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph, plan_id=plan_id)
         return Report()
 
     monkeypatch.setattr(commands.reconcile_module, "reconcile", reconcile)
@@ -1017,6 +1017,7 @@ def test_reconcile_rebuild_graph_forwards_the_opt_in_flag(
         "vault_root": Path("fixture-vault"),
         "dry_run": False,
         "rebuild_graph": True,
+        "plan_id": None,
     }
     assert result["graph_rebuild_requested"] is True
 

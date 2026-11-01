@@ -41,13 +41,27 @@ def remove(*paths: Path) -> None:
             pass
 
 
-def write_record(store: Path, stem: str, record: dict, *, temp_suffix: str) -> None:
-    """Write `<stem>.json` whole through a temp named `<stem>.*<temp_suffix>`, which the store's sweep owns."""
+def write_record(store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False) -> None:
+    """Write `<stem>.json` whole through a temp named `<stem>.*<temp_suffix>`, which the store's sweep owns.
+
+    A `durable` record reaches the disk before the rename that publishes it. The store's folder entry is
+    the caller's to flush, once for a batch of records, with `sync_directory`.
+    """
     descriptor, raw = tempfile.mkstemp(prefix=f"{stem}.", suffix=temp_suffix, dir=store)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
             json.dump(record, sink)
+            if durable:
+                sink.flush()
+                os.fsync(sink.fileno())
         os.replace(raw, store / f"{stem}.json")
     except BaseException:
         remove(Path(raw))
         raise
+
+
+def sync_directory(store: Path) -> None:
+    """Flush the store's folder entries, so records renamed into it survive a crash."""
+    from .governance.transaction import fsync_directory
+
+    fsync_directory(store)

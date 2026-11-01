@@ -9,9 +9,9 @@ because resident memory is a property of a process's whole history:
   then a synthetic vault from ``synth_vault.gen_dense_vault``. Not measured.
 - ``build``: the first embedding-sidecar build, ``EmbeddingIndex.rebuild_all``,
   which ``maintain --fix --rebuild-embeddings`` runs on a host. It gets its own
-  process because a cloud cell cannot run it: write-mode maintenance refuses over
-  MCP (``MAINTENANCE_REQUIRES_CLI``) and the watcher's boot seed deliberately
-  embeds nothing already on the volume. Points: import, model load, index build.
+  process so the build's peak does not carry into the ``cell`` stage, and because
+  the watcher's boot seed deliberately embeds nothing already on the volume.
+  Points: import, model load, index build.
 - ``cell``: the cloud server itself, in-process. ``server.build_server`` under
   ``EXOMEM_CLOUD_CELL=1`` with a locally generated bearer, its ASGI app and
   lifespan (``LocalRuntimeActivation``: drain, watcher, warm-up, reaper), and

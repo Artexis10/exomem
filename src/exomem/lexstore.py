@@ -71,15 +71,23 @@ import threading
 import time
 import uuid
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, NamedTuple, TypeVar
 
-from . import call_spans, foreground_priority, request_budget, reserved_paths, state_paths
+from . import (
+    __version__,
+    call_spans,
+    foreground_priority,
+    mutation_lock,
+    request_budget,
+    reserved_paths,
+    state_paths,
+)
 from .find_types import RankingPage
 from .kbdir import kb_dirname
 from .log_events import log_event
@@ -290,7 +298,9 @@ def catalog_selection_scope(
         if lagging:
             # Preserve convergence without handing repair an active SQL reader.
             if lag_dispatch is None:
-                _schedule_runtime_catalog_repair(root, lag_only=True)
+                _schedule_runtime_catalog_repair(
+                    root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
             else:
                 lag_dispatch(root)
 
@@ -815,6 +825,9 @@ SCHEMA_VERSION = 15
 #: (the default drops marks, which splits Indic words at every vowel sign).
 _FTS_TOKENIZE = "tokenize=\"unicode61 remove_diacritics 0 categories 'L* N* Co M*'\""
 CATALOG_FOREGROUND_DELTA_CAP = 32
+#: Steps a lagging-delta catch-up may take beyond the ones its first lag needs.
+#: A lag that outgrows them keeps the full pass, which publishes under writes.
+_CATCH_UP_SLACK_STEPS = 2
 #: A rebuild temp untouched this long, and held open by no connection, is the
 #: leftover of a killed build; the next rebuild removes it.
 _ORPHAN_REBUILD_TEMP_AGE_SECONDS = 10 * 60
@@ -877,6 +890,49 @@ def _timed_barrier(barrier, timeout: float):
 # the source again, and retry; never turn sustained write traffic into an
 # unbounded repair worker.
 _PUBLICATION_CATCHUP_RETRIES = 2
+# A governed write changes a page on disk before its event reaches the
+# registry: the batch snapshot restores the page's timestamps, which moves its
+# ctime, and the rename lands before the publication. A page that every write
+# rewrites, such as an index or the activity log, is then often mid-write when
+# an off-barrier replay proves it or the final census walks it, and a new page
+# of an import batch is on disk before the registry lists it. The replay waits
+# for the registry to observe the newer state and replays that, a bounded
+# number of times per call, but only while a write can still be publishing: a
+# path that differs with no write in flight is drift no event will report, and
+# it refuses the replay or the census at once.
+_REPLAY_RETARGETS = 3  # A page rewritten after every retarget ends the pass instead of holding it.
+# One batch's snapshot-to-publication span (up to 23 s on a 2-CPU cell, 2026-10-31).
+# The deadline is shared by every path of one round, so a call waits at most
+# 3 x 30 s = 90 s, and the census waits once more, up to 30 s, before each of
+# its replays: up to 6 off-barrier calls and 3 censuses in one pass, 630 s in all.
+_REPLAY_OBSERVATION_WAIT_SECONDS = 30.0
+_REPLAY_OBSERVATION_POLL_SECONDS = 0.05
+
+
+def _a_write_may_be_publishing(vault_root: Path, paths: Iterable[str]) -> bool:
+    """Whether a write in this process can still be publishing one of `paths`.
+
+    A write changes a page on disk before its event reaches the registry. That
+    gap lasts while the write holds a mutation boundary, and after it releases
+    the boundary, until its publication intent for the page closes: the
+    publication runs behind the release, up to about a second later in an
+    import (attributed 2026-11-01, 7 of 7 declines). A write in another
+    process reaches the registry only as an event, and is not seen here.
+
+    After the boundary is released, only an open publication intent keeps the
+    wait going, and some writes have none. A replay or census that meets one of
+    these refuses at once as `unobserved_drift`, which costs the pass, not data:
+    - a deleted page, and the old path of a renamed page;
+    - a Markdown page over `PUBLICATION_INTENT_MAX_BYTES`;
+    - a write past the cap on open intents;
+    - an intent past its deadline.
+    """
+    if mutation_lock.active_mutation_snapshot()["state"] == "held":
+        return True
+    from . import file_watcher
+
+    return file_watcher.publication_in_flight(vault_root, paths)
+
 
 _PROBE_RESULT: bool | None = None
 _PROBE_LOCK = threading.Lock()
@@ -897,8 +953,9 @@ _FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
 #: exact live recall generation pair the caller observed. They are acknowledged
 #: only when the pass's promotion proof covers that pair. The sentinel is used
 #: by the explicit event-index rollback, where no live generation exists.
+#: Each observation also keeps whether every request that made it was lag-only.
 _UNKNOWN_REPAIR_GENERATION = object()
-_FULL_REBUILD_REOBSERVED: dict[Path, set[object]] = {}
+_FULL_REBUILD_REOBSERVED: dict[Path, dict[object, bool]] = {}
 # A successful publish+promotion may still preserve one uncovered generation at
 # the bounded idle handoff. The next flight may cheaply prove that a foreground
 # delta already covered it. Failed/unpromoted passes never enter this set.
@@ -907,6 +964,20 @@ _PUBLISHED_HANDOFF_PENDING: set[Path] = set()
 #: request observed during it, the request stays pending for a later caller to
 #: restart after an idle boundary instead of chaining full scans forever.
 _MAX_FULL_REBUILDS_PER_FLIGHT = 1
+#: Progress floor of a full repair's rebuild (`foreground_priority.PassBudget`).
+#: An import's apply holds the boundary for 97% of each call (rehearsals,
+#: 2026-10-31). In a local reproduction, the default half share let the repair
+#: work through half of each apply call and cost the apply a third of its files;
+#: at 0.9 the apply kept its quiet rate. The ceiling keeps a pass that never
+#: meets a gap within its work plus five minutes, where the default floor allows
+#: twice its work. That bound covers parking only. A pass also waits for the
+#: registry to observe a write that is still publishing, up to
+#: `_REPLAY_OBSERVATION_WAIT_SECONDS` x 21 across its 6 off-barrier replay calls
+#: and 3 censuses (630 s), so its worst case exceeds the 900 s stalled-recall
+#: alert. It waits only while a write is publishing; `retargeted` and `parked_s`
+#: in its finish line show what it spent.
+_REPAIR_WAIT_SHARE = 0.9
+_REPAIR_MAX_PARKED_SECONDS = 300.0
 #: Affected identities a contended publication declined, awaiting current-state replay.
 #:
 #: A governed write's incremental upsert cannot take the publication barrier
@@ -949,6 +1020,24 @@ class RepairCause(enum.StrEnum):
     TARGETED_UNPROMOTED = "targeted_unpromoted"
     TARGETED_YIELDED = "targeted_yielded"
     STRANDED_SCOPE = "stranded_scope"
+    # Lag-only requests: a read proof found the stored checkpoint behind the
+    # registry, or a bounded apply met a source that moved before its commit.
+    CATALOGUE_LAG = "catalogue_lag"
+    SOURCE_MOVED = "source_moved"
+
+
+class DeclineCause(enum.StrEnum):
+    """Why a full pass declined for a moving source, as the token the worker logs.
+
+    A closed set that this code implements, so a log line separates the bound
+    that ended the pass: `observation_timed_out` (a write was still publishing
+    when the wait ran out), `retargets_exhausted` (the replay's retargets ran
+    out), and `unobserved_drift` (the source differs and no write is publishing).
+    """
+
+    OBSERVATION_TIMED_OUT = "observation_timed_out"
+    RETARGETS_EXHAUSTED = "retargets_exhausted"
+    UNOBSERVED_DRIFT = "unobserved_drift"
 
 
 class RepairStage(enum.StrEnum):
@@ -992,13 +1081,22 @@ def _log_repair_finished(
     started: float,
     *,
     excused: int = 0,
+    retargeted: int = 0,
+    parked_s: float = 0.0,
+    declined_for: DeclineCause | None = None,
     promoted: bool | None = None,
 ) -> None:
     """Name one repair pass's result and the stage that produced it.
 
     Every field is a closed token or a count, so a hosted cell keeps the line.
     `excused` counts the distinct paths that the pass's source censuses
-    excused, across both scopes and every census in the pass.
+    excused, across both scopes and every census in the pass. `retargeted`
+    counts the times the pass's detached replays, the census replay included,
+    waited for the registry to observe a newer write and replayed it.
+    `parked_s` is the part of `duration_s` that the pass's rebuild waited at its
+    yields for foreground work, such as an apply that holds the mutation boundary.
+    `declined_for` names the bound that ended a pass that declined for a moving
+    source, and is absent for any other result.
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -1006,7 +1104,11 @@ def _log_repair_finished(
         "stage": str(stage),
         "duration_s": round(max(0.0, time.monotonic() - started), 3),
         "excused": excused,
+        "retargeted": retargeted,
+        "parked_s": round(max(0.0, parked_s), 3),
     }
+    if declined_for is not None:
+        fields["declined_for"] = str(declined_for)
     if promoted is not None:
         fields["promoted"] = promoted
     log_event(log, logging.INFO, "lexical_repair_finished", fields=fields)
@@ -1344,6 +1446,33 @@ class CatalogUnavailable(RuntimeError):
     def __init__(self, readiness: CatalogReadiness) -> None:
         self.readiness = readiness
         super().__init__(f"lexical catalog is not ready: {readiness.status}")
+
+
+class _CensusView(NamedTuple):
+    """One scope's census walk and the registry's map after it.
+
+    Each entry is the digested path key, the path and its normalized signature.
+    The entries stay lists, not maps, so two registry spellings of one page that
+    digest to the same key both count in the census, as a Windows alias did
+    before this view existed.
+    """
+
+    walked: tuple[tuple[str, str, tuple[int, int, int]], ...]
+    registry: tuple[tuple[str, str, tuple[int, int, int]], ...]
+
+    def disagreements(self) -> set[str]:
+        """The paths that only one side has, or whose signatures differ.
+
+        Spelled as the registry spells them when it has them.
+        """
+        walked = {key: (path, sig) for key, path, sig in self.walked}
+        registry = {key: (path, sig) for key, path, sig in self.registry}
+        disagreeing = set()
+        for key in walked.keys() | registry.keys():
+            walked_entry, registry_entry = walked.get(key), registry.get(key)
+            if walked_entry is None or registry_entry is None or walked_entry[1] != registry_entry[1]:
+                disagreeing.add((registry_entry or walked_entry)[0])
+        return disagreeing
 
 
 class _DeltaReplayStale(RuntimeError):
@@ -1898,7 +2027,7 @@ def runtime_retrieval_catalog_admission(
     admission = _published_catalog_admission(root)
     if admission is not None and schedule_repair:
         # Serving stale is a bridge, not a resting state: keep converging.
-        _schedule_runtime_catalog_repair(root, lag_only=True)
+        _schedule_runtime_catalog_repair(root, lag_only=True, cause=RepairCause.CATALOGUE_LAG)
     return admission
 
 
@@ -2154,7 +2283,7 @@ def request_lag_repair(vault_root: Path) -> None:
     its reads, as `catalog_selection_scope` does, so the repair cannot move
     the catalogue under them.
     """
-    _schedule_runtime_catalog_repair(vault_root, lag_only=True)
+    _schedule_runtime_catalog_repair(vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG)
 
 
 def retry_pending_repair(vault_key: Path) -> bool:
@@ -2336,8 +2465,6 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         if _admit_if_current(vault_root):
             return True
         return _log_catch_up_decline("not_current")
-    except _SourceMoved:
-        raise
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):
             raise
@@ -2416,7 +2543,8 @@ def _schedule_repair(
         elif deferred_paths:
             _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
         elif key in _FULL_REBUILDS_IN_FLIGHT:
-            _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
+            observed = _FULL_REBUILD_REOBSERVED.setdefault(key, {})
+            observed[observation] = observed.get(observation, True) and lag_only
         else:
             _request_full_rebuild(key, lag_only=lag_only)
         if key in _REPAIRS_IN_FLIGHT:
@@ -2506,13 +2634,10 @@ def _schedule_repair(
                     try:
                         caught_up = _caught_up_without_rebuild(vault_root, store)
                     except Exception as error:  # noqa: BLE001 - preserve only typed deferrals
-                        if not isinstance(error, _SourceMoved) and not _is_repair_contention(error):
+                        if not _is_repair_contention(error):
                             raise
                         _log_repair_finished(
-                            "catch_up",
-                            "source_changed" if isinstance(error, _SourceMoved) else "error",
-                            RepairStage.TARGETED,
-                            catch_up_started,
+                            "catch_up", "error", RepairStage.TARGETED, catch_up_started
                         )
                         with _REPAIRS_LOCK:
                             _yield_targeted_repair(key, paths, error, lag_only=True)
@@ -2589,6 +2714,10 @@ def _schedule_repair(
                         # A failed targeted retry escalates to the same full pass
                         # a queued request asked for. Consume that level here so
                         # it cannot become a redundant pass immediately after.
+                        # The pass stays lag-only only if that request was too.
+                        lag_only = lag_only and (
+                            key not in _FULL_REBUILD_REQUESTED or key in _LAG_ONLY_REBUILDS
+                        )
                         _FULL_REBUILD_REQUESTED.discard(key)
                         _LAG_ONLY_REBUILDS.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
@@ -2644,6 +2773,9 @@ def _schedule_repair(
                     else RepairStage.TARGETED,
                     pass_started,
                     excused=len(getattr(store, "_last_census_excused", ())) if full_pass else 0,
+                    retargeted=getattr(store, "_last_replay_retargets", 0) if full_pass else 0,
+                    parked_s=getattr(store, "_last_parked_seconds", 0.0) if full_pass else 0.0,
+                    declined_for=getattr(store, "_last_decline_cause", None) if full_pass else None,
                     promoted=promoted,
                 )
                 pass_kind = None
@@ -2655,7 +2787,7 @@ def _schedule_repair(
                         covered_generation = _repair_generation_from_proof(
                             promotion_proof
                         )
-                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, set())
+                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, {})
                         uncovered = {
                             generation
                             for generation in reobserved
@@ -2670,6 +2802,10 @@ def _schedule_repair(
                                 )
                             )
                         }
+                        # A published replacement, or a declined pass that only
+                        # lag asked for, leaves nothing but checkpoint lag, so
+                        # the next flight tries the bounded catch-up first.
+                        residual_lag_only = bool(repaired) or lag_only
                         if not (repaired and promoted):
                             # A consumed full request is acknowledged only after
                             # both publication and the exact-current promotion
@@ -2678,6 +2814,7 @@ def _schedule_repair(
                             # re-observe staleness while it was running.
                             _request_full_rebuild(
                                 key,
+                                lag_only=residual_lag_only,
                                 cause=RepairCause.PUBLISH_UNPROMOTED
                                 if repaired
                                 else RepairCause.PASS_DECLINED,
@@ -2685,7 +2822,12 @@ def _schedule_repair(
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
-                            _request_full_rebuild(key, cause=RepairCause.REOBSERVED_DURING_PASS)
+                            _request_full_rebuild(
+                                key,
+                                lag_only=residual_lag_only
+                                and all(reobserved[generation] for generation in uncovered),
+                                cause=RepairCause.REOBSERVED_DURING_PASS,
+                            )
                         if repaired and key in _FULL_REBUILD_REQUESTED:
                             # Another proof can win admission during promotion.
                             # Re-prove this publication before rebuilding it.
@@ -4558,6 +4700,18 @@ class _ReconcileSourceProof:
     refutation_epoch: int
 
 
+@dataclass(frozen=True)
+class _CatchUpStep:
+    """One committed step of a lagging-delta catch-up.
+
+    `marks` holds each scope's registry checkpoint, taken before the step read
+    any file; `paths` holds the registry paths the step applied.
+    """
+
+    marks: Mapping[str, object]
+    paths: frozenset[str]
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -4594,6 +4748,15 @@ class LexicalStore:
         # them. A set, so a path excused by two censuses in one pass counts once.
         self._last_rebuild_stage = RepairStage.BUILD
         self._last_census_excused: set[str] = set()
+        # How many times the pass's detached replays, the census replay
+        # included, waited for the registry to observe a newer write and
+        # replayed it (`_await_observed_rewrites`).
+        self._last_replay_retargets = 0
+        # Which bound ended the last pass that declined for a moving source.
+        self._last_decline_cause: DeclineCause | None = None
+        # Seconds the last rebuild waited at its yields for foreground work:
+        # requests and every wait for or hold of a mutation boundary.
+        self._last_parked_seconds = 0.0
         # Per-path build signatures of a detached catalogue this process
         # adopted, awaiting the one heal that reconciles it (single use).
         self._adopted_rows: dict[str, tuple] | None = None
@@ -5764,6 +5927,21 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
+        """Record the schema and the release that derived every page row (caller owns the txn).
+
+        A release can change how rows derive from the same bytes without a
+        schema, parser or identity bump, so `_seed_from_live` reuses rows only
+        from a catalogue that the running release built.
+        """
+        stamps = (("schema_version", str(SCHEMA_VERSION)), ("catalog_release", __version__))
+        for key, value in stamps:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
     def _write_catalog_identity(
         self, conn: sqlite3.Connection, identity: str | None = None
     ) -> None:
@@ -6175,11 +6353,7 @@ class LexicalStore:
                 conn.execute("DELETE FROM unit_fts")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
+            self._stamp_whole_build(conn)
         self._witnessed.clear()
         self._term_frequency_cache = None
         self._filtered_term_frequency_cache = None
@@ -6559,7 +6733,9 @@ class LexicalStore:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
             # A source read moved under the apply; the worker's catch-up must
             # prove the catalogue exactly current, or the full pass runs.
-            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+            _schedule_runtime_catalog_repair(
+                self.vault_root, lag_only=True, cause=RepairCause.SOURCE_MOVED
+            )
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
@@ -6618,7 +6794,9 @@ class LexicalStore:
             source_moved = True
             applied = False
         if not applied and source_moved:
-            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+            _schedule_runtime_catalog_repair(
+                self.vault_root, lag_only=True, cause=RepairCause.SOURCE_MOVED
+            )
         elif not applied:
             _schedule_runtime_catalog_repair(self.vault_root, deferred_paths=deferred_paths)
         else:
@@ -6627,7 +6805,9 @@ class LexicalStore:
             self._note_pending_publication(list(paths), list(rel_paths))
         return applied
 
-    def retry_deferred_upsert(self, paths: list[Path]) -> bool:
+    def retry_deferred_upsert(
+        self, paths: list[Path], *, earlier_steps: Sequence[_CatchUpStep] = ()
+    ) -> bool:
         """Reconcile identities a contended foreground publication declined.
 
         The foreground wait is 50ms because a governed write may not block on
@@ -6640,6 +6820,9 @@ class LexicalStore:
         a sqlite error or a failed read says the store or the disk is wrong,
         and re-applying rows cannot fix either. Source movement and bounded
         publication timeouts raise instead, so the caller keeps the claim.
+
+        `earlier_steps` makes this the last step of a lagging-delta catch-up:
+        what those steps applied counts toward the witness that blesses a scope.
         """
         if self._failed or not paths:
             return False
@@ -6648,7 +6831,9 @@ class LexicalStore:
         try:
             source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
-                return self._apply_paths_locked(paths, [], source_proofs=source_proofs)
+                return self._apply_paths_locked(
+                    paths, [], source_proofs=source_proofs, earlier_steps=earlier_steps
+                )
         except VaultLockTimeout:
             raise
         except VaultLockError as e:
@@ -6665,65 +6850,149 @@ class LexicalStore:
 
         A watcher batch that misses the barrier leaves an uncovered delta that no
         later batch can bless. When this process's registry still bridges each
-        scope's stored checkpoint with a complete, untainted delta, and the
-        union fits the foreground cap, replaying those identities is the
-        watcher's own bounded apply, deletions included. Returns whether that
-        replay committed (trivially, when nothing lags). A retired or stale
-        store, a foreign or adopted origin, lost history, a reconcile-tainted
-        delta or an oversized one returns False, logs which refusal it was and
-        keeps the full pass. A source that moves under the replay raises
-        `_SourceMoved`, and the worker keeps the lag-only claim.
+        scope's stored checkpoint with a complete, untainted delta, replaying
+        those identities is the watcher's own bounded apply, deletions included.
+        Returns whether the catalogue then stores the registry's checkpoints
+        (trivially, when nothing lags). A retired or stale store, a foreign or
+        adopted origin, lost history or a reconcile-tainted delta returns False,
+        logs which refusal it was and keeps the full pass.
+
+        A lag larger than the foreground cap replays in steps of at most the
+        cap, each under its own publication barrier, so writers wait no longer
+        than for one watcher batch. Only a round's last step can stamp the
+        checkpoints, and only when every lagging path is in that step or was
+        settled by an earlier one (`_settled_catch_up_paths`, re-read under the
+        last step's barrier). A step whose source moves rolls back and settles
+        nothing; its paths stay in the lag. Steps beyond the first lag's need
+        come from `_CATCH_UP_SLACK_STEPS`; a lag that outgrows them returns False.
+        """
+        from . import freshness as freshness_module
+
+        lagging = self._lagging_catch_up_paths()
+        if lagging is None:
+            return False
+        cap = CATALOG_FOREGROUND_DELTA_CAP
+        budget = -(-len(lagging) // cap) + _CATCH_UP_SLACK_STEPS
+        taken = 0
+        steps: list[_CatchUpStep] = []
+        while lagging:
+            # A round replays what no earlier step settled. When every path is
+            # settled but unstamped, one more step carries the stamp.
+            pending = sorted(lagging - self._settled_catch_up_paths(steps))
+            pending = pending or sorted(lagging)[:cap]
+            while pending:
+                if taken >= budget:
+                    return _log_catch_up_decline("outpaced", paths=len(lagging), steps=taken)
+                taken += 1
+                chunk, pending = pending[:cap], pending[cap:]
+                # Taken before the step reads any file: an edit after it has an
+                # event after this mark, so the path is not settled by this step.
+                marks = {
+                    scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+                    for scope in freshness_module.SCOPES
+                }
+                try:
+                    applied = self.retry_deferred_upsert(
+                        [Path(path) for path in chunk],
+                        earlier_steps=() if pending else tuple(steps),
+                    )
+                except _SourceMoved:
+                    # The step rolled back, so it settles nothing and its paths
+                    # stay in the lag that the next round re-reads.
+                    continue
+                if not applied:
+                    return _log_catch_up_decline("replay_failed", paths=len(chunk))
+                steps.append(_CatchUpStep(marks, frozenset(chunk)))
+            lagging = self._lagging_catch_up_paths()
+            if lagging is None:
+                return False
+        return True
+
+    def _lagging_catch_up_paths(self) -> set[str] | None:
+        """The registry paths both scopes' stored checkpoints miss, or None.
+
+        None means a refusal that keeps the full pass; this logs which one.
         """
         from . import freshness as freshness_module
 
         if self._failed:
-            return _log_catch_up_decline("store_failed")
+            _log_catch_up_decline("store_failed")
+            return None
         if not self.path.exists():
-            return _log_catch_up_decline("store_missing")
+            _log_catch_up_decline("store_missing")
+            return None
         lagging: set[str] = set()
         try:
             conn = self._connect()
             try:
                 if not self._schema_is_current(conn):
-                    return _log_catch_up_decline("schema")
+                    _log_catch_up_decline("schema")
+                    return None
                 identity = catalog_semantic_identity(self.vault_root)
                 if self._meta_catalog_identity(conn) != identity:
-                    return _log_catch_up_decline("identity")
+                    _log_catch_up_decline("identity")
+                    return None
                 for scope in freshness_module.SCOPES:
                     if not freshness_module.recall_is_live(self.vault_root, scope):
-                        return _log_catch_up_decline("not_live", scope=scope)
+                        _log_catch_up_decline("not_live", scope=scope)
+                        return None
                     stored = self._meta_checkpoint(conn, scope)
                     current = freshness_module.recall_checkpoint(self.vault_root, scope)
                     if stored is None or current is None:
-                        return _log_catch_up_decline("no_checkpoint", scope=scope)
+                        _log_catch_up_decline("no_checkpoint", scope=scope)
+                        return None
                     if stored.instance_id != current.instance_id:
-                        return _log_catch_up_decline("instance", scope=scope)
+                        _log_catch_up_decline("instance", scope=scope)
+                        return None
                     delta = freshness_module.recall_delta_since(
                         self.vault_root, scope, stored
                     )
                     if not delta.complete:
-                        return _log_catch_up_decline("incomplete", scope=scope)
+                        _log_catch_up_decline("incomplete", scope=scope)
+                        return None
                     if delta.requires_source_proof:
-                        return _log_catch_up_decline(
+                        _log_catch_up_decline(
                             "source_proof",
                             scope=scope,
                             changed=len(delta.changed),
                             deleted=len(delta.deleted),
                         )
+                        return None
                     lagging |= delta.changed | delta.deleted
             finally:
                 conn.close()
         except sqlite3.Error as error:
-            return _log_catch_up_decline("store_error", error=type(error).__name__)
-        if len(lagging) > CATALOG_FOREGROUND_DELTA_CAP:
-            return _log_catch_up_decline(
-                "over_cap", paths=len(lagging), cap=CATALOG_FOREGROUND_DELTA_CAP
-            )
-        if not lagging:
-            return True
-        if not self.retry_deferred_upsert([Path(path) for path in sorted(lagging)]):
-            return _log_catch_up_decline("replay_failed", paths=len(lagging))
-        return True
+            _log_catch_up_decline("store_error", error=type(error).__name__)
+            return None
+        return lagging
+
+    def _settled_catch_up_paths(self, steps: Sequence[_CatchUpStep]) -> set[str]:
+        """The paths earlier catch-up steps applied that no later event touched.
+
+        A path stays settled by its step while neither scope's delta since the
+        step's marks names it. A step whose marks no longer bridge (lost
+        history, a restarted registry) settles nothing. The catch-up plans with
+        this off the barrier; the last step re-reads it under the barrier, so
+        an edit while that step waits for the barrier still counts.
+        """
+        from . import freshness as freshness_module
+
+        settled: set[str] = set()
+        for step in steps:
+            touched: set[str] = set()
+            for scope in freshness_module.SCOPES:
+                mark = step.marks.get(scope)
+                delta = (
+                    freshness_module.recall_delta_since(self.vault_root, scope, mark)
+                    if mark is not None
+                    else None
+                )
+                if delta is None or not delta.complete:
+                    break
+                touched |= delta.changed | delta.deleted
+            else:
+                settled |= step.paths - touched
+        return settled
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
@@ -6735,8 +7004,13 @@ class LexicalStore:
         rel_paths: list[str],
         *,
         source_proofs: dict[str, _ReconcileSourceProof] | None = None,
+        earlier_steps: Sequence[_CatchUpStep] = (),
     ) -> bool:
-        """Apply a changed/deleted union with the publication barrier held."""
+        """Apply a changed/deleted union with the publication barrier held.
+
+        Paths that `earlier_steps` applied count as requested for the witness
+        only while no event has touched them since their step's marks.
+        """
         from . import freshness as freshness_module
         from . import recall_policy
 
@@ -6761,6 +7035,8 @@ class LexicalStore:
                 for scope in ("kb", "vault")
             }
             requested_paths = self._requested_event_paths(paths, rel_paths)
+            if earlier_steps:
+                requested_paths |= self._settled_catch_up_paths(earlier_steps)
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
             for path in paths:
@@ -7291,9 +7567,12 @@ class LexicalStore:
            each scope's start freshness checkpoint, and the semantic projection
            identity BEFORE the (potentially long) corpus scan. Any later live
            publication establishes the baseline for later conflict detection.
-        2. Build a fresh temp sidecar from the walk; if the projection identity
+        2. Build the temp sidecar from the walk; if the projection identity
            shifted under the scan, discard it (the parsed units used the old
-           projection).
+           projection). When the live catalogue carries this release's schema
+           and the captured identity, the temp starts as a backup copy of it and
+           only pages whose content, scope or semantic generation moved are
+           re-parsed (`_reconcile_catalog`); otherwise every page is parsed.
         3. Obtain each scope's complete delta from its start checkpoint and
            replay it onto the temp DB WITHOUT the 32-path foreground cap. An
            incomplete/overflowed delta means the exact target checkpoint cannot
@@ -7331,6 +7610,9 @@ class LexicalStore:
         self._last_rebuild_result = None
         self._last_rebuild_stage = RepairStage.BUILD
         self._last_census_excused = set()
+        self._last_replay_retargets = 0
+        self._last_decline_cause = None
+        self._last_parked_seconds = 0.0
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
         try:
@@ -7366,13 +7648,23 @@ class LexicalStore:
                 # A foreground bulk pass: its corpus walks and page inserts
                 # pause while an activation is in flight, never under the
                 # publication lock or a boundary (`foreground_priority`).
-                with foreground_priority.bulk():
-                    published = self._build_and_publish(
-                        temp_path,
-                        start_identity,
-                        start_checkpoints,
-                        start_live_guard,
+                with foreground_priority.bulk(
+                    budget=foreground_priority.PassBudget(
+                        wait_share=_REPAIR_WAIT_SHARE,
+                        max_waited=_REPAIR_MAX_PARKED_SECONDS,
                     )
+                ):
+                    # A delta, so a pass nested in another's scope reports only its own waits.
+                    parked_before = foreground_priority.pass_waited()
+                    try:
+                        published = self._build_and_publish(
+                            temp_path,
+                            start_identity,
+                            start_checkpoints,
+                            start_live_guard,
+                        )
+                    finally:
+                        self._last_parked_seconds = foreground_priority.pass_waited() - parked_before
             except sqlite3.Error as e:
                 if classify_sqlite_error(e) == "transient":
                     # A passing lock/interrupt fails only this attempt; the next
@@ -7439,7 +7731,9 @@ class LexicalStore:
                 checkpoint = base._replace(triple=walk_triple)
                 scope_targets[scope] = ("walk", None, checkpoint, walk_triple)
 
-        if not self._materialize_catalog(temp_path, members, signatures, scope_targets):
+        if not self._materialize_catalog(
+            temp_path, members, signatures, scope_targets, reuse_identity=start_identity
+        ):
             return False
 
         # Work observed while the temp rows were being materialized is not part
@@ -7497,10 +7791,19 @@ class LexicalStore:
                     )
                 except freshness_module.RecallProjectionUnavailable:
                     continue
+            # The walk can see a write that is still publishing before the
+            # registry does. Wait for the registry to observe each path where
+            # the two disagree, so the census replay re-proves it.
+            views = {
+                scope: self._census_view(final_entries[scope], snapshot)
+                for scope, snapshot in after_walk.items()
+            }
+            if not self._await_census_observation(scope_targets, views):
+                return False
             self._last_rebuild_stage = RepairStage.CENSUS_REPLAY
             before_replay = scope_targets
             rebased = self._rebase_detached_catalog(
-                temp_path, scope_targets, start_identity, max_paths=None,
+                temp_path, scope_targets, start_identity, max_paths=None
             )
             if rebased is None:
                 return False
@@ -7522,12 +7825,13 @@ class LexicalStore:
                 if final_triple == scope_targets[scope][3]:
                     continue
                 agreed = None if tainted else self._census_agrees_outside_replay(
-                    final_entries[scope],
                     before_replay[scope][2],
                     replayed.get(scope),
                     after_walk.get(scope),
+                    views.get(scope),
                 )
                 if agreed is None:
+                    self._last_decline_cause = DeclineCause.UNOBSERVED_DRIFT
                     log.info(
                         "lexical atomic publish aborted: %s source changed after target capture",
                         scope,
@@ -7624,15 +7928,25 @@ class LexicalStore:
         scope_targets: dict[str, tuple],
         *,
         cancel: threading.Event | None = None,
+        reuse_identity: str | None = None,
     ) -> bool:
         """Write one walked corpus and its target checkpoints into a temp catalogue.
 
         Shared by the background repair's `rebuild_atomic` and a standby's
-        `build_detached_catalog`. Touches only the temp family: no live file, no
-        publication barrier. True only when the temp is a single self-contained
-        main file that may later replace the live one. A set ``cancel`` stops the
-        build between pages with `_DetachedBuildCancelled`.
+        `build_detached_catalog`. Touches only the temp family and, to copy it,
+        reads the live catalogue: no live write, no publication barrier. True
+        only when the temp is a single self-contained main file that may later
+        replace the live one. A set ``cancel`` stops the build between pages
+        with `_DetachedBuildCancelled`. A ``reuse_identity`` lets the temp start
+        from the live catalogue built under that identity (`_seed_from_live`).
         """
+        started = time.monotonic()
+        counts: tuple[int, int, int, int] | None = None
+        basis = "not_requested"
+        if reuse_identity is not None:
+            counts, basis = self._reuse_live_catalog(
+                temp_path, reuse_identity, members, signatures
+            )
         conn = self._connect_setup(temp_path)
         folded = False
         try:
@@ -7640,17 +7954,28 @@ class LexicalStore:
             with conn:
                 # Only the temp family is open here: a pause holds no live
                 # file, lock or boundary.
-                for path, (in_kb, in_vault) in foreground_priority.yielding_in_bulk(
-                    members.items()
-                ):
-                    if cancel is not None and cancel.is_set():
-                        raise _DetachedBuildCancelled
-                    self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(SCHEMA_VERSION),),
-                )
+                if counts is None:
+                    for path, (in_kb, in_vault) in foreground_priority.yielding_in_bulk(
+                        members.items()
+                    ):
+                        if cancel is not None and cancel.is_set():
+                            raise _DetachedBuildCancelled
+                        self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+                self._stamp_whole_build(conn)
+            reparsed, removed, inserted, unchanged = (
+                counts if counts is not None else (0, 0, len(members), 0)
+            )
+            log.info(
+                "lexical catalogue pages materialized route=%s basis=%s reparsed=%d "
+                "removed=%d inserted=%d unchanged=%d elapsed_ms=%d",
+                "reconciled" if counts is not None else "rebuilt",
+                basis,
+                reparsed,
+                removed,
+                inserted,
+                unchanged,
+                int((time.monotonic() - started) * 1000),
+            )
             with conn:
                 for _scope, (kind, delta, _cp, _tr) in scope_targets.items():
                     if kind == "delta":
@@ -7682,6 +8007,239 @@ class LexicalStore:
             )
             return self._decline_rebuild("fold_failed")
         return True
+
+    def _reuse_live_catalog(
+        self,
+        temp_path: Path,
+        identity: str,
+        members: dict[Path, list[bool]],
+        signatures: dict,
+    ) -> tuple[tuple[int, int, int, int] | None, str]:
+        """Fill an empty temp from the live catalogue, reconciled to the walk.
+
+        Returns the `_reconcile_catalog` counts and "current", or None and the
+        reason the caller parses the whole corpus into the temp instead. On None
+        the temp family has been removed, so the caller starts from empty.
+        Contention propagates, so `rebuild_atomic` declines and the worker retries.
+        """
+        from .vault import VaultLockError
+
+        conn = self._connect_setup(temp_path)
+        try:
+            basis = self._seed_from_live(conn, identity)
+            if basis is None:
+                counts = self._reconcile_catalog(conn, members, signatures)
+                if counts is not None:
+                    return counts, "current"
+                basis = "damaged"
+        except Exception as e:  # noqa: BLE001 - reuse only saves work; parse the corpus instead
+            if isinstance(e, VaultLockError) or (
+                isinstance(e, sqlite3.Error) and classify_sqlite_error(e) == "transient"
+            ):
+                raise
+            log.warning("lexical repair could not reuse the live catalogue (%s)", e)
+            basis = "error"
+        finally:
+            conn.close()
+        self._cleanup_sidecar_files(temp_path)
+        return None, basis
+
+    def _seed_from_live(self, conn: sqlite3.Connection, identity: str) -> str | None:
+        """Copy the live catalogue into the empty temp behind `conn` if it may be reused.
+
+        Returns None when `conn` holds a reusable copy, else the reason it does
+        not: a retired, quarantine-bound or missing live store, a stale schema,
+        identity or release, a failed integrity check, or declarations that
+        differ from a fresh build's (an FTS tokenizer, index or trigger the copy
+        would otherwise keep).
+        """
+        if self._failed:
+            return "failed"
+        # An ordinary connection may discard the WAL of a corrupt set, which the
+        # publication must move aside whole (`_publish_over_quarantined_set`).
+        # Outside the barrier this is advisory: the probe never writes, and the
+        # publication classifies the set again under the barrier.
+        if self._live_set_disposition() == "quarantine":
+            return "quarantine"
+        if not self.path.exists():
+            return "missing"
+        source = self._connect()
+        try:
+            # One backup step copies one consistent snapshot of the live main
+            # and its committed WAL frames; a file copy could tear under a writer.
+            source.backup(conn)
+        finally:
+            source.close()
+        if not self._schema_is_current(conn):
+            return "schema"
+        if self._meta_catalog_identity(conn) != identity:
+            return "identity"
+        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        if release is None or release[0] != __version__:
+            return "release"
+        # A whole-corpus build reads nothing from the live file; a copy would
+        # carry its damage into every later repair, so check the copy once.
+        if conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            return "integrity"
+        fresh = _sqlite_connect(":memory:")
+        try:
+            self._ensure_schema(fresh)
+            if self._catalog_declarations(conn) != self._catalog_declarations(fresh):
+                return "declarations"
+        finally:
+            fresh.close()
+        with conn:
+            # The copied meta rows attest the live rows, not this temp's; the
+            # build writes its own targets. Recreating the defaults also gives
+            # the replacement its own frequency revision.
+            conn.execute("DELETE FROM meta")
+            self._create_catalog_tables(conn)
+        return None
+
+    @staticmethod
+    def _catalog_declarations(conn: sqlite3.Connection) -> list[tuple]:
+        # SQLite reserves the `sqlite_` prefix for its own objects, such as
+        # planner statistics, which no catalogue declaration creates.
+        return sorted(
+            conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+            ).fetchall()
+        )
+
+    @staticmethod
+    def _index_rows_missing(conn: sqlite3.Connection) -> bool:
+        """Whether a page or semantic unit lacks the full-text row a build writes for it.
+
+        A build writes one `fts` and one `tri` row per page and one `unit_fts`
+        row per semantic unit when FTS5 is available. Without FTS5 neither the
+        copy nor a fresh build has those tables, so only present tables are
+        counted. Run after `_delete_orphan_rows`: a count below its owner's is
+        then a missing row, which no page input shows.
+        """
+        tables = {
+            name
+            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # The schema's own full-text tables and their owner tables, as `_ensure_fts_schema`
+        # declares them: a closed set.
+        for index, owner in (("fts", "pages"), ("tri", "pages"), ("unit_fts", "semantic_units")):
+            if index in tables and (
+                conn.execute(f"SELECT count(*) FROM {index}").fetchone()[0]
+                != conn.execute(f"SELECT count(*) FROM {owner}").fetchone()[0]
+            ):
+                return True
+        return False
+
+    def _reconcile_catalog(
+        self,
+        conn: sqlite3.Connection,
+        members: dict[Path, list[bool]],
+        signatures: dict,
+    ) -> tuple[int, int, int, int] | None:
+        """Bring a catalogue's page rows to one walk, parsing only the pages that moved.
+
+        `conn` holds a complete catalogue that the running release built under
+        the catalogue identity the caller captured; it is never the live
+        sidecar, whose writers this does not serialize with. A stored page stays
+        only while every input of its rows still matches: the walk's mtime and
+        scope membership, the content hash of the page's current bytes, and the
+        semantic generation the current parser and registries give those bytes.
+        Every other walked page is deleted and parsed again, stored pages the
+        walk lacks are removed, and new pages are inserted, so the rows of an
+        undamaged catalogue equal a whole-corpus build of the same walk. Damage
+        that leaves a page's inputs intact, such as a changed column or a
+        deleted semantic unit, stays until that page is written or a release
+        builds the catalogue whole. Meta rows are the caller's.
+
+        Returns the (reparsed, removed, inserted, unchanged) page counts, or None
+        when an owner row lacks its full-text row (`_index_rows_missing`).
+        """
+        from . import freshness as freshness_module
+        from . import semantic_index
+
+        parser_version, language_hash, relation_hash = (
+            semantic_index.current_registry_identity(self.vault_root)
+        )
+
+        def generation_current(rel: str, content_hash: str, structure_json: str | None) -> bool:
+            # The core registries enter the generation but not the catalogue
+            # identity, so a registry change must re-parse the pages it moved.
+            try:
+                structure = json.loads(structure_json or "")
+            except ValueError:
+                return False
+            return (
+                isinstance(structure, dict)
+                and structure.get("parser_version") == parser_version
+                and structure.get("parent_source_hash") == content_hash
+                and structure.get("parent_generation")
+                == semantic_index.parent_generation(
+                    parent_path=rel,
+                    parent_ref=structure.get("parent_ref"),
+                    parent_source_hash=content_hash,
+                    language_registry_hash=language_hash,
+                    relation_registry_hash=relation_hash,
+                    parser_version=parser_version,
+                )
+            )
+
+        walk: dict[str, tuple[Path, int, bool, bool]] = {}
+        for path, (in_kb, in_vault) in members.items():
+            rel = self._rel(path)
+            if rel is not None:
+                walk[rel] = (path, signatures[path][0], bool(in_kb), bool(in_vault))
+        # path(rel) -> (rowid, the stored inputs to compare), snapshotted before
+        # writes. A NULL content hash (an unreadable page) or a stale semantic
+        # generation keeps no inputs, so the page is parsed again.
+        stored: dict[str, tuple[int, tuple[int, bool, bool, str] | None]] = {}
+        for rel, rowid, mtime_ns, in_kb, in_vault, content_hash, structure_json in conn.execute(
+            "SELECT path, rowid, mtime_ns, in_kb, in_vault, content_hash, structure_json "
+            "FROM pages"
+        ):
+            inputs = None
+            if content_hash is not None and generation_current(
+                rel, content_hash, structure_json
+            ):
+                inputs = (int(mtime_ns), bool(in_kb), bool(in_vault), str(content_hash))
+            stored[str(rel)] = (int(rowid), inputs)
+
+        reparsed = removed = inserted = unchanged = 0
+        with conn:
+            # External owner-row corruption can leave page and semantic-unit
+            # index rows behind; purge them before SQLite reuses rowids.
+            self._delete_orphan_rows(conn)
+            if self._index_rows_missing(conn):
+                return None
+            for rel, (rowid, _inputs) in stored.items():
+                if rel not in walk:
+                    self._delete_rowid(conn, rowid)
+                    removed += 1
+            # Only the temp family is open here: a pause holds no live file,
+            # lock or boundary.
+            for rel, (path, mtime_ns, in_kb, in_vault) in foreground_priority.yielding_in_bulk(
+                walk.items()
+            ):
+                row = stored.get(rel)
+                if row is None:
+                    self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
+                    inserted += 1
+                    continue
+                rowid, inputs = row
+                # The digest is the one every custody seam compares with
+                # `pages.content_hash`: sha256 of the bytes the parser reads.
+                if (
+                    inputs is not None
+                    and inputs[:3] == (mtime_ns, in_kb, in_vault)
+                    and freshness_module.custody_digests(self.vault_root, (rel,))[rel]
+                    == inputs[3]
+                ):
+                    unchanged += 1
+                    continue
+                self._delete_rowid(conn, rowid)
+                self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
+                reparsed += 1
+        return reparsed, removed, inserted, unchanged
 
     def _replace_live_catalog(self, temp_path: Path) -> bool:
         """Install a folded temp catalogue over the live set.
@@ -8126,7 +8684,10 @@ class LexicalStore:
 
         Each replayed path proves its target signature or absence; an event
         that lands later on another path does not void the replay; the next
-        replay carries it (see `_delta_target_still_current`).
+        replay carries it (see `_delta_target_still_current`). Off the barrier,
+        a path whose proof fails because the registry has not yet observed a
+        newer write to it is replayed again once the registry observes that
+        write (`_await_observed_rewrites`), up to `_REPLAY_RETARGETS` times.
         """
         from . import freshness as freshness_module
 
@@ -8134,6 +8695,10 @@ class LexicalStore:
             self._last_rebuild_result = "identity_changed"
             return None
 
+        # Waiting for the registry never holds the publication barrier, and
+        # every call under the barrier keeps the foreground cap.
+        retargets_left = _REPLAY_RETARGETS if max_paths is None else 0
+        checkpoints: dict[str, object] = {}
         deltas: dict[str, object] = {}
         touched: set[str] = set()
         updated = dict(scope_targets)
@@ -8151,22 +8716,7 @@ class LexicalStore:
             delta = freshness_module.recall_delta_since(
                 self.vault_root, scope, checkpoint
             )
-            if (
-                not delta.complete
-                or (
-                    getattr(delta, "requires_source_proof", False)
-                    and max_paths is not None
-                )
-                or delta.from_ != checkpoint
-                or (
-                    delta.to.policy_version,
-                    delta.to.access_policy_fingerprint,
-                )
-                != (
-                    checkpoint.policy_version,
-                    checkpoint.access_policy_fingerprint,
-                )
-            ):
+            if not self._replayable_delta(delta, checkpoint, max_paths=max_paths):
                 self._last_rebuild_result = "delta_unavailable"
                 return None
             touched.update(delta.changed)
@@ -8174,12 +8724,16 @@ class LexicalStore:
             if max_paths is not None and len(touched) > max_paths:
                 self._last_rebuild_result = "delta_unavailable"
                 return None
-            if not self._delta_target_still_current(scope, delta, bind_registry=False):
+            # A replay that may retarget proves after applying its rows, so a
+            # write still publishing overlaps the apply instead of aborting it.
+            if not retargets_left and not self._delta_target_still_current(
+                scope, delta, bind_registry=False
+            ):
                 self._last_rebuild_result = "source_changed"
                 return None
             if delta.to != checkpoint:
+                checkpoints[scope] = checkpoint
                 deltas[scope] = delta
-                updated[scope] = ("delta", delta, delta.to, delta.to.triple)
 
         if not deltas:
             return updated
@@ -8193,17 +8747,41 @@ class LexicalStore:
             ):
                 self._last_rebuild_result = "identity_changed"
                 return None
+            stale_result = "source_changed"
             try:
                 with conn:
                     for delta in deltas.values():
                         self._apply_delta_rows(conn, delta)
-                    if catalog_semantic_identity(self.vault_root) != expected_identity:
-                        raise _DeltaReplayStale
-                    for scope, delta in deltas.items():
-                        if not self._delta_target_still_current(
-                            scope, delta, bind_registry=False
-                        ):
+                    # Every scope proves in one round with no rows applied after
+                    # it. A page's rows are shared by both scopes, so a retarget
+                    # in one scope sends every scope through the proof again.
+                    while True:
+                        if catalog_semantic_identity(self.vault_root) != expected_identity:
                             raise _DeltaReplayStale
+                        unproven = {
+                            scope: paths
+                            for scope, delta in deltas.items()
+                            if (paths := set(self._unproven_delta_paths(scope, delta)))
+                        }
+                        if not unproven:
+                            break
+                        if not retargets_left:
+                            if max_paths is None:
+                                self._last_decline_cause = DeclineCause.RETARGETS_EXHAUSTED
+                            raise _DeltaReplayStale
+                        retargets_left -= 1
+                        self._last_replay_retargets += 1
+                        deadline = time.monotonic() + _REPLAY_OBSERVATION_WAIT_SECONDS
+                        for scope, paths in unproven.items():
+                            observed = self._await_observed_rewrites(
+                                scope, checkpoints[scope], deltas[scope], paths, deadline
+                            )
+                            if observed is None:
+                                stale_result = self._last_rebuild_result
+                                raise _DeltaReplayStale
+                            deltas[scope], newer = observed
+                            self._apply_delta_rows(conn, newer)
+                    for scope, delta in deltas.items():
                         if delta.to.triple is not None:
                             conn.execute(
                                 "INSERT INTO meta(key, value) VALUES(?, ?) "
@@ -8211,9 +8789,10 @@ class LexicalStore:
                                 (f"triple:{scope}", repr(tuple(delta.to.triple))),
                             )
                         self._write_checkpoint(conn, scope, delta.to)
+                        updated[scope] = ("delta", delta, delta.to, delta.to.triple)
                     self._write_catalog_identity(conn, expected_identity)
             except _DeltaReplayStale:
-                self._last_rebuild_result = "source_changed"
+                self._last_rebuild_result = stale_result
                 return None
             folded = self._fold_to_single_file(conn)
         finally:
@@ -8226,11 +8805,163 @@ class LexicalStore:
         return updated
 
     @staticmethod
+    def _replayable_delta(delta, checkpoint, *, max_paths: int | None) -> bool:
+        """Does `delta` bridge `checkpoint` completely, under the same recall policy?
+
+        A capped replay also refuses a delta that needs a source proof.
+        """
+        return (
+            delta.complete
+            and not (getattr(delta, "requires_source_proof", False) and max_paths is not None)
+            and delta.from_ == checkpoint
+            and (delta.to.policy_version, delta.to.access_policy_fingerprint)
+            == (checkpoint.policy_version, checkpoint.access_policy_fingerprint)
+        )
+
+    def _await_observed_rewrites(
+        self, scope: str, checkpoint, delta, unproven: set[str], deadline: float
+    ):
+        """Wait until the registry observes a newer state of every unproven path.
+
+        Returns the newer delta from `checkpoint` and the part of it that
+        `delta` did not replay. Returns None, with the result set, when the
+        registry no longer bridges `checkpoint` (`delta_unavailable`), or has
+        not observed every path by `deadline` or while a write could still be
+        publishing it (`source_changed`, with the cause). A path that differs
+        with no write in flight is drift that no event will report, so the wait
+        ends one poll after the last write finished publishing.
+        """
+        from . import freshness as freshness_module
+
+        seen = delta.to
+        quiet_since: float | None = None
+        while True:
+            if freshness_module.recall_checkpoint(self.vault_root, scope) != seen:
+                fresh = freshness_module.recall_delta_since(self.vault_root, scope, checkpoint)
+                seen = fresh.to
+                newer = (
+                    self._newer_part(delta, fresh)
+                    if self._replayable_delta(fresh, checkpoint, max_paths=None)
+                    else None
+                )
+                if newer is None:
+                    self._last_rebuild_result = "delta_unavailable"
+                    return None
+                if not self._uncovered_paths(unproven, newer):
+                    return fresh, newer
+            now = time.monotonic()
+            if _a_write_may_be_publishing(self.vault_root, unproven):
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = now
+            elif now - quiet_since >= _REPLAY_OBSERVATION_POLL_SECONDS:
+                self._last_rebuild_result = "source_changed"
+                self._last_decline_cause = DeclineCause.UNOBSERVED_DRIFT
+                return None
+            remaining = deadline - now
+            if remaining <= 0:
+                self._last_rebuild_result = "source_changed"
+                self._last_decline_cause = (
+                    DeclineCause.UNOBSERVED_DRIFT
+                    if quiet_since is not None
+                    else DeclineCause.OBSERVATION_TIMED_OUT
+                )
+                return None
+            time.sleep(min(_REPLAY_OBSERVATION_POLL_SECONDS, remaining))
+
+    @staticmethod
+    def _uncovered_paths(paths, delta) -> set[str]:
+        """The paths in `paths` that `delta` neither changes nor deletes.
+
+        Paths compare as the freshness digest spells them, so a walked path and
+        its registry spelling are one path.
+        """
+        from . import freshness as freshness_module
+
+        digest = freshness_module._digest_path
+        covered = {digest(path) for path in (*delta.changed, *delta.deleted)}
+        return {path for path in paths if digest(path) not in covered}
+
+    @staticmethod
+    def _census_view(walked: list[tuple[str, object]], after_walk) -> _CensusView:
+        """Digest the census walk and the registry's map after it, once for every reader.
+
+        Each side maps a path as the freshness digest spells it to the path and
+        its normalized signature.
+        """
+        from . import freshness as freshness_module
+
+        digest = freshness_module._digest_path
+        signature = freshness_module._normalize_signature
+        _registry_checkpoint, registry_entries = after_walk
+        return _CensusView(
+            walked=tuple((digest(path), path, signature(sig)) for path, sig in walked),
+            registry=tuple(
+                (digest(path), path, signature(sig)) for path, sig in registry_entries.items()
+            ),
+        )
+
+    def _await_census_observation(
+        self, scope_targets: dict[str, tuple], views: dict[str, _CensusView]
+    ) -> bool:
+        """Wait until the registry observes every path where the census walk differs from it.
+
+        The walk can see a write before the registry does. The registry's
+        delta from the temp catalogue's checkpoint must name each such path
+        before the census replay can replay and prove it. False, with the result
+        set, when it does not within `_REPLAY_OBSERVATION_WAIT_SECONDS`, or when
+        no write is publishing it: the census refuses as it did before.
+        """
+        from . import freshness as freshness_module
+
+        deadline = time.monotonic() + _REPLAY_OBSERVATION_WAIT_SECONDS
+        for scope, view in views.items():
+            disagreeing = view.disagreements()
+            if not disagreeing:
+                continue
+            checkpoint = scope_targets[scope][2]
+            delta = freshness_module.recall_delta_since(self.vault_root, scope, checkpoint)
+            if not self._replayable_delta(delta, checkpoint, max_paths=None):
+                continue  # The census replay reports it as `delta_unavailable`.
+            missing = self._uncovered_paths(disagreeing, delta)
+            if not missing:
+                continue
+            self._last_replay_retargets += 1
+            if self._await_observed_rewrites(scope, checkpoint, delta, missing, deadline) is None:
+                self._last_rebuild_stage = RepairStage.CENSUS
+                return False
+        return True
+
+    @staticmethod
+    def _newer_part(delta, fresh):
+        """The part of `fresh` that a replay of `delta` did not apply, or None.
+
+        Both start at one checkpoint, so `fresh` names every path that `delta`
+        names; a `fresh` that does not cannot extend it. A changed path with
+        the same target signature keeps the rows that `delta` applied.
+        """
+        if not (delta.changed | delta.deleted) <= (fresh.changed | fresh.deleted):
+            return None
+        replayed = dict(delta.target_signatures)
+        targets = dict(fresh.target_signatures)
+        changed = frozenset(
+            path for path in fresh.changed if replayed.get(path) != targets.get(path)
+        )
+        return fresh._replace(
+            changed=changed,
+            deleted=fresh.deleted - delta.deleted,
+            target_signatures=tuple(
+                (path, signature) for path, signature in fresh.target_signatures
+                if path in changed
+            ),
+        )
+
+    @staticmethod
     def _census_agrees_outside_replay(
-        walked: list[tuple[str, object]],
         temp_checkpoint,
         replayed_delta,
         after_walk,
+        view: _CensusView | None,
     ) -> set[str] | None:
         """Excuse exactly the paths the census replay re-proved, or refuse.
 
@@ -8249,9 +8980,9 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
-        if replayed_delta is None or after_walk is None:
+        if replayed_delta is None or after_walk is None or view is None:
             return None
-        registry_checkpoint, registry_entries = after_walk
+        registry_checkpoint, _registry_entries = after_walk
         if not (
             replayed_delta.complete
             and replayed_delta.from_ == temp_checkpoint
@@ -8264,10 +8995,8 @@ class LexicalStore:
         # a replayed path is excused on both sides or on neither.
         digest = freshness_module._digest_path
         excused = {digest(path) for path in (*replayed_delta.changed, *replayed_delta.deleted)}
-        walked_outside = [(path, sig) for path, sig in walked if digest(path) not in excused]
-        registry_outside = [
-            (path, sig) for path, sig in registry_entries.items() if digest(path) not in excused
-        ]
+        walked_outside = [(path, sig) for key, path, sig in view.walked if key not in excused]
+        registry_outside = [(path, sig) for key, path, sig in view.registry if key not in excused]
         if freshness_module.triple_from_entries(
             walked_outside
         ) != freshness_module.triple_from_entries(registry_outside):
@@ -8401,19 +9130,37 @@ class LexicalStore:
         observed event there leaves the temp behind the registry, never wrong:
         every replayed path still proves its signature or absence, and the next
         replay or the published lag carries the newer event. The live catalogue
-        keeps the registry binding, because readers trust its checkpoint.
+        keeps the registry binding, because readers trust its checkpoint. An
+        off-barrier detached replay proves only after its rows, through
+        `_unproven_delta_paths` (see `_rebase_detached_catalog`).
         """
         from . import freshness as freshness_module
-        from . import recall_policy
 
         if (
             bind_registry
             and freshness_module.recall_checkpoint(self.vault_root, scope) != delta.to
         ):
             return False
-        expected = dict(getattr(delta, "target_signatures", ()))
-        if set(expected) != set(delta.changed):
+        if next(self._unproven_delta_paths(scope, delta), None) is not None:
             return False
+        return (
+            not bind_registry
+            or freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
+        )
+
+    def _unproven_delta_paths(self, scope: str, delta) -> Iterator[str]:
+        """Yield each path of `delta` that does not prove its target on disk.
+
+        A changed path proves its target signature as a recall candidate in
+        `scope`. A deleted path proves that it is absent, or that it is no
+        longer a recall candidate in `scope`. A changed path without a target
+        signature, or a target without a changed path, proves nothing.
+        """
+        from . import freshness as freshness_module
+        from . import recall_policy
+
+        expected = dict(getattr(delta, "target_signatures", ()))
+        yield from set(expected) ^ set(delta.changed)
         scope_index = 0 if scope == "kb" else 1
         for sp, signature in expected.items():
             path = Path(sp)
@@ -8421,12 +9168,13 @@ class LexicalStore:
                 not recall_policy.is_recall_candidate(self.vault_root, path)
                 or not self._membership(path)[scope_index]
             ):
-                return False
+                yield sp
+                continue
             try:
                 if freshness_module.stat_signature(path) != tuple(signature):
-                    return False
+                    yield sp
             except OSError:
-                return False
+                yield sp
         for sp in delta.deleted:
             path = Path(sp)
             if (
@@ -8434,11 +9182,7 @@ class LexicalStore:
                 and recall_policy.is_recall_candidate(self.vault_root, path)
                 and self._membership(path)[scope_index]
             ):
-                return False
-        return (
-            not bind_registry
-            or freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
-        )
+                yield sp
 
     def _apply_delta_rows(self, conn: sqlite3.Connection, delta) -> None:
         """Replay one delta's row mutations onto `conn` (caller owns the txn).
@@ -9534,7 +10278,9 @@ class LexicalStore:
                             # letting the mismatch escape this seam.
                             if schedule_repair:
                                 _schedule_runtime_catalog_repair(
-                                    self.vault_root, lag_only=True
+                                    self.vault_root,
+                                    lag_only=True,
+                                    cause=RepairCause.CATALOGUE_LAG,
                                 )
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
@@ -9547,7 +10293,9 @@ class LexicalStore:
             if schedule_repair:
                 # The stored checkpoint differs from the target; the worker's catch-up
                 # must prove it exactly current, or the full pass runs.
-                _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                _schedule_runtime_catalog_repair(
+                    self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
@@ -10244,7 +10992,9 @@ class LexicalStore:
                     # Only metadata disagrees (view, checkpoint, policy, schema or
                     # identity); the worker's catch-up must prove the catalogue
                     # exactly current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                    _schedule_runtime_catalog_repair(
+                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                    )
                     return CatalogQueryResult(None, readiness)
                 return self._query_within_budget(view.connection, query_fn, readiness)
             except RegistryError:
@@ -10292,7 +11042,9 @@ class LexicalStore:
                     # generation; the repair worker reconciles it. Only metadata
                     # disagrees, so its catch-up must prove the catalogue exactly
                     # current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+                    _schedule_runtime_catalog_repair(
+                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                    )
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )

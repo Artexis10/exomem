@@ -35,7 +35,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # languages is read in each of them.
 # Paged, consuming imports add `after` and `consume` to import_memory, so the budget rises 100 B after the
 # import text was trimmed.
-TOTAL_BUDGET = 162_500
+# Remote maintenance jobs add the fix, backfill-ids and reconcile write variants, the job status and cancel
+# variants, the receipt's page cursor, and the adopt-local write variant, so the budget rises 2,000 B and
+# remote clients keep the maintenance that local clients have.
+# The windows status adds `series_id`, `next_window_bytes` and the `after` cursor to read_import, and the
+# acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
+TOTAL_BUDGET = 165_250
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -44,7 +49,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3350,
-    "import_memory": 5850,
+    "import_memory": 6100,
     "change_connections": 3200,
     "change_files": 7100,
     "change_governance": 4650,
@@ -55,7 +60,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_schema": 9450,
     "change_session_access": 1700,
     "change_settings": 1500,
-    "check_memory": 6600,
+    "check_memory": 6850,
     "configure_memory": 1400,
     "connect_memory": 4500,
     "coordination_status": 500,
@@ -74,7 +79,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_import": 2150,
+    "read_import": 2550,
     "read_connections": 3300,
     "read_episode": 1500,
     "read_governance": 2250,
@@ -87,7 +92,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "recall_context": 2950,
     "record_episode": 4150,
     "record_memory": 4600,
-    "repair_memory": 4350,
+    "repair_memory": 6050,
     "review_item_context": 1300,
     "review_memory": 3500,
     "schema_memory": 4200,

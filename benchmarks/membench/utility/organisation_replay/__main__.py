@@ -1,4 +1,4 @@
-"""``python -m membench.utility.organisation_replay {bind,run,check}``.
+"""``python -m membench.utility.organisation_replay {bind,run,check,score}``.
 
 Run it once per arm under that arm's interpreter, with ``PYTHONPATH`` set to
 the checkout's ``benchmarks`` directory and nothing else: the server, the tap,
@@ -7,9 +7,14 @@ the seed builder and the readback then all load the arm's own package.
 1. ``bind`` writes ``OUT/binding-ARM.json`` from a slot of its own.
 2. ``run`` runs each situation file through that binding.
 3. ``check`` reports each way a run file departs from ``SCHEMA.md``.
+4. ``score`` scores both arms' run files against the keys (``score.py``); it
+   takes each arm's role from its binding record.
 
-Exit codes are switch evaluation's: 0 done, 2 refused or aborted, 75 paused on
-a quota. Rerun the same ``run`` command to resume a paused or aborted situation.
+Exit codes are switch evaluation's: 0 done, 2 refused, aborted or stopped after
+a struck situation, 75 paused on a quota. Rerun the same ``run`` command to
+resume: it skips each finished or struck situation and resumes a paused or
+aborted one. A situation that aborted on a fault the lane judges its own is
+closed with ``run --strike ID --reason TEXT``.
 """
 
 from __future__ import annotations
@@ -95,7 +100,7 @@ def cmd_run(args) -> int:
     from membench.utility.switch_eval.__main__ import EXIT_PAUSED, EXIT_REFUSED
     from membench.utility.switch_eval.session import RunAborted, RunPaused
 
-    from .runner import arm_parity, run_situation
+    from .runner import arm_parity, finished_run, run_situation, strike_situation
     from .situation import load_situation
 
     out = Path(args.out)
@@ -126,7 +131,22 @@ def cmd_run(args) -> int:
     # Every file is checked before the first session starts.
     situations = [load_situation(Path(path), manifest=manifest) for path in args.situation]
     config = _config(args, binding)
+    if args.strike is not None:
+        chosen = [situation for situation in situations if situation.id == args.strike]
+        if not chosen or not args.reason:
+            print(
+                "refused: --strike names one of the situation files and needs --reason",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        path = strike_situation(config, binding, chosen[0], args.reason)
+        print(f"{args.strike} {config.arm}: struck by the lane -> {path}")
+        return 0
     for situation in situations:
+        done = finished_run(config, binding, situation)
+        if done is not None:
+            print(f"{situation.id} {config.arm}: {done['status']}, finished earlier")
+            continue
         try:
             path = run_situation(config, binding, situation)
         except RunPaused as pause:
@@ -137,6 +157,13 @@ def cmd_run(args) -> int:
             return EXIT_REFUSED
         run = json.loads(path.read_text(encoding="utf-8"))
         print(f"{situation.id} {config.arm}: {run['status']} -> {path}")
+        if run["status"] == "struck":
+            # More than two strikes void an f34 run, so one cause must not strike them all.
+            print(
+                f"stopped: {situation.id} is struck; read its faults, then rerun to continue",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
     return 0
 
 
@@ -151,6 +178,35 @@ def cmd_check(args) -> int:
         f"{run_dir / 'run.json'}: {'conforms to SCHEMA.md' if not problems else f'{len(problems)} problems'}"
     )
     return 0 if not problems else 1
+
+
+def cmd_score(args) -> int:
+    from .score import ScoreRefused, _read_json, score, write_report
+
+    def read(path: str | None):
+        return _read_json(Path(path)) if path else None
+
+    try:
+        report = score(
+            Path(args.out),
+            Path(args.keys),
+            manifest=Path(args.manifest) if args.manifest else None,
+            expect=args.expect or (),
+            judgements=read(args.judgements),
+            judge_key=read(args.judge_key),
+        )
+    except ScoreRefused as refused:
+        print(f"refused: {refused}", file=sys.stderr)
+        return 2
+    write_report(report, Path(args.to))
+    print(
+        f"{report['verdict']}: {len(report['rows'])} scored, {len(report['struck'])} struck, "
+        f"{len(report['incomplete'])} incomplete, {len(report['pending_judgement'])} awaiting the judge"
+    )
+    stats = report["statistics"]
+    print(stats if isinstance(stats, str) else json.dumps(stats["decision_rule"], sort_keys=True))
+    # A void or incomplete run decides nothing; awaiting the judge is a normal stage.
+    return 1 if report["verdict"] in ("void", "incomplete") else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,11 +242,33 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--manifest", help="the custody manifest (sha256sum format); required for held-out files"
     )
+    p.add_argument(
+        "--strike", metavar="ID", help="close this aborted situation as struck, and run nothing"
+    )
+    p.add_argument("--reason", help="why the lane judges the strike's fault the situation's own")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("check", help="check a run directory's run.json against SCHEMA.md")
     p.add_argument("--run-dir", required=True)
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("score", help="score both arms' run files against the key files")
+    p.add_argument("--out", required=True, help="the run root that holds OUT/<situation>/<arm>/")
+    p.add_argument("--keys", required=True, help="the directory that holds the key files")
+    p.add_argument(
+        "--manifest", help="the custody manifest; held-out keys need the preregistered one"
+    )
+    p.add_argument(
+        "--expect", action="append", metavar="ID", help="a development situation the run declares"
+    )
+    p.add_argument("--judgements", help="the blind judge's verdicts on the residual items")
+    p.add_argument("--judge-key", help="the judge-key.json that issued the verdicts' item ids")
+    p.add_argument(
+        "--to",
+        required=True,
+        help="TO/scores.json, the arm key in TO/key, the items alone in TO/judge",
+    )
+    p.set_defaults(func=cmd_score)
 
     args = parser.parse_args(argv)
     return args.func(args)

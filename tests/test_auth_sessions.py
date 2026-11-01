@@ -392,6 +392,33 @@ async def test_refresh_rotation_is_cross_authority_idempotent_then_revokes_on_re
 
 
 @pytest.mark.anyio
+async def test_a_refresh_retried_after_the_edge_timeout_keeps_the_family() -> None:
+    # The client never saw the first response: the service answered after the
+    # edge proxy's 100 s origin timeout, so the client sent the same refresh again.
+    raw = AtomicMemoryStore()
+    now = [1_800_000_000.0]
+    raw.clock = lambda: now[0]
+    authority = _authority(raw, clock=lambda: now[0])
+    _, _, refresh = await authority.issue_offline(
+        client_id="claude-code",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    _, _, lost_refresh = await authority.rotate_refresh(
+        refresh, client_id="claude-code", scopes=("offline_access", "exomem:read")
+    )
+    now[0] += 101
+    retried_access, retried_record, retried_refresh = await authority.rotate_refresh(
+        refresh, client_id="claude-code", scopes=("offline_access", "exomem:read")
+    )
+
+    assert retried_refresh == lost_refresh
+    assert await authority.validate(retried_access) == retried_record
+    assert await authority.validate_refresh(retried_refresh, client_id="claude-code") is not None
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("delayed_collection", ["grace", "redemption"])
 async def test_slow_first_refresh_keeps_the_family_active(delayed_collection: str) -> None:
     now = [1_800_000_000.0]

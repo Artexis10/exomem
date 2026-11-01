@@ -96,6 +96,7 @@ def build_reconcile_config() -> ReconcileConfig:
         ("import_growth_deadline", "CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES", "minutes"),
         ("import_cleanup_deadline", "CELLCTL_IMPORT_CLEANUP_DEADLINE_MINUTES", "minutes"),
         ("import_cleanup_retry", "CELLCTL_IMPORT_CLEANUP_RETRY_MINUTES", "minutes"),
+        ("import_cleanup_owner_retry", "CELLCTL_IMPORT_CLEANUP_OWNER_RETRY_MINUTES", "minutes"),
         ("export_deadline", "CELLCTL_EXPORT_DEADLINE_MINUTES", "minutes"),
         # C6 names this setting. Substrate reads the same variable to state the time limit, so set both alike.
         ("export_ttl", "EXOMEM_EXPORT_TTL_HOURS", "hours"),
@@ -166,13 +167,15 @@ def _positive_integer_env(name: str) -> int:
 
 def build_alert_thresholds() -> AlertThresholds:
     """The cell alerts' thresholds, which the chart renders from the observability
-    contract (`alerts.pending_operation_warn_seconds`, `alerts.pvc_reserved_free_bytes`).
-    A missing or invalid value fails cellctl at startup: with no default in code, the
-    contract is the only place either number lives, and a guessed one would alert wrongly."""
+    contract (`alerts.pending_operation_warn_seconds`, `alerts.pvc_reserved_free_bytes`,
+    `alerts.recall_lag_warn_seconds`). A missing or invalid value fails cellctl at
+    startup: with no default in code, the contract is the only place each number
+    lives, and a guessed one would alert wrongly."""
 
     return AlertThresholds(
         unavailable_after=timedelta(seconds=_positive_integer_env("CELLCTL_PENDING_OPERATION_WARN_SECONDS")),
         disk_free_floor_bytes=_positive_integer_env("CELLCTL_PVC_RESERVED_FREE_BYTES"),
+        recall_lag_after=timedelta(seconds=_positive_integer_env("CELLCTL_RECALL_LAG_WARN_SECONDS")),
     )
 
 

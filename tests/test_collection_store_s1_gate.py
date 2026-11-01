@@ -837,6 +837,20 @@ def _published(found):
     _until(done)
 
 
+def _preserved(found):
+    """Wait until the publisher has recorded a divergence and moved the foreign replica aside.
+
+    The marker commits before the foreign bytes move, so a preview sealed on the marker alone goes
+    stale when the move lands.
+    """
+    path = replica.replica_path(found.root)
+
+    def done():
+        marker = found.meta().get(schema.META_REPLICA_DIVERGENCE)
+        return marker is not None and (path.parent / json.loads(marker)["foreign_leaf"]).exists()
+    _until(done)
+
+
 def _counted_publications(monkeypatch):
     """Count publications that installed a replica, orderly or coalesced."""
     calls = []
@@ -1247,12 +1261,7 @@ def test_owner_route_applies_inside_the_running_service_which_keeps_its_lease_an
     _published(abc)
     path = replica.replica_path(abc.root)
     path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
-
-    def preserved():  # the marker lands before the foreign bytes move aside; preview after both
-        marker = abc.meta().get(schema.META_REPLICA_DIVERGENCE)
-        return marker is not None and (path.parent / json.loads(marker)["foreign_leaf"]).exists()
-
-    _until(preserved)
+    _preserved(abc)
     token = abc.manager._fencing_token
     with library_scope():
         preview = commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local")

@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 701106927b68ca81005cfc518c59da982810f909f2197611b2afa37503eb8901
+  skill_contract: f1d926be0f41b6b64565a23502423649b8da8ed66e75f4310fadb9cb97a22502
   version: "0.32.0"
 ---
 
@@ -296,6 +296,7 @@ target; use a plain title-first citation. Never invent, copy, or edit an
 
 Legacy pages are not rewritten automatically. To add IDs, first run
 `check_memory(operation={'kind': 'backfill-ids'})` in its default dry-run mode, inspect the
-proposed files, and write only after explicit confirmation with `dry_run=false`.
+proposed files, and write only after explicit confirmation with `dry_run=false`. A remote
+write starts a maintenance job with the preview's `plan_id` and a `why` ([vault care](references/vault-care.md)).
 Duplicate or malformed IDs are audit findings; do not guess which duplicate a
 reference means.

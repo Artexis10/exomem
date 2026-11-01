@@ -191,17 +191,11 @@ def test_a_reap_that_releases_nothing_does_not_trim(
 
 
 def _fake_claims(monkeypatch: pytest.MonkeyPatch, *, completed: list[str]) -> None:
-    claim = SimpleNamespace(attempt_count=0, next_attempt_at=0.0)
-    batches = [(claim,)]
-    monkeypatch.setattr(
-        derived_drain.derived_receipts, "recover_prepared_batches", lambda *_a, **_k: 0
-    )
-    monkeypatch.setattr(
-        derived_drain.derived_receipts,
-        "claim_ready_components",
-        lambda *_a, **_k: batches.pop() if batches else (),
-    )
-    monkeypatch.setattr(derived_drain, "_dispatch_claims", lambda *_a, **_k: (list(completed), len(completed)))
+    def run(work) -> None:
+        work.completed.extend(completed)
+        work.dispatched += len(completed)
+
+    monkeypatch.setattr(derived_drain._Pass, "run", run)
 
 
 def test_a_drain_pass_that_completes_a_batch_trims_once(

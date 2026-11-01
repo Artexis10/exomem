@@ -444,12 +444,21 @@ class Supervisor:
             self.phase = "recovery-required"
             self.ingress.unavailable()
             return
-        target = self.records.active() or self.initial_target
-        target = await self.runtime.inspect(target)
-        self._migration_declared(target)
-        # A window shorter than the cold worker's warm stops it mid-warm, and
-        # the unit restarts into the same cold catalog.
-        client = await self.runtime.start(target, timeout=self._replacement_budget())
+        # The listeners are already open. A cold warm can outlast any queue
+        # budget, so calls are refused at once as not dispatched until it ends.
+        self.phase = "starting"
+        self.ingress.unavailable()
+        try:
+            target = self.records.active() or self.initial_target
+            target = await self.runtime.inspect(target)
+            self._migration_declared(target)
+            # A window shorter than the cold worker's warm stops it mid-warm, and
+            # the unit restarts into the same cold catalog.
+            client = await self.runtime.start(target, timeout=self._replacement_budget())
+        except BaseException:
+            # A refused or failed first start is not still starting.
+            self.phase = "unavailable"
+            raise
         self.records.accept(target)
         self.ingress.resume(client)
         self.phase = "ready"
@@ -2053,7 +2062,6 @@ async def serve(
     )
 
     async with await control_server(supervisor.records.directory / "control.sock", supervisor):
-        await supervisor.start()
         server = uvicorn.Server(
             uvicorn.Config(
                 supervisor.ingress,
@@ -2093,9 +2101,23 @@ async def serve(
         if local_server is not None:
             local_serving = asyncio.create_task(local_server.serve(sockets=[local_socket]))
             supervisor.local_port = local_socket.getsockname()[1]
+        # The listeners open before the first worker is ready, so a cold warm
+        # answers calls as not dispatched instead of leaving a closed port.
+        serving = asyncio.create_task(server.serve())
+        starting = asyncio.create_task(supervisor.start())
         try:
-            await server.serve()
+            await asyncio.wait({serving, starting}, return_when=asyncio.FIRST_COMPLETED)
+            if starting.done():
+                # A failed first start still stops the supervisor with its error.
+                starting.result()
+                await serving
+            else:
+                # The server ended while the first worker warmed: report its error.
+                serving.result()
         finally:
+            server.should_exit = True
+            starting.cancel()
+            await asyncio.gather(serving, starting, return_exceptions=True)
             if local_serving is not None:
                 local_server.should_exit = True
                 await asyncio.gather(local_serving, return_exceptions=True)
@@ -2118,8 +2140,12 @@ async def serve(
             try:
                 await supervisor.runtime.stop(timeout=5)
             except Exception:  # noqa: BLE001 - the unit's cgroup cleanup takes what is left
-                # A restart that gave up already names the reason worth reporting.
-                if stopped_because is None:
+                # A restart that gave up, or a first start that failed, already
+                # names the reason worth reporting.
+                start_failed = (
+                    starting.done() and not starting.cancelled() and starting.exception() is not None
+                )
+                if stopped_because is None and not start_failed:
                     raise
         if stopped_because is not None:
             # A failed exit status, so the journal and a Restart=on-failure unit see it.

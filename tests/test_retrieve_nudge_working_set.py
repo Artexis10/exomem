@@ -68,6 +68,11 @@ def _load_hook_module():
 hook = _load_hook_module()
 
 
+def _lane(key: str = "key"):
+    """A REST lane carrying `key`, built by the same module the installed hook loads."""
+    return hook._local_credentials().Lane("rest", None, key)
+
+
 @pytest.fixture(autouse=True)
 def _trusted_fixture_umask():
     """Fixture-created homes/tokens must not inherit writable host defaults.
@@ -883,7 +888,7 @@ def test_the_working_set_rung_posts_to_the_activation_route(
 
     monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
 
-    packet = hook._fetch_packet_via_rest(PROMPT, "sekret", "TOKEN-0", 1.0)
+    packet = hook._fetch_packet_via_rest(PROMPT, _lane("sekret"), "TOKEN-0", 1.0)
 
     assert packet is not None
     assert seen["url"].endswith("/api/recall_context")
@@ -1014,7 +1019,7 @@ def test_no_continuity_key_is_sent_when_there_is_no_token(
         ),
     )
 
-    hook._fetch_packet_via_rest(PROMPT, "sekret", "", 1.0)
+    hook._fetch_packet_via_rest(PROMPT, _lane("sekret"), "", 1.0)
 
     assert "continuity" not in seen["body"]
 
@@ -2274,7 +2279,7 @@ def test_a_service_that_predates_the_workspace_key_still_gets_the_session(
 
     monkeypatch.setattr(hook, "_rest_port", lambda: 1234)
     monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
-    packet = hook._fetch_packet_via_rest("continue", "key", "", 1.0, hook.attribution(SESSION))
+    packet = hook._fetch_packet_via_rest("continue", _lane(), "", 1.0, hook.attribution(SESSION))
 
     assert packet == {"abstained": True}
     assert [sorted(body) for body in bodies] == [
@@ -2658,8 +2663,7 @@ def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_
     monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
     monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
-    monkeypatch.setattr(hook, "_resolve_local_credential", lambda: ("", None))
-    monkeypatch.setattr(hook, "_resolve_rest_key", lambda: ("", "none"))
+    monkeypatch.setattr(hook, "_credentialed_lanes", lambda: iter(()))
     calls = []
     packet = {"continuity": "opaque-token", "map": {
         "ref": "exomem://map", "generation": "map-1", "items": [

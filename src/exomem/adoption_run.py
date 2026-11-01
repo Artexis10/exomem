@@ -29,9 +29,8 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
@@ -43,9 +42,11 @@ from . import (
     context_refs,
     due_state,
     held_fs,
+    import_rename,
     import_stage,
     knowledge_packs,
     note_types,
+    rename_journal,
     request_budget,
     reserved_paths,
     source_taxonomy,
@@ -54,6 +55,7 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .kbdir import kb_dirname
 from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
+from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
 RUNS_DIR = "_Adoption/runs"
 SCHEMA_VERSION = 1
@@ -90,6 +92,11 @@ BYTE_RATE_MIN_ITEM_MIB = 1.0
 # call; once the first had run, each further sidecar cost about 0.1 s; reply
 # handling took about 2.4 s for 456 written paths (0.005 s each).
 TERMINAL_WORK_RESERVE_SECONDS = 20.0
+# What a fast-acknowledgement call reserves for its custody handoff is the handoff time measured on
+# this vault, between two bounds. The floor is the acknowledgement's own wait bound, which a short
+# call's tail can spend whatever the handoff measured; the ceiling is the whole reserve above,
+# which also stands until a handoff has been measured.
+CUSTODY_RESERVE_FLOOR_SECONDS = _FAST_ACK_DEADLINE_SECONDS
 TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
 REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
@@ -103,10 +110,19 @@ PHASES = (
     "cancelled",
 )
 
-_APPLIED_STATUSES = ("applied", "already-applied")
+_APPLIED_STATUSES = adoption_consume.FILED_STATUSES
 # An own-note item whose Source is on disk and whose draft note is still owed. The item is
 # not complete: `apply` resumes it at the note, and the phase stays `applying` until it is.
 _SOURCE_ONLY = "source-applied"
+# The run-object key for the dearest time per made note of the run's last call that made
+# one, with the wall-clock time it was recorded.
+_NOTE_PRICE = "note_price"
+# An agent continues a run within seconds of the last reply. A run resumed later may meet
+# another load or another host, so its next call times a note again instead.
+_NOTE_PRICE_FRESH_SECONDS = 300.0
+# A carried price sizes a call's first batch at this share of the room, so notes that cost
+# up to twice the carried price still fit; the call re-prices from that batch.
+_CARRIED_PRICE_ROOM_SHARE = 0.5
 # The values of a rule's `adopt_as` are fixed by the rule schema, not by the vault.
 _ADOPT_AS = ("source", "note")  # nosemgrep: ep-word-set -- the closed values of the rule schema's `adopt_as`.
 # Per-item failures that mean "the original is not what the plan read".
@@ -258,6 +274,30 @@ class AdoptionRunStore:
     def list_runs(self) -> list[dict]:
         return self.listing()["runs"]
 
+    def runs_by_stage(self) -> dict[str, tuple[dict, ...]]:
+        """Every readable run, grouped by the import whose stage it started in; the most recently updated first."""
+        try:
+            names = sorted(folder.name for folder in self.base.iterdir())
+        except OSError:
+            return {}
+        grouped: dict[str, list[dict]] = {}
+        for name in names:
+            try:
+                run = self.load(name)
+            except AdoptionRunError:
+                continue
+            recorded = run.get("stage") if isinstance(run, dict) else None
+            if isinstance(recorded, dict) and isinstance(recorded.get("stage"), str):
+                grouped.setdefault(recorded["stage"], []).append(run)
+        return {
+            import_id: tuple(sorted(runs, key=lambda run: str(run.get("updated") or ""), reverse=True))
+            for import_id, runs in grouped.items()
+        }
+
+    def runs_of_stage(self, import_id: str) -> tuple[dict, ...]:
+        """Every readable run that started in the import's stage, the most recently updated first."""
+        return self.runs_by_stage().get(import_id, ())
+
     def listing(self, *, path: str = "") -> dict:
         rows: list[dict] = []
         adopted: set[PurePosixPath] = set()
@@ -370,6 +410,7 @@ def build_inventory(
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
     ceiling: int | None = None,
     after: tuple[int, str] | None = None,
+    stage: import_stage.Stage | None = None,
 ) -> tuple[list[dict], int, int]:
     """Return ``(rows, remaining, hidden_files)`` — one page of the adoption candidates outside the KB.
 
@@ -379,7 +420,7 @@ def build_inventory(
     ``hidden_files`` counts every hidden file the scan skipped, whatever the page.
     """
     files, folders, hidden_files = walk_inventory(
-        root, path=path, include_hidden=include_hidden, ceiling=ceiling
+        root, path=path, include_hidden=include_hidden, ceiling=ceiling, stage=stage
     )
     if after is not None:
         files, folders = [row for row in files if _order_key(row) > after], []
@@ -392,6 +433,7 @@ def walk_inventory(
     path: str = "",
     include_hidden: bool = False,
     ceiling: int | None = None,
+    stage: import_stage.Stage | None = None,
 ) -> tuple[list[dict], list[dict], int]:
     """Return ``(files, folders, hidden_files)`` — every adoption candidate outside the KB, in scan order.
 
@@ -400,7 +442,9 @@ def walk_inventory(
     an ``eligible`` flag, and a machine-readable ``reason`` when ineligible
     (never silently dropped). A skipped hidden folder is one ``kind: folder`` row
     with its file count; ``hidden_files`` counts skipped hidden files. Rows are
-    stat-only (no file reads); per-source sha256 is deferred to ``plan``.
+    stat-only (no file reads); per-source sha256 is deferred to ``plan``. A file above the ceiling stays
+    eligible when ``stage`` (a run that consumes) records an identity that its stat equals: adoption files
+    it by rename and copies nothing.
     """
     from . import client_artifacts
 
@@ -440,6 +484,8 @@ def walk_inventory(
                 kept.append(d)
             dirnames[:] = kept
             for fn in filenames:
+                if fn == import_stage.SERIES_FILE and import_stage.is_series_file(_rel(root, Path(dirpath) / fn)):
+                    continue  # the series file is never an item to file, nor a hidden file to report
                 if not include_hidden and fn.startswith("."):
                     hidden_files += 1
                     continue
@@ -454,7 +500,7 @@ def walk_inventory(
                 reason = None
                 if not stat.S_ISREG(st.st_mode):
                     reason = "NOT_REGULAR_FILE"
-                elif st.st_size > limit:
+                elif st.st_size > limit and not _stands_for_manifest(stage, rel, st):
                     reason = adoption_plan.OVER_CEILING
                 # Stat-level junk classification (no reads), mirroring overview's
                 # categories. Rows are the UNCAPPED source of truth for the
@@ -471,6 +517,25 @@ def walk_inventory(
     rows.sort(key=_order_key)
     folders.sort(key=lambda r: r["path"])
     return rows, folders, hidden_files
+
+
+def _stands_for_manifest(stage: import_stage.Stage | None, rel: str, info: os.stat_result) -> bool:
+    """Whether the stat of a staged file equals the identity its stage's manifest records."""
+    vouched = adoption_consume.vouched(stage, rel)
+    return vouched is not None and vouched[0] == import_stage.Identity.of(info)
+
+
+def has_text_suffix(path: str) -> bool:
+    """Whether the importer treats this path's suffix as text-like, whatever its size."""
+    return PurePosixPath(path).suffix.lower() in _TEXT_IMPORT_SUFFIXES
+
+
+def reads_as_text(path: str, size: int) -> bool:
+    """Whether the importer files this member as text: a text-like suffix within the inline text limit.
+
+    The importer also needs the bytes to decode as UTF-8, which a status call does not read.
+    """
+    return has_text_suffix(path) and size <= adoption_plan.INLINE_TEXT_MAX_BYTES
 
 
 def _row(
@@ -776,7 +841,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope"})
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE, "sources_seal"})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _present(root: Path, run: dict, **extra) -> dict:
@@ -988,39 +1053,85 @@ def _open_cursor(run: dict, kind: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # lifecycle actions
 # --------------------------------------------------------------------------- #
-def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
+def _only_folder(paths: Iterable[str]) -> str | None:
+    """The one folder that holds every path, or None; a hidden name is not counted, as in a walk of the stage."""
+    visible = [path for path in paths if not path.startswith(".")]
+    folders = {path.split("/", 1)[0] for path in visible}
+    return next(iter(folders)) if len(folders) == 1 and all("/" in path for path in visible) else None
+
+
+def _collection_of(root: Path, source_root: str, label: str | None, stage: import_stage.Stage | None = None) -> dict:
     """The collection's label, and the folder its files' collection paths hang from.
 
     A staged Cloud upload holds its collection in the one folder inside
     ``_Imports/<import_id>/``; a re-upload gets a new import id, so the inner folder
     is what keeps ``collection_path`` stable across uploads.
+
+    A recorded stage (``stage``) gives the folder from its record, not from a walk, so that a window whose
+    files adoption has already filed keeps it. The record is the series file's path list, which every window of
+    a series carries whole, when it names every member of the manifest, and otherwise the manifest's members.
+    The series file's label is the default label.
     """
     parts = source_root.split("/") if source_root else []
     collection_root = source_root
     default = parts[-1] if parts else Path(root).name
     if len(parts) == 2 and parts[0] == IMPORT_STAGE_DIR:
-        try:
-            entries = [e for e in (root / source_root).iterdir() if not e.name.startswith(".")]
-        except OSError:
-            entries = []
-        if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink():
-            collection_root = f"{source_root}/{entries[0].name}"
-            default = entries[0].name
+        series = import_stage.read_series(root, parts[1]) if stage is not None else None
+        if stage is not None:
+            listed = series.listing(stage.members) if series is not None else ()
+            folder = _only_folder(listed or stage.members)
+        else:
+            try:
+                entries = [e for e in (root / source_root).iterdir() if not e.name.startswith(".")]
+            except OSError:
+                entries = []
+            folder = entries[0].name if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink() else None
+        if folder is not None:
+            collection_root, default = f"{source_root}/{folder}", folder
+        if series is not None and series.label is not None:
+            default = series.label
     chosen = (label or "").strip() or default
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
-def _recorded_stage(root: Path, source_root: str) -> dict | None:
-    """`{"stage": id, "proof": ...}` when `source_root` lies in an import stage that has a member manifest, else None.
+def _stage_at(root: Path, source_root: str) -> import_stage.Stage | None:
+    """The member manifest of the import stage that `source_root` lies in, or None when it lies in none or the stage has none."""
+    parts = source_root.split("/") if source_root else []
+    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
+        return None
+    return import_stage.read(root, parts[1])
+
+
+def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
+    """`{"stage": id, "proof": ...}` for the stage a run starts in, or None when it has no member manifest.
 
     The manifest itself is read again at each apply, never stored in the run: a discarded stage must stop
     being consumable at once.
     """
-    parts = source_root.split("/") if source_root else []
-    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
-        return None
-    stage = import_stage.read(root, parts[1])
     return None if stage is None else {"stage": stage.import_id, "proof": stage.proof}
+
+
+def _refuse_pending_renames(root: Path, verb: str, *, run_id: str | None = None, under: str | None = None) -> None:
+    """Refuse `verb` while a run has renamed staged files into the Knowledge Base and not committed their Source pages.
+
+    Such a file is in no stage and has no page, so a run that is cancelled, re-planned or restarted would leave
+    it with no run to finish it. `apply` finishes it. A caller names the run, or a folder of staged files.
+    """
+    holds = rename_journal.pending(root, run_id=run_id, under=under)
+    if holds:
+        runs = ", ".join(sorted({hold.run_id for hold in holds}))
+        # Only the receipt's manifest lets `apply` settle a renamed file; without it `apply` cannot, and the source stays the only copy.
+        settled_by_apply = all(import_stage.read(root, hold.import_id) is not None for hold in holds)
+        route = (
+            "Call apply on that run first; if apply reports a file unbound, move it, and keep the source."
+            if settled_by_apply
+            else "The receipt of that import cannot be read, so apply cannot settle them. Move each file, and keep the source."
+        )
+        raise AdoptionRunError(
+            "RENAMES_PENDING",
+            f"{verb} is refused: run {runs} renamed {len(holds)} staged file(s) into the Knowledge Base "
+            f"and has not committed their Source pages. {route}",
+        )
 
 
 def _refuse_outside_vault(root: Path, path: str) -> None:
@@ -1135,6 +1246,7 @@ def start(
         path, include_hidden = pinned["path"], pinned["include_hidden"]
         consume, max_candidates = pinned["consume"], pinned["max_candidates"]
     _refuse_outside_vault(root, path)
+    _refuse_pending_renames(root, "start", under=_clean(path))
     run_date = _today(today)
     kb = root / kb_dirname()
     if not kb.is_dir():
@@ -1155,9 +1267,10 @@ def start(
     except overview_module.OverviewError as exc:
         raise AdoptionRunError(exc.code, exc.reason) from exc
 
+    stage = _stage_at(root, _clean(path))
     rows, remaining, hidden_files = build_inventory(
         root, path=path, include_hidden=include_hidden, max_candidates=max_candidates,
-        after=None if pinned is None else tuple(pinned["after"]),
+        after=None if pinned is None else tuple(pinned["after"]), stage=stage if consume else None,
     )
     inv_fp = inventory_fingerprint(rows)
     created_iso = _now_iso()
@@ -1174,8 +1287,8 @@ def start(
         "updated": created_iso,
         "phase": "selecting",
         "source_root": source_root,
-        "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection),
-        "stage": _recorded_stage(root, source_root),
+        "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection, stage),
+        "stage": _recorded_stage(stage),
         "consume": consume,
         "scan_summary": {
             "totals": scan.get("totals", {}),
@@ -1301,6 +1414,7 @@ def select(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"select is not allowed from phase {run['phase']!r}"
             )
+        _refuse_pending_renames(root, "select", run_id=run_id)
         # A rule object names a registered kind, domain or note type; resolve before any
         # change so a refused rule leaves the stored selection as it was.
         taxonomy = (
@@ -1357,6 +1471,30 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
     return tuple(pages)
 
 
+def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
+    """The members of an import that adoption did not file, as a residual record lists them.
+
+    Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
+    The members are the stage manifest's, plus any staged file that the manifest does not list. A member that
+    left the stage, by rename or by hand, keeps the bytes the manifest gives it; the runs that started in the
+    stage classify every member, the most recent first, and one that no run scanned is `outside_run`. A member
+    that adoption filed, and the series file, are left out: filed is what a run's outcome says, not what the
+    stage no longer holds. A caller that lists many windows passes `runs`, the stage's runs from `runs_by_stage`,
+    so it reads the run store once.
+    """
+    pages = AdoptionRunStore(root).runs_of_stage(import_id) if runs is None else runs
+    stage = import_stage.read(root, import_id)
+    files = dict(import_stage.staged_files(root, import_id))
+    for path, (size, _digest) in (stage.members if stage is not None else {}).items():
+        files.setdefault(path, size)
+    return [
+        import_stage.residual_member(path, size, reason)
+        for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
+        # nosemgrep: ep-word-membership -- `FILED_REASONS` holds closed result keys of `_page_classifier`.
+        if reason not in adoption_consume.FILED_REASONS and path != import_stage.SERIES_FILE
+    ]
+
+
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
     """The id of the nearest earlier page of this run's collection that still has work to apply, or None.
 
@@ -1372,17 +1510,31 @@ def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
 
 
 def _whole_scan(root: Path, run: dict) -> list[str] | None:
-    """The collection path of every eligible file the scan holds, for a paged run; None for any other.
+    """The collection path of every file the scan holds, for a run of a series or a paged run; None for any other.
 
-    Consumed files of earlier pages are no longer on disk, but their Sources are in the import index.
+    A recorded stage with a series file passes the series' path list, so that a bare name meets the files of
+    the windows that have not landed, when the list names every member of the stage's manifest (see
+    `Series.listing`). Consumed files of earlier pages are no longer on disk, but their Sources are in the
+    import index.
     """
+    collection_root = (run.get("collection") or {}).get("root", "")
+    stage = import_stage.read(root, run["stage"]["stage"]) if run.get("stage") else None
+    listed = ()
+    if stage is not None and (series := import_stage.read_series(root, stage.import_id)) is not None:
+        listed = series.listing(stage.members)
+    if listed:
+        prefix = f"{IMPORT_STAGE_DIR}/{stage.import_id}"
+        return [
+            adoption_plan.collection_path_of(f"{prefix}/{path}", collection_root)
+            for path in listed if path != import_stage.SERIES_FILE
+        ]
     paging = run.get("paging")
     if not paging:
         return None
     files, _folders, _hidden = walk_inventory(
-        root, path=run["source_root"], include_hidden=paging["include_hidden"]
+        root, path=run["source_root"], include_hidden=paging["include_hidden"],
+        stage=adoption_consume.recorded(root, run) if run.get("consume", True) else None,
     )
-    collection_root = (run.get("collection") or {}).get("root", "")
     return [
         adoption_plan.collection_path_of(row["path"], collection_root) for row in files if row["eligible"]
     ]
@@ -1413,6 +1565,7 @@ def plan(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"plan requires phase 'selecting' or 'planned', got {run['phase']!r}"
             )
+        _refuse_pending_renames(root, "plan", run_id=run_id)
         selection = run.get("selection") or {}
         selected = selection.get("paths") or []
         if not selected:
@@ -1445,8 +1598,12 @@ def plan(
                 "items": [],
                 "skipped": [],
                 "next": 0,
+                # Listed before the first index read below, so a page filed in between breaks the
+                # seal at apply instead of hiding from the plan.
+                "sources_seal": adoption_plan.sources_seal(adoption_plan.source_page_paths(root)),
             }
             run["plan"] = None
+            run["sources_seal"] = None
             run["phase"] = "selecting"
 
         collection = run.get("collection") or {"label": None, "root": ""}
@@ -1454,6 +1611,7 @@ def plan(
         taxonomy = source_taxonomy.load_taxonomy(root) if classification else None
         inventory = {row["path"]: row for row in run.get("inventory") or []}
         ceiling = client_artifacts.adoption_ceiling()
+        stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
@@ -1477,7 +1635,7 @@ def plan(
                 classification=classification.get(rel), taxonomy=taxonomy,
                 text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
                 date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
-                ceiling=ceiling,
+                ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel),
             )
             draft["next"] += 1
             handled += 1
@@ -1537,6 +1695,7 @@ def plan(
             },
         }
         run["plan_draft"] = None
+        run["sources_seal"] = draft.get("sources_seal")
         run["phase"] = "planned"
         reply = {"progress": progress}
         if entry is not None:
@@ -1595,15 +1754,19 @@ def _source_status(outcome: dict) -> str:
     return outcome.get("source_status") or outcome["status"]
 
 
-def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
+def _read_original(
+    root: Path, planned: dict, ceiling: int, *, by_rename: bool = False
+) -> tuple[str | None, dict | None]:
     """The original's text (None for an artifact), or a failed outcome when it drifted.
 
     An artifact is only sized here: the batch hashes its bytes once, as it copies them, and refuses
-    them when they differ from the plan (`_commit_chunk` then finds which item drifted).
+    them when they differ from the plan (`_commit_chunk` then finds which item drifted). A member
+    that files by rename is not bound by the ceiling here; `import_rename` applies it to the hash of a
+    file whose identity no longer matches, and the size check below still catches a grown file.
     """
     read = adoption_plan.read_facts(
-        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text",
-        hash_artifact=False,
+        root, planned["original_path"], text_hint=planned["form"] == "text", hash_artifact=False,
+        ceiling=max(ceiling, planned["original_bytes"]) if by_rename else ceiling,
     )
     if isinstance(read, dict):
         code = "SOURCE_CHANGED" if read["code"] == adoption_plan.OVER_CEILING else read["code"]
@@ -1647,12 +1810,14 @@ class _ApplyPacer:
     this call has measured, not a past call's, and each rate is the dearest seen so
     far: chunk cost swings several-fold with media artifacts and a contended index,
     so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
-    of this call's chunks and nothing after it.
+    of this call's chunks and nothing after it. Notes are the exception: `_create_notes`
+    sizes a call's first batch of notes on the price that the run's last call recorded.
     """
 
     def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
         from .writer_lease import active_derived_batch_custody
 
+        self._root = root
         self._budget = budget
         self._item_seconds: float | None = None
         self._mib_seconds: float | None = None
@@ -1666,9 +1831,18 @@ class _ApplyPacer:
     def _tracked(rate: float | None, seen: float) -> float:
         return seen if rate is None else max(rate, seen)
 
-    def _owed_after_loop(self, artifacts: int) -> float:
-        if not self._owes_fanout:
+    def _custody_reserve(self, chunk: list[dict]) -> float:
+        """Seconds the end of the call needs to hand off custody of the batches so far and this chunk's."""
+        from .writer_lease import owed_custody_handoff_seconds
+
+        measured = owed_custody_handoff_seconds(self._root, more_batches=_custody_batches(chunk))
+        if measured is None:
             return TERMINAL_WORK_RESERVE_SECONDS
+        return min(max(measured, CUSTODY_RESERVE_FLOOR_SECONDS), TERMINAL_WORK_RESERVE_SECONDS)
+
+    def _owed_after_loop(self, chunk: list[dict], artifacts: int) -> float:
+        if not self._owes_fanout:
+            return self._custody_reserve(chunk)
         if not artifacts:
             return 0.0
         return TERMINAL_WORK_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
@@ -1702,7 +1876,7 @@ class _ApplyPacer:
         return (
             self._budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
             - REPLY_SECONDS_PER_ITEM * (self._started_items + len(chunk))
-            - self._owed_after_loop(self._deferred_artifacts + self._media(chunk))
+            - self._owed_after_loop(chunk, self._deferred_artifacts + self._media(chunk))
         )
 
     def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
@@ -1714,6 +1888,11 @@ class _ApplyPacer:
             chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
             cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         return chunk if first or cost <= self._room(chunk) else []
+
+    def next_unit(self, pending: list[dict]) -> tuple[float, int, float]:
+        """The full next chunk, before any trim: its predicted seconds, its batches and its room."""
+        chunk = _take_chunk(pending, APPLY_CHUNK_ITEMS)
+        return self._cost(chunk), _custody_batches(chunk), self._room(chunk)
 
     def note_fits(self, chunk: list[dict], seconds: float) -> bool:
         """Keep the same terminal headroom between the chunk's individual notes."""
@@ -1735,6 +1914,11 @@ class _ApplyPacer:
             self._deferred_artifacts += len(extractions)
 
 
+def _custody_batches(chunk: list[dict]) -> int:
+    """The custody batches a chunk may commit: one for its Sources, at most one per draft note."""
+    return 1 + sum(_owes_note(planned) for planned in chunk)
+
+
 def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
     """Up to `limit` items, bounded by bytes, always at least one."""
     chunk: list[dict] = []
@@ -1747,15 +1931,16 @@ def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
     return chunk
 
 
-def _space_shortfall(root: Path, chunk: list[dict]) -> dict | None:
+def _space_shortfall(root: Path, chunk: list[dict], stage: import_stage.Stage | None) -> dict | None:
     """Why the chunk cannot start: its bytes and the import reserve do not fit the vault's free space.
 
     The reserve is the one setting an import already keeps (`cloud_import.reserve_bytes_from_env`); it also
     stands for the chunk's derived state (index, graph and sidecars), which is small beside the copy itself.
+    A member that files by rename on one device writes no bytes, so only the reserve covers it.
     """
     from . import cloud_import
 
-    needed = sum(planned["original_bytes"] for planned in chunk)
+    needed = sum(import_rename.written_bytes(root, stage, planned) for planned in chunk)
     reserve = cloud_import.reserve_bytes_from_env()
     free = shutil.disk_usage(root).free
     if needed + reserve <= free:
@@ -1799,17 +1984,53 @@ def _request_extraction(root: Path, planned: dict, budget: request_budget.Reques
 class _CallReads:
     """What one `apply` call reads from the vault once and keeps current across its chunks.
 
-    Walking every Source for each chunk made a re-run cost grow with the whole vault.
+    Walking every Source for each chunk made a re-run cost grow with the whole vault,
+    and walking every Source for each call made a long run's calls slower as it filed.
     Each starts empty and fills on first use; a batch that raised drops the Source
     reads, because what it left on disk is then unknown. A batch writes no note, so
     the note index stays.
+
+    The Source index is read in full only where the run's own state cannot answer. The plan
+    seals the Source pages it saw (`run["sources_seal"]`) and every call that files extends the
+    seal by its own pages. While the pages listed now carry that seal, nothing else has been
+    filed since the plan: an earlier import of a pending original is then only the Source
+    the plan froze for it, or one this run wrote, and both sit at the item's `target_path`.
     """
 
     index: list[adoption_plan.EarlierImport] | None = None
+    #: Source pages under the seal: the listing at the call's start, then the pages the call filed.
+    pages: list[str] | None = None
+    sealed: bool = False
     source_counts: dict[str, int] | None = None
     notes: adoption_plan.NoteIndex | None = None
     stage: import_stage.Stage | None = None
     stage_read: bool = False
+
+    def open_sources(self, root: Path, run: dict) -> None:
+        """List the Sources once, and read them in full only when the run's seal no longer holds."""
+        if self.pages is not None:
+            return
+        self.pages = adoption_plan.source_page_paths(root)
+        seal = run.get("sources_seal")
+        self.sealed = seal is not None and adoption_plan.sources_seal(self.pages) == seal
+        if not self.sealed and self.index is None:
+            # No seal (a plan made before the seal existed), or a Source was filed or removed by
+            # someone else since the plan or the run's last call: only the walk can answer.
+            self.index = adoption_plan.read_import_index(root)
+
+    def earlier_imports(self, root: Path, run: dict, planned: dict) -> list[adoption_plan.EarlierImport]:
+        """The earlier imports that can decide this pending original: all of them, or its own page."""
+        self.open_sources(root, run)
+        if self.index is not None:
+            return self.index
+        entry = adoption_plan.read_import_entry(root, root / planned["target_path"])
+        return [] if entry is None else [entry]
+
+    def whole_index(self, root: Path, run: dict) -> list[adoption_plan.EarlierImport]:
+        """Every earlier import, walked now: for a batch that raised, which left unknown pages."""
+        self.open_sources(root, run)
+        self.index = adoption_plan.read_import_index(root)
+        return self.index
 
     def recorded_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
         """The run's stage manifest, read once per call: a manifest can list a million files."""
@@ -1817,17 +2038,24 @@ class _CallReads:
             self.stage, self.stage_read = adoption_consume.recorded(root, run), True
         return self.stage
 
+    def filing_stage(self, root: Path, run: dict) -> import_stage.Stage | None:
+        """The stage a run files from by rename; a run that opted out of consuming keeps every staged copy, so none."""
+        return self.recorded_stage(root, run) if run.get("consume", True) else None
+
 
 def _commit_chunk(
     root: Path, store: AdoptionRunStore, run: dict,
     survivors: list[tuple[dict, adopt_module.ImportItem]], *,
     run_date: dt.date, label: str | None, reads: _CallReads,
+    placed: Mapping[str, import_rename.Placed],
 ) -> list[dict]:
     """Commit one chunk's pages, artifacts, indexes, log and the run object in one batch.
 
     Returns the items now on disk. A batch that raises may still have committed, so
     each item is resolved by the same identity check the next call would use; the
-    rest fail as retryable, and the call's closing save records them.
+    rest fail as retryable, and the call's closing save records them. `placed` holds the items
+    whose binary is already at its Knowledge Base path. When the batch fails, a binary that this
+    call renamed goes back to its stage; one that an earlier call renamed stays where it is.
     """
     outcomes = run["outcomes"]
     for planned, _item in survivors:
@@ -1840,11 +2068,12 @@ def _commit_chunk(
         )
     except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
         reads.source_counts = None
-        reads.index = adoption_plan.read_import_index(root)
+        # The pages the batch left are unknown, so only the walk can say which items landed.
+        index = reads.whole_index(root, run)
         landed: list[dict] = []
         unlanded: list[tuple[dict, adopt_module.ImportItem]] = []
         for planned, item in survivors:
-            earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
+            earlier = _earlier_with_same_bytes(root, index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path),
@@ -1859,7 +2088,8 @@ def _commit_chunk(
             # plan. Only now are the artifacts re-hashed, to fail the one that drifted and commit the rest.
             drifted = [
                 planned for planned, _item in unlanded
-                if planned["form"] == "artifact" and not _original_unchanged(root, planned)
+                if planned["form"] == "artifact" and planned["original_path"] not in placed
+                and not _original_unchanged(root, planned)
             ]
             if drifted and len(drifted) < len(unlanded):
                 for planned in drifted:
@@ -1868,7 +2098,7 @@ def _commit_chunk(
                     )
                 rest = [(planned, item) for planned, item in unlanded if planned not in drifted]
                 return landed + _commit_chunk(
-                    root, store, run, rest, run_date=run_date, label=label, reads=reads
+                    root, store, run, rest, run_date=run_date, label=label, reads=reads, placed=placed
                 )
         if isinstance(error, adopt_module.AdoptError):
             failure = {"code": error.code, "reason": error.reason}
@@ -1879,7 +2109,13 @@ def _commit_chunk(
         else:
             failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
         for planned, _item in unlanded:
-            outcomes[planned["original_path"]] = _failed(**failure)
+            path = planned["original_path"]
+            outcomes[path] = _failed(**failure)
+            moved = placed.get(path)
+            if moved is not None and not moved.replayed:
+                stuck = import_rename.put_back(root, moved)
+                if stuck is not None:
+                    outcomes[path] = _failed(stuck.code, stuck.reason)
         return landed
     reads.source_counts = committed["source_counts"]
     return [planned for planned, _item in survivors]
@@ -1894,35 +2130,56 @@ def _apply_chunk(
     plan = run["plan"]
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
-    if reads.index is None:
-        reads.index = adoption_plan.read_import_index(root)
-    index = reads.index
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
+    stage = reads.filing_stage(root, run)
+    placed: dict[str, import_rename.Placed] = {}
     for planned in chunk:
         path = planned["original_path"]
-        text, failure = _read_original(root, planned, ceiling)
+        by_rename = import_rename.renamable(stage, planned)
+        text, failure = _read_original(root, planned, ceiling, by_rename=by_rename)
+        moved = None
         if failure is not None and failure["code"] == "NOT_FOUND":
             # Not a failure when adoption already filed it and removed the staged copy.
             earlier = _filed_and_gone(root, run, reads, planned)
             if earlier is not None:
+                _release_hold(root, planned)
                 outcomes[path] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
                 )
                 if run.get("consume", True):
                     outcomes[path]["consumed"] = True
                     stats["consumed"] += 1
+                    _queue_offload(root, planned)
                 else:  # a run that opted out claims no removal, and counts its missing copy as changed
                     _record_unchanged(root, planned, outcomes[path], stats)
                 continue
+            if by_rename:
+                # An earlier call may have renamed the file and stopped before its Source page committed.
+                replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
+                if isinstance(replay, import_rename.Refused):
+                    # The hold stays: the file is unbound with other bytes, and only the person's move
+                    # lifts it. The scans leave it alone and a discard of its stage refuses until then.
+                    outcomes[path] = _failed(replay.code, replay.reason)
+                    continue
+                if replay is not None:
+                    moved, failure = replay, None
         if failure is not None:
+            if by_rename and rename_journal.is_held(root, root / planned["artifact_path"]):
+                # An earlier call renamed this member's file and could not put it back: the retry finds the
+                # staged path changed, and the outcome must still say where the file is.
+                failure = _failed(
+                    import_rename.UNBOUND,
+                    f"{failure['reason']}; the file stays unbound at {planned['artifact_path']}",
+                )
             outcomes[path] = failure
             continue
         if text is not None and _owes_note(planned):
             texts[path] = text
         if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
             continue  # an earlier call wrote its Source; only the note is owed
+        index = reads.earlier_imports(root, run, planned)
         if planned["action"] == "already-imported":
             frozen = [entry for entry in index if entry.path == planned["target_path"]]
             if _earlier_with_same_bytes(root, frozen, label, planned) is None:
@@ -1948,6 +2205,7 @@ def _apply_chunk(
         occupied = [
             target for target in (planned["target_path"], planned.get("artifact_path"))
             if target and os.path.lexists(root / target)
+            and not (moved is not None and target == planned["artifact_path"])
         ]
         if occupied:
             outcomes[path] = _failed(
@@ -1955,21 +2213,29 @@ def _apply_chunk(
                 f"{occupied[0]} already exists and is not an import of this file",
             )
             continue
-        survivors.append(
-            (planned, adopt_module.import_item(
-                root, planned, text=text, date_iso=plan["date"], collection=label
-            ))
+        item = adopt_module.import_item(root, planned, text=text, date_iso=plan["date"], collection=label)
+        if moved is not None:
+            item.artifact.placed = True
+            placed[path] = moved
+        survivors.append((planned, item))
+    if survivors and stage is not None:
+        survivors = _file_by_rename(
+            root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
         )
     landed: list[dict] = []
     if survivors:
         landed = _commit_chunk(
-            root, store, run, survivors, run_date=run_date, label=label, reads=reads
+            root, store, run, survivors, run_date=run_date, label=label, reads=reads, placed=placed
         )
         for planned in landed:
+            _release_hold(root, planned)
+        for planned in landed:
             if _source_status(outcomes[planned["original_path"]]) == "applied":
-                reads.index.append(
-                    adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
-                )
+                reads.pages.append(planned["target_path"])
+                if reads.index is not None:
+                    reads.index.append(
+                        adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
+                    )
     landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
         outcome = outcomes[planned["original_path"]]
@@ -2000,6 +2266,54 @@ def _apply_chunk(
     return extractions
 
 
+def _file_by_rename(
+    root: Path, stage: import_stage.Stage, survivors: list[tuple[dict, adopt_module.ImportItem]], *,
+    run_id: str, ceiling: int, outcomes: dict, placed: dict[str, import_rename.Placed],
+) -> list[tuple[dict, adopt_module.ImportItem]]:
+    """Rename each renamable survivor's staged file into its Knowledge Base path, before the batch.
+
+    A member that the primitive refuses fails here and leaves the batch; a member it cannot rename
+    stays a survivor and files by copy, which the adoption ceiling bounds. Each renamed member is added to `placed`.
+    """
+    candidates = {
+        planned["original_path"] for planned, _item in survivors
+        if planned["original_path"] not in placed and import_rename.renamable(stage, planned)
+    }
+    members = [planned for planned, _item in survivors if planned["original_path"] in candidates]
+    verdicts = import_rename.place_all(root, stage, members, ceiling=ceiling, run_id=run_id) if members else {}
+    kept = []
+    for planned, item in survivors:
+        path = planned["original_path"]
+        verdict = verdicts.get(path)
+        if isinstance(verdict, import_rename.Refused):
+            outcomes[path] = _failed(verdict.code, verdict.reason)
+            continue
+        if isinstance(verdict, import_rename.Placed):
+            item.artifact.placed = True
+            placed[path] = verdict
+        elif path in candidates and planned["original_bytes"] > ceiling:
+            # `_read_original` let this member past the ceiling because a rename needs no copy; the copy has no such excuse.
+            outcomes[path] = _failed(
+                adoption_plan.OVER_CEILING,
+                f"the original exceeds the {ceiling:,} byte adoption ceiling and could not be renamed into the vault",
+            )
+            continue
+        kept.append((planned, item))
+    return kept
+
+
+def _queue_offload(root: Path, planned: dict) -> None:
+    """Queue the offload job of a filed artifact; the store's classification rule decides whether it is offloadable."""
+    from . import media_store
+
+    if not planned.get("artifact_path"):
+        return
+    try:
+        media_store.enqueue_offload(root, root / planned["artifact_path"])
+    except Exception:  # noqa: BLE001 - the Source is committed, and the periodic offload scan queues a missed job
+        pass
+
+
 def _create_notes(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], texts: dict[str, str], *,
     label: str | None, notes: adoption_plan.NoteIndex, pacer: _ApplyPacer,
@@ -2009,14 +2323,17 @@ def _create_notes(
 
     The identity check runs first: an item whose note exists settles as found, and one
     whose note cannot be placed fails. The other items commit in batches through the
-    governed two-phase creation (`adopt.create_draft_notes`). A call makes one note at a
-    time until it has made and timed one; after that a batch holds as many notes as fit in
-    the time left at the dearest cost per made note this call has seen. A refused note does
-    not lower that cost, because a quick refusal would make the next batch look free. A batch
-    that refuses makes its notes alone only while one more note fits at the price that sized
-    it. The items a batch leaves or does not reach keep their `source-applied` outcome and the
-    continuation resumes at them. A call always tries at least one note, so a budget below
-    one note's cost still moves.
+    governed two-phase creation (`adopt.create_draft_notes`). A call's first batch holds as
+    many notes as fit in half the time left at the price that the run's last call to make a
+    note recorded, when that call was recent; otherwise it holds one note, to time it. While
+    the call has made no note, it makes one note at a time; after that a batch holds as many
+    notes as fit at the dearest cost per made note this call has seen, which the call
+    records for the next one.
+    A refused note does not lower that cost, because a quick refusal would make the next
+    batch look free. A batch that refuses makes its notes alone only while one more note fits
+    at the price that sized it. The items a batch leaves or does not reach keep their
+    `source-applied` outcome and the continuation resumes at them. A call always tries at
+    least one note, so a budget below one note's cost still moves.
     """
     outcomes = run["outcomes"]
     owed = [
@@ -2029,25 +2346,24 @@ def _create_notes(
         if _note_due(root, planned, outcomes[planned["original_path"]], label=label, notes=notes, stats=stats)
     ]
     while due:
-        if not stats["notes_started"]:
-            size = 1
+        first_try = not stats["notes_started"]
+        if first_try:
+            # Pricing each note at the carried price over the share fills only that share of the room.
+            price_ms = _carried_note_price_ms(run) / _CARRIED_PRICE_ROOM_SHARE
+            size = max(1, _notes_that_fit(pacer, chunk, price_ms, len(due))) if price_ms else 1
         elif not stats["notes_created"]:
             # No note made yet, so nothing prices a batch: one note, paced on the dearest try.
-            size = 1 if pacer.note_fits(chunk, stats["note_try_ms_max"] / 1000) else 0
+            price_ms = stats["note_try_ms_max"]
+            size = 1 if pacer.note_fits(chunk, price_ms / 1000) else 0
         else:
-            size = len(due)
-            while size and not pacer.note_fits(chunk, stats["note_ms_max"] * size / 1000):
-                size -= 1
+            price_ms = stats["note_ms_max"]
+            size = _notes_that_fit(pacer, chunk, price_ms, len(due))
         if not size:
             stats["notes_deferred"] += 1
             break
         batch, due = due[:size], due[size:]
         # A refused batch makes its notes alone; each must still fit at the price that sized it.
-        # A call's first note always runs, so a budget below one note's cost still moves.
-        price_ms = stats["note_ms_max"] if stats["notes_created"] else stats["note_try_ms_max"]
-        fits_one_note = (
-            partial(pacer.note_fits, chunk, price_ms / 1000) if stats["notes_started"] else None
-        )
+        fits_one_note = _fallback_pace(pacer, chunk, price_ms, first_note_free=first_try)
         started = time.monotonic()
         results = adopt_module.create_draft_notes(
             root,
@@ -2069,6 +2385,7 @@ def _create_notes(
         if made:
             # The dearest cost per made note: a batch's time, its refusals included, over the notes it made.
             stats["note_ms_max"] = max(stats["note_ms_max"], int(elapsed_ms / made))
+            run[_NOTE_PRICE] = {"ms": stats["note_ms_max"], "at": dt.datetime.now(dt.UTC).timestamp()}
         for planned, result in zip(batch, results, strict=True):
             if result.reached:
                 _settle_draft_note(
@@ -2083,6 +2400,39 @@ def _create_notes(
         # The outcomes are committed with the chunk's Sources and again here, so a
         # crash costs the identity check at most one chunk of notes.
         store.save(run)
+
+
+def _carried_note_price_ms(run: dict) -> float:
+    """The price per made note that the run's last call recorded, or 0 when it is stale."""
+    carried = run.get(_NOTE_PRICE) or {}
+    age = dt.datetime.now(dt.UTC).timestamp() - carried.get("at", 0.0)
+    return carried.get("ms", 0) if 0 <= age <= _NOTE_PRICE_FRESH_SECONDS else 0
+
+
+def _notes_that_fit(pacer: _ApplyPacer, chunk: list[dict], price_ms: float, most: int) -> int:
+    """How many notes, up to `most`, fit in the time the call has left at `price_ms` each."""
+    size = most
+    while size and not pacer.note_fits(chunk, price_ms * size / 1000):
+        size -= 1
+    return size
+
+
+def _fallback_pace(
+    pacer: _ApplyPacer, chunk: list[dict], price_ms: int, *, first_note_free: bool
+) -> Callable[[], bool]:
+    """Whether the per-note fallback may make one more note at `price_ms`.
+
+    On a call's first batch the first note always runs, so a budget below one note's cost
+    still moves.
+    """
+    asked = 0
+
+    def fits_one_note() -> bool:
+        nonlocal asked
+        asked += 1
+        return (first_note_free and asked == 1) or pacer.note_fits(chunk, price_ms / 1000)
+
+    return fits_one_note
 
 
 def _found_note(
@@ -2174,6 +2524,12 @@ def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) 
     stats["verified_unchanged"] += int(unchanged)
 
 
+def _release_hold(root: Path, planned: dict) -> None:
+    """Drop the journal record of an item that is settled: its Source page binds the file, or the run gave it up."""
+    if planned.get("artifact_path"):
+        rename_journal.release(root, planned["artifact_path"])
+
+
 def _filed_and_gone(
     root: Path, run: dict, reads: _CallReads, planned: dict
 ) -> adoption_plan.EarlierImport | None:
@@ -2189,9 +2545,9 @@ def _filed_and_gone(
         or adoption_consume.entry_of(stage, planned["original_path"]) is None
     ):
         return None
-    if reads.index is None:
-        reads.index = adoption_plan.read_import_index(root)
-    return _earlier_with_same_bytes(root, reads.index, (run.get("collection") or {}).get("label"), planned)
+    return _earlier_with_same_bytes(
+        root, reads.earlier_imports(root, run, planned), (run.get("collection") or {}).get("label"), planned
+    )
 
 
 def _settle_staged(
@@ -2206,10 +2562,13 @@ def _settle_staged(
     """
     if outcome.get("consumed"):
         return
+    _release_hold(root, planned)  # a call that stopped after the commit left the record
     stage = reads.recorded_stage(root, run)
     if not os.path.lexists(root / planned["original_path"]):
         # A run that opted out claims no removal; its missing copy is recorded as changed below.
         consumed = run.get("consume", True) and _filed_and_gone(root, run, reads, planned) is not None
+        if consumed:
+            _queue_offload(root, planned)
     else:
         consumed = (
             stage is not None and run.get("consume", True) and planned["form"] == "artifact"
@@ -2270,6 +2629,7 @@ def apply(
     twice: every item is checked against the earlier imports before it is copied.
     """
     from . import client_artifacts
+    from .writer_lease import active_manager
 
     root = Path(root)
     run_date = _today(today)
@@ -2345,16 +2705,24 @@ def apply(
             # refuses below with nothing written, as before.
             run["phase"] = "applying"
             run["inflight"] = True
+            # Read once here, before the first chunk's timer, so the pacer does not price it into items.
+            reads.open_sources(root, run)
 
         pacer = _ApplyPacer(root, budget)
         stopped = False
         chunks = 0
         while pending:
+            if chunks:
+                # Each chunk is committed whole, so a waiting derived proof may hold the boundary here.
+                seconds, batches, room = pacer.next_unit(pending)
+                active_manager().lend_boundary(
+                    root, next_unit_seconds=seconds, next_unit_batches=batches, room_seconds=room
+                )
             chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
                 stopped = True
                 break
-            shortfall = _space_shortfall(root, chunk)
+            shortfall = _space_shortfall(root, chunk, reads.filing_stage(root, run))
             if shortfall is not None:
                 run["apply_stop"] = shortfall
                 stopped = True
@@ -2423,6 +2791,8 @@ def apply(
             reply["continuation"] = _issue_cursor(run, "apply")
         if entry is not None:
             entry["state"], entry["reply"] = "used", reply
+        if reads.sealed:
+            run["sources_seal"] = adoption_plan.sources_seal(reads.pages)
         store.save(run)
     return _present(root, run, **reply)
 
@@ -2444,6 +2814,7 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
         # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
         if phase not in ("selecting", "planned", "applying", "partial", "failed"):
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
+        _refuse_pending_renames(root, "cancel", run_id=run_id)
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
         run["phase"] = "cancelled"
         store.save(run)

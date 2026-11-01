@@ -49,9 +49,6 @@ MAX_SHARING_ATTEMPTS = 3
 _SHARING_WINERRORS = frozenset({5, 32})
 _BATCH_WORKSPACE_RE = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$")
 _BATCH_STAGE_RE = re.compile(r"^stage-[0-9]+\.tmp$")
-_HELD_PUBLISH_RE = re.compile(
-    rf"^{re.escape(held_fs.PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}$"
-)
 _QUOTED_PATH = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
 _STORED_SHARING_ERROR_RE = re.compile(
     rf"^PermissionError: \[WinError (?P<winerror>5|32)\] .*?: "
@@ -104,6 +101,9 @@ ENGINE_DISABLED = "engine_disabled"
 #: the `media_brakes.context` they depended on.
 MEMORY_BLOCKED = "memory_blocked"
 OVER_BUDGET = "over_budget"
+#: The original exceeds the whole hydration capacity of the store policy; only a larger
+#: capacity and a retry clear it (`media_store.HYDRATION_TOO_LARGE_CODE`).
+HYDRATION_TOO_LARGE = "hydration_too_large"
 #: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
 _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 #: Reasons whose rows return by themselves, as a SQL list of these constants.
@@ -413,7 +413,7 @@ def is_guarded_sidecar_sharing_violation(
     )
     held_publication = (
         _normalized_path(source.parent) == _normalized_path(destination.parent)
-        and _HELD_PUBLISH_RE.fullmatch(source.name) is not None
+        and held_fs.is_publish_temporary(source.name)
     )
     if (
         not source.is_absolute()
@@ -497,6 +497,31 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def process_start(pid: int) -> str | None:
+    """The kernel's start time for `pid`, which a later process that reuses the ID does not share.
+
+    Linux exposes it as field 22 of `/proc/<pid>/stat`. Elsewhere it is None, and
+    liveness falls back to the process ID alone.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+    # The command name, field 2, may hold spaces and parentheses; the fields after it do not.
+    fields = stat.rpartition(")")[2].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+def holder_alive(pid: int | None, start: str | None) -> bool:
+    """Whether the process that recorded (`pid`, `start`) still runs."""
+    if not pid_alive(pid):
+        return False
+    if start is None:
+        return True
+    current = process_start(int(pid))
+    return current is None or current == start
+
+
 def _windows_pid_alive(pid: int) -> bool:
     """Query process state without using os.kill, which terminates on Windows."""
     import ctypes
@@ -543,32 +568,83 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
     return int(deleted + kept)
 
 
+# A returned job waits 1 minute, doubling with each return, up to 15 minutes (D3, M4).
+RETRY_FIRST_SECONDS = 60
+RETRY_LIMIT_SECONDS = 15 * 60
+_CLAIMABLE = "state = 'pending' AND (retry_at IS NULL OR retry_at <= ?)"
+_FRESH = "NOT EXISTS (SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)"
+# The cache flag only orders the claim; the hydration itself reads the original's real state.
+# A pinned job's original stayed on the volume, so it never needs a hydration.
+_NEEDS_HYDRATION = (
+    "(pinned = 0 AND EXISTS (SELECT 1 FROM media_cache WHERE media_cache.binary_rel = jobs.binary_rel "
+    "AND media_cache.evicted = 1))"
+)
+# Claimed but unfinished jobs whose original the worker hydrated at the claim.
+_HYDRATED_CLAIMS = "SELECT COUNT(*) FROM jobs WHERE hydrated = 1 AND pinned = 1"
+
+
 def _extraction_stage(media_types: Collection[str]) -> tuple[str, tuple[str, ...]]:
     """SQL and parameters that select the extraction stage of these media types."""
     return f"(do_ocr = 1 AND media_type IN ({','.join('?' * len(media_types))}))", tuple(media_types)
 
 
-def _next_pending_row(conn: sqlite3.Connection, skip_media_types: Collection[str] = ()) -> sqlite3.Row | None:
-    """The job to claim next: the oldest fresh job, else the oldest resumed speech job.
+def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, migrated: bool = True,
+                      skip_media_types: Collection[str] = ()) -> sqlite3.Row | None:
+    """The job to claim next, in the order of D3 (M4).
 
-    A resumed speech job has a progress row. It runs only when no fresh job waits, so a
-    long recording that keeps advancing delays a new upload by at most one job timeout.
-    Two indexed `LIMIT 1` queries keep the claim cheap on a long queue.
+    Offload jobs come first. Then come jobs whose original is on the volume, then jobs
+    whose original must be hydrated, the last only while fewer than `max_hydrations`
+    claimed jobs hold a hydrated original. Within each group a fresh job comes before
+    a resumed speech job, which has a progress row, so a long recording that keeps
+    advancing delays a new upload by at most one job timeout. A returned job waits
+    for its retry time. Each group is one indexed `LIMIT 1` query.
 
-    `skip_media_types` leaves out the extraction stage of those media types, so the caller can pass
-    over work whose engine cannot run now without holding back the jobs queued behind it.
+    `skip_media_types` leaves out the extraction stage of those media types in every group, so the
+    caller can pass over work whose engine cannot run now without holding back the jobs queued behind it.
     """
-    skip, params = "", ()
+    skip, skipped = "", ()
     if skip_media_types:
-        clause, params = _extraction_stage(skip_media_types)
+        clause, skipped = _extraction_stage(skip_media_types)
         skip = f" AND NOT {clause}"
-    return conn.execute(
-        "SELECT * FROM jobs WHERE state = 'pending' AND NOT EXISTS "
-        "(SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)" + skip + " ORDER BY id LIMIT 1",
-        params,
-    ).fetchone() or conn.execute(
-        "SELECT * FROM jobs WHERE state = 'pending'" + skip + " ORDER BY id LIMIT 1", params
-    ).fetchone()
+    # A ledger from before this order's columns keeps the earlier order until the next write adds them.
+    if not migrated:
+        claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], skipped
+    else:
+        # Placeholders bind in text order: the retry time in `_CLAIMABLE`, then the skipped media types.
+        claimable, needs_hydration, parameters = _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped)
+        groups = ["do_offload = 1", f"NOT {_NEEDS_HYDRATION} AND {_FRESH}", f"NOT {_NEEDS_HYDRATION}"]
+        if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
+            groups += [_FRESH, "1"]
+    for group in groups:
+        row = conn.execute(
+            f"SELECT *, {needs_hydration} AS needs_hydration FROM jobs "
+            f"WHERE {claimable} AND {group}{skip} ORDER BY id LIMIT 1",
+            parameters,
+        ).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
+def _max_hydrations(vault_root: Path) -> int | None:
+    """The store policy's hydration slots, or None when no store bounds hydration."""
+    from . import media_capacity, originals
+
+    config = originals.configuration(vault_root)
+    limits = None if config is None else media_capacity.hydration_limits(config)
+    return None if limits is None else limits.hydrations
+
+
+def _hydration_policy_problem(vault_root: Path) -> str | None:
+    """Why the store policy turns hydration capacity off, for operator status, or None."""
+    from . import media_capacity, originals
+
+    try:
+        config = originals.configuration(vault_root)
+    except (OSError, ValueError) as exc:
+        # The exception's type only: its text can name a cell's configuration path.
+        return f"the media store configuration is unreadable ({type(exc).__name__})"
+    return None if config is None else media_capacity.hydration_policy_problem(config)
 
 
 class MediaJobStore:
@@ -621,6 +697,7 @@ class MediaJobStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 self._migrate_offload_columns(conn)
+                self._migrate_eviction_columns(conn)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -685,6 +762,16 @@ class MediaJobStore:
                              "token TEXT PRIMARY KEY, binary_rel TEXT NOT NULL, pid INTEGER NOT NULL, "
                              "temporary_bytes INTEGER NOT NULL DEFAULT 0, hydrating INTEGER NOT NULL DEFAULT 0)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_binary_rel ON media_access(binary_rel)")
+                self._migrate_eviction_columns(conn)
+                # Eviction on demand (D3): one lease per import series, served at the largest live demand.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_demands ("
+                             "series TEXT PRIMARY KEY, demand_bytes INTEGER NOT NULL, "
+                             "budget_offset INTEGER NOT NULL, renewed_at REAL NOT NULL)")
+                # The latest owner census that offload read, for the window status (D12); one row, rebuildable.
+                # NULL used_bytes is a census that could not count: the status must not show an older figure instead.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_owner_census ("
+                             "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+                             "used_bytes INTEGER, observed_at TEXT NOT NULL)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
@@ -763,6 +850,49 @@ class MediaJobStore:
             conn.execute("INSERT INTO media_offload_refusals(binary_rel, sha256, code, ciphertext_size, created_at) "
                          "SELECT binary_rel, sha256, code, ciphertext_size, created_at FROM media_offload_refusals_old")
             conn.execute("DROP TABLE media_offload_refusals_old")
+
+    @staticmethod
+    def _migrate_eviction_columns(conn: sqlite3.Connection) -> None:
+        """Columns that let eviction and the claim read originals from the ledger alone (D3, M3 and M4).
+
+        `media_cache.owner_read` is NULL until an owner reads the original. A row from
+        before the column keeps its old read time, so an upgrade evicts no original
+        earlier than before. `pinned` marks a claimed job, which keeps its original
+        until the job completes, fails or is blocked. `returns` counts the times that a
+        hydration failure returned the job, which sets its `retry_at`.
+        """
+        cache = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
+        access = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_access)").fetchall()}
+        jobs = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if not (cache and access and jobs):
+            return  # A ledger without these tables gets them from `_initialize`, which then runs this again.
+        if "size" not in cache:
+            conn.execute("ALTER TABLE media_cache ADD COLUMN size INTEGER")
+        if "owner_read" not in cache:
+            conn.execute("ALTER TABLE media_cache ADD COLUMN owner_read REAL")
+            conn.execute("UPDATE media_cache SET owner_read = last_read")
+        if "evicted" not in cache:
+            conn.execute("ALTER TABLE media_cache ADD COLUMN evicted INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS media_cache_candidates ON media_cache(evicted, size)")
+        # A reservation names its process by ID and start time, and its temporary file by name (D12, choice 3).
+        if "pid_start" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN pid_start TEXT")
+        if "temporary_name" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN temporary_name TEXT")
+        if "pinned" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        # Whether the worker hydrated the original when it claimed the job.
+        if "hydrated" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN hydrated INTEGER NOT NULL DEFAULT 0")
+        if "retry_at" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN retry_at REAL")
+        if "returns" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN returns INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS jobs_hydrated_claims ON jobs(pinned) WHERE hydrated = 1")
+        # One rule for every path that fails or blocks a job, including engine waits and stop limits.
+        conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_release_pin AFTER UPDATE OF state ON jobs "
+                     "WHEN NEW.state IN ('failed', 'blocked') "
+                     "BEGIN UPDATE jobs SET pinned = 0 WHERE id = NEW.id; END")
 
     @staticmethod
     def _migrate_offload_columns(conn: sqlite3.Connection) -> None:
@@ -1123,23 +1253,26 @@ class MediaJobStore:
         job the memory brakes do not admit stays pending and unclaimed.
         `skip_media_types` passes over the extraction stage of those media types (see `_next_pending_row`).
         """
+        max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = _next_pending_row(conn, skip_media_types)
+            row = _next_pending_row(conn, max_hydrations=max_hydrations, skip_media_types=skip_media_types)
             if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
             now = time.time()
+            # A job that stays pinned across a slice keeps the flag from its first claim.
             changed = conn.execute(
                 """
                 UPDATE jobs
                 SET state = 'running', attempts = attempts + 1,
                     claim_revision = claim_revision + 1,
+                    hydrated = CASE WHEN pinned = 1 THEN hydrated ELSE ? END, pinned = 1,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
-                (now, row["id"]),
+                (int(row["needs_hydration"]), now, row["id"]),
             ).rowcount
             conn.commit()
             if changed != 1:
@@ -1187,7 +1320,8 @@ class MediaJobStore:
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
                         reprocess = 0, language = NULL, language_mode = NULL,
-                        state = 'pending', updated_at = ?, last_error = NULL
+                        state = 'pending', pinned = 0, returns = 0, retry_at = NULL,
+                        updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
                     """,
                     (
@@ -1249,8 +1383,13 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def defer(self, job: MediaJob | int) -> bool:
-        """Return a claimed job to pending after transient coordination refusal."""
+    def defer(self, job: MediaJob | int, *, free_hydration_slot: bool = False) -> bool:
+        """Return a claimed job to pending after transient coordination refusal.
+
+        The job keeps its pin, so its original stays on the volume and the retry hydrates nothing (D3, M4).
+        `free_hydration_slot` stops the job counting against `max_hydrations`, for a wait with no known end,
+        so other jobs can hydrate their originals during it.
+        """
         job_id = job.id if isinstance(job, MediaJob) else job
         if job_id is None:
             return False
@@ -1266,11 +1405,35 @@ class MediaJobStore:
                     """
                     UPDATE jobs
                     SET state = 'pending', attempts = MAX(0, attempts - 1),
-                        last_error = NULL, updated_at = ?
+                        last_error = NULL, updated_at = ?""" + (", hydrated = 0" if free_hydration_slot else "") + """
                     WHERE id = ? AND state = 'running'""" + revision_clause,
                     tuple(params),
                 ).rowcount
                 return changed == 1
+        finally:
+            conn.close()
+
+    def return_for_retry(self, job: MediaJob, reason: str | None = None) -> bool:
+        """Return a claimed job whose original could not be hydrated now (D3, M4).
+
+        The return spends no attempt and keeps the job's speech progress. The job holds
+        no original, so it releases its pin, and a worker claims it again only after its
+        retry time. `reason` stays as the job's error until the next claim, so status
+        shows why the job waits.
+        """
+        if job.id is None:
+            return False
+        conn = self._connect()
+        try:
+            with conn:
+                now = time.time()
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', attempts = MAX(0, attempts - 1), pinned = 0, "
+                    "hydrated = 0, retry_at = ? + MIN(?, ? * (1 << MIN(returns, 4))), returns = returns + 1, "
+                    "last_error = ?, updated_at = ? WHERE id = ? AND state = 'running' AND claim_revision = ?",
+                    (now, RETRY_LIMIT_SECONDS, RETRY_FIRST_SECONDS, (reason or "")[:1000] or None, now, job.id,
+                     job.claim_revision),
+                ).rowcount == 1
         finally:
             conn.close()
 
@@ -1609,9 +1772,16 @@ class MediaJobStore:
 
     def next_pending(self, *, skip_media_types: Collection[str] = ()) -> MediaJob | None:
         """The job `claim_next` would claim now with the same `skip_media_types`, without claiming it."""
+        max_hydrations = _max_hydrations(self.vault_root)
         conn = self._connect(readonly=True)
         try:
-            row = _next_pending_row(conn, skip_media_types)
+            # A write connection migrates the ledger first; a read-only one can see it before the columns
+            # that this module's migrations add. PRAGMA rows are (cid, name, ...), read by position.
+            jobs = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            cache = {str(row[1]) for row in conn.execute("PRAGMA table_info(media_cache)").fetchall()}
+            migrated = "evicted" in cache and {"do_offload", "pinned", "hydrated", "retry_at"} <= jobs
+            row = _next_pending_row(conn, max_hydrations=max_hydrations, migrated=migrated,
+                                    skip_media_types=skip_media_types)
             return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
@@ -1803,7 +1973,8 @@ class MediaJobStore:
                     delete_job = False
                     changed = conn.execute(
                         """
-                        UPDATE jobs SET do_ocr = ?, state = 'pending', last_error = NULL,
+                        UPDATE jobs SET do_ocr = ?, state = 'pending', pinned = 0, returns = 0,
+                            retry_at = NULL, last_error = NULL,
                             reprocess = CASE WHEN ? THEN reprocess ELSE 0 END,
                             language = CASE WHEN ? THEN language ELSE NULL END,
                             language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
@@ -2008,7 +2179,8 @@ class MediaJobStore:
         conn = self._connect()
         try:
             with conn:
-                head = _next_pending_row(conn)
+                # The next child starts with no busy GPU recorded, so it claims with no skipped media types.
+                head = _next_pending_row(conn, max_hydrations=_max_hydrations(self.vault_root))
                 self._set_meta_json(
                     conn,
                     CHILD_CRASHES_KEY,
@@ -2212,7 +2384,7 @@ class MediaJobStore:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
                         "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
-                        "blocked_reason = NULL, "
+                        "returns = 0, retry_at = NULL, blocked_reason = NULL, "
                         "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                         "WHERE media_job_results.job_id = jobs.id)",
@@ -2363,10 +2535,13 @@ class MediaJobStore:
         conn = self._connect()
         try:
             clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
+            # A returned job is no work before its retry time; the supervisor's forced
+            # recheck finds it within a minute after.
             work = conn.execute(
-                "SELECT 1 FROM jobs WHERE state IN ('pending', 'running') "
+                "SELECT 1 FROM jobs WHERE (state = 'running' OR " + _CLAIMABLE + ") "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                "WHERE media_job_results.job_id = jobs.id) LIMIT 1"
+                "WHERE media_job_results.job_id = jobs.id) LIMIT 1",
+                (time.time(),),
             ).fetchone()
             if work is None:
                 candidates = conn.execute(
@@ -2753,9 +2928,12 @@ def status(
         "child_crashes": None,
         "jobs": [],
         "errors": [],
+        "hydration_policy_problem": None,
     }
     if vault_root is None:
         return empty
+    # Operator detail: an invalid policy turns the hydration capacity off instead of stopping work.
+    empty["hydration_policy_problem"] = _hydration_policy_problem(Path(vault_root))
     store_path = job_store_path(vault_root)
     if not store_path.exists():
         return empty
@@ -2805,6 +2983,7 @@ def status(
             "child_crashes": facts["child_crashes"],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
+            "hydration_policy_problem": empty["hydration_policy_problem"],
         }
     except (OSError, sqlite3.Error) as exc:
         return {**empty, "store": str(store_path), "healthy": False, "errors": [str(exc)]}
@@ -2883,6 +3062,15 @@ def tool_job_state(vault_root: Path, state: str, job_id: int | None) -> str:
     return state
 
 
+def _hydration_too_large_action() -> str:
+    """A Cloud tenant cannot change the store policy, so a Cloud cell names the operator."""
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        return "wait until the operator raises this deployment's hydration capacity, then retry"
+    return "raise the hydration capacity (max_temporary_bytes in the media store policy) above the file's size, then retry"
+
+
 def _status_job(row: Any) -> dict[str, Any]:
     state = str(row["state"])
     error = str(row["last_error"]) if row["last_error"] is not None else None
@@ -2931,6 +3119,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         }
     if reason == OVER_BUDGET:
         actions[BLOCKED] = OVER_BUDGET_ACTION
+    elif reason == HYDRATION_TOO_LARGE:
+        actions[BLOCKED] = _hydration_too_large_action()
     # A stopped reprocess leaves the completed transcript as it was, and a retry would
     # find that transcript complete, so only a new request runs it again.
     reprocess_stopped = (

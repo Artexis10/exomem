@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import sys
 import threading
@@ -20,6 +21,8 @@ from typing import Generic, TypeVar
 T = TypeVar("T")
 _MISSING = object()
 PUBLISH_TEMP_PREFIX = ".exomem-held-publish-"
+# The name format that publish_temporary_name creates: the prefix and 32 hexadecimal digits.
+_PUBLISH_TEMP_RE = re.compile(rf"{re.escape(PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}", re.ASCII)
 _CAPABILITY_CACHE: dict[tuple[int, str, int, int], Capabilities] = {}
 _CAPABILITY_CACHE_LOCK = threading.Lock()
 
@@ -415,6 +418,104 @@ def reset_capability_cache_for_tests() -> None:
         _CAPABILITY_CACHE.clear()
 
 
+def publish_temporary_name() -> str:
+    """A fresh name in the reserved publish namespace, which the watcher and scans skip."""
+    return f"{PUBLISH_TEMP_PREFIX}{secrets.token_hex(16)}"
+
+
+def is_publish_temporary(name: str) -> bool:
+    """Whether `name` has the exact form that `publish_temporary_name` creates."""
+    return _PUBLISH_TEMP_RE.fullmatch(name) is not None
+
+
+def _link_without_replace(
+    filesystem: HeldFilesystem,
+    parent: HeldDirectory,
+    staged: HeldFile,
+    leaf: str,
+    publication_error: Callable[[HeldFsError | None], HeldResult[StableIdentity]],
+) -> HeldResult[StableIdentity] | None:
+    """Link `staged` to `leaf` with no replace and drop its temporary name; None on success."""
+    linked = filesystem.link(staged, parent, leaf)
+    if not linked.ok:
+        return publication_error(linked.error)
+    removed = filesystem.unlink(staged)
+    if not removed.ok:
+        # A transient unlink refusal after the no-replace link is an
+        # ambiguous outcome unless we finish cleanup or reverse the
+        # just-installed destination. Retry once on the same retained
+        # name; no pathname reopen is allowed here.
+        removed = filesystem.unlink(staged)
+    if removed.ok:
+        return None
+    rollback = filesystem.file(parent, leaf, access="mutate")
+    if not rollback.ok:
+        return publication_error(
+            HeldFsError("ROLLBACK_INCOMPLETE", "create publication could not be reconciled")
+        )
+    with rollback.require() as installed:
+        if not _same_file_identity(installed.identity, staged.identity):
+            return publication_error(
+                HeldFsError("ROLLBACK_INCOMPLETE", "create publication identity changed")
+            )
+        reversed_result = filesystem.unlink(installed)
+        if not reversed_result.ok:
+            return publication_error(
+                HeldFsError("ROLLBACK_INCOMPLETE", "create publication rollback was refused")
+            )
+    return publication_error(removed.error)
+
+
+def _published_identity(filesystem: HeldFilesystem, parent: HeldDirectory, leaf: str) -> HeldResult[StableIdentity]:
+    published = filesystem.file(parent, leaf)
+    if not published.ok:
+        return HeldResult(error=published.error)
+    with published.require() as installed:
+        if installed.identity.link_count != 1:
+            return HeldResult(
+                error=HeldFsError("IDENTITY_CHANGED", "published identity is ambiguous")
+            )
+        return HeldResult(value=installed.identity)
+
+
+def install_temporary(
+    filesystem: HeldFilesystem,
+    parent: HeldDirectory,
+    temporary: str,
+    leaf: str,
+    *,
+    expected_identity: StableIdentity,
+) -> HeldResult[StableIdentity]:
+    """Link a temporary that the caller already wrote and verified into place, with no replace.
+
+    `temporary` must still be the file of `expected_identity`, so a swapped temporary is
+    refused. The caller owns the temporary until this succeeds; afterwards its name is gone.
+    """
+
+    def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
+        bounded = error or HeldFsError("IO_REFUSED", "publish was refused")
+        bounded.source_leaf = temporary
+        bounded.destination_leaf = leaf
+        return HeldResult(error=bounded)
+
+    current = filesystem.file(parent, leaf)
+    if current.ok:
+        current.require().close()
+        return HeldResult(error=HeldFsError("DESTINATION_EXISTS", "destination already exists"))
+    if current.error is None or current.error.code != "MISSING":
+        return HeldResult(error=current.error or HeldFsError("IO_REFUSED", "publish refused"))
+    mutable = filesystem.file(parent, temporary, access="mutate")
+    if not mutable.ok:
+        return HeldResult(error=mutable.error)
+    with mutable.require() as staged:
+        if staged.identity != expected_identity:
+            return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed"))
+        failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
+        if failure is not None:
+            return failure
+    return _published_identity(filesystem, parent, leaf)
+
+
 def publish_bytes(
     filesystem: HeldFilesystem,
     parent: HeldDirectory,
@@ -443,7 +544,7 @@ def publish_bytes(
         return HeldResult(error=HeldFsError("INVALID_INPUT", "data must be bytes"))
     existing: HeldFile | None = None
     staged: HeldFile | None = None
-    temporary = f"{PUBLISH_TEMP_PREFIX}{secrets.token_hex(16)}"
+    temporary = publish_temporary_name()
     temporary_identity: StableIdentity | None = None
 
     def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
@@ -513,42 +614,9 @@ def publish_bytes(
             )
 
         if expected_identity is None:
-            linked = filesystem.link(staged, parent, leaf)
-            if not linked.ok:
-                return publication_error(linked.error)
-            removed = filesystem.unlink(staged)
-            if not removed.ok:
-                # A transient unlink refusal after the no-replace link is an
-                # ambiguous outcome unless we finish cleanup or reverse the
-                # just-installed destination. Retry once on the same retained
-                # name; no pathname reopen is allowed here.
-                removed = filesystem.unlink(staged)
-            if not removed.ok:
-                rollback = filesystem.file(parent, leaf, access="mutate")
-                if not rollback.ok:
-                    return publication_error(
-                        HeldFsError(
-                            "ROLLBACK_INCOMPLETE",
-                            "create publication could not be reconciled",
-                        )
-                    )
-                with rollback.require() as installed:
-                    if not _same_file_identity(installed.identity, staged.identity):
-                        return publication_error(
-                            HeldFsError(
-                                "ROLLBACK_INCOMPLETE",
-                                "create publication identity changed",
-                            )
-                        )
-                    reversed_result = filesystem.unlink(installed)
-                    if not reversed_result.ok:
-                        return publication_error(
-                            HeldFsError(
-                                "ROLLBACK_INCOMPLETE",
-                                "create publication rollback was refused",
-                            )
-                        )
-                return publication_error(removed.error)
+            failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
+            if failure is not None:
+                return failure
         else:
             if expected_sha256 is not None:
                 assert existing is not None
@@ -570,15 +638,7 @@ def publish_bytes(
             if not replaced.ok:
                 return publication_error(replaced.error)
 
-        published = filesystem.file(parent, leaf)
-        if not published.ok:
-            return HeldResult(error=published.error)
-        with published.require() as installed:
-            if installed.identity.link_count != 1:
-                return HeldResult(
-                    error=HeldFsError("IDENTITY_CHANGED", "published identity is ambiguous")
-                )
-            return HeldResult(value=installed.identity)
+        return _published_identity(filesystem, parent, leaf)
     finally:
         if existing is not None:
             existing.close()

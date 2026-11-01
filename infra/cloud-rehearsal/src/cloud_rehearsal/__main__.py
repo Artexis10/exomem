@@ -32,12 +32,14 @@ from . import (
     build,
     drill,
     drill_cluster,
+    host_speed,
     images,
     infra,
     k3s_link,
     large_import,
     large_import_fixture,
     platform,
+    raw_import,
     substrate,
     tls,
 )
@@ -87,6 +89,15 @@ def _parser() -> argparse.ArgumentParser:
                             help="with --large-import: accept data that cannot show the volume is below two copies; "
                             "the verdict is then smoke_only, never pass")
     run_parser.add_argument(
+        "--raw-import", action="store_true",
+        help="bring the generator's messy collection into a fresh cell and into one that already holds another collection, "
+        "and compare every item with the same journey run locally; runs after provisioning, in place of the other steps "
+        "(partial proof; never gates a node)",
+    )
+    run_parser.add_argument("--raw-import-python", type=Path, default=None,
+                            help="with --raw-import: an interpreter with the server and its extractors installed "
+                            "(the local arm and the scorer run on it)")
+    run_parser.add_argument(
         "--local-storage-coexistence", action="store_true",
         help="install TopoLVM while keeping Hetzner-class cells for the full P3 lifecycle",
     )
@@ -128,6 +139,15 @@ def main(argv: list[str] | None = None) -> int:
             ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
         if others:
             parser.error(f"--large-import runs alone; remove {', '.join(others)}")
+    if args.command == "run" and args.raw_import:
+        others = [flag for flag, chosen in (
+            ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
+            ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
+            ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
+        if others:
+            parser.error(f"--raw-import runs alone; remove {', '.join(others)}")
+        if args.raw_import_python is None:
+            parser.error("--raw-import needs --raw-import-python")
     if args.command == "local-storage-drill":
         return asyncio.run(drill.run_drill(args))
     if args.command == "k3s-link":
@@ -143,6 +163,9 @@ async def _run(args: argparse.Namespace) -> int:
     args.cache.mkdir(parents=True, exist_ok=True)
     report = Report(run_id=run_id)
     report.environment = infra.environment_facts()
+    if args.large_import:
+        # Before any image build or cluster work loads the CPU, so the number is the host's alone.
+        report.environment.update(host_speed.calibrate())
     report.inputs = {
         "exomem_commit": run(["git", "-C", str(images.REPO_ROOT), "rev-parse", "HEAD"]).stdout.strip(),
         "exomem_worktree_clean": run(["git", "-C", str(images.REPO_ROOT), "status", "--porcelain"]).stdout.strip() == "",
@@ -158,6 +181,7 @@ async def _run(args: argparse.Namespace) -> int:
         "owner_export": args.owner_export,
         "operator_restore_abort": args.operator_restore_abort,
         "large_import": args.large_import,
+        "raw_import": args.raw_import,
     }
     if args.cell_image:
         report.valid = False
@@ -170,19 +194,21 @@ async def _run(args: argparse.Namespace) -> int:
     if not report.inputs["exomem_worktree_clean"]:
         report.notes.append("the exomem checkout had uncommitted changes")
     only = {int(part) for part in args.steps.split(",")} if args.steps else None
-    if args.large_import:
+    if args.large_import or args.raw_import:
         # The cell must exist and be paid for; every later step is a P3 lifecycle check this mode does not make.
         only = {1, 2}
     if only is not None:
         report.valid = False
         report.invalid_reasons.append(
             "the large-import mode runs steps 1 and 2, then its own scenario" if args.large_import
+            else "the raw-import mode runs steps 1 and 2, then its own scenario" if args.raw_import
             else f"only steps {sorted(only)} were selected")
     # The CLI journey needs the disposable CA in the images and versioned object storage.
-    native_cli = args.cloud_import or args.large_import
+    native_cli = args.cloud_import or args.large_import or args.raw_import
     node_storage: infra.NodeStorage | None = None
     node: drill_cluster.Agent | None = None
     plan: large_import.LargeImportPlan | None = None
+    raw_plan: raw_import.RawImportPlan | None = None
 
     stack: infra.Stack | None = None
     code = 1
@@ -258,6 +284,8 @@ async def _run(args: argparse.Namespace) -> int:
                     "volume_group": drill_cluster.create_volume_group(node, drill_cluster.pool_gib_for(plan.volume_gib)),
                 })
                 plan.node = node
+        if args.raw_import:
+            raw_plan = raw_import.RawImportPlan(run_id=run_id, workdir=workdir, cli_image=v1, python=args.raw_import_python)
         with stage(report, "control_database"):
             await substrate.bootstrap_database(stack)
             report.stages["control_database"]["migrate_tail"] = substrate.migrate(stack, source)[-800:]
@@ -304,6 +332,7 @@ async def _run(args: argparse.Namespace) -> int:
             _wait_json(resolver, f"https://{tls.MCP_HOST}/.well-known/oauth-protected-resource{substrate.MCP_PATH}", "the gateway through ingress")
         ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report,
                       cli_image=v1 if args.cloud_import else None,
+                      raw_import=raw_plan,
                       owner_export_image=v1 if args.owner_export else None,
                       operator_restore_abort=args.operator_restore_abort, large_import=plan)
         with stage(report, "release"):
@@ -340,6 +369,8 @@ async def _run(args: argparse.Namespace) -> int:
         elif args.large_import:
             # The mode's own verdict; the P3 outcome is not a gate here (steps 3 to 12 did not run).
             code = 0 if report.stages["large_import"]["verdict"] in ("pass", "smoke_only") else 1
+        elif args.raw_import:
+            code = 0 if report.stages["raw_import"]["verdict"] == raw_import.PASS else 1
         elif outcome["gates_node"] or args.harness_check:
             code = 0
         else:
@@ -445,6 +476,9 @@ def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
 def _print_summary(report: Report, path: Path) -> None:
     data = report.to_json()
     print(f"[rehearsal] report: {path}")
+    raw = report.stages.get("raw_import")
+    if raw and raw.get("verdict"):
+        print(f"[rehearsal] raw-import verdict: {raw['verdict']} ({len(raw['findings'])} findings)")
     large = report.stages.get("large_import")
     if large and large.get("verdict"):
         print(f"[rehearsal] large-import verdict: {large['verdict']} ({len(large['findings'])} findings)")

@@ -13,6 +13,13 @@ from pathlib import Path
 
 from . import adoption_plan, held_fs, import_stage
 
+# The outcome statuses of an item that is in the Knowledge Base; a run, its residual report and a discard all read them here.
+FILED_STATUSES = ("applied", "already-applied")  # nosemgrep: ep-word-set -- the statuses that `apply` writes: a closed protocol of the run object.
+#: The reasons that mean the member is in the Knowledge Base although its staged copy stays; a residual record leaves them out.
+FILED_REASONS = ("text", "kept")  # nosemgrep: ep-word-set -- two of the closed result keys that `_page_classifier` returns.
+#: Why a staged file no scan of the run covers stays.
+OUTSIDE_RUN = "outside_run"
+
 
 def recorded(root: Path, run: dict) -> import_stage.Stage | None:
     """The manifest of the stage this run started in, as it is now; None when the run has no recorded stage.
@@ -26,12 +33,34 @@ def recorded(root: Path, run: dict) -> import_stage.Stage | None:
     return import_stage.read(root, recorded_stage.get("stage", ""))
 
 
+def _member_path(stage: import_stage.Stage, original_path: str) -> str | None:
+    """A staged file's path relative to its stage, or None when the file is not in this stage."""
+    prefix = f"{import_stage.STAGE_DIR}/{stage.import_id}/"
+    return original_path[len(prefix):] if original_path.startswith(prefix) else None
+
+
 def entry_of(stage: import_stage.Stage, original_path: str) -> tuple[int, str] | None:
     """The manifest's (size, SHA-256) for a staged file given by its vault-relative path, or None if unlisted."""
-    prefix = f"{import_stage.STAGE_DIR}/{stage.import_id}/"
-    if not original_path.startswith(prefix):
+    member_path = _member_path(stage, original_path)
+    return None if member_path is None else stage.members.get(member_path)
+
+
+def identity_of(stage: import_stage.Stage, original_path: str) -> import_stage.Identity | None:
+    """The manifest's identity for a staged file, or None when it is unlisted or has none."""
+    member_path = _member_path(stage, original_path)
+    return None if member_path is None else stage.identities.get(member_path)
+
+
+def vouched(stage: import_stage.Stage | None, original_path: str) -> tuple[import_stage.Identity, str] | None:
+    """The identity and SHA-256 that a stage's manifest records for a file, or None when it records no identity.
+
+    A file whose stat equals that identity holds the manifest's bytes: plan and scan take the SHA-256 from
+    here, skip the ceiling and read nothing.
+    """
+    if stage is None:
         return None
-    return stage.members.get(original_path[len(prefix):])
+    identity, entry = identity_of(stage, original_path), entry_of(stage, original_path)
+    return None if identity is None or entry is None or entry[0] != identity.size else (identity, entry[1])
 
 
 def _sha256_of(file: held_fs.HeldFile) -> str:
@@ -40,7 +69,7 @@ def _sha256_of(file: held_fs.HeldFile) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def _matches(file: held_fs.HeldFile, size: int, sha256: str) -> bool:
+def matches(file: held_fs.HeldFile, size: int, sha256: str) -> bool:
     """Whether the held file has these bytes, and was not written while it was read."""
     version = file.version()
     return version.size == size and _sha256_of(file) == sha256 and file.version() == version
@@ -55,7 +84,7 @@ def durable_matches(root: Path, artifact_path: str | None, planned: dict) -> boo
         with held_fs.acquire(root).require() as filesystem:
             with filesystem.parent(parent or ".").require() as directory:
                 with filesystem.file(directory, leaf).require() as durable:
-                    return _matches(durable, planned["original_bytes"], planned["original_sha256"])
+                    return matches(durable, planned["original_bytes"], planned["original_sha256"])
     except (held_fs.HeldFsError, OSError):
         return False
 
@@ -74,7 +103,7 @@ def remove_staged(root: Path, stage: import_stage.Stage, planned: dict) -> bool:
         with held_fs.acquire(root).require() as filesystem:
             with filesystem.parent(parent, access="mutate").require() as directory:
                 with filesystem.file(directory, leaf, access="mutate").require() as staged:
-                    if not _matches(staged, *entry):
+                    if not matches(staged, *entry):
                         return False
                     filesystem.unlink(staged).require()
     except (held_fs.HeldFsError, OSError):
@@ -94,9 +123,10 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     def classify(path: str) -> str | None:
         item = items.get(path)
         if item is not None:
-            status = (outcomes.get(path) or {}).get("status")
+            outcome = outcomes.get(path) or {}
+            status = outcome.get("status")
             if status == "failed":
-                return "failed"
+                return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
@@ -113,6 +143,27 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
         return None
 
     return classify
+
+
+def stage_reasons(
+    import_id: str, files: list[tuple[str, int]], pages: tuple[dict, ...], filed_statuses: tuple[str, ...]
+) -> list[tuple[str, int, str]]:
+    """Each of `files` (path relative to the stage, bytes) as (path, bytes, why it stays); `pages` are the scans, nearest first.
+
+    A file that no page scanned (hidden, added after the scan, on a page not yet scanned) is `OUTSIDE_RUN`.
+    A caller passes the staged files, and may add manifest members that are no longer there.
+    """
+    classifiers = [_page_classifier(page, filed_statuses) for page in pages]
+    prefix = f"{import_stage.STAGE_DIR}/{import_id}/"
+
+    def why(path: str) -> str:
+        for classify in classifiers:
+            reason = classify(prefix + path)
+            if reason is not None:
+                return reason
+        return OUTSIDE_RUN
+
+    return [(path, size, why(path)) for path, size in files]
 
 
 def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = ()) -> dict | None:
@@ -132,26 +183,12 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     if not isinstance(recorded_stage, dict):
         return None
     folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
-    classifiers = [_page_classifier(page, filed_statuses) for page in (run, *earlier_pages)]
-
-    def why(path: str) -> str:
-        for classify in classifiers:
-            reason = classify(path)
-            if reason is not None:
-                return reason
-        return "outside_run"
-
     by_reason: dict[str, dict[str, int]] = {}
-    for directory, _names, files in os.walk(root / folder):
-        for name in files:
-            full = Path(directory) / name
-            try:
-                size = full.lstat().st_size
-            except OSError:
-                continue
-            entry = by_reason.setdefault(why(full.relative_to(root).as_posix()), {"files": 0, "bytes": 0})
-            entry["files"] += 1
-            entry["bytes"] += size
+    staged = import_stage.staged_files(root, recorded_stage["stage"])
+    for _path, size, reason in stage_reasons(recorded_stage["stage"], staged, (run, *earlier_pages), filed_statuses):
+        entry = by_reason.setdefault(reason, {"files": 0, "bytes": 0})
+        entry["files"] += 1
+        entry["bytes"] += size
     files = sum(entry["files"] for entry in by_reason.values())
     route = (
         f"call transfer_memory with action import_discard, import_id {recorded_stage['stage']} and confirm=true"

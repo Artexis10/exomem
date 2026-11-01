@@ -256,6 +256,35 @@ def test_legacy_owner_lock_is_hardened_with_runtime_state(tmp_path: Path) -> Non
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_owner_lock_released_during_hardening_does_not_stop_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another writer process releases its owner lock between our directory listing
+    # and the lstat; a standalone CLI writer once crashed here before any write.
+    state = tmp_path / "racing-lock-state"
+    owners = state / "idempotency-owners"
+    owners.mkdir(parents=True, mode=0o700)
+    released = owners / "released-by-peer.lock"
+    released.write_bytes(b"")
+    released.chmod(0o644)
+    kept = owners / "kept.lock"
+    kept.write_bytes(b"")
+    kept.chmod(0o644)
+    real_lstat = Path.lstat
+
+    def lstat_after_peer_release(path: Path):  # noqa: ANN202
+        if path == released:
+            path.unlink(missing_ok=True)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat_after_peer_release)
+
+    IdempotencyStore(state / "idempotency.sqlite")
+
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o600
+
+
 def _initialize_idempotency_client(database: Path, role: str, legacy: bool, channel) -> None:  # noqa: ANN001
     from exomem import mutation_lock
 
@@ -3091,6 +3120,66 @@ def test_different_identity_busy_is_precommit(
     assert first_calls == ["first"]
 
 
+def test_keyed_write_during_warm_waits_and_commits_once(tmp_path: Path) -> None:
+    """A restart's warm-up is seconds long; the client must not see it as a refusal."""
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("called"))
+    readiness.begin_warm()
+    for component in readiness.COMPONENTS:
+        if component != "semantic_corpus":
+            readiness.mark_ready(component)
+    finisher = threading.Timer(0.4, readiness.mark_ready, args=("semantic_corpus",))
+    finisher.start()
+    try:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="during-warm",
+            idempotency_principal_scope="alice",
+            mutation_request_id="warm-wait",
+        )
+    finally:
+        finisher.join()
+        readiness.reset()
+
+    assert calls == ["called"]
+
+
+def test_keyed_write_refuses_when_warm_outlasts_the_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("called"))
+    readiness.begin_warm()
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpError) as warming:
+            manager.invoke(
+                command,
+                (),
+                {},
+                idempotency_key="long-warm",
+                idempotency_principal_scope="alice",
+                mutation_request_id="warm-too-long",
+            )
+    finally:
+        readiness.reset()
+
+    assert time.monotonic() - started < 5.0
+    assert warming.value.code == "MUTATION_WARMING"
+    payload = error_dict(warming.value)
+    assert payload["status"] == "retryable"
+    assert payload["committed"] is False
+    assert payload["cause"] == "warm_wait_exhausted"
+    assert payload["waited_ms"] >= 300
+    assert calls == []
+    assert active_mutation_snapshot()["state"] == "free"
+
+
 def test_mutation_during_semantic_warm_returns_without_holding_boundary(
     tmp_path: Path,
 ) -> None:
@@ -3111,6 +3200,9 @@ def test_mutation_during_semantic_warm_returns_without_holding_boundary(
     assert payload["committed"] is False
     assert payload["retry_after_ms"] == 750
     assert payload["request_id"] == "warm-request"
+    # Unkeyed: a resend after a client gave up during a wait would run it twice.
+    assert payload["cause"] == "unkeyed"
+    assert payload["waited_ms"] == 0
     assert calls == []
     assert active_mutation_snapshot()["state"] == "free"
 

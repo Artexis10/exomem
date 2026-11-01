@@ -25,7 +25,7 @@ from .shell import run, wait_for
 from .substrate import MCP_URL, PUBLIC_BASE_URL
 
 if TYPE_CHECKING:
-    from .scenarios import Context
+    from .scenarios import Context, Tenant
 
 
 # BROWSER is Python's standard browser hook; it changes only the human side of OAuth.
@@ -156,12 +156,15 @@ def retain_cli_diagnostics(ctx: Context, label: str) -> dict | None:
 
 
 async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str = "",
-                         include_hidden: bool = False, wait_seconds: int = 900) -> CliRun:
+                         include_hidden: bool = False, wait_seconds: int = 900,
+                         tenant: Tenant | None = None) -> CliRun:
     """Run the shipped CLI against `source` as a person would, signing in through the headless browser.
 
-    `label` keeps a second import's container and files apart from the first one's.
+    `label` keeps a second import's container and files apart from the first one's. `tenant` is the person
+    whose cell receives it (default: the owner, A).
     """
-    if not ctx.a.cell_id or not ctx.a.session:
+    tenant = tenant or ctx.a
+    if not tenant.cell_id or not tenant.session:
         raise StepFailure("native import requires the provisioned owner cell and browser session")
     fixture = ctx.stack.workdir / (f"native-import-{label}" if label else "native-import")
     fixture.mkdir(mode=0o700)
@@ -197,7 +200,7 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     # The CLI signs in before it inventories the folder and writes checkpoint.json, so only the folder exists yet.
     if stat.S_IMODE(checkpoint.stat().st_mode) != 0o700:
         raise StepFailure("native checkpoint folder is not private")
-    callback = await ctx.browser.consent_redirect(ctx.a.session, url, redirect_uri)
+    callback = await ctx.browser.consent_redirect(tenant.session, url, redirect_uri)
     # Deliver to the real loopback server in the CLI container, preserving code/state/issuer.
     await asyncio.to_thread(wait_for, lambda: run(["docker", "exec", name, "python3", "-c", LISTENER_SCRIPT,
                                                  str(parsed_redirect.port)], check=False).returncode == 0,

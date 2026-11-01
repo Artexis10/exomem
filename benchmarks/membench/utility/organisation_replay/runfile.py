@@ -25,11 +25,38 @@ TITLE_FIELDS = ("title", "name")
 PATH_FIELDS = ("path", "destination")
 
 
+def structured_answer(structured: object, meta: object) -> object:
+    """A tool's answer from its structured content, as the tool returned it.
+
+    FastMCP sends the answer of a tool whose output schema is not an object as
+    ``{"result": answer}`` and marks the call's ``_meta`` with
+    ``fastmcp.wrap_result``. The marker is the framework's own protocol field,
+    the one its client unwraps by, so no answer is unwrapped by its shape.
+    """
+
+    framework = meta.get("fastmcp") if isinstance(meta, dict) else None
+    if isinstance(framework, dict) and framework.get("wrap_result") is True:
+        return structured.get("result") if isinstance(structured, dict) else None
+    return structured
+
+
+def refusal(answer: object) -> str | None:
+    """The structured refusal code of an answer, or ``None`` when it succeeded."""
+
+    if not isinstance(answer, dict):
+        return None
+    error = answer.get("error")
+    if answer.get("success") is False or isinstance(error, dict):
+        code = error.get("code") if isinstance(error, dict) else None
+        return str(code or "refused")
+    return None
+
+
 def _answer(result: object) -> object:
     if not isinstance(result, dict):
         return None
     if result.get("structuredContent") is not None:
-        return result["structuredContent"]
+        return structured_answer(result["structuredContent"], result.get("_meta"))
     text = "".join(
         item.get("text", "") for item in result.get("content") or [] if isinstance(item, dict)
     )
@@ -83,15 +110,7 @@ def call_records(tap_events: Sequence[Mapping]) -> list[dict]:
         arguments = call.get("arguments") or {}
         result = call.get("result")
         answer = _answer(result)
-        error = (answer or {}).get("error") if isinstance(answer, dict) else None
-        if call.get("outcome") in _TAP_REFUSALS:
-            refusal_code = call["outcome"]
-        elif isinstance(answer, dict) and (
-            answer.get("success") is False or isinstance(error, dict)
-        ):
-            refusal_code = str((error or {}).get("code") or "refused")
-        else:
-            refusal_code = None
+        refusal_code = call["outcome"] if call.get("outcome") in _TAP_REFUSALS else refusal(answer)
         sent = _layers(arguments)
         preview = bool(_first(sent, (PREVIEW_FIELD,)))
         path = _first(_layers(answer), PATH_FIELDS)

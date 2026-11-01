@@ -117,13 +117,15 @@
     - a stop after the commit settles as already applied with no byte read;
     - a failed batch renames the file back, recreates a removed staged folder and never removes the file;
     - the batch writer never lists the renamed binary as a destination;
-    - `import_discard` settles a renamed but uncommitted member first, or refuses and names it;
-    - the discard Job keeps a residual record of the unfiled members in the receipt, in the same write that drops the manifest;
+    - `import_discard` refuses with `IMPORT_RENAMES_PENDING` and names a renamed but uncommitted member in the receipt's `renames_pending`, keeps the stage, and proceeds once the member is settled or moved;
+    - `cancel`, `select`, `plan` and `start` refuse with `RENAMES_PENDING` while a renamed member has no page, and say to move the file and keep the source when the receipt cannot be read;
+    - a walking discard of an unreadable receipt names that member in the walk file, and a retried walk still records the stage;
+    - the discard Job keeps a residual record of the unfiled manifest members in the receipt, in the same write that drops the manifest, and lists a renamed member that has no page;
     - a retried discard keeps that record, and a discard writes an empty record when every member was filed;
     - a discard refuses with `IMPORT_RECEIPT_UNREADABLE` and keeps the stage when it cannot read the receipt;
-    - a discard with `walk_stage` set records each staged file except the series file in a separate file, keeps the receipt and removes the stage;
-    - a discard with `walk_stage` set refuses with `IMPORT_REQUEST_INVALID` and keeps the stage when it can read the receipt;
-    - a retried walk keeps the record that the first walk wrote;
+    - the operator's walking discard (`--walk-stage`) records each staged file except the series file in a separate file, keeps the receipt and removes the stage;
+    - the operator's walking discard (`--walk-stage`) refuses with `IMPORT_REQUEST_INVALID` and keeps the stage when it can read the receipt;
+    - a retried walk keeps the record that the first walk wrote, and a later discard writes no empty record over it;
     - the file watcher and media scans bind no renamed file before replay settles it.
   - [ ] 5.4.6 Report these in `adoption_studio status`: both budgets, the job-pinned bytes and the effective file limit. Also report the classification inputs, the remaining allowance, the drain state and each window's residual with its paths. Report each landed window's unfiled members, with or without a run, and never count the series file. Report each residual record's members as "discarded, not filed", and add `adoption_studio(action="acknowledge")` with explicit paths. Accept a series ID and the next window's bytes as that series' demand. Verify these with tests:
     - the budget arithmetic, and job-pinned bytes that include the copies that the worker hydrated;
@@ -159,7 +161,7 @@
   - [ ] 5.4.8 Update the tool text, regenerate the surface and plugins, and tell an agent without a shell to give the person the CLI command. The `acknowledge` text says that acknowledging is the person's decision. Verify: the tool-surface and scaffold-leak tests pass, and descriptions stay within the plugin description limit.
   - [ ] 5.4.9 Take one owner census per offload batch through the existing `usage` parameter, and reuse it across guard releases. First list every writer that can bind a version while the runtime serves. Verify: a test counts one census for a batch of 500 offloads and shows another write between two members. A publication-time reference change is still refused.
   - [ ] 5.4.10 In cellctl, render the growth threshold into the store policy, so the cell reads the one value that cellctl uses. Verify: a manifest test shows the policy's threshold equals cellctl's growth threshold.
-  - [ ] 5.4.11 Pass the series file's path list as `whole_scan`. Take a recorded stage's collection root and default label from its series file or manifest. Never list the series file as an item. Verify: a bare name that repeats in a later window stays ambiguous. Two windows of one series get one root and label, and a fully filed stage keeps its root. A resend window with the first series' file gets the same root.
+  - [ ] 5.4.11 Pass the series file's path list as `whole_scan`. Take a recorded stage's collection root and default label from its series file or manifest. Never list the series file as an item. Verify: a bare name that repeats in a later window stays ambiguous. Two windows of one series get one root and label, and a fully filed stage keeps its root. A resend window with the first series' file gets the same root. A path list that does not name the stage's members, such as paths relative to the source folder, leaves the root and the collection paths to the manifest, and `finish` reports no residual file for the series file.
   - [ ] 5.4.12 Stream hydration and downloads (D12, choice 3). Hydrate in one stream into one temporary file in the original's folder, verify both digests, and link it into place under the guard. Reserve plaintext bytes only. Record the temporary file's name in the reservation row, and name the row's process by ID and start time. Remove that file when a dead reservation is cleared. Clear dead `media_access` rows and their temporary files at each runtime start, not only at the next reservation. Serve downloads from a held handle on the hydrated original, with no private copy, and skip the hash when the cache identity matches. Verify these with tests:
     - a 5 GiB hydration raises volume use by about 5 GiB at most, and reserves 5 GiB of the hydration capacity;
     - a corrupt object and a failed decryption each leave nothing at the original's path and no temporary file;
@@ -184,6 +186,11 @@
     - a report captured after the store was turned off with no evicted original gives the retained store without keys or egress;
     - after that removal, the wrapped bundle stays on the cell row;
     - a deleted cell leaves the active set and has its keys retired without a report;
+    - a turned-off canary's namespace keeps the edge access label, and the chart's edge ingress and cellctl's admission admit a labelled namespace and refuse an unlabelled one (operator decision of 2026-10-31);
+    - the credential and the label leave in one render, and the active-set entry leaves after them;
+    - a served cell whose live namespace lacks the label gets it on the next pass, with no restart;
+    - on real K3s, admission gives the edge peer to a labelled namespace, refuses an unlabelled one, and admits a label-then-policy pair;
+    - a chart upgrade with the edge off is refused while the live active set lists a cell or cannot be read, and renders once it lists none;
     - a cell whose evicted originals do not fit hydrates an owner read, offloads nothing new, evicts the hydrated copy again and reports the shortfall.
   - [ ] 5.4.16 Extend the large-import rehearsal of `scale-agent-led-imports` (its task 5.1) with the media store on a local-storage cell. Use a sandbox bucket with a bucket-restricted key in the existing B2 account. The operator creates the bucket and key before this task (pending). Import at least 50 GiB of mixed media and notes. Include files over 200 MiB, one large offloadable file and one file above the object bound. Run no owner reads during the series. Record the store policy used, with the 5.25 GiB of hydration capacity and `max_hydrations` at 1 that the operator confirmed.
     - Size the large file or the cell from the band. One way is a 20 GiB cell with a large file within the effective file limit that status reports before the series. The other is a cell whose band holds a 5 GiB file, which needs `max_cell_gib` raised above 20 GiB for the rehearsal. Do not assume that a 5 GiB file fits a 20 GiB cell during a large import.
@@ -207,6 +214,16 @@
     4. A second request carries the cell's digest. The edge finishes the large file only when the two digests match, and cancels it otherwise.
     5. A head request for a streamed version confirms only that it exists and its size. With no stored digest, it answers "unconfirmed", never "absent".
     - Verify: an offload of a 5 GiB file writes no ciphertext temporary file, and a digest mismatch leaves no finished version.
+  - [ ] 5.4.19 Follow-up, optional for closing this change: give the import row a cellctl-owned `cleanup_retry_at` column and a discard request stamp, through one Substrate migration and its grant. cellctl then stores an owner refusal's next attempt there instead of in `urls_expire_at`, and a new discard request from the owner re-arms the attempt at once. Verify: a test shows a new request after an owner refusal runs the discard without the daily wait, and `urls_expire_at` is never written during `cleanup_pending`.
+  - [x] 5.4.20 Before task 5.5, let the CLI settle its own stalled window attempts. Make these changes:
+    - drop a window's stale checkpoint when Cloud has no row for its import ID;
+    - cancel the CLI's own never-uploaded (`key_ready`) attempt itself when its member set changed, instead of asking the person to press Cancel in Home;
+    - treat a `done` own attempt as over when a known receipt listing holds none of the window's import IDs, so a window whose receipt a restore lost is sent again; until then, name the discard route in that stop.
+    Verify: a member change after a stopped attempt lands once with the new member set and no manual Cancel, and a restored cell that lost a window's receipt sends that window again once.
+  - [ ] 5.4.21 Follow-up, optional for closing this change: report a changed member that lands with its old content. A window can land its declared member set instead of the current files. That happens when a rerun resumes the window's checkpoint after a stop in the middle of the parts, and when the window's attempt is past upload. The run then lists a member that changed at the source as not sent, although its old content landed. When the change empties a window whose attempt is past upload, the record also drops the window. Make these changes:
+    - keep such a window in the record with its declared paths, also when a member change empties it;
+    - report each changed member of such a window as sent with the content from before the change, not as not sent.
+    Verify: a member change after a stop in the middle of the parts, and a member change that empties a window whose attempt is past upload, each land the old content once, and the run reports those members as sent with the content from before the change.
 - [ ] 5.5 Split export into a packing step that reaches only the edge and holds the media key, with its network and admission rules (the Job and its policy do not exist before this task), and an upload step without the key. Size staging, parts and deadlines for exports larger than the cell. Verify: export tests with evicted originals pass, a corrupt object fails the export, and chart tests show the upload step has no media key and the packing step has no public egress.
 
 ## 6. Rollout (D11)

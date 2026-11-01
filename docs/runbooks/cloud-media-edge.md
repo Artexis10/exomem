@@ -52,7 +52,10 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 5. Check that ConfigMap `exomem-media-edge-active-set` lists the canary in `active-set.json`.
 6. Wait for cellctl to re-render the canary. Check that its Secret `cell-credentials` has the keys
    `media-edge-credential`, `media-age-identity`, `media-name-key` and `media-store.json`.
-7. Read `/v1/generation` on the edge. It must report the generation in the ConfigMap.
+7. Check that the canary's namespace carries the label that opens the network to the edge:
+   `kubectl get namespace exo-cell-<canary> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
+   Expect `true`.
+8. Read `/v1/generation` on the edge. It must report the generation in the ConfigMap.
    The edge reports a generation only after it drains the requests of the earlier set.
 
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
@@ -69,46 +72,99 @@ revocation as finished only when `/v1/generation` reports that number.
 
 ## Undo
 
-A cell that leaves the edge keeps its store settings, marked `"enabled":false`. It
-loses its credential, its keys and its egress to the edge. Its evicted originals
-answer "unavailable" until it returns, and are never read as deleted. It evicts
-nothing more.
+A cell that leaves the edge drains before it loses its edge access. While it drains,
+it keeps its key bundle, its credential, its egress to the edge, its namespace label
+`exomem.io/media-edge-access` and its active-set entry. Its store settings say
+`"enabled":false`, so it offloads nothing more. Every evicted original stays readable,
+because the cell still hydrates it through the edge.
 
-1. Remove the cell from `mediaEdge.cellIds` in the private values file. To take every
-   cell off the edge, set `mediaEdge.enabled=false` instead.
+Known gap: the current cell image evicts only while its store is enabled, so a draining
+cell evicts nothing. Each original that it hydrates stays on its volume, and a cell with
+more evicted originals than free space can fill its volume. A follow-up change to the
+cell runtime lets a draining cell evict and report its shortfall.
+
+cellctl removes the edge access only after a backup report that the cell captured after
+the turn-off shows no evicted original. The current cell image reports `unknown` for
+that count, so a cell that leaves the edge keeps its edge access until a later image
+counts its evicted originals.
+
+1. Remove the cell from `mediaEdge.cellIds` in the private values file. Keep
+   `mediaEdge.enabled=true`.
 2. Deploy the chart:
    `helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform --values infra/helm/platform/values.yaml --values "$EXOMEM_PLATFORM_VALUES" --atomic --wait --timeout 10m`
 3. Wait for cellctl to re-render the cell. Its pod restarts once.
 4. Read the cell's store settings:
    `kubectl -n exo-cell-<cell> get secret cell-credentials -o jsonpath='{.data.media-store\.json}' | base64 -d`
-   Expect `{"vaults":{"/data/vault":{"adapter":"media-edge","enabled":false,"store":"media-edge:<cell>"}}}`.
-5. Check that the credential is gone:
+   Expect `"enabled":false` beside the cell's `key_version` and `recipient`.
+5. Check that the credential stays:
    `kubectl -n exo-cell-<cell> get secret cell-credentials -o jsonpath='{.data.media-edge-credential}'`
-   Expect no output.
+   Expect output.
 6. List the runtime's egress ports:
    `kubectl -n exo-cell-<cell> get networkpolicy runtime-ingress -o jsonpath='{.spec.egress[*].ports[*].port}'`
-   Expect no `8769`.
-7. If you removed one cell, check that the ConfigMap no longer lists it and that
-   `/v1/generation` reports the new number.
+   Expect `8769`.
+7. Read the cell's drain record:
+   `psql "$EXOMEM_CELLCTL_DSN" -At -c "SELECT custody_observation->'media_store' FROM exomem_cloud_cells WHERE cell_id='<cell>'"`
+   Expect a `turned_off_at` time.
+8. After each nightly backup, read the record again. The cell has drained when
+   `evicted` is `0` and `captured_at` is later than `turned_off_at`.
+9. When the cell has drained, wait for cellctl to re-render it. Repeat steps 5 and 6.
+   Expect no credential and no `8769`.
+10. Read the namespace label:
+    `kubectl get namespace exo-cell-<cell> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
+    Expect no output.
+11. Check that the ConfigMap no longer lists the cell and that `/v1/generation` reports
+    the new number.
 
-Expected result: the cell serves its local files, and its evicted originals answer
-"unavailable". The state volume `exomem-media-edge-state` stays after
-`mediaEdge.enabled=false`. Delete it by hand only after `/v1/pending` on the edge
-reported `0` before you turned it off.
+Expected result: the cell serves its local files and keeps its store identity alone, so
+it reads no original as deleted. It has no key, credential or edge access.
 
 cellctl keeps the cell's key bundle after an undo. A later return reuses the bundle and
 gets a new credential version, so a credential from before the undo stays revoked.
 
+## Turn the edge off
+
+Do not set `mediaEdge.enabled=false` while a cell drains. Without the edge settings,
+cellctl can sign no credential, so the cell would lose its edge access with its evicted
+originals still on the edge, and they would become unreadable. The chart's upgrade
+therefore reads ConfigMap `exomem-media-edge-active-set` and refuses while
+`active-set.json` lists any cell. Draining cells stay listed. The refusal names each
+cell, and the upgrade changes nothing.
+
+`helm template`, a client-side dry run and `helm rollback` cannot read the cluster, so
+they skip this check. Use `helm upgrade` or `helm upgrade --dry-run=server` to turn the
+edge off.
+
+1. Take each cell off the edge with the undo above.
+2. Read the active set:
+   `kubectl -n exomem-cloud get configmap exomem-media-edge-active-set -o jsonpath='{.data.active-set\.json}'`
+   Expect `"cells":{}`.
+3. If a cell is still listed, read its drain record as in step 7 of the undo. Wait for
+   its next backup, then repeat step 2.
+4. Set `mediaEdge.enabled=false` and deploy the chart with the command in step 2 of the undo.
+
+Expected result: the upgrade succeeds, and no cell has `8769` in its egress. The state
+volume `exomem-media-edge-state` stays after `mediaEdge.enabled=false`. Delete it by hand
+only after `/v1/pending` on the edge reported `0` before you turned it off.
+
 ## Roll back the chart
 
-`helm rollback` to a revision with this cellctl acts as an undo for every cell that
-revision's values take off the edge. A revision with an older cellctl drops the store
-settings of every cell, and those cells then read their evicted originals as deleted.
+`helm rollback` skips the active-set check of "Turn the edge off". Check the target
+revision before you roll back:
 
-1. Before you roll back past this release, count the cells that hold a key bundle:
+- With this cellctl and the edge on, a rollback acts as the undo for each cell that the
+  target's values take off the edge.
+- With the edge off, a rollback takes every listed cell to its store identity alone.
+  Each cell that has not drained loses access to its evicted originals.
+- With an older cellctl, a rollback drops the store settings of every cell. Those
+  cells then read their evicted originals as deleted.
+
+1. Read the active set as in step 2 of "Turn the edge off".
+2. If it lists a cell, do not roll back to a revision with the edge off.
+3. Count the cells that hold a key bundle:
    `psql "$EXOMEM_CELLCTL_DSN" -At -c "SELECT count(*) FROM exomem_cloud_cells WHERE media_key_wrapped IS NOT NULL"`
-2. If the count is above `0`, do not roll back past this release. Fix forward, and take
-   cells off the edge with the undo above.
+4. If the count is above `0`, do not roll back past this release. Fix forward.
 
-`--atomic` rolls back a failed deploy by itself. Deploy this release once with the edge
-off before you turn the edge on, so that an automatic rollback finds no key bundle.
+`--atomic` rolls back a failed deploy by itself, and skips the check too. Deploy this
+release once with the edge off before you turn the edge on. A failed first deploy with
+the edge on then rolls back to this cellctl, which keeps each keyed cell's store
+identity, and not to an older cellctl, which drops it.

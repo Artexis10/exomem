@@ -4966,6 +4966,51 @@ def test_an_idle_supervisor_backs_off_its_forced_store_recheck(
     assert max(gaps) <= 70.0, f"the re-check outgrew its ceiling: {gaps}"
 
 
+def test_a_slow_eviction_pass_leaves_the_supervisor_watching(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches timer eviction inside the watchdog loop, where a store outage stops its memory and timeout checks."""
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+    now = 0.0
+    entered, released = threading.Event(), threading.Event()
+    inside = False
+    polls_while_evicting = 0
+
+    def slow_pass(_vault_root):
+        nonlocal inside
+        inside = True
+        entered.set()
+        released.wait(2)
+        inside = False
+
+    def poll(_timeout):
+        nonlocal now, polls_while_evicting
+        now += 0.5
+        if now > media_worker._EVICTION_INTERVAL_SECONDS:
+            assert entered.wait(5), "the eviction timer never ran"
+        if inside:
+            polls_while_evicting += 1
+            if polls_while_evicting == 3:
+                released.set()
+                worker._stop_event.set()
+        if now >= 3 * media_worker._EVICTION_INTERVAL_SECONDS:
+            worker._stop_event.set()
+        return False
+
+    # The clock only has to pass the eviction interval; the pass itself blocks on a real event.
+    monkeypatch.setattr(media_worker, "_clock", lambda: now)
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    monkeypatch.setattr(media_worker, "_evict", slow_pass)
+
+    worker._supervise()
+    released.set()
+
+    assert polls_while_evicting == 3
+
+
 def test_a_store_change_puts_the_backed_off_recheck_back_at_five_seconds(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
