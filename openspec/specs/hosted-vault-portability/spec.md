@@ -250,10 +250,11 @@ The durability registry SHALL classify a hidden part page of a Source's extracti
 - **THEN** the class is canonical
 - **AND** an unregistered hidden file beside it stays disposable
 
-### Requirement: Deleting a Source removes its part pages
+### Requirement: Trash carries the part pages of a Source
 
-Removing a Source page SHALL remove its hidden part pages and their index rows, as it removes a video's scene-frame derivatives.
+Trashing a Source page SHALL move its hidden part pages to Trash beside it and remove their index rows. Recovering the page SHALL bring its part pages back beside it and index them again. Only emptying Trash SHALL remove part pages. When a Source page is removed outside the service, reconcile SHALL report its part pages and leave them.
 
-#### Scenario: A deleted Source leaves no part
-- **WHEN** a Source page with part pages is removed
-- **THEN** its hidden folder and the index rows of its part pages are gone
+#### Scenario: A trashed Source comes back whole
+- **WHEN** a Source page with part pages is trashed
+- **THEN** a search finds no text of its part pages
+- **AND** after its recovery, its part pages are beside it and a search finds text from its last part

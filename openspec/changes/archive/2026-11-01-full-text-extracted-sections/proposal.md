@@ -9,7 +9,7 @@ The extraction of a Source was cut to its first 512 KB, so the rest of a long do
 - Stop cutting extracted text. The Source page keeps the first part. Further parts are pages in a hidden folder beside the stored original, written in the same atomic batch.
 - A search hit on a part is one hit on its Source. The hit names the matched part and carries the matched passage with its offset in the whole text.
 - `read_memory` returns a long Source's extracted text in bounded windows that walk the whole text in order. A part page reads as its Source.
-- Delete, move, reconcile, export, audit and the viewer map treat the hidden folder as part of its Source.
+- Trash, recovery, move, reconcile, export, audit, governance and the viewer map treat the hidden folder as part of its Source.
 - A paragraph of more than 350 words is indexed as consecutive chunks, so no word is left out of semantic search.
 
 ## Capabilities
@@ -24,7 +24,7 @@ None.
 - `attachment-source-ingestion`: one Source page per artifact, with hidden part pages as its text.
 - `find-recall-efficiency`: a hit reports its matched part and passage.
 - `get-payload-shape`: `read_memory` reads long extracted text in windows.
-- `hosted-vault-portability`: export keeps part pages and deletion removes them.
+- `hosted-vault-portability`: export keeps part pages, and Trash keeps them with their Source.
 
 ## Impact
 
