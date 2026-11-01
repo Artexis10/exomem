@@ -519,6 +519,11 @@ def _read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
     return snapshot.data if snapshot is not None else None
 
 
+def read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
+    """The bytes the parser reads for one page, or None when it cannot be read."""
+    return _read_page_bytes(path, vault_root)
+
+
 def page_relative_path(path: Path, vault_root: Path) -> str:
     """The canonical path identity used by the page parser."""
     try:
