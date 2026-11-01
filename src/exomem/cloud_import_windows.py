@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import stat
 import time
 import uuid
@@ -25,6 +26,7 @@ from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
 from .cloud_import_client import (
     _STOP_ON_CLOUD,
     PREFLIGHT,
+    REGISTER,
     CloudImportClientConfig,
     CloudImportError,
     Window,
@@ -395,7 +397,17 @@ class _Run:
                 self.progress.say("The Job refused the window for space; planning it again from the current budget.")
                 return
             message, resume = error.message, error.resume
-            if error.ended:
+            if error.phase == REGISTER and error.code == "IMPORT_CONFLICT":
+                # Cloud checks the declaration before it returns a known row: this window's own earlier attempt declared another member set.
+                if await self._attempt_is_over(window):
+                    window.renew()
+                    shutil.rmtree(checkpoint, ignore_errors=True)  # Its checkpoint holds the dead ID, and a checkpoint's ID wins over the window's.
+                    self.series.write(self.record)
+                    return await self.send(window)
+                message = ("Cloud still holds an earlier attempt of this window with another member set. "
+                           "The run continues once Cloud lands or ends it")
+                resume = True
+            elif error.ended:
                 # Cloud reported that this import ended and replays its ID; the rerun uses a new one.
                 window.renew()
                 self.series.write(self.record)
@@ -428,9 +440,9 @@ class _Run:
                 return True
             raise
         row = response.json()["import"]
-        # The Cloud import protocol fixes these states.
+        # The Cloud import protocol fixes these states (Substrate: requested, uploaded, cancelled, discard_requested).
         # nosemgrep: ep-word-membership -- The protocol fixes the terminal and pre-upload states.
-        return row["observed_state"] in ("failed", "expired", "discarded") or row["requested_state"] in ("requested", "prepared")
+        return row["observed_state"] in ("failed", "expired", "discarded") or row["requested_state"] == "requested"
 
     async def settle(self, window: SentWindow) -> None:
         """A landed window of a resend clears its members from the old residual records, once."""

@@ -168,7 +168,7 @@ class FakeCloud:
                 self.fail_prepare_once = False
                 raise httpx2.ConnectError("interrupted")
             size = json.loads(request.content)["ciphertext_bytes"]
-            row["requested_state"] = "prepared"
+            row["requested_state"] = "requested"  # Substrate keeps `requested` until the upload completes.
             row["part_urls"] = [{"part_number": n + 1, "part_size_bytes": min(5000, size - offset),
                                  "url": f"https://storage.example/{import_id}/{n + 1}"} for n, offset in enumerate(range(0, size, 5000))]
         elif request.method == "POST" and path.endswith("/complete"):
@@ -1003,3 +1003,42 @@ def test_a_skipped_member_adds_to_the_cells_keep_the_source_message_and_does_not
     rig.run()
 
     assert "unfiled" in rig.said() and "1 files were not sent" in rig.said()
+
+
+# -- Review round 4
+
+
+def _stop_with_cloud_importing_slowly_then_change_a_member(rig: Rig) -> None:
+    rig.files(a01__bin=800, a02__bin=800)
+    rig.cloud.holding = rig.cloud.fail_next_read = True
+    with pytest.raises(CloudImportError):
+        rig.run(poll_seconds=0.001)
+    for folder in rig.tmp.glob("checkpoint/window-*"):
+        (folder / "checkpoint.json").unlink()
+    (rig.source / "a02.bin").write_bytes(b"changed after the upload")
+
+
+def test_a_window_that_cloud_still_holds_with_another_member_set_says_the_run_goes_on_once_cloud_ends_it(rig):
+    """Catches the stop text 'cancel it or wait for it to expire' and resume=False for a window's own earlier attempt."""
+    _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(poll_seconds=0.001)
+
+    assert stop.value.resume
+    assert "earlier attempt of this window" in stop.value.message
+
+
+def test_after_cloud_fails_the_old_import_the_next_run_sends_the_window_once_under_a_new_import(rig):
+    """Catches a window that stays pinned to its old import ID and gets IMPORT_CONFLICT on every rerun."""
+    _stop_with_cloud_importing_slowly_then_change_a_member(rig)
+    with pytest.raises(CloudImportError):
+        rig.run(poll_seconds=0.001)
+    for row in rig.cloud.rows.values():
+        row.update(observed_state="failed")
+    rig.cloud.holding = False  # Cloud lands the new import at once.
+
+    rig.run(poll_seconds=0.001)
+
+    assert rig.cloud.all_sent() == ["a01.bin"]
+    assert len(rig.cloud.rows) == 2
