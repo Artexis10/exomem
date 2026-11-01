@@ -2332,15 +2332,16 @@ def _contact_terms(item: CandidateFacts) -> frozenset[str]:
     return item.name_contact | frozenset(word for word in phrase_words if word)
 
 
-def _independent(partner: CandidateFacts, item: CandidateFacts) -> bool:
+def _independent(partner: CandidateFacts, item: CandidateFacts, terms: Mapping[str, frozenset[str]]) -> bool:
     """Whether `partner` adds a fact about `item` beyond the words that already reached `item`.
 
-    A partner whose kind records no words keeps the earlier rule and counts.
+    `terms` holds each candidate's `_contact_terms`, computed once per call. A partner whose
+    kind records no words keeps the earlier rule and counts.
     """
     if partner.anchor_id == item.anchor_id:
         return False
-    words = _contact_terms(partner)
-    return not words or not words <= _contact_terms(item)
+    words = terms[partner.anchor_id]
+    return not words or not words <= terms[item.anchor_id]
 
 
 def add_graph_corroboration(
@@ -2380,11 +2381,12 @@ def add_graph_corroboration(
             named_paths.setdefault(item.path, []).append(item)
         for path in item.neighbourhood:
             named_neighbours.setdefault(path, []).append(item)
+    terms = {item.anchor_id: _contact_terms(item) for item in candidates}
     corroborated = {
         item.anchor_id for item in candidates
-        if (item.path and any(_independent(partner, item) for partner in named_neighbours.get(item.path, ())))
+        if (item.path and any(_independent(partner, item, terms) for partner in named_neighbours.get(item.path, ())))
         or any(
-            _independent(partner, item)
+            _independent(partner, item, terms)
             for path in item.neighbourhood
             for partner in named_paths.get(path, ())
         )

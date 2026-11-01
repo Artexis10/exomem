@@ -439,8 +439,9 @@ def test_corroboration_needs_an_independently_reached_partner() -> None:
 def test_one_turn_word_shared_by_two_linked_names_corroborates_neither() -> None:
     """Two linked concepts whose titles share one word ("domain") are both
     reached by that single turn word. Counting the link as corroboration would
-    count the same word twice and resolve both for a turn about something else
-    (a gardening question that says "which domain should I check").
+    count the same word as a second, independent fact for a turn about something
+    else (a gardening question that says "which domain should I check"). With
+    two shared words (lexical overlap) that second fact is what resolves the pair.
     """
     contract = _facts(
         "contract.md", evidence=("rare_term",), neighbourhood=("tenant.md",), name_contact=("domain",)
