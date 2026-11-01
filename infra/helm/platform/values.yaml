@@ -206,7 +206,7 @@ cellctl:
   databaseDsnSecretKey: dsn
   cellTokenKeySecretName: exomem-cloud-cell-token-key
   backupMasterKeySecretName: exomem-cloud-backup-master-key
-  # D9: cellctl holds no key-creating credential and none in the founder account. Its two object-store
+  # D9: cellctl holds no key-creating credential and no bucket-wide founder credential. Its two object-store
   # keys are bucket-restricted: the staging key serves every export and import, and the backup-list key
   # only counts a deleted new cell's backup versions. Each Secret holds the keys keyId and applicationKey.
   cellDataStagingSecretName: exomem-cloud-cell-data-staging

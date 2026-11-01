@@ -308,7 +308,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - a key limited to the staging bucket, for presigning and removing export and import objects;
 - a key that can only list files in the backup bucket, for version bookkeeping.
 
-`cellctl` holds no credential in the founder account. The operator's cleanup script deletes the keys of a cell created before the switch, and every file version under its prefix in the old bucket. That bucket has no lock, so no grace applies there.
+`cellctl` holds no bucket-wide credential in the founder account. It still unwraps the stored per-cell key of each cell created before the switch and renders it into that cell's Secret for its backup Jobs. That key is limited to the cell's prefix but can delete files in an unlocked bucket, so this residual lasts until those cells migrate to the locked bucket (step 5). The operator's cleanup script deletes the keys of a cell created before the switch, and every file version under its prefix in the old bucket. That bucket has no lock, so no grace applies there.
 
 **The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
 - It runs as a scheduled CI job outside the cluster, at least hourly. It alerts with its own receiver credential, which no in-cluster component holds.

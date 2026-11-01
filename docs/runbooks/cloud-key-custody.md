@@ -3,7 +3,8 @@
 # Exomem Cloud key custody
 
 Each cell reads and writes its backups with one object-store key. The key custodian creates
-that key. `cellctl` holds no credential that creates or deletes keys, and none in the founder account.
+that key. `cellctl` holds no credential that creates or deletes keys, and no bucket-wide credential in the founder account.
+It still holds the stored per-cell key of each cell created before the switch, limited to that cell's prefix, until the cell migrates.
 
 ## Credentials
 
@@ -24,9 +25,9 @@ No other credential can create or delete a key.
 
 ## Clean up after a cell deletion
 
-`cellctl` cannot delete the deleted cell's key or its backup files. This holds for a cell created
-before the key custodian too: its backups sit in the old founder bucket, and `cellctl` has no credential
-there. When a cell reaches `deleted`, `cellctl` raises the platform alert
+`cellctl` cannot delete the deleted cell's key. It cannot delete a new cell's backup files, which the lock keeps.
+A cell created before the key custodian keeps its backups in the old founder bucket. `cellctl` holds that
+cell's stored key until the cell migrates, but it does not delete the files. When a cell reaches `deleted`, `cellctl` raises the platform alert
 `cell-storage-cleanup-pending-<cell_id>`. It raises the alert again after each restart.
 
 The alert, `observed_at` and `updated_at` are inputs that `cellctl` controls. A compromised `cellctl`

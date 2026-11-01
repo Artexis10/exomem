@@ -309,8 +309,9 @@ def run() -> None:
 
     cluster_config = build_cluster_config()
     cluster = ClusterClient(k8s.ApiClient(), storage_config=cluster_config.storage)
-    # D9: cellctl holds no key that creates, lists or deletes an application key, and no credential in
-    # the founder account. The cell-data key only lists the locked backup bucket.
+    # D9: cellctl holds no key that creates, lists or deletes an application key, and no bucket-wide
+    # founder credential; a pre-switch cell's stored prefix key stays until it migrates. The cell-data
+    # key only lists the locked backup bucket.
     backup_listing = B2ObjectStorage(
         B2Config(
             key_id=os.environ["CELLCTL_CELL_DATA_BACKUP_LIST_KEY_ID"],
