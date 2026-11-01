@@ -20,6 +20,7 @@ These tests pin the handoff that does not depend on that republish:
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -46,6 +47,7 @@ from exomem import (
     readiness,
     service_standby,
 )
+from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 CREATED = f"{GENERATED}/created-after-publication.md"
@@ -622,37 +624,171 @@ def test_the_edge_oracle_sees_a_drain_that_does_not_widen(
         _assert_matches_a_fresh_rebuild(root)
 
 
-def test_a_snapshot_published_during_the_proof_is_not_named_as_proved(
+def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M1: the proof covers the snapshot it opened, not one published after it."""
+    """M1: the standby holds the snapshot its proof read, not one published after it.
+
+    The publication shows at promotion as `advanced`, so the promoted worker
+    runs the handoff in full instead of the standby discarding a sound proof.
+    """
+    # Catches a standby that names S2 as proved, or declines a sound proof of S1.
     root = handoff_vault
     _commit_unpublished_page(root)
     _enter_standby(monkeypatch)
-    monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     real = EpistemicGraphIndex.adopt_published_snapshot
-    published: list[str] = []
+    read: list[str | None] = []
 
     def proof_then_publication(self, **kwargs):
         adoption = real(self, **kwargs)
-        if not published:
+        if not read:
+            read.append(service_standby.snapshot_token(root))
             # The serving worker publishes S2 after the proof read S1.
             EpistemicGraphIndex(root).rebuild_all()
-            published.append("S2")
         return adoption
 
     monkeypatch.setattr(
         EpistemicGraphIndex, "adopt_published_snapshot", proof_then_publication, raising=True
     )
 
-    assert service_standby.prove_graph_snapshot(root) is False
-    assert service_standby.proved_checkpoint() is None
-    assert service_standby.cutover_components()["graph_snapshot"] == "waiting"
+    assert service_standby.prove_graph_snapshot(root) is True
+    assert service_standby.proved_checkpoint() == read[0], "the standby must hold S1"
+    assert service_standby.snapshot_token(root) != read[0], "S2 must have been published"
+    assert service_standby.cutover_components()["graph_snapshot"] == "ready"
 
-    # The published snapshot moved, so the waiting standby proves S2 itself.
-    assert service_standby.reprove_graph_snapshot_if_due(root) is True
-    assert service_standby.proved_checkpoint() == service_standby.snapshot_token(root)
-    assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}
+    record = service_standby.promote(root, migrated=False)
+    assert record["snapshot"] == "advanced"
+    assert "graph_handoff" not in record["carried_from_standby"]
+
+
+def _replace_with_identical_bytes(path: Path) -> None:
+    """What a direct editor's save does: the same bytes, renamed over the page."""
+    staged = path.with_name(path.name + ".editor-save")
+    staged.write_bytes(path.read_bytes())
+    os.replace(staged, path)
+
+
+def _governed_write(root: Path, writes: dict[Path, str]) -> None:
+    """One committed governed write through the lease manager a request uses."""
+    from types import SimpleNamespace
+
+    from exomem.writer_lease import get_manager, mark_active_mutation_committed
+
+    def leaf(vault_root: Path, **_kwargs: object) -> dict[str, object]:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(path=path, content=text) for path, text in writes.items()],
+            vault_root=vault_root,
+        )
+        mark_active_mutation_committed()
+        return {"status": "committed", "mutated": True}
+
+    get_manager().invoke(
+        SimpleNamespace(name="remember", read_only=False, leaf=leaf), (root,), {}
+    )
+
+
+def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live upgrade: a governed write, a direct save and a deletion during the proof."""
+    # Catches a proof that declines while writers commit (`proof_raised` on a replaced
+    # page, `snapshot_published_during_proof`), or adopts a residue missing a moved page.
+    from exomem import warmup
+
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    s1 = service_standby.snapshot_token(root)
+    replaced = [f"{GENERATED}/generated-note-0001.md", f"{GENERATED}/generated-note-0002.md"]
+    saved = f"{GENERATED}/generated-note-0003.md"
+    deleted = f"{GENERATED}/generated-note-0199.md"
+    trigger = f"{GENERATED}/generated-note-0010.md"
+    created = f"{GENERATED}/created-during-proof.md"
+    real_read = vault_module.read_bounded_guarded_bytes
+    read: list[str] = []
+    premise: list[bool] = []
+
+    def writers_during_the_proof(vault_root, target, **kwargs):
+        result = real_read(vault_root, target, **kwargs)
+        read.append(target)
+        if target == trigger and not premise:
+            # Recorded, not asserted: the proof would catch an assertion as `proof_raised`.
+            premise.append(set(replaced) | {saved} <= set(read) and deleted not in read)
+            _governed_write(
+                root,
+                {
+                    **{
+                        root / rel: (root / rel).read_text(encoding="utf-8") + "\n- governed\n"
+                        for rel in replaced
+                    },
+                    root / created: _note(9998, ["generated-note-0004", "generated-note-0005"]),
+                },
+            )
+            # S2 lands before the proof reads on: the rebuild this process registered
+            # for the write, then the repair the write queued.
+            premise.append(graph_sync.drain_active_rebuilds(timeout=120.0))
+            index_sync.drain_graph_work(root, limit=64)
+            _replace_with_identical_bytes(root / saved)
+            (root / deleted).unlink()
+        return result
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes", writers_during_the_proof, raising=True
+    )
+
+    assert service_standby.prove_graph_snapshot(root) is True, service_standby.adoption_record()
+    assert premise == [True, True], "the writers must run mid-proof and publish S2"
+    assert service_standby.snapshot_token(root) != s1, "the governed write must publish S2"
+    assert service_standby.proved_checkpoint() == s1, "the standby must hold the S1 it proved"
+    assert service_standby.adoption_record() == {"residue": 4, "reason": "adopted"}, (
+        "S1 plus the residue must equal the disk: both replaced pages, the created "
+        "page and the deleted page, and not the page saved with identical bytes"
+    )
+    monkeypatch.setattr(vault_module, "read_bounded_guarded_bytes", real_read, raising=True)
+
+    record = service_standby.promote(root, migrated=False)
+    assert record["snapshot"] == "advanced"
+    assert "graph_handoff" not in record["carried_from_standby"]
+
+    # The promoted worker seeds its registry, then its warm runs the handoff in full.
+    freshness.rebaseline(root)
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    warmup.warm_graph_handoff(root)
+    _drain_to_empty(root)
+
+    assert EpistemicGraphIndex(root).available() is True
+    assert _file_row(root, created)
+    assert not _file_row(root, deleted)
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_page_rewritten_after_every_read_declines_instead_of_folding_forever(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches an unbounded fold: an editor that saves a page after every read would hold
+    # the proof, and the standby's warm budget, until the upgrade is discarded.
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    churned = f"{GENERATED}/generated-note-0005.md"
+    real_read = vault_module.read_bounded_guarded_bytes
+    reads: list[str] = []
+
+    def saved_after_every_read(vault_root, target, **kwargs):
+        result = real_read(vault_root, target, **kwargs)
+        if target == churned:
+            reads.append(target)
+            _replace_with_identical_bytes(root / churned)
+        return result
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes", saved_after_every_read, raising=True
+    )
+
+    assert service_standby.prove_graph_snapshot(root) is False
+    assert service_standby.adoption_record()["reason"] == "sources_kept_moving"
+    assert service_standby.proved_checkpoint() is None
+    assert len(reads) > 1, "the proof must have re-read the page before it gave up"
 
 
 def _land_a_batch_without_fanout(root: Path) -> None:
