@@ -4,8 +4,9 @@ A scene-frame page holds text taken from its video, such as a description of the
 
 ## What Changes
 
-- A scene-frame page takes the scope membership, and with it the audiences, of its video's Source page.
-- The redirect needs the frame's path shape and its `parent_media` field together. A page that only claims a parent in front matter is governed as itself.
+- A scene-frame page belongs to its own scopes and to its video's. A decision takes the most restrictive of an item's scopes, so the added scopes can only narrow who reads a frame, and a page that claims a parent gains nothing.
+- A page takes its video's scopes only when its path shape and its `parent_media` field agree.
+- A projected catalog row of a frame holds the video's scopes as of the frame's publication. A later change to the video's membership reaches the frame's row only when the frame is published again.
 
 ## Impact
 

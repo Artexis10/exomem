@@ -1159,38 +1159,57 @@ def test_legacy_identity_does_not_change_nonidentity_membership(vault: Path, sel
     assert membership.evaluate(parsed, policy.load(vault)) == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
 
 
+_VIDEO = "Knowledge Base/Evidence/Video/clip.mp4.md"
 _VIDEO_FRAME = "Knowledge Base/Evidence/Video/clip.mp4.frames/scene-001.jpg.md"
 
 
 def _video_with_a_frame(vault: Path) -> None:
-    """A video page and one scene-frame page in that video's own frames folder."""
-    _write_page(vault, "Knowledge Base/Evidence/Video/clip.mp4.md", "type: source\nexomem_id: 4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607")
+    """A video page and one scene-frame page, tagged as frames are, in the video's frames folder."""
+    _write_page(vault, _VIDEO, "type: source\nexomem_id: 4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607")
     _write_page(
-        vault, _VIDEO_FRAME, "type: source\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\nframe_ts: 12.0",
+        vault, _VIDEO_FRAME,
+        "type: source\ntags: [scene-frame]\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\nframe_ts: 12.0",
         body="Whiteboard text from the frame.",
     )
 
 
-def test_a_scene_frame_belongs_to_the_scopes_of_its_video(vault: Path) -> None:
+def test_a_scene_frame_keeps_its_own_scopes_and_takes_its_videos(vault: Path) -> None:
     _video_with_a_frame(vault)
     _write_scope(
         vault, "client",
         'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\nrefs: ["exomem://memory/4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607"]\n',
     )
+    _write_scope(vault, "frames", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB4\ntags: ["scene-frame"]\n')
+    frame = _parse(vault, _VIDEO_FRAME)
+    loaded = policy.load(vault)
+    content_hash = hashlib.sha256((vault / _VIDEO_FRAME).read_bytes()).hexdigest()
 
-    scopes = membership.evaluate(_parse(vault, _VIDEO_FRAME), policy.load(vault))
+    live = membership.evaluate(frame, loaded)
+    snapshot = membership.evaluate_snapshot(frame, loaded, content_hash=content_hash)
 
-    assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB2"})
+    assert live == snapshot == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB2", "01ARZ3NDEKTSV4RRFFQ69G5FB4"})
 
 
-def test_a_page_that_only_claims_a_video_parent_is_governed_as_itself(vault: Path) -> None:
-    _video_with_a_frame(vault)
+def test_a_page_that_claims_a_video_parent_keeps_its_own_scopes(vault: Path) -> None:
+    _write_page(vault, "Knowledge Base/Notes/public.md", "type: insight")
     _write_page(
-        vault, "Knowledge Base/Notes/salary-review.md",
-        "type: insight\ntags: [secret]\nparent_media: Knowledge Base/Evidence/Video/clip.mp4",
+        vault, "Knowledge Base/Notes/public.frames/salary-review.md",
+        "type: insight\ntags: [secret]\nparent_media: Knowledge Base/Notes/public",
     )
     _write_scope(vault, "secret", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB3\ntags: ["secret"]\n')
 
-    scopes = membership.evaluate(_parse(vault, "Knowledge Base/Notes/salary-review.md"), policy.load(vault))
+    scopes = membership.evaluate(
+        _parse(vault, "Knowledge Base/Notes/public.frames/salary-review.md"), policy.load(vault)
+    )
 
     assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB3"})
+
+
+def test_a_scene_frame_whose_video_page_is_gone_is_unresolved(vault: Path) -> None:
+    _video_with_a_frame(vault)
+    _write_scope(vault, "frames", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB4\ntags: ["scene-frame"]\n')
+    frame = _parse(vault, _VIDEO_FRAME)
+    (vault / _VIDEO).unlink()
+
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate(frame, policy.load(vault))
