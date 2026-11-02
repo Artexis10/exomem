@@ -54,8 +54,10 @@ log = logging.getLogger(__name__)
 #: can tell a projection that no longer describes the live page. 3 caps each
 #: page pair instead of each page, and is rebuilt from the ledger without
 #: re-sensing. 4 adds the recap claims and their coverage pairs, and is rebuilt
-#: the same way.
-SCHEMA_VERSION = 4
+#: the same way. 5 adds each claim's place in its recap, the Decided count of
+#: each recap, and the claims' not-covered readings (`claim_readings`), which
+#: the effect counter reads.
+SCHEMA_VERSION = 5
 FILENAME = "projection.sqlite"
 
 #: Pairs one page pair may send to sensing: its first PAIR_CAP pairs in the
@@ -140,10 +142,21 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS claims (
         episode_path TEXT NOT NULL, home_path TEXT NOT NULL, text_sha256 TEXT NOT NULL,
-        text TEXT NOT NULL, PRIMARY KEY (episode_path, home_path, text_sha256)
+        text TEXT NOT NULL, claim_index INTEGER NOT NULL,
+        PRIMARY KEY (episode_path, home_path, text_sha256)
     )
     """,
     "CREATE INDEX IF NOT EXISTS claims_home ON claims(home_path)",
+    # How many Decided lines of each live recap name no single home, so they can be counted.
+    "CREATE TABLE IF NOT EXISTS recaps (episode_path TEXT PRIMARY KEY, unlinked INTEGER NOT NULL)",
+    # `(claim, unit)` pairs the ledger holds a `absent` or `partial` reading of, whatever the
+    # instrument: a set of what was read, so it is the same in any order. It is how the effect
+    # counter tells a home that changed from a label map or pin that changed.
+    """
+    CREATE TABLE IF NOT EXISTS claim_readings (
+        claim_hash TEXT NOT NULL, unit_hash TEXT NOT NULL, PRIMARY KEY (claim_hash, unit_hash)
+    )
+    """,
     # Shaped like `pairs` and in slot order: a = the home's unit (premise), b = the claim
     # (hypothesis). `path_b` is the recap page, so a page pair is (home, recap).
     """
@@ -391,6 +404,8 @@ class PageFacts:
     destinations: frozenset[str] = frozenset()
     #: The Decided lines of a live recap page that name a home (`recap_claims`).
     claims: tuple[Claim, ...] = ()
+    #: How many Decided lines that recap has that name no single home. None for any other page.
+    unlinked: int | None = None
 
 
 def _link_key(raw: str) -> str:
@@ -499,6 +514,8 @@ class Claim:
     text_sha256: str
     #: Vault-relative path of the page the line links.
     home: str
+    #: Where the line stands among the recap's Decided lines, counted from 0.
+    index: int = 0
 
 
 def _display(line: str, links: list[Any]) -> str:
@@ -529,6 +546,35 @@ def _home_of(target: str, destinations: Iterable[str]) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+def _decided_lines(raw_page: str) -> list[str] | None:
+    """The Decided lines of a recap page, or None when the page is not a recap as recorded."""
+    from . import episode_capture, source_coverage
+
+    _head, found, rest = raw_page.partition(f"\n{source_coverage.CAPTURE_HEADING}\n\n")
+    parsed = episode_capture.parse(rest[:-1]) if found and rest.endswith("\n") else None
+    # The recap format is closed and server-written, and `decided` is the section whose lines are claims.
+    return None if parsed is None else list(parsed.sections["decided"])
+
+
+def _claims_of(decided: list[str], destinations: Iterable[str]) -> tuple[list[Claim], int]:
+    """The claims of a recap's Decided lines, and how many of those lines name no single home."""
+    from . import vault as vault_module
+
+    claims: dict[tuple[str, str], Claim] = {}
+    unlinked = 0
+    for index, line in enumerate(decided):
+        links = vault_module.find_body_wikilinks(line)
+        targets = {vault_module.split_wikilink_target(match.group(1))[0] for match in links}
+        home = _home_of(next(iter(targets)), destinations) if len(targets) == 1 else None
+        text = sensing.extract_text(_display(line, links)) if home else ""
+        if text:
+            digest = sensing.text_sha256(text)
+            claims.setdefault((home, digest), Claim(text, digest, home, index))
+        else:
+            unlinked += 1
+    return list(claims.values()), unlinked
+
+
 def recap_claims(raw_page: str, destinations: Iterable[str]) -> list[Claim]:
     """The claims of one recap page: its Decided lines that name exactly one home.
 
@@ -537,41 +583,30 @@ def recap_claims(raw_page: str, destinations: Iterable[str]) -> list[Claim]:
     from the recap's other links, its `about` refs or any search. A recap that
     `episode_capture.parse` does not accept, as a hand edit is not, yields none.
     """
-    from . import episode_capture, source_coverage
-    from . import vault as vault_module
-
-    _head, found, rest = raw_page.partition(f"\n{source_coverage.CAPTURE_HEADING}\n\n")
-    parsed = episode_capture.parse(rest[:-1]) if found and rest.endswith("\n") else None
-    if parsed is None:
-        return []
-    claims: dict[tuple[str, str], Claim] = {}
-    # The recap format is closed and server-written, and `decided` is the section whose lines are claims.
-    for line in parsed.sections["decided"]:
-        links = vault_module.find_body_wikilinks(line)
-        targets = {vault_module.split_wikilink_target(match.group(1))[0] for match in links}
-        home = _home_of(next(iter(targets)), destinations) if len(targets) == 1 else None
-        text = sensing.extract_text(_display(line, links)) if home else ""
-        if text:
-            digest = sensing.text_sha256(text)
-            claims[(home, digest)] = Claim(text, digest, home)
-    return list(claims.values())
+    decided = _decided_lines(raw_page)
+    return [] if decided is None else _claims_of(decided, destinations)[0]
 
 
-def _page_claims(vault_root: Path, facts: PageFacts) -> tuple[Claim, ...]:
-    """The claims of a live recap page, read from the page itself; none for any other page.
+def _page_claims(vault_root: Path, facts: PageFacts) -> tuple[tuple[Claim, ...], int | None]:
+    """The claims of a live recap page and its count of unlinked Decided lines, read from the page itself.
 
-    A recap's file name is the cheap test, and `recap_claims` the real one. A
-    retired revision (`superseded`) proposes nothing: the live revision speaks.
+    No claims and no count (None) for any other page. A recap's file name is the
+    cheap test, and the parse the real one. A retired revision (`superseded`)
+    proposes nothing: the live revision speaks.
     """
     from . import episode_capture
 
     if facts.lifecycle in _INACTIVE or episode_capture.filename_parts(facts.path) is None:
-        return ()
+        return (), None
     try:
         raw = (Path(vault_root) / facts.path).read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
-        return ()
-    return tuple(recap_claims(raw, facts.destinations))
+        return (), None
+    decided = _decided_lines(raw)
+    if decided is None:
+        return (), None
+    claims, unlinked = _claims_of(decided, facts.destinations)
+    return tuple(claims), unlinked
 
 
 # ----------------------------------------------------------------------
@@ -1160,6 +1195,7 @@ def run_tick(
         for question in sensing.QUESTIONS.values():
             _follow_active(store, conn, ledger, active, question, report, halt)
         _ingest(store, conn, ledger, active, report, halt)
+        _follow_claim_readings(store, conn, ledger, halt)
         cosine = _follow_cosine(vault_root, store, conn)
         _follow_pages(
             vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now,
@@ -1194,6 +1230,9 @@ def _follow_ledger(store, conn, ledger) -> None:
         _set_meta(conn, "ledger_seq", 0 if ledger is None else sensing_ledger.max_seq(ledger))
         for question in sensing.QUESTIONS.values():
             _set_meta(conn, f"{_prefix(question)}reproject_after", "")
+        # A reading set from another ledger says nothing of this one: read it all again.
+        conn.execute("DELETE FROM claim_readings")
+        _set_meta(conn, "claim_readings_seq", 0)
 
 
 def _follow_seeding(store, conn, seen: Mapping[str, str]) -> None:
@@ -1351,6 +1390,36 @@ def _ingest(store, conn, ledger, active, report, halt) -> None:
                 _refresh_selection(conn, touched, table)
 
 
+def _follow_claim_readings(store, conn, ledger, halt) -> None:
+    """File each claim's `absent` and `partial` readings by the unit they were made against.
+
+    The cursor is only progress through the ledger. The table is a set of
+    `(claim, unit)` keys, so it holds the same rows whatever order the readings
+    arrive in and a replay rebuilds it exactly.
+    """
+    if ledger is None:
+        return
+    cursor = int(_get_meta(conn, "claim_readings_seq") or 0)
+    if sensing_ledger.max_seq(ledger) < cursor:
+        cursor = 0
+    while halt() is None:
+        rows = sensing_ledger.since(ledger, cursor, limit=INGEST_PER_TICK)
+        if not rows:
+            break
+        with store.write(conn):
+            conn.executemany(
+                "INSERT OR IGNORE INTO claim_readings(claim_hash, unit_hash) VALUES (?, ?)",
+                (
+                    (row.hashes[1], row.hashes[0])
+                    for row in rows
+                    if row.question_type == sensing.RECAP_COVERED_BY
+                    and row.verdict.label in _NOT_ENTAILED
+                ),
+            )
+            cursor = rows[-1].seq
+            _set_meta(conn, "claim_readings_seq", cursor)
+
+
 #: Halt reasons that are the tick's own budgets. They stop a tick from reading
 #: more pages, but the pages it has read share one vector pass and are all
 #: applied, so a pass that outruns the budget is never discarded and read
@@ -1396,7 +1465,8 @@ def _follow_pages(
                 break
             facts = page_facts(graph, rel, ctx.graph_view())
             if facts is not None:
-                facts = dataclasses.replace(facts, claims=_page_claims(vault_root, facts))
+                claims, unlinked = _page_claims(vault_root, facts)
+                facts = dataclasses.replace(facts, claims=claims, unlinked=unlinked)
             vectors = (
                 stored_unit_vectors(vault_root, rel, fingerprint) if facts and facts.units else {}
             )
@@ -1480,6 +1550,7 @@ def _drop_page(conn: sqlite3.Connection, rel: str, store_key: str) -> None:
     conn.execute("DELETE FROM pairs WHERE path_a=? OR path_b=?", (rel, rel))
     conn.execute("DELETE FROM coverage_pairs WHERE path_a=? OR path_b=?", (rel, rel))
     conn.execute("DELETE FROM claims WHERE episode_path=?", (rel,))
+    conn.execute("DELETE FROM recaps WHERE episode_path=?", (rel,))
     conn.execute("DELETE FROM units WHERE path=?", (rel,))
     conn.execute("DELETE FROM links WHERE path=?", (rel,))
     conn.execute("DELETE FROM pages WHERE path=?", (rel,))
@@ -1583,10 +1654,14 @@ def _apply_page(
         _write_projection(conn, key, projected, priority, instrument_key)
     _refresh_selection(conn, {rel})
     conn.execute("DELETE FROM claims WHERE episode_path=?", (rel,))
+    conn.execute("DELETE FROM recaps WHERE episode_path=?", (rel,))
     conn.executemany(
-        "INSERT INTO claims(episode_path, home_path, text_sha256, text) VALUES (?, ?, ?, ?)",
-        ((rel, claim.home, claim.text_sha256, claim.text) for claim in facts.claims),
+        "INSERT INTO claims(episode_path, home_path, text_sha256, text, claim_index) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ((rel, claim.home, claim.text_sha256, claim.text, claim.index) for claim in facts.claims),
     )
+    if facts.unlinked is not None:
+        conn.execute("INSERT INTO recaps(episode_path, unlinked) VALUES (?, ?)", (rel, facts.unlinked))
     _rebuild_coverage(conn, ledger, every, _coverage_pages(conn, rel))
 
 
@@ -1786,6 +1861,17 @@ class CoverageClaim:
     #: `entailed`, `partial` or `absent` once every unit of the home has been read
     #: under the active instrument; `incomplete` while any read is missing.
     state: str
+    #: Where the claim's Decided line stands in its recap, counted from 0.
+    index: int = 0
+    #: The reading that decided the state: the first by unit position of the pairs that
+    #: read it (an entailed or partial pair, else the first pair of an absent claim).
+    #: None while the claim is incomplete.
+    reading_id: str | None = None
+    #: An `incomplete` claim that no unit entails and that at least one unit's current
+    #: reading abstained on: unreadable, which is not the same as unread.
+    abstained: bool = False
+    #: The units of the home whose current reading entails the claim.
+    entailing_units: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1809,24 +1895,36 @@ class CoverageItem:
         return tuple(claim for claim in self.claims if claim.state in _NOT_ENTAILED)
 
 
-def _claim_state(pairs: list[tuple[Any, ...]], key: str) -> str:
-    """One claim's state from its pairs' `(state, verdict, instrument_key)`.
+#: One pair of a claim against a unit of its home, as `_claim_read` takes it:
+#: `(state, verdict, instrument key, reading id, order key, unit hash)`.
+_ClaimPair = tuple[Any, Any, Any, Any, Any, Any]
+
+
+def _claim_read(
+    pairs: list[_ClaimPair], key: str
+) -> tuple[str, str | None, bool, tuple[str, ...]]:
+    """One claim's `(state, deciding reading, abstained, entailing units)` from its pairs.
 
     `absent` and `partial` both need every unit read: a pair still pending,
     stale, abstained, left unread by the cap or read under another instrument
     could entail the claim, so the claim stays `incomplete`, never absent. A home
     with no unit to read has no reading either, so its claim is `incomplete` too.
     """
-    served = [pair[1] for pair in pairs if pair[0] == "current" and pair[2] == key]
-    if "entailed" in served:
-        return "entailed"
+    pairs = sorted(pairs, key=lambda pair: str(pair[4]))
+    served = [pair for pair in pairs if pair[0] == "current" and pair[2] == key]
+    entailing = [pair for pair in served if pair[1] == "entailed"]
+    if entailing:
+        return "entailed", entailing[0][3], False, tuple(str(pair[5]) for pair in entailing)
     complete = bool(pairs) and all(
         state == "current" and instrument == key and verdict in _NOT_ENTAILED
-        for state, verdict, instrument in pairs
+        for state, verdict, instrument, *_rest in pairs
     )
     if not complete:
-        return "incomplete"
-    return "partial" if "partial" in served else "absent"
+        return "incomplete", None, any(pair[1] == "abstain" for pair in served), ()
+    partial = [pair for pair in served if pair[1] == "partial"]
+    if partial:
+        return "partial", partial[0][3], False, ()
+    return "absent", pairs[0][3], False, ()
 
 
 def _coverage_items(conn: sqlite3.Connection, key: str) -> list[CoverageItem]:
@@ -1834,42 +1932,44 @@ def _coverage_items(conn: sqlite3.Connection, key: str) -> list[CoverageItem]:
 
     inactive = sorted(_INACTIVE)
     rows = conn.execute(
-        "SELECT c.episode_path, c.home_path, c.text_sha256, c.text, p.state, p.verdict, "
-        "p.instrument_key FROM claims c JOIN pages h ON h.path = c.home_path "
+        "SELECT c.episode_path, c.home_path, c.text_sha256, c.text, c.claim_index, p.state, "
+        "p.verdict, p.instrument_key, p.reading_id, p.order_key, p.hash_a "
+        "FROM claims c JOIN pages h ON h.path = c.home_path "
         "LEFT JOIN coverage_pairs p ON p.path_a = c.home_path AND p.path_b = c.episode_path "
         "AND p.hash_b = c.text_sha256 "
         f"WHERE h.lifecycle NOT IN ({','.join('?' for _ in inactive)}) "
         "ORDER BY c.home_path, c.episode_path, c.text_sha256",
         inactive,
     ).fetchall()
-    grouped: dict[tuple[str, str], dict[tuple[str, str], list[tuple[Any, ...]]]] = {}
-    for episode, home, digest, text, state, verdict, instrument in rows:
+    grouped: dict[
+        tuple[str, str], dict[tuple[str, str, int], list[_ClaimPair]]
+    ] = {}
+    for episode, home, digest, text, index, state, verdict, instrument, reading, order, unit in rows:
         claim = grouped.setdefault((str(home), str(episode)), {}).setdefault(
-            (str(digest), str(text)), []
+            (str(digest), str(text), int(index)), []
         )
         if state is not None:
-            claim.append((state, verdict, instrument))
+            claim.append((state, verdict, instrument, reading, order, unit))
     items: list[CoverageItem] = []
     for (home, episode), claims in grouped.items():
-        read = tuple(
-            CoverageClaim(text, digest, _claim_state(pairs, key))
-            for (digest, text), pairs in claims.items()
-        )
+        read = []
+        for (digest, text, index), pairs in claims.items():
+            state, reading, abstained, units = _claim_read(pairs, key)
+            read.append(CoverageClaim(text, digest, state, index, reading, abstained, units))
+        read.sort(key=lambda claim: (claim.index, claim.text_sha256))
         due = sorted(claim.text_sha256 for claim in read if claim.state in _NOT_ENTAILED)
         parts = episode_capture.filename_parts(episode)
         fingerprint = _digest("coverage-item", home, parts[0] if parts else episode, due, key)
-        items.append(CoverageItem(home, episode, read, fingerprint[:24]))
+        items.append(CoverageItem(home, episode, tuple(read), fingerprint[:24]))
     return items
 
 
-def coverage_items(vault_root: Path) -> list[CoverageItem] | None:
-    """Every (home, recap) with its claims' states, or None while the projection cannot say.
-
-    The consumer takes the items whose `due` is not empty.
+def _readable(vault_root: Path, read: Callable[[sqlite3.Connection, str], Any]) -> Any | None:
+    """`read(conn, key)` over the projection, or None while it cannot say.
 
     None when sensing is off, there is no projection, or it is still being
-    rebuilt from empty or from a replaced ledger. Not released per caller: the
-    consumer applies the release rule to the home and the recap.
+    rebuilt from empty or from a replaced ledger. `key` is the coverage
+    question's active instrument key.
     """
     if not sensing.enabled():
         return None
@@ -1883,11 +1983,190 @@ def coverage_items(vault_root: Path) -> list[CoverageItem] | None:
             or _get_meta(conn, f"{_prefix(question)}reproject_after") is not None
         ):
             return None
-        return _coverage_items(conn, _question_key(active_instruments(), question))
+        return read(conn, _question_key(active_instruments(), question))
     except sqlite3.Error:
         return None
     finally:
         conn.close()
+
+
+def coverage_items(vault_root: Path) -> list[CoverageItem] | None:
+    """Every (home, recap) with its claims' states, or None while the projection cannot say.
+
+    The consumer takes the items whose `due` is not empty. Not released per
+    caller: the consumer applies the release rule to the home and the recap.
+    """
+    return _readable(vault_root, _coverage_items)
+
+
+# ----------------------------------------------------------------------
+# the homes due for compilation, as one caller may see them
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CompileRow:
+    """One home that a recap's Decided lines say more about than the home says.
+
+    `id` names the (home, episode) and survives a new revision of the episode;
+    `fingerprint` changes when the set of due claims does.
+    """
+
+    id: str
+    home: str
+    episode: str
+    #: The claims that read `absent` or `partial`, in the order of the recap's lines.
+    claims: tuple[CoverageClaim, ...]
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class Compiled:
+    rows: tuple[CompileRow, ...]
+    #: False while a claim on a page the caller may see has no verdict yet (unread, capped,
+    #: abstained or stale), or the projection lags that page: more rows may follow.
+    complete: bool
+
+
+def compile_id(home: str, episode: str) -> str:
+    """The review id of the (home, episode) item: the same for every revision of the episode."""
+    from . import dreamer_families, dreamer_store, episode_capture
+
+    parts = episode_capture.filename_parts(episode)
+    return dreamer_store.candidate_id(
+        dreamer_families.SENSED_COMPILE_KIND, home, parts[0] if parts else episode
+    )
+
+
+def _newest_revisions(items: Iterable[CoverageItem]) -> list[CoverageItem]:
+    """One item per (home, episode): the newest revision of an episode speaks for it."""
+    from . import episode_capture
+
+    def recorded(item: CoverageItem) -> tuple[str, str]:
+        parts = episode_capture.filename_parts(item.episode)
+        return (parts[1] if parts else "", item.episode)
+
+    chosen = {compile_id(item.home, item.episode): item for item in sorted(items, key=recorded)}
+    return [chosen[key] for key in sorted(chosen)]
+
+
+def _projects_live_page(vault_root: Path, conn: sqlite3.Connection, path: str) -> bool:
+    """Whether the projection still describes `path` as it is on disk now."""
+    row = conn.execute("SELECT sig FROM pages WHERE path=?", (path,)).fetchone()
+    return row is not None and row[0] is not None and row[0] == _live_sig(vault_root, path)
+
+
+def compile_rows(vault_root: Path, *, keep=None) -> Compiled | None:
+    """The homes due for compilation for the caller whose release predicate is `keep`.
+
+    A row needs its home and its recap released to the caller, so a withheld page
+    leaves the row out exactly as an absent page does and never moves
+    `complete`. A row also needs the projection to describe both pages as they
+    are on disk now: a page edited since its last tick has an unknown verdict, not
+    a stale one. None while sensing cannot say (`_readable`).
+    """
+
+    def read(conn: sqlite3.Connection, key: str) -> Compiled:
+        rows: list[CompileRow] = []
+        complete = True
+        for item in _newest_revisions(_coverage_items(conn, key)):
+            if keep is not None and not (keep(item.home) and keep(item.episode)):
+                continue
+            live = _projects_live_page(vault_root, conn, item.home) and _projects_live_page(
+                vault_root, conn, item.episode
+            )
+            if not live or any(claim.state == "incomplete" for claim in item.claims):
+                complete = False
+            if live and item.due:
+                rows.append(
+                    CompileRow(
+                        compile_id(item.home, item.episode), item.home, item.episode, item.due,
+                        item.fingerprint,
+                    )
+                )
+        return Compiled(tuple(rows), complete)
+
+    return _readable(vault_root, read)
+
+
+def compile_row(vault_root: Path, row_id: str, *, keep=None) -> CompileRow | None:
+    """One due row by id, as `compile_rows` gives it to this caller, or None."""
+    found = compile_rows(vault_root, keep=keep)
+    return None if found is None else next((row for row in found.rows if row.id == row_id), None)
+
+
+# ----------------------------------------------------------------------
+# what became of the homes that were due: the effect counter's reads
+# ----------------------------------------------------------------------
+
+
+def compile_acted(vault_root: Path) -> frozenset[str] | None:
+    """The ids of the (home, episode) items that a change to the home cleared.
+
+    An item is acted on when it is no longer due, its home and recap still exist
+    and still hold the claims, and every claim that was ever read `absent` or
+    `partial` now reads `entailed` by a unit that no such reading was made
+    against: a unit written since. A re-read of the same unit under a new pin or
+    label map entails it through a unit that was already read, so it never counts.
+    A deleted home, a retired recap or an edited claim leaves nothing to entail,
+    and is not acted on either. None while sensing cannot say (`_readable`).
+    """
+
+    def read(conn: sqlite3.Connection, key: str) -> frozenset[str]:
+        read_before: dict[str, set[str]] = {}
+        for claim_hash, unit_hash in conn.execute("SELECT claim_hash, unit_hash FROM claim_readings"):
+            read_before.setdefault(str(claim_hash), set()).add(str(unit_hash))
+        acted: set[str] = set()
+        for item in _newest_revisions(_coverage_items(conn, key)):
+            if item.due:
+                continue
+            asked = [claim for claim in item.claims if claim.text_sha256 in read_before]
+            if asked and all(
+                claim.state == "entailed"
+                and set(claim.entailing_units) - read_before[claim.text_sha256]
+                for claim in asked
+            ) and all(
+                _projects_live_page(vault_root, conn, path) for path in (item.home, item.episode)
+            ):
+                acted.add(compile_id(item.home, item.episode))
+        return frozenset(acted)
+
+    return _readable(vault_root, read)
+
+
+def coverage_summary(vault_root: Path, since: str, through: str) -> dict[str, Any] | None:
+    """What the coverage question made of the recaps captured from `since` through `through`.
+
+    Both are `YYYY-MM-DD` dates compared with the recap page's own knowledge
+    date. Counts each claim once by what it reads (`entailed`, `partial`,
+    `absent`, `abstain` for a claim a unit could not be read on, `incomplete` for
+    one still unread), and the Decided lines that name no single home. `evidence_complete` holds when no claim is left unread or abstained.
+    None while sensing cannot say (`_readable`).
+    """
+
+    def read(conn: sqlite3.Connection, key: str) -> dict[str, Any]:
+        window = {
+            str(path)
+            for path, date in conn.execute("SELECT path, knowledge_date FROM pages")
+            if since <= str(date or "")[:10] <= through
+        }
+        verdicts = dict.fromkeys(("entailed", "partial", "absent", "abstain", "incomplete"), 0)
+        for item in _coverage_items(conn, key):
+            if item.episode not in window:
+                continue
+            for claim in item.claims:
+                verdicts["abstain" if claim.abstained else claim.state] += 1
+        unlinked = sum(
+            int(count) for path, count in conn.execute("SELECT episode_path, unlinked FROM recaps")
+            if str(path) in window
+        )
+        return {
+            "claims": verdicts,
+            "unlinked_decided": unlinked,
+            "evidence_complete": not (verdicts["incomplete"] or verdicts["abstain"]),
+        }
+
+    return _readable(vault_root, read)
 
 
 # ----------------------------------------------------------------------

@@ -31,7 +31,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_families, dreamer_store, review_state
+from . import dreamer_families, dreamer_store, review_state, sensed_model, sensing
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +52,13 @@ FAMILY_ORDER: tuple[str, ...] = (
     dreamer_families.CONVENTION_FAMILY,
 )
 
+#: The sensed families rank after every structural one: a reading may add an item,
+#: never move or hide a structural one (R2 of the sensed epistemic model).
+_RANKED: tuple[str, ...] = (*FAMILY_ORDER, *dreamer_families.SENSED_FAMILY_NAMES)
+
 #: Closed per-kind labels. UI strings, not matching lists.
 LABELS: dict[str, str] = {
+    dreamer_families.SENSED_COMPILE_KIND: "A recap says more about this page than the page does",
     dreamer_families.LINK_KIND: "Two notes could be connected",
     dreamer_families.HYDRATION_KIND: "Facts about an entity live on other pages",
     dreamer_families.ALIAS_KIND: "Other notes name this page another way",
@@ -107,7 +112,7 @@ def _changed(ref: str) -> ValueError:
 
 
 def _family_rank(family: str) -> int:
-    return FAMILY_ORDER.index(family) if family in FAMILY_ORDER else len(FAMILY_ORDER)
+    return _RANKED.index(family) if family in _RANKED else len(_RANKED)
 
 
 def _keep(vault_root: Path):
@@ -160,6 +165,13 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
             f"pages from {visible_origins} independent sources link this page, which has no summary"
         )
     measures = row.get("measures") or {}
+    if kind == dreamer_families.SENSED_COMPILE_KIND:
+        count = int(measures.get("due") or 0)
+        return (
+            f"{count} decided item{'' if count == 1 else 's'} of a conversation recap that "
+            "links this page "
+            f"{'is' if count == 1 else 'are'} not stated on it"
+        )
     if kind == dreamer_families.ALIAS_KIND:
         count = int(measures.get("referrers") or 0)
         notes = f"{count} other note{'' if count == 1 else 's'} link"
@@ -221,13 +233,16 @@ def serve(
     elif kind == dreamer_families.TAG_KIND:
         if not others:
             return None
+    elif kind == dreamer_families.SENSED_COMPILE_KIND:
+        if not any(item.get("role") == "episode" for item in others):
+            return None
     subject_entry = next((item for item in evidence if item.get("path") == subject), {})
     ref = str(row.get("ref") or upkeep_ref(str(row["id"])))
     route = _visible_route(row.get("route") or {}, keep)
     dispose_args: dict[str, Any] = {"ref": ref}
     if kind == dreamer_families.LINK_KIND:
         dispose_args["source_path"] = subject
-    return {
+    served = {
         "ref": ref,
         "family": str(row.get("family") or ""),
         "fingerprint": str(row.get("fingerprint") or ""),
@@ -264,6 +279,9 @@ def serve(
         },
         "permission": dreamer_families.PERMISSION,
     }
+    if kind == dreamer_families.SENSED_COMPILE_KIND:
+        served["compile"] = row.get("compile")
+    return served
 
 
 def _visible_route(route: dict[str, Any], keep) -> dict[str, Any]:
@@ -292,6 +310,52 @@ def _deliveries(view: dreamer_store.StoreView) -> dict[tuple[str, str], int]:
     for cid, fingerprint, _caller, _at in view.deliveries:
         counts[(cid, fingerprint)] = counts.get((cid, fingerprint), 0) + 1
     return counts
+
+
+def _sensed_rows(
+    vault_root: Path,
+    ctx: dreamer_families.Context,
+    keep,
+    payload: dict[str, Any],
+    wanted: set[str],
+) -> tuple[list[dict[str, Any]], bool | None]:
+    """The sensed families' open rows for this caller, and whether that list is whole.
+
+    The second value is None when the family is not asked for, is off or sensing is
+    off: it is then left out of the response altogether. It is False while the
+    projection cannot say, so an unknown list is never read as an empty one.
+    """
+    family = dreamer_families.SENSED_COMPILE_FAMILY
+    if (
+        not sensing.enabled()
+        or (wanted and family not in wanted)
+        or review_state.disposition_for(family, payload=payload) == "off"
+    ):
+        return [], None
+    compiled = sensed_model.compile_rows(vault_root, keep=keep)
+    if compiled is None:
+        return [], False
+    rows = (dreamer_families.sensed_compile_row(ctx, due) for due in compiled.rows)
+    return [row for row in rows if row is not None], compiled.complete
+
+
+def _stamp_listed(
+    vault_root: Path, payload: dict[str, Any], served: list[dict[str, Any]]
+) -> None:
+    """Record that these sensed items reached the review surface, for the effect counter.
+
+    Best effort: the ledger's own isolation means a read that cannot write it still
+    answers. Only sensed items are stamped; a structural family has its own ledger
+    of deliveries.
+    """
+    entries = [
+        (parse_upkeep_ref(item["ref"]), str(item["fingerprint"]), str(item["family"]))
+        for item in served
+        if item["family"] in dreamer_families.SENSED_FAMILY_NAMES
+        and item["disposition"]["state"] == "open"
+    ]
+    if entries:
+        review_state.record_surfaced(vault_root, entries, surface="review", known=payload)
 
 
 def review(
@@ -334,7 +398,9 @@ def review(
     ctx = _request_context(Path(vault_root))
     with egress.disclosure_boundary(Path(vault_root), "upkeep_review"), contextlib.closing(ctx):
         keep, withheld = _filters(Path(vault_root))
-        for stored in view.candidates:
+        sensed, sensed_complete = _sensed_rows(Path(vault_root), ctx, keep, payload, wanted)
+        # The sensed rows come after the stored ones and never touch their loop.
+        for stored in (*view.candidates, *sensed):
             if stored.get("state") != "open":
                 continue
             family = str(stored.get("family") or "")
@@ -375,16 +441,23 @@ def review(
                 integrity[category] = integrity.get(category, 0) + 1
     collected.sort(key=lambda pair: pair[0])
     complete = view.health.get("evidence_complete") or {}
+    listed = [item for _key, item in collected[:bound]]
+    _stamp_listed(Path(vault_root), payload, listed)
     return {
         **base,
         "status": "available",
-        "items": [item for _key, item in collected[:bound]],
+        "items": listed,
         "families": families,
         "evidence_complete": {
             family: bool(flag)
             for family, flag in complete.items()
             if not wanted or family in wanted
-        },
+        }
+        | (
+            {}
+            if sensed_complete is None
+            else {dreamer_families.SENSED_COMPILE_FAMILY: sensed_complete}
+        ),
         "integrity": integrity,
         "truncated": len(collected) > bound,
     }
@@ -466,6 +539,13 @@ def _current(vault_root: Path, ref: str) -> tuple[dict[str, Any], dict[str, Any]
     row = _row(Path(vault_root), cid)
     ctx = _request_context(Path(vault_root))
     try:
+        if row is None and sensing.enabled():
+            # A sensed row is recomputed for this caller and carries no stored row; one that
+            # does not exist or is withheld reads as an unknown id, and costs the same work.
+            sensed = sensed_model.compile_row(Path(vault_root), cid, keep=keep)
+            released = None if sensed is None else dreamer_families.sensed_compile_row(ctx, sensed)
+            if released is not None:
+                return released, released
         if row is None or not _subject_visible(row, keep):
             raise _not_found(ref)
         released = dreamer_families.release(ctx, row, keep, withheld=withheld)

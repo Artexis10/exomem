@@ -256,6 +256,7 @@ def registered_families() -> frozenset[str]:
             *working_set_learning_module._ADVISORY_KINDS,
             *REVIEW_FAMILIES.values(),
             *dreamer_families.family_names(),
+            *dreamer_families.SENSED_FAMILY_NAMES,
             promotions_module.FAMILY,
         }
     )

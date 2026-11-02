@@ -2169,6 +2169,80 @@ def release(
 #: The families this build implements, in registry order.
 REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE]
 
+# ----------------------------------------------------------------------
+# sensed families: read from the sensing projection, never stored in the sidecar
+# ----------------------------------------------------------------------
+#
+# A sensed family has no row in `REGISTRY` or in the sidecar: its rows are
+# recomputed for each caller from the projection's readings (`sensed_model`), so
+# the sidecar's size cap, delivery clock and ordering never see it. It still
+# takes every disposition a registry family does, so it is named here.
+
+SENSED_COMPILE_FAMILY = "upkeep_sensed_compile"
+SENSED_COMPILE_KIND = "episode.compile"
+SENSED_FAMILY_NAMES: tuple[str, ...] = (SENSED_COMPILE_FAMILY,)
+
+
+def sensed_compile_row(ctx: Context, due: Any) -> dict[str, Any] | None:
+    """A `sensed_model.CompileRow` as an upkeep row, or None when either page is gone.
+
+    The home is the subject and the recap its one piece of evidence. `compile`
+    carries what the item says: the recap, the page to compile into, and for each
+    due claim where it stands in the recap (`claim_index`, counted from 0), what
+    the page's units read it as (`verdict`) and the reading that decided it.
+    """
+    entries = []
+    for path, role in ((due.home, "subject"), (due.episode, "episode")):
+        page = ctx.page(path)
+        if page is None:
+            return None
+        frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+        exomem_id = frontmatter.get("exomem_id")
+        entries.append(
+            {
+                "path": path,
+                "ref": _memory_or_path_ref(path, exomem_id if isinstance(exomem_id, str) else None),
+                "role": role,
+                "origin": "",
+                "title": getattr(page, "title", None),
+            }
+        )
+    home, episode = entries
+    return {
+        "id": due.id,
+        "family": SENSED_COMPILE_FAMILY,
+        "kind": SENSED_COMPILE_KIND,
+        "state": "open",
+        "subject_path": due.home,
+        "subject_ref": home["ref"],
+        "evidence": entries,
+        "evidence_count": len(entries),
+        "route": {
+            "tool": "maintain_memory",
+            "args": {
+                "mode": "curation",
+                "curation_action": "work-item",
+                "paths": [due.home, due.episode],
+            },
+        },
+        "reason_code": "recap_decided_not_on_page",
+        "signal_version": due.fingerprint,
+        "fingerprint": due.fingerprint,
+        "measures": {"due": len(due.claims)},
+        "compile": {
+            "episode": episode["ref"],
+            "target": home["ref"],
+            "claims": [
+                {
+                    "claim_index": claim.index,
+                    "verdict": claim.state,
+                    "reading_id": claim.reading_id,
+                }
+                for claim in due.claims
+            ],
+        },
+    }
+
 
 def family_names() -> tuple[str, ...]:
     return tuple(family.name for family in REGISTRY)
