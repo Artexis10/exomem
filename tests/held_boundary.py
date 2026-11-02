@@ -23,7 +23,11 @@ class HeldBoundary:
 
 @contextmanager
 def held_boundary(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, *, release_when_refused: bool = True
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    release_when_refused: bool = True,
+    expect_refusal: bool = True,
 ) -> Iterator[HeldBoundary]:
     """Hold the boundary from another writer until the code under test has been refused once.
 
@@ -31,7 +35,8 @@ def held_boundary(
     under test must wait the holder out to succeed. With `release_when_refused` false the holder
     keeps the boundary until the test sets `release`, for a test that needs the wait to run out.
     Enter before the first `writer_lease.get_manager()` of the test: a manager reads its timeout
-    from the environment when it is built.
+    from the environment when it is built. With `expect_refusal` false the code under test must
+    never meet the boundary, as for work that needs no boundary, and the holder keeps it to the end.
     """
     monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.1")
     held = HeldBoundary()
@@ -58,7 +63,10 @@ def held_boundary(
     assert holding.wait(30)
     try:
         yield held
-        assert held.refused.is_set(), "the code under test never met the held boundary"
+        if expect_refusal:
+            assert held.refused.is_set(), "the code under test never met the held boundary"
+        else:
+            assert not held.refused.is_set(), "the code under test needed the held boundary"
     finally:
         held.release.set()
         thread.join(30)

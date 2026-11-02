@@ -235,7 +235,8 @@ is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 
 Warming, busy, acknowledgement-pending, and committed-acknowledgement-uncertain outcomes
-remain structured errors. Retrying must retain the same identity and payload:
+remain structured errors. (A file of a committed batch that failed with `MUTATION_BUSY`
+is not such an error; see `mutation-results.md`.) Retrying must retain the same identity and payload:
 wait before retrying `MUTATION_WARMING` or `MUTATION_BUSY`; never revise a pending payload; and after
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, reconcile and retry only with the
 same identity rather than creating a new write.

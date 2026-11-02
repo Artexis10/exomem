@@ -170,7 +170,14 @@ def _stub_artifact_fetch(vault: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_a, **_k: nullcontext()})(),
+        lambda: type(
+            "Manager",
+            (),
+            {
+                "mutation_guard": lambda self, *_a, **_k: nullcontext(),
+                "absorbing_mutation_guard": lambda self, *_a, **_k: nullcontext(),
+            },
+        )(),
     )
 
 
