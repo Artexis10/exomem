@@ -26,7 +26,7 @@ def _per_hold_seconds(state_root: Path, vault: Path) -> float:
 
 def test_hold_cost_does_not_grow_with_the_coordinators_a_context_has_seen(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
-    fresh = contextvars.copy_context().run(_per_hold_seconds, state_root, tmp_path / "hot")
+    fresh = contextvars.Context().run(_per_hold_seconds, state_root, tmp_path / "hot")
 
     def busy_context() -> float:
         for index in range(COORDINATORS):
@@ -36,5 +36,5 @@ def test_hold_cost_does_not_grow_with_the_coordinators_a_context_has_seen(tmp_pa
                 pass
         return _per_hold_seconds(state_root, tmp_path / "hot")
 
-    seen = contextvars.copy_context().run(busy_context)
+    seen = contextvars.Context().run(busy_context)
     assert seen < fresh * 3 + 0.0005

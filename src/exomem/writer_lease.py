@@ -5276,8 +5276,11 @@ class LeaseManager:
         operation: str | None = None,
         holder_kind: str = "reserved-state",
         deadline: float | None = None,
-    ) -> Iterator[str]:
-        """Coordinate one owner's identities without serializing other owners."""
+    ) -> Iterator[str | None]:
+        """Coordinate one owner's identities without serializing other owners.
+
+        Yields the identity generation token under the gate, or None on the domain-only path.
+        """
 
         ordered_domains = tuple(sorted(set(domains)))
         if not ordered_domains or any(
@@ -5335,7 +5338,9 @@ class LeaseManager:
             with ExitStack() as domains_stack:
                 for domain, mutation in domain_locks:
                     enter(domains_stack, mutation, domain)
-                yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
+                # No token: reading it without the gate would race the bump's replace, which fails on
+                # Windows while a reader holds the file open, and no domain-only caller uses it.
+                yield None
             return
 
         # Admission order matches the exclusive scanner: gate first, then domains. Only a wait for
