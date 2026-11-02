@@ -1024,6 +1024,10 @@ class RepairCause(enum.StrEnum):
     # registry, or a bounded apply met a source that moved before its commit.
     CATALOGUE_LAG = "catalogue_lag"
     SOURCE_MOVED = "source_moved"
+    # A strict recall resolver refused: no admitted checkpoint names its
+    # request, or the catalogue holds no rows for the checkpoint it names.
+    RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
+    RESOLVER_ENTRIES_UNAVAILABLE = "resolver_entries_unavailable"
 
 
 class DeclineCause(enum.StrEnum):

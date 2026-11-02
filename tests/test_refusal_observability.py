@@ -21,6 +21,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -365,3 +366,105 @@ def test_every_declared_site_remains_constructible() -> None:
     for site in find_module.RETRIEVAL_WARMING_SITES:
         error = find_module.RetrievalIndexWarming(site=site)
         assert error.details["site"] == site
+
+
+# --- What a refusal asks of the catalogue -----------------------------------
+
+
+@pytest.fixture
+def current_catalogue(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A seeded live registry and a lexical catalogue published at it."""
+    from exomem import freshness, lexstore, readiness
+    from exomem import vault as vault_module
+
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    freshness.clear()
+    lexstore.clear_stores()
+    freshness.seed(
+        vault,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(vault / "Knowledge Base")
+        ),
+    )
+    freshness.seed(
+        vault,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(vault)
+        ),
+    )
+    lexstore.ensure_fresh(vault)
+    try:
+        yield vault
+    finally:
+        lexstore.await_repairs_idle(vault)
+        readiness.reset()
+        lexstore.clear_stores()
+        freshness.clear()
+
+
+def test_a_build_wait_refusal_asks_for_no_catalogue_repair(
+    current_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another request building the resolver says nothing about the catalogue.
+
+    The refusal used to request a full repair, so a busy resolver build could
+    queue a whole-catalogue rebuild of a catalogue that was current.
+    """
+    from exomem import freshness, lexstore
+
+    root = current_catalogue
+    checkpoint = freshness.live_recall_checkpoint(root, "vault")
+    monkeypatch.setattr(find_module, "_RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS", 0.2)
+    stuck = threading.Event()
+    with find_module._RECALL_REBUILD_LOCK:
+        find_module._RECALL_RESOLVER_BUILDS[root] = stuck
+    try:
+        with pytest.raises(find_module.RetrievalIndexWarming) as caught:
+            find_module.recall_resolver_snapshot(
+                root, allow_fallback=False, expected_checkpoint=checkpoint
+            )
+    finally:
+        with find_module._RECALL_REBUILD_LOCK:
+            find_module._RECALL_RESOLVER_BUILDS.pop(root, None)
+        stuck.set()
+
+    assert caught.value.details["site"] == "resolver_build_wait"
+    assert lexstore.repair_progress(root) is None, "a repair was asked for"
+
+
+def test_a_stale_checkpoint_refusal_catches_the_catalogue_up_without_a_rebuild(
+    current_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save after the request's admission leaves the catalogue one page behind.
+
+    The refusal used to request a full repair, which cancels the lag-only
+    catch-up that one page needs.
+    """
+    from exomem import freshness, lexstore
+
+    root = current_catalogue
+    admitted_at = freshness.live_recall_checkpoint(root, "vault")
+    page = root / "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md"
+    page.write_text(
+        page.read_text(encoding="utf-8") + "\nquokkasavedafteradmission.\n", encoding="utf-8"
+    )
+    freshness.on_files_changed(root, changed=[page])
+    rebuilds: list[str] = []
+    monkeypatch.setattr(
+        lexstore.LexicalStore, "rebuild_atomic", lambda self: rebuilds.append("atomic")
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as caught:
+        find_module.recall_resolver_snapshot(
+            root, allow_fallback=False, expected_checkpoint=admitted_at
+        )
+    assert lexstore.await_repairs_idle(root)
+
+    assert caught.value.details["site"] == "resolver_checkpoint_stale"
+    assert rebuilds == [], rebuilds
+    assert lexstore.search_bm25(root, "quokkasavedafteradmission", k=3, scope="kb")
