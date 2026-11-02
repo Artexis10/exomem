@@ -3379,8 +3379,8 @@ class EpistemicGraphIndex:
         like a page read in this proof, the recheck walks both memberships
         again, and a page that moved or appeared is read, so a proof of a
         snapshot published after the earlier one re-reads only what moved in
-        between. `reads_out` receives the pages a
-        True answer ended on, for the next proof to start from. `deadline`, a
+        between. `reads_out` receives the pages and memberships a True answer
+        ended on, for the next proof to start from. `deadline`, a
         `time.monotonic()` value checked per page and per walked path, declines
         `proof_deadline_passed` once passed.
 
