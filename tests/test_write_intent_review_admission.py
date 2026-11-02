@@ -11,7 +11,7 @@ from test_connector_boundary import configured_boundary as configured_boundary  
 from test_write_intent_accept import _journal, _manager
 
 from exomem import commands, intent_accept, intent_applier, intent_disclosure, writer_lease
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import RequestPrincipal, request_scope
 
 
 @pytest.fixture(autouse=True)
@@ -174,4 +174,22 @@ def test_a_limited_client_cannot_see_a_full_clients_write_that_plans_no_path(
     assert journal.get(intent.intent_id).state == "conflicted"
     with request_scope(full):
         assert commands.op_review_memory(vault, mode="item", ref=ref)["state"] == "conflicted"
+        assert intent_disclosure.status(vault)["refs"] == [ref]
+
+
+def test_an_unbound_restricted_caller_still_polls_its_own_accepted_write(
+    configured_boundary, vault: Path  # noqa: F811
+) -> None:
+    """An API-key caller has no client binding and gets the default denied scopes; its own 202 must stay pollable."""
+    caller = RequestPrincipal("principal:caller", surface="rest", resolved=True)
+    journal = _journal(_manager(), vault)
+    intent, _ = journal.accept(
+        audience=caller.audience_id, command="remember", arguments={"content": "a public note"},
+        surface="rest", principal=intent_accept.principal_snapshot(caller), digest="own", retry_key="own",
+        window_seconds=600.0, validation="complete", planned_paths=[], target_hashes={},
+    )
+    ref = f"exomem://write/{intent.intent_id}"
+    with request_scope(caller):
+        assert commands.op_review_memory(vault, mode="write-intent", ref=ref)["state"] == "accepted"
+        assert [row["ref"] for row in commands.op_review_memory(vault, mode="write-intent")["writes"]] == [ref]
         assert intent_disclosure.status(vault)["refs"] == [ref]

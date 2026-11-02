@@ -88,8 +88,10 @@ def _same_client(intent: write_intents.Intent) -> bool:
 def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
     """Whether this reader may see or decide the intent.
 
-    The audience must match (the owner sees all). A reader with any denied scope sees another client's intent only
-    when the client binding is the same, because an intent with no planned page (a creation) has no path to check.
+    The audience must match (the owner sees all). The owner audience spans every client, so an owner-audience
+    reader with any denied scope sees another client's intent only when the client binding is the same: an intent
+    with no planned page (a creation) has no path to check. A non-owner audience already names the caller, so an
+    unbound restricted caller keeps sight of its own intents.
     For the planned pages it then runs the check a synchronous write runs (`connector_boundary.require_write`),
     for the reader and not the caller who made the intent.
     """
@@ -100,7 +102,7 @@ def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
     if not (owner or intent.audience == audience):
         return False
     current = connector_boundary.snapshot(vault_root)
-    if current is not None and current.denied_scopes(effective_principal()) and not _same_client(intent):
+    if owner and current is not None and current.denied_scopes(effective_principal()) and not _same_client(intent):
         return False
     try:
         for path in intent.planned_paths or ():
