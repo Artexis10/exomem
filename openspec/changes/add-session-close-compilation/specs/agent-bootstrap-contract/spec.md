@@ -65,6 +65,7 @@ The server SHALL NOT claim that a page was written in this session, and SHALL NO
 - **WHEN** link resolution fails, or the writers' resolver snapshot declines because no warm cache exists
 - **THEN** the recap is still recorded and no resolver is built from the vault
 - **AND** the `compile` block says that its links were not checked and omits `unlinked_decided`
+- **AND** a declined snapshot starts one background warm, so that the next record is checked
 
 #### Scenario: The block survives the compact envelope
 

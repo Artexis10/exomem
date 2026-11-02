@@ -65,7 +65,8 @@ snapshot declines and the block reports its links as unchecked, before any
 or a declined snapshot never refuses a recap: the block says that its links were
 not checked and omits `unlinked_decided`. Unknown is never zero. The state
 follows the resolver cache, not the pages, so it leaks nothing about a withheld
-page.
+page. A declined snapshot also starts the existing single-flight background
+warm, so the next record is checked and the request still never walks the vault.
 
 ### The outcome states the result, and one conditional step follows it
 
@@ -107,9 +108,10 @@ Writing it there keeps this change independent of the open tasks of
 - A cold resolver cache makes the block report its links as unchecked, with no
   page counted from the Decided items. The `about` pages still list. The
   `compile` block is advisory, so the cost is a weaker hint, not a slower or
-  refused record.
+  refused record. The decline starts one background warm, which ends the state.
 - A recap is an immutable Source and may now carry `[[...]]` links. A link whose
   target is missing or ambiguous stays in the recap, and no agent can repair it.
+  The contract text therefore says to link each Decided item to its existing page.
   The audit's link check does not exclude `Sources/Episodes/`. It reports such a
   link as `forward_reference` or `broken_wikilink` at `info` severity, marked
   immutable and not repairable in place. This change leaves the audit as it is.

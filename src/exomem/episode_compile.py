@@ -58,7 +58,8 @@ def linked_pages(
     behind its own change until the terminal's fanout catches it up. The resolver
     is the writers' own snapshot, taken without the disk fallback: a cold cache
     would cost a walk of the whole vault on every record, so the snapshot
-    declines and the links are reported unchecked instead.
+    declines and the links are reported unchecked instead. A decline starts the
+    background warm, so the next record is checked and no request walks the vault.
     """
     targets = [
         [
@@ -74,6 +75,8 @@ def linked_pages(
         resolver = find.writer_resolver_snapshot(root, allow_disk=False)
         if resolver is None:
             # `normalize_wikilink` would build its own resolver from disk: never reach it.
+            # The warm is the single-flight build that fills the cache this snapshot forks, so the next record is checked.
+            find._schedule_query_resolver_rebuild(root)  # noqa: SLF001
             return None
         keep = vault.writer_link_visibility(root)
         resolved = [[_resolved(root, page, resolver, keep) for page in pages] for pages in targets]
@@ -163,6 +166,8 @@ def block(
     `decided_links` are `linked_pages` for its Decided items. Never raises: the
     recap is already committed.
     """
+    if not decided and not about_paths:
+        return None
     root = Path(vault_root)
     try:
         keep = vault.writer_link_visibility(root)

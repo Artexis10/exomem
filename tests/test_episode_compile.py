@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,23 @@ def test_a_recap_that_names_no_page_and_decides_nothing_has_no_compile_block(vau
     assert "compile" not in result
 
 
+def test_a_recap_that_names_nothing_has_no_block_even_when_the_visibility_check_fails(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-block rule holds before any check runs: a failure must not turn an empty recap into an "unchecked" block."""
+
+    def failing(*args: object, **kwargs: object) -> None:
+        raise OSError("visibility unavailable")
+
+    monkeypatch.setattr(vault_module, "writer_link_visibility", failing)
+
+    with request_scope(OWNER):
+        result = _record(vault, decided=[])
+
+    assert result["ledger"] == "bound"
+    assert "compile" not in result
+
+
 def test_the_next_step_rides_only_when_live_policy_permits_capture(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -207,6 +225,36 @@ def test_a_cold_resolver_cache_reports_links_unchecked_and_builds_no_resolver(
     assert compiled["diagnostics"]["links"] == "unchecked"
     assert "unlinked_decided" not in compiled
     assert compiled["outcome"] == "This recap's links were not checked."
+
+
+def test_a_declined_link_check_starts_one_background_warm_that_makes_the_next_record_checked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold cache costs this record its check, not every later one, and no request walks the vault."""
+    _write_note(vault, "lamp-choice", FIRST)
+    decided = ["Buy the brass lamp, see [[lamp-choice]]"]
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setattr(find_module, "_RESOLVER_CACHE", {})
+    monkeypatch.setattr(semantic_contract, "current_writer_resolver_entries", lambda *a, **k: None)
+    build, started, release = find_module._get_query_resolver, threading.Event(), threading.Event()
+    builders: list[str] = []
+
+    def paused(root: Path, *args: object, **kwargs: object) -> object:
+        builders.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(20)
+        return build(root, *args, **kwargs)
+
+    monkeypatch.setattr(find_module, "_get_query_resolver", paused)
+
+    assert episode_compile.linked_pages(vault, decided) is None
+    assert started.wait(10), "the decline started no background warm"
+    assert episode_compile.linked_pages(vault, decided) is None  # a second decline, warm pending
+    release.set()
+    assert find_module.await_recall_resolver_warm()
+
+    assert builders == ["exomem-query-resolver-warm"]
+    assert episode_compile.linked_pages(vault, decided) == (("Knowledge Base/Notes/Insights/lamp-choice.md",),)
 
 
 def test_a_failed_link_check_is_reported_as_unchecked_and_does_not_refuse_the_recap(
