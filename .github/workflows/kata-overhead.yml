@@ -32,15 +32,16 @@ env:
   PHASES: "measure"
   # kata-blk: the shipped QEMU configuration (plus the block-device key). kata-blk-tuned: the same arm with the
   # configuration built below from the shipped file of KATA_HYPERVISOR plus KATA_CONFIG_EDITS.
-  ARMS: "runc,kata-blk-tuned"
+  ARMS: "runc,kata-blk,kata-blk-tuned"
   # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line).
   KATA_HYPERVISOR: "qemu"
-  KATA_CONFIG_EDITS: ""
+  KATA_CONFIG_EDITS: |
+    reclaim_guest_freed_memory = true
   # "1" also boots a cell with and without psi=1 on the guest kernel command line and prints the PSI files.
   PSI_PROBE: "0"
   # "1" moves Docker's image store onto containerd's devmapper snapshotter, so a container's root filesystem is a
   # block device that Kata can hot-plug instead of a directory it shares with virtiofsd.
-  ROOTFS_BLOCK: "1"
+  ROOTFS_BLOCK: "0"
 
 jobs:
   measure:

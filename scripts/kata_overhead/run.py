@@ -817,10 +817,12 @@ class Lab:
             "guest_uname": ["docker", "exec", name, "uname", "-a"],
             "guest_cmdline": ["docker", "exec", name, "cat", "/proc/cmdline"],
             "guest_cpus": ["docker", "exec", name, "nproc"],
+            "guest_balloon": ["docker", "exec", name, "sh", "-c", "ls /sys/bus/virtio/drivers 2>&1; "
+                              "grep -H . /sys/module/page_reporting/parameters/* 2>&1"],
             "guest_meminfo": ["docker", "exec", name, "sh", "-c", "head -8 /proc/meminfo"],
             "guest_mounts": ["docker", "exec", name, "sh", "-c", "cat /proc/self/mountinfo | cut -c1-200"],
             "host_vm_processes": ["sh", "-c", "ps -eo pid,rss,args | grep -E 'qemu|cloud-hyper|virtiofsd|kata' | grep -v grep "
-                                  "| cut -c1-2500"],
+                                  "| cut -c1-6000"],
         }.items():
             result = sh(argv, check=False, timeout=60)
             facts[key] = (result.stdout + result.stderr).strip()[:12000]
