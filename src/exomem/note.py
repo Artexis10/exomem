@@ -55,6 +55,7 @@ from . import (
     semantic_contract,
     semantic_units,
     semantic_writes,
+    source_closure,
     source_coverage,
     tag_variants,
     temporal,
@@ -370,10 +371,14 @@ def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _Naviga
     """
     from .relation_census import operation_provenance
 
+    from .governance import connector_boundary
+
     writes: list[PlannedWrite] = []
     warnings: list[str] = []
     top_index = kb_root(root) / "index.md"
-    if top_index.is_file():
+    if not top_index.is_file():
+        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+    elif connector_boundary.effect_admission(root)(top_index):
         top_text, top_guard = read_guarded_text(root, top_index)
         new_top = top_text
         for entry in entries:
@@ -388,8 +393,6 @@ def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _Naviga
         )
         writes.append(PlannedWrite(top_index, counted_top or new_top, guard=top_guard))
         writes.extend(sub_writes)
-    else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     try:
         log_plan = plan_log_entries(
             root,
@@ -1420,6 +1423,12 @@ def _resolve_path(
     from .governance import connector_boundary
 
     try:
+        # A restricted writer's note goes to its inbox in the tree the type folder lies in.
+        inbox = connector_boundary.inbox_destination(
+            vault_root, folder.relative_to(vault_root).as_posix(), f"{stem}.md"
+        )
+        if inbox is not None:
+            folder = vault_root / inbox
         connector_boundary.require_create(vault_root, (folder / f"{stem}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
@@ -2210,6 +2219,8 @@ def note(
         + home_warnings
         + folder_split_warnings(root, note_path.parent)
     )
+    if preflight.source_closure_plan is not None:
+        warnings.extend(source_closure.skipped_warnings(preflight.source_closure_plan))
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
         if provenance_warning is not None:

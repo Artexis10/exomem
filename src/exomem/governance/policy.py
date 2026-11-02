@@ -63,6 +63,18 @@ def is_governance_path(rel_path: str) -> bool:
         return False
     folded = GOVERNANCE_DIRNAME.casefold()
     return any(part.casefold() == folded for part in clean.split("/"))
+
+
+def is_workflow_state_path(rel_path: str) -> bool:
+    """True for a record that a door keeps about its own work: a curation run, an episode journal or a relation review.
+
+    Doors write these records for every caller, and no audience is served them. Nothing compiles
+    them as policy. The match is exact, so a variant spelling stays a policy path.
+    """
+    parts = tuple(str(rel_path or "").split("/"))
+    return len(parts) > 3 and parts[0] == kb_dirname() and parts[1:3] in _WORKFLOW_STATE_FOLDERS
+
+
 GOVERNANCE_VERSION = 1
 DISCLOSURE_MIN = 0
 DISCLOSURE_MAX = 6  # L0 (nothing) .. L6 (full disclosure)
@@ -972,6 +984,10 @@ _OPERATIONAL_DIRECTORIES = frozenset({"events", "deletion-tombstones", "archives
 #: Run and episode records written by `curation` and `episode_store`. Nothing compiles them
 #: as policy; only the runtime load leaves them out (see `_iter_all_files`).
 _CURATION_DIRECTORY = "curation"
+#: Folders, below the knowledge base, of the records a door keeps about its own work. The relation
+#: review folder is the one `relation_review.review_artifact_path` writes.
+# nosemgrep: ep-word-set -- Folder names that the writers fix in the tree layout, not a vocabulary.
+_WORKFLOW_STATE_FOLDERS = frozenset({(GOVERNANCE_DIRNAME, _CURATION_DIRECTORY), ("_Schema", "relation-reviews")})
 
 
 def _iter_all_files(root: Path, *, policy_inputs: bool = False):

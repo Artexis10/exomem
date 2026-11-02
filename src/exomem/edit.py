@@ -903,8 +903,10 @@ def commit_edit(
 
     # Opportunistic sub-index refresh — surfacing any drift on every write
     # keeps the indexes self-healing.
+    from .governance import connector_boundary
+
     top_index = kb / "index.md"
-    if top_index.exists():
+    if top_index.exists() and connector_boundary.effect_admission(vault_root)(top_index):
         current_top, top_guard = read_guarded_text(vault_root, top_index)
         sub_writes, new_top = indexes.compute_subindex_writes(
             vault_root, top_index_text=current_top

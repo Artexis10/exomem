@@ -49,17 +49,33 @@ only read-only.
 - Its writable scopes: `writable_scope_ids` on its client entry in the host
   connector configuration. It may change an existing page it reads in full when
   the page sits inside those scopes before and after the change.
-- Its inbox: a configured capture path. Give each client an inbox by adding a
-  scope that selects the capture path by `paths`, naming the scope in that
-  client's `writable_scope_ids`, and denying it to the default context and to
-  every other fenced client. The inbox is private to its writer and the owner.
+- Its inbox: configured capture paths. Give each client one capture path for
+  each tree it writes to, for example one under the sources tree and one under
+  the notes tree. Add a scope that selects those capture paths by `paths`, name
+  the scope in that client's `writable_scope_ids`, and deny it to the default
+  context and to every other fenced client. The inbox scope selects every one of
+  the client's capture paths. The inbox is private to its writer and the owner.
 
 Vault content never confers write authority: a policy document cannot grant
 `writable_scope_ids`. The host refuses a client whose writable scopes are not
 policy scopes, meet its own denied set, belong to a client with an empty denied
-set, or are readable by the default context or another fenced client. A restricted
-writer's Source captures and recaps land in its inbox, under the kind's folder. The
-owner's recaps stay in the shared episodes folder and take the residual scope.
+set, or are readable by the default context or another fenced client. A
+configuration that breaks these rules makes the connector boundary unavailable,
+and every restricted write is refused until the host repairs it.
+
+A door that generates its own destination, such as a Source capture, an episode
+recap or a note, places a restricted writer's page under the capture path in the
+same tree, keeping the folders below it. An explicit destination is never
+redirected. The owner's recaps stay in the shared episodes folder and take the
+residual scope. A fenced connector uses kinds the owner has registered, and a
+vocabulary change needs the owner's grant through the vocabulary authority.
+
+A door skips its side effects on pages outside the writer's writable scopes and
+inbox, without a refusal. The effects are activity log and index entries, a cited
+Source's `ingested_into` back-reference, and link rewrites in linking pages. A
+fenced episode still prepares, records and resumes: the door keeps its workflow
+state under the governance tree. A skipped back-reference shows as one warning
+without a path.
 
 ## Authorization sessions
 

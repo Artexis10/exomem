@@ -422,14 +422,18 @@ def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(
     withheld_result = create_as_external("Tidal Ledger", NOTE)
     missing_result = create_as_external("Harbour Reconciliation", missing)
 
+    log_text = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
     for result in (withheld_result, missing_result):
         assert result["path"].startswith("Knowledge Base/Entities/Concepts/"), "the entity was created"
         assert "never-written" not in repr(result) and NOTE not in repr(result)
         assert result.keys() == withheld_result.keys()
         assert result["warnings"] == []
-        entry = _log_entry(vault, result["path"])
-        assert "Origin: unknown." in entry
-        assert NOTE not in entry and missing not in entry
+        # The restricted writer may not write the activity log, so its creation leaves no entry that could name an origin.
+        assert result["path"].removeprefix("Knowledge Base/").removesuffix(".md") not in log_text
+    assert NOTE not in log_text and missing not in log_text
+    with request_scope(writer("external")):
+        for ref in (NOTE, missing):
+            assert commands._creation_origin(vault, ref)["path"] is None, "an unreadable origin is unknown"
     with library_scope():
         assert commands._creation_origin(vault, NOTE)["path"] == NOTE, "the owner reads the page"
 

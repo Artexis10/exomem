@@ -33,11 +33,11 @@ def private_instances(configured_boundary, vault):
         "destinations": {},
         "selections": {},
     }
-    # A limited client writes only its inbox, so an entity folder and a meeting folder are inboxes.
-    data["capture_paths"] += ["Knowledge Base/Entities/Venues", "Knowledge Base/Notes/Meetings"]
+    # A limited client writes only its inbox, so an entity folder, a meeting folder and a Sources folder are inboxes.
+    data["capture_paths"] += ["Knowledge Base/Entities/Venues", "Knowledge Base/Notes/Meetings", "Knowledge Base/Sources/Inbox/limited"]
     config.write_text(json.dumps(data))
     (vault / "Knowledge Base/_Governance/scopes/inbox.yaml").write_text(
-        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Entities/Venues/**", "Notes/Meetings/**"]\n',
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Entities/Venues/**", "Notes/Meetings/**", "Sources/Inbox/limited/**"]\n',
         encoding="utf-8",
     )
     authority = state_migration.assert_offline_migration_authority(source="private vocabulary fixture")

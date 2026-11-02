@@ -69,7 +69,7 @@ def _owner_store(vault: Path):
     return EpisodeInputOwner(vault)
 
 
-def _write_source_rule(vault: Path, *, ceiling: int) -> None:
+def _write_source_rule(vault: Path, *, ceiling: int, audience: str = "client-a") -> None:
     root = vault / "Knowledge Base" / "_Governance"
     (root / "scopes").mkdir(parents=True, exist_ok=True)
     (root / "rules").mkdir(parents=True, exist_ok=True)
@@ -84,7 +84,7 @@ def _write_source_rule(vault: Path, *, ceiling: int) -> None:
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FAB\n"
         "scope_ids: [\"01ARZ3NDEKTSV4RRFFQ69G5FAA\"]\n"
-        "audience: client-a\n"
+        f"audience: {audience}\n"
         f"ceiling: {ceiling}\n",
         encoding="utf-8",
     )

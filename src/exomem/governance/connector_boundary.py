@@ -508,20 +508,64 @@ def require_create(root: Path, path: str, *, replace_existing: bool = False, dir
     _require_target(root, path, existing=replace_existing, directory=directory)
 
 
-def capture_folders(root: Path) -> tuple[str, ...]:
-    """The configured capture paths, none when the boundary is absent or unavailable."""
+def effect_admission(root: Path) -> Callable[[str | Path], bool]:
+    """Decide where a door's side effects may land, once for one plan.
+
+    The returned test takes a page, vault-relative or absolute. A restricted writer's effect
+    lands only inside its write ceiling and is skipped, neither written nor refused,
+    anywhere else; an unavailable boundary skips every effect. Every other caller's effects
+    all land. A door that plans an effect on another page (an activity log or index entry, a
+    back-reference, a link rewrite) asks this one test and plans nothing when it says no.
+    """
+    from .principal import effective_principal
+
+    root = Path(root)
+
+    def relative(page: str | Path) -> str | None:
+        try:
+            return Path(page).relative_to(root).as_posix() if Path(page).is_absolute() else str(page)
+        except ValueError:
+            return None
+
+    try:
+        ceiling = write_ceiling(root, effective_principal())
+    except BoundaryUnavailable:
+        return lambda page: False
+    if ceiling is None:
+        return lambda page: True
+    return lambda page: (rel := relative(page)) is not None and _target_admitted(root, rel, ceiling, existing=True)
+
+
+def capture_folders(root: Path, *, tree: str | None = None) -> tuple[str, ...]:
+    """The configured capture paths, none when the boundary is absent or unavailable.
+
+    `tree` keeps the capture paths that lie under `<knowledge base>/<tree>/`.
+    """
     try:
         current = snapshot(root)
     except BoundaryUnavailable:
         return ()
-    return current.capture_paths if current is not None else ()
+    if current is None:
+        return ()
+    if tree is None:
+        return current.capture_paths
+    return tuple(folder for folder in current.capture_paths if _in_tree(folder, tree))
 
 
-def inbox_destination(root: Path, relative: str, leaf: str) -> str | None:
-    """Where a restricted writer's capture of `relative/leaf` goes: its inbox, as a vault path.
+def _in_tree(path: str, tree: str) -> bool:
+    """Whether `path` lies under `<knowledge base>/<tree>/`, under any portable spelling."""
+    return collections._portable_path_key(path).startswith(collections._portable_path_key(f"{kb_dirname()}/{tree}/"))
 
-    `None` when the boundary does not confine the caller. The inbox is the first capture
-    path, in sorted order, where the writer may create; with none, the capture is refused.
+
+def inbox_destination(root: Path, folder: str, leaf: str) -> str | None:
+    """Where a restricted writer's page that a door places in `folder/leaf` goes: its inbox, as a vault folder.
+
+    `folder` is the shared destination `<knowledge base>/<tree>/<rest>`. It redirects to
+    `<capture path>/<rest>`: the first capture path, in sorted order, that lies under
+    `<knowledge base>/<tree>/` and where the writer may create. A destination already
+    inside a capture path stays. `None` when the boundary does not confine the caller;
+    with no capture path to use, the write is refused. Only a door that generates its
+    own destination calls this: an explicit destination is never redirected.
     """
     from .principal import effective_principal
 
@@ -529,9 +573,15 @@ def inbox_destination(root: Path, relative: str, leaf: str) -> str | None:
         ceiling = write_ceiling(root, effective_principal())
         if ceiling is None:
             return None
-        for folder in ceiling.current.capture_paths if ceiling.current is not None else ():
-            if _in_inbox(root, f"{folder}/{relative}/{leaf}", ceiling):
-                return f"{folder}/{relative}"
+        if _in_inbox(root, f"{folder}/{leaf}", ceiling):
+            return folder
+        parts = folder.split("/")
+        if len(parts) > 1:
+            rest = "/".join(parts[2:])
+            for capture in ceiling.current.capture_paths if ceiling.current is not None else ():
+                target = f"{capture}/{rest}" if rest else capture
+                if _in_tree(capture, parts[1]) and _in_inbox(root, f"{target}/{leaf}", ceiling):
+                    return target
     except BoundaryUnavailable:
         pass
     raise ValueError("WRITE_REFUSED: target is unavailable")
@@ -610,15 +660,20 @@ def _proposed_companion(root: Path, artifact: str, proposed: dict) -> companions
                                                artifact_size=size, companion=page)
 
 
-def require_write(root: Path, path: str, *, content: bytes | None, proposed: dict | None = None,
-                  derived: bool = False) -> None:
+def require_write(
+    root: Path, path: str, *, content: bytes | None, proposed: dict | None = None,
+    granted: bool = False,
+) -> None:
     """Preserve both current and proposed membership at the publication owner.
 
     A restricted writer keeps its target inside its writable scopes before and after the
     write. Every writer keeps a capture page's membership equal to its path's. A refused
-    write cannot reveal or remove protective membership. A `derived` page is a system
-    effect of a write whose named target the door has decided; it skips the writable-scope
-    rule only.
+    write cannot reveal or remove protective membership. A restricted writer's record of
+    workflow state is admitted here without a membership check: no audience is served it, a
+    door writes it, and a JSON record has no content or companion for a scope to select.
+    Registry storage that the vocabulary authority granted to this caller for this change
+    (`granted`) skips the writable-scope rule only; the caller passes it for that one path,
+    never for a whole write.
     """
     from .principal import effective_principal
 
@@ -633,10 +688,10 @@ def require_write(root: Path, path: str, *, content: bytes | None, proposed: dic
     # the configured folder spelling; choosing that spelling costs no content.
     if folder is not None and not path.startswith(f"{folder}/"):
         raise refused
-    if ceiling is not None and derived and (Path(root) / path == activation_manifest.manifest_path(root)
-                                            or policy.is_governance_path(path)):
-        raise refused
-    if ceiling is not None and not derived and not _target_admitted(root, path, ceiling, existing=True):
+    if ceiling is not None and policy.is_workflow_state_path(path):
+        return
+    scope_exempt = ceiling is not None and granted
+    if ceiling is not None and not scope_exempt and not _target_admitted(root, path, ceiling, existing=True):
         raise refused
     compiled = ceiling.compiled if ceiling is not None else policy.load(root)
 
@@ -648,7 +703,7 @@ def require_write(root: Path, path: str, *, content: bytes | None, proposed: dic
         if folder is not None and not all(
                 scopes == membership.evaluate_path_selectors(Path(root), target, compiled) for scopes in sets):
             return False
-        return bool(sets) and (ceiling is None or derived or all(_writable(ceiling, scopes) for scopes in sets))
+        return bool(sets) and (ceiling is None or scope_exempt or all(_writable(ceiling, scopes) for scopes in sets))
 
     proposed = proposed or {}
     companion = None

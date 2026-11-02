@@ -1,7 +1,7 @@
 """Where conversation recaps live: the shared episodes folder, or a restricted writer's inbox.
 
 One place names the folder, so recording, listing, superseding and recent context agree.
-A restricted writer's recaps stay in its private inbox, like its Source captures.
+A restricted writer's recaps stay in its private inbox in the Sources tree, like its Source captures.
 """
 
 from __future__ import annotations
@@ -29,21 +29,19 @@ def recap_folder(vault_root: Path) -> str:
     """
     from .governance import connector_boundary
 
-    inbox = connector_boundary.inbox_destination(
-        Path(vault_root), source_taxonomy.EPISODE_PATH_LABEL, _PROBE_LEAF,
-    )
+    inbox = connector_boundary.inbox_destination(Path(vault_root), shared_folder(), _PROBE_LEAF)
     return shared_folder() if inbox is None else inbox
 
 
 def inbox_folders(vault_root: Path | None) -> tuple[str, ...]:
-    """The recap folder of each configured capture path, as vault-relative folders."""
+    """The recap folder of each capture path in the Sources tree, as vault-relative folders."""
     if vault_root is None:
         return ()
     from .governance import connector_boundary
 
     return tuple(
         f"{folder}/{source_taxonomy.EPISODE_PATH_LABEL}"
-        for folder in connector_boundary.capture_folders(Path(vault_root))
+        for folder in connector_boundary.capture_folders(Path(vault_root), tree=source_taxonomy.SOURCES_ROOT)
     )
 
 

@@ -424,6 +424,20 @@ def test_a_curation_with_no_store_records_step_stays_on_its_file_path(env, capsy
         service.stop()
 
 
+def record_episode_for_external(root):
+    """EXTERNAL's episode, recorded through an unconfined ingress in EXTERNAL's audience.
+
+    A restricted caller writes a recap only into an inbox, and the cases below prepare a leaf and
+    nothing else. The prepare that each case drives runs as the restricted caller.
+    """
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "episode_memory")
+    setup = RequestPrincipal(audience_id=EXTERNAL, surface="library", resolved=True, administrative_ingress=True)
+    with request_scope(setup):
+        writer_lease.invoke_command(command, root, schema_module.load_source_schema(root), episode=EPISODE,
+                                    action="record", subject="Work log", summary="Logged one work item.",
+                                    worked_on=["Logged a work item"])
+
+
 def test_a_withheld_caller_hears_a_store_records_leaf_collection_is_absent(env, capsys, monkeypatch):
     """Defect: preparing a Records leaf into a store collection withheld from the caller answers
     differently from a collection that does not exist, so it confirms the withheld one is there."""
@@ -435,10 +449,9 @@ def test_a_withheld_caller_hears_a_store_records_leaf_collection_is_absent(env, 
     try:
         command = next(command for command in commands.product_commands_for("mcp") if command.name == "episode_memory")
         answers = {}
+        record_episode_for_external(root)
         with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
             schema = schema_module.load_source_schema(root)
-            writer_lease.invoke_command(command, root, schema, episode=EPISODE, action="record", subject="Work log",
-                                        summary="Logged one work item.", worked_on=["Logged a work item"])
             for name, target in {"withheld": WORK, "missing": "Knowledge Base/Records/Nowhere/_collection.md"}.items():
                 proposal = leaf_into_work("0" * 64)
                 proposal["leaves"][0]["args"]["collection"] = target
@@ -515,8 +528,7 @@ def test_a_curation_leaf_into_a_store_collection_with_no_service_refuses_by_who_
     finally:
         service.stop()
     record_an_episode(root)
-    episode_as(EXTERNAL_CALLER, root, action="record", subject="Work log", summary="Logged one work item.",
-               worked_on=["Logged a work item"])
+    record_episode_for_external(root)
     missing = leaf_into_work(container)
     missing["leaves"][0]["args"]["collection"] = "Knowledge Base/Records/Nowhere/_collection.md"
     prepare = {"action": "prepare", "candidate": "work"}

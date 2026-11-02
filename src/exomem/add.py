@@ -307,8 +307,8 @@ def admit_source_destination(vault_root: Path, prepared: PreparedSourceMetadata,
     folder = kb_root(vault_root).joinpath(*prepared.segments)
     leaf = f"{date_iso}-{prepared.filename_slug}.md"
     try:
-        # A restricted writer's capture keeps its kind folder under its inbox; the owner's stays in Sources.
-        inbox = connector_boundary.inbox_destination(vault_root, "/".join(prepared.segments[1:]), leaf)
+        # A restricted writer's capture goes to its inbox in the Sources tree; the owner's stays in Sources.
+        inbox = connector_boundary.inbox_destination(vault_root, folder.relative_to(vault_root).as_posix(), leaf)
         if inbox is not None:
             folder = vault_root / inbox
         connector_boundary.require_create(vault_root, (folder / leaf).relative_to(vault_root).as_posix())
@@ -725,11 +725,19 @@ def add(
             top_with_counts if top_with_counts is not None
             else update.top_index_content
         )
+    from .governance import connector_boundary
+
+    effect_admitted = connector_boundary.effect_admission(vault_root)
     writes = [
         PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
-        PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
-        PlannedWrite(path=kb / "index.md", content=top_index_final),
-        PlannedWrite(path=kb / "log.md", content=update.log_content),
+        *(
+            write for write in (
+                PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
+                PlannedWrite(path=kb / "index.md", content=top_index_final),
+                PlannedWrite(path=kb / "log.md", content=update.log_content),
+            )
+            if effect_admitted(write.path)
+        ),
     ]
     writes.extend(sub_writes)
     writes.extend(taxonomy_plan.writes)

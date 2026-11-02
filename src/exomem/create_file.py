@@ -363,7 +363,11 @@ def create_file(
         auxiliary: list[PlannedWrite] = []
         derived_auxiliaries: list[tuple[str, PlannedWrite]] = []
         top_index = kb_root(vault_root) / "index.md"
-        if top_index.is_file() and preflight.applicability in {"full", "structural"}:
+        if (
+            top_index.is_file()
+            and preflight.applicability in {"full", "structural"}
+            and connector_boundary.effect_admission(vault_root)(top_index)
+        ):
             top_text, top_guard = read_guarded_text(vault_root, top_index)
             new_top, _ = indexes._prepend_recent_activity(
                 top_text,

@@ -826,11 +826,19 @@ def _move_file_local(
     writes: list[PlannedWrite] = []
     batch_index_reports: list[object] = []
     batch_fanout_paths: list[Path] = []
+    left_unchanged: list[str] = []
+    writable_page = connector_boundary.effect_admission(vault_root)
     if update_wikilinks and inbound:
         for item in plan_inbound_rewrites(vault_root, old_rel, new_rel, inbound):
             if not item.changes:
                 continue
             rel = item.path
+            if not writable_page(rel):
+                # A page the mover may not write keeps its link and the move commits. Only a page
+                # the mover may see is counted, so a withheld page leaves the answer as it is without it.
+                if visible is None or visible(rel):
+                    left_unchanged.append(rel)
+                continue
             if visible is not None and not visible(rel):
                 if item.append_only:
                     continue
@@ -853,6 +861,10 @@ def _move_file_local(
             if visible is None or visible(rel):
                 reported_touched.append(rel)
                 reported_updated += item.changes
+
+    if left_unchanged:
+        # No path in the sentence: a restricted caller's response drops a warning that embeds one.
+        warnings.append(f"{len(left_unchanged)} visible linking page(s) outside your write scope keep their link to the old path")
 
     def validation_result(
         *, source_hash: str, destination_hash: str

@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 import yaml
 from test_connector_boundary import configured_boundary as configured_boundary
+from test_connector_boundary import sources_inbox_writer as sources_inbox_writer
 
 from exomem import adopt as adopt_module
 from exomem import commands, mutation_terminal, product_invoke
@@ -120,13 +121,13 @@ def test_a_restricted_caller_counts_only_the_sources_it_may_see(
 
 
 def test_owner_connector_source_counts_and_capture_debt_ignore_hidden_sources(
-    configured_boundary, vault: Path, tmp_path: Path,
+    sources_inbox_writer, vault: Path, tmp_path: Path,
 ) -> None:
     """A limited owner can capture publicly without learning another connector's source debt."""
     from exomem import state_migration
     from exomem.governance import principal, raw_protection
 
-    _, authenticate = configured_boundary
+    _, authenticate = sources_inbox_writer
     clients = {name: authenticate(name) for name in ("limited", "full")}
     assert all(raw_protection.is_owner(who) for who in clients.values())
     assert clients["limited"].audience_id == clients["full"].audience_id
@@ -164,7 +165,7 @@ def test_owner_connector_source_counts_and_capture_debt_ignore_hidden_sources(
                 terminal = _committed_envelope(leaf)
             path = leaf["source"]["path"]
             # The limited connector's capture lands in its inbox; the unrestricted owner's in Sources.
-            assert path.startswith(f"{KB}/{'Capture' if name == 'limited' else 'Sources'}/Sessions/")
+            assert path.startswith(f"{KB}/Sources/{'Inbox/limited/' if name == 'limited' else ''}Sessions/")
             assert _frontmatter(root, path)["source_type"] == "session"
             assert content in (root / path).read_text()
             advisories[name].append(terminal.get("structure_suggestion"))
@@ -393,13 +394,13 @@ def test_a_legacy_other_page_counts_as_debt(
 
 
 def test_a_restricted_caller_gets_no_debt_count(
-    configured_boundary, vault: Path, source_schema: schema_module.SourceSchema
+    sources_inbox_writer, vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     """The debt count covers pages a restricted caller may not see, so it gets none."""
     from exomem import state_migration
     from exomem.governance.principal import request_scope
 
-    _, authenticate = configured_boundary
+    _, authenticate = sources_inbox_writer
     _legacy_other_page(vault)
     authority = state_migration.assert_offline_migration_authority(source="isolated debt-count stop window")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
@@ -412,7 +413,7 @@ def test_a_restricted_caller_gets_no_debt_count(
             source_kind="session",
         )
 
-    assert leaf["source"]["path"].startswith(f"{KB}/Capture/Sessions/")
+    assert leaf["source"]["path"].startswith(f"{KB}/Sources/Inbox/limited/Sessions/")
     assert "structure_suggestion" not in leaf["source"]
 
 

@@ -75,6 +75,23 @@ def configured_boundary(vault, tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def sources_inbox_writer(configured_boundary, vault):
+    """`configured_boundary`, with `limited` also given an inbox under the Sources tree.
+
+    A restricted client's Source capture keeps its tree, so it lands only under a capture path
+    inside `Sources/`. Call it before arming, because arming pins the inbox scope.
+    """
+    config, authenticate = configured_boundary
+    (vault / "Knowledge Base/_Governance/scopes/inbox.yaml").write_text(
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Sources/Inbox/limited/**"]\n', encoding="utf-8",
+    )
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["capture_paths"].append("Knowledge Base/Sources/Inbox/limited")
+    config.write_text(json.dumps(data), encoding="utf-8")
+    return config, authenticate
+
+
+@pytest.fixture
 def public_matter_writer(configured_boundary, vault):
     """`configured_boundary`, with `limited` also granted the public matter it already reads.
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,9 @@ from test_connector_boundary import (
     configured_boundary as configured_boundary,
 )
 
-from exomem import commands, state_migration, writer_lease
+from granted_writer import grant_writer
+
+from exomem import commands, find, lexstore, state_migration, writer_lease
 from exomem import schema as schema_module
 from exomem.governance import connector_boundary, egress, membership, policy, principal
 
@@ -34,6 +37,12 @@ SHARED = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
 OWN_PAGE = "Knowledge Base/Notes/own.md"
 SHARED_PAGE = "Knowledge Base/Notes/shared.md"
 NEW_INBOX_PAGE = "Knowledge Base/Capture/new.md"
+SHARED_SOURCES = "01ARZ3NDEKTSV4RRFFQ69G5FB5"
+PRIVATE_SOURCES = "01ARZ3NDEKTSV4RRFFQ69G5FB6"
+SOURCES_INBOX = "Knowledge Base/Sources/Inbox/writer"
+NOTES_INBOX = "Knowledge Base/Notes/Inbox/writer"
+INBOX_FOLDERS = (NOTES_INBOX, SOURCES_INBOX)
+INBOX_GLOBS = ("Notes/Inbox/writer/**", "Sources/Inbox/writer/**")
 NEW_OUTSIDE_PAGE = "Knowledge Base/Notes/created.md"
 REFUSED = "WRITE_REFUSED: target is unavailable"
 NON_OWNER = "principal:" + "ab" * 32
@@ -59,7 +68,12 @@ def unarmed(configured_boundary, vault):
                                 (PUBLIC, "public-project", "public information text"),
                                 (PRIVATE, "private-project", "protected canary text")):
         (vault / path).write_text(f"---\nproject: {project}\n---\n{text}\n", encoding="utf-8")
+    # One inbox per tree: a generated destination keeps its tree, so the recap and the note land
+    # under Sources and Notes. The sorted-first capture path of a tree is the one the door picks.
+    (scopes / "inbox.yaml").write_text(
+        f"governance_version: 1\nid: {INBOX}\npaths: {json.dumps(['Capture/**', *INBOX_GLOBS])}\n", encoding="utf-8")
     data = json.loads(config.read_text())
+    data["capture_paths"] = ["Knowledge Base/Capture", *INBOX_FOLDERS]
     fenced = [SCOPE, RESIDUAL]
     data["default_denied_scope_ids"] = [SCOPE, RESIDUAL, INBOX, OWN]
     data["clients"] = [
@@ -371,7 +385,7 @@ def test_a_fenced_connectors_recap_lands_in_its_inbox_and_only_it_and_the_owner_
     owner_path, writer_path = owner_recap["source"]["path"], writer_recap["source"]["path"]
 
     assert owner_path.startswith("Knowledge Base/Sources/Episodes/")
-    assert writer_path.startswith("Knowledge Base/Capture/Episodes/")
+    assert writer_path.startswith(f"{SOURCES_INBOX}/Episodes/")
 
     def sees(client: str, path: str) -> bool:
         with principal.request_scope(authenticate(client)):
@@ -411,7 +425,7 @@ def test_a_recap_by_a_non_owner_with_no_client_entry_is_refused(confined, vault)
     with pytest.raises(ValueError, match="WRITE_REFUSED"):
         _record_recap(vault, stranger, _WRITER_KEY, "Garden path layout")
 
-    assert not (vault / "Knowledge Base/Capture/Episodes").exists()
+    assert not (vault / SOURCES_INBOX).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -540,3 +554,196 @@ def test_an_unclassifiable_visible_label_refuses_only_the_writes_that_depend_on_
                  old_string="bounded.", new_string="tightly bounded.")
     assert "corrected own text" in (vault / OWN_PAGE).read_text()
     assert "tightly" not in (notes / "linked.md").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Side effects, workflow state and generated destinations
+# ---------------------------------------------------------------------------
+
+LOG = "Knowledge Base/log.md"
+TOP_INDEX = "Knowledge Base/index.md"
+READABLE_SOURCE = "Knowledge Base/Sources/Shared/shared-original.md"
+WITHHELD_SOURCE = "Knowledge Base/Sources/Private/private-original.md"
+ABSENT_SOURCE = "Knowledge Base/Sources/Private/absent-original.md"
+
+
+def _original(vault: Path, path: str) -> bytes:
+    page = vault / path
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        f"---\ntype: source\nexomem_id: {uuid.uuid4()}\ningested_into: []\n---\n"
+        "# Original\n\nCaptured original text.\n", encoding="utf-8")
+    find.clear_cache()
+    lexstore.ensure_fresh(vault)
+    return page.read_bytes()
+
+
+ANCHOR = "Knowledge Base/Notes/Insights/anchor.md"
+
+
+def _remember(vault: Path, who, title: str, **kwargs: Any) -> Any:
+    """Remember an insight that relates to a shared active insight, which a note needs to be written."""
+    anchor = vault / ANCHOR
+    if not anchor.exists():
+        anchor.parent.mkdir(parents=True, exist_ok=True)
+        anchor.write_text("---\ntype: insight\nstatus: active\n---\n# Anchor\n\nShared anchor text.\n", encoding="utf-8")
+    content = ("## Finding\n\nA durable conclusion.\n\n## Observations\n\n- [finding] One bath runs every stage. ^bath\n\n"
+               f"## Relations\n\n- relates_to [[{ANCHOR.removesuffix('.md')}]]\n")
+    return _call(vault, who, "remember", content=content, title=title, note_type="insight", **kwargs)
+
+
+@pytest.fixture
+def citing(vault, tmp_path, monkeypatch):
+    """A path-only world, because a Source is cited through a path-only release that a semantic selector leaves undecided.
+
+    The writer reads `Sources/Shared/` without writing it, is fenced from `Sources/Private/`, and
+    writes one inbox per tree. Returns the principal of that writer.
+    """
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    for scope, folder in ((SHARED_SOURCES, "Shared"), (PRIVATE_SOURCES, "Private")):
+        (governance / "scopes" / f"sources-{folder.lower()}.yaml").write_text(
+            f'governance_version: 1\nid: {scope}\npaths: ["Sources/{folder}/**"]\n', encoding="utf-8")
+    (governance / "rules" / "sources-shared.yaml").write_text(
+        f"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB4\nscope_ids: [\"{SHARED_SOURCES}\"]\n"
+        f"audience: external\nceiling: {egress.LEVEL_FULL}\n", encoding="utf-8")
+    return grant_writer(vault, tmp_path, monkeypatch, writable_paths=list(INBOX_GLOBS), capture_paths=list(INBOX_FOLDERS),
+                        protected=[PRIVATE_SOURCES])("external")
+
+
+def _capture_source(vault: Path, who, title: str) -> dict:
+    with principal.request_scope(who):
+        return writer_lease.invoke_command(
+            _COMMANDS["capture_source"], vault, schema_module.load_source_schema(vault),
+            title=title, content="Captured original text.", source_kind="session")
+
+
+def test_a_fenced_client_cites_a_readable_source_it_may_not_write(citing, vault):
+    """The note is written, the Source keeps its bytes, and the answer names the skipped back-reference."""
+    source_before = _original(vault, READABLE_SOURCE)
+
+    answer = _remember(vault, citing, "Cites a shared original", sources=[READABLE_SOURCE.removesuffix(".md")])
+
+    assert "__error__" not in answer, answer
+    assert any("ingested_into back-ref skipped for 1 cited source" in warning for warning in answer["warnings"]), answer["warnings"]
+    assert (vault / READABLE_SOURCE).read_bytes() == source_before
+
+
+def test_a_withheld_source_cited_by_a_fenced_client_answers_as_a_missing_one(citing, vault):
+    """The writer learns nothing about a Source it cannot read: the refusal matches a citation of a missing one."""
+    source_before = _original(vault, WITHHELD_SOURCE)
+
+    withheld = _remember(vault, citing, "Cites one original", sources=[WITHHELD_SOURCE.removesuffix(".md")])
+    missing = _remember(vault, citing, "Cites another original", sources=[ABSENT_SOURCE.removesuffix(".md")])
+
+    assert withheld == missing
+    assert "UNRESOLVED_SOURCE_CITATION" in withheld["message"], withheld
+    assert (vault / WITHHELD_SOURCE).read_bytes() == source_before
+
+
+def test_inbox_creation_leaves_the_activity_log_and_the_top_index_unchanged(confined, vault):
+    """Each generated destination skips the shared log and index; the owner's create still writes them."""
+    _, authenticate = confined
+    writer = authenticate("writer")
+    watched = {path: (vault / path).read_bytes() for path in (LOG, TOP_INDEX)}
+
+    created = _call(vault, writer, *_create(NEW_INBOX_PAGE)[:1], **_create(NEW_INBOX_PAGE)[1])
+    remembered = _remember(vault, writer, "A note from the inbox")
+    captured = _capture_source(vault, writer, "A capture from the inbox")
+
+    assert not _refused(created) and not _refused(remembered), (created, remembered)
+    assert captured["path"].startswith(SOURCES_INBOX)
+    assert {path: (vault / path).read_bytes() for path in watched} == watched
+    owner_created = _call(vault, principal.owner_principal(surface="cli"), "manage_memory_file", operation="create",
+                          path="Knowledge Base/Notes/owner-page.md", content="# Owner page\n\nOwner text.\n")
+    assert not _refused(owner_created), owner_created
+    assert (vault / LOG).read_bytes() != watched[LOG]
+
+
+def test_a_fenced_remember_lands_in_the_notes_inbox_and_an_owners_stays_in_its_folder(confined, vault):
+    _, authenticate = confined
+
+    fenced = _remember(vault, authenticate("writer"), "A fenced insight")
+    unfenced = _remember(vault, authenticate("full"), "An unfenced insight")
+
+    assert fenced["path"].startswith(f"{NOTES_INBOX}/Insights/"), fenced
+    assert unfenced["path"].startswith("Knowledge Base/Notes/Insights/"), unfenced
+
+
+def test_a_fenced_source_capture_under_the_sources_inbox_can_be_cited(citing, vault):
+    """The captured Source is in the writer's own inbox, so its back-reference is written, not skipped."""
+    writer = citing
+    captured = _capture_source(vault, writer, "A fenced capture")
+    path = captured["path"]
+    assert path.startswith(f"{SOURCES_INBOX}/")
+
+    answer = _remember(vault, writer, "Cites its own capture", sources=[path.removesuffix(".md")])
+
+    assert "__error__" not in answer, answer
+    assert not any("back-ref skipped" in warning for warning in answer.get("warnings", [])), answer
+    assert answer["path"].removesuffix(".md").rsplit("/", 1)[1] in (vault / path).read_text(encoding="utf-8")
+
+
+def test_a_fenced_episode_records_prepares_and_resumes_without_touching_policy(confined, vault, monkeypatch):
+    """The journal under the governance tree is workflow state; no policy document or manifest changes."""
+    from exomem import episode_workflow
+
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    _, authenticate = confined
+    governance = vault / "Knowledge Base/_Governance"
+    curation = governance / "curation"
+    policy_before = {path: path.read_bytes() for path in governance.rglob("*")
+                     if path.is_file() and curation not in path.parents}
+    leaf = {"leaf_key": "write", "effect_revision": 1, "kind": "create-note", "args": {
+        "title": "Steady bath model", "slug": "steady-bath-model", "content": "## Observations\n\n- [finding] One bath. ^bath\n"}}
+    proposal = {"route": "focused_note", "alternatives": [], "evidence": "complete", "title": "Steady bath model",
+                "reason": "A named model none of the existing pages own.", "leaves": [leaf]}
+
+    def episode(**kwargs: Any) -> dict:
+        with principal.request_scope(authenticate("writer")):
+            return commands.op_episode_memory(vault, schema_module.load_source_schema(vault), episode=_WRITER_KEY, **kwargs)
+
+    recorded = episode(action="record", subject="Dye bath", summary="What was settled.", worked_on=["Worked on the bath"])
+    episode(action="prepare", candidate="model", proposal=proposal)
+    reviewed = episode(action="disposition", candidate="model", disposition="routed", reason="Reviewed.")
+    resumed = episode(action="resume", input_revision=1, journal_digest=reviewed["journal_digest"])
+
+    assert recorded["source"]["path"].startswith(f"{SOURCES_INBOX}/Episodes/")
+    assert resumed["status"] == "ok", (resumed["blocked"], resumed["stale"])
+    assert all(item["path"].startswith(f"{NOTES_INBOX}/") for item in resumed["executed"]), resumed["executed"]
+    assert any(path.is_file() for path in curation.rglob("*"))
+    assert {path: path.read_bytes() for path in policy_before} == policy_before
+
+
+def test_a_move_skips_the_linkers_the_writer_may_not_write_and_names_only_the_readable_ones(confined, vault):
+    """A readable linker it cannot write is skipped with a warning; a withheld linker leaves the answer as if absent."""
+    _, authenticate = confined
+    writer = authenticate("writer")
+    inbox = vault / NOTES_INBOX
+    inbox.mkdir(parents=True, exist_ok=True)
+    for name in ("moved-a", "moved-b", "moved-c"):
+        (inbox / f"{name}.md").write_text(f"Inbox text of {name}.\n", encoding="utf-8")
+    visible = vault / "Knowledge Base/Notes/visible-linker.md"
+    visible.write_text(f"---\nproject: shared-project\n---\nSee [[{NOTES_INBOX}/moved-a]].\n", encoding="utf-8")
+    hidden = vault / "Knowledge Base/Notes/hidden-linker.md"
+    hidden.write_text(f"---\nproject: private-project\n---\nSee [[{NOTES_INBOX}/moved-b]].\n", encoding="utf-8")
+    visible_before, hidden_before = visible.read_bytes(), hidden.read_bytes()
+    find.clear_cache()
+    lexstore.ensure_fresh(vault)
+
+    def move(name: str) -> Any:
+        return _call(vault, writer, "manage_memory_file", operation="move",
+                     old_path=f"{NOTES_INBOX}/{name}.md", new_path=f"{NOTES_INBOX}/Archive/{name}.md")
+
+    with_visible, with_hidden, with_none = move("moved-a"), move("moved-b"), move("moved-c")
+
+    assert all("__error__" not in answer for answer in (with_visible, with_hidden, with_none)), (
+        with_visible, with_hidden, with_none)
+    assert any("1 visible linking page(s) outside your write scope" in warning for warning in with_visible.get("warnings", [])), json.dumps(with_visible)
+    def shape(answer: dict, name: str) -> str:
+        return json.dumps({key: value for key, value in answer.items() if key != "request_id"},
+                          sort_keys=True).replace(name, "<name>")
+
+    assert shape(with_hidden, "moved-b") == shape(with_none, "moved-c")
+    assert (visible.read_bytes(), hidden.read_bytes()) == (visible_before, hidden_before)
