@@ -154,6 +154,14 @@ class CellRow:
 
         return max(self.storage_gib, self.grown_storage_gib or 0)
 
+    @property
+    def has_stored_object_store_key(self) -> bool:
+        """An old cell: cellctl holds the per-cell key it stored, and the cell backs up to the
+        founder-account bucket. Rendering, the backup store and the deletion log all route on this one
+        test, so a row with half a key is a new cell for each of them alike."""
+
+        return self.b2_key_id is not None and self.b2_key_wrapped is not None
+
     def is_dirty(self, *, refusal_parked: bool = False) -> bool:
         # D4: a refused row (MANIFEST_IMMUTABLE) is dirty unless cellctl holds
         # it parked in memory, so a restarted cellctl retries it once.
@@ -299,8 +307,9 @@ class ClusterObservation:
     namespace_absent_confirmed: bool = False
     pv_absent_confirmed: bool = False
     provider_volume_absent_confirmed: bool = False
-    backup_objects_absent_confirmed: bool = False
-    b2_key_absent_confirmed: bool = False
+    # Every export and import object of the cell in the staging bucket: all versions, hidden ones
+    # and unfinished uploads included. It holds for every cell, old or new.
+    staging_objects_absent_confirmed: bool = False
 
 
 @dataclass
@@ -327,11 +336,14 @@ class Decision:
     clear_backup_retry_after: bool = False
 
     delete_namespace: bool = False
-    delete_backup_objects: bool = False
+    delete_staging_objects: bool = False
     # D4/D8: a BACKUP_FAILED hold exit deletes this hold's backup Job before
     # the cell restarts, so the ResourceQuota does not hold the restart back.
     delete_backup_job: bool = False
-    delete_b2_key: bool = False
+    # D9: the cell's deletion is complete here, but its object-store key and its backup files
+    # (locked for a new cell, in the old bucket for an old one) are the operator's to remove;
+    # the pass raises the pending alert.
+    storage_cleanup_pending: bool = False
     run_backup_job: bool = False
     run_restore_job_snapshot: str | None = None
 

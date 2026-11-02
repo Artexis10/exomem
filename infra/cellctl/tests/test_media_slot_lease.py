@@ -11,7 +11,6 @@ import pytest
 from cellctl import main, reconcile
 from cellctl.manifests import ResourceSettings, render_network_policies, render_statefulset
 from cellctl.state import CellRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_manifests import _spec
@@ -91,6 +90,9 @@ def test_only_a_selected_cell_sees_its_digest_move() -> None:
 def _slot_environment(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_MEDIA_SLOT_URL", SLOT_URL)
 
 
@@ -107,6 +109,9 @@ def test_the_selection_loads_from_the_environment(monkeypatch) -> None:
 def test_nothing_is_selected_when_the_environment_omits_the_lease(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     assert main.build_cluster_config().media_slot_for_cell(CELL_ID) == ""
 
 
@@ -135,7 +140,7 @@ async def test_reconcile_adds_the_lease_only_to_the_selected_cell(cell_db) -> No
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         for cell_id in (CELL_ID, OTHER_CELL_ID):
             namespace = "exo-cell-" + cell_id

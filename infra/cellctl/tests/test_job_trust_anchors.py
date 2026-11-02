@@ -106,6 +106,9 @@ def test_a_grant_key_moves_no_cells_digest_so_no_cell_restarts() -> None:
 def test_the_grant_key_loads_from_the_environment_and_is_empty_by_default(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     assert main.build_cluster_config().grant_public_key == ""
     grant_key = _public_pem()
     monkeypatch.setenv("CELLCTL_GRANT_PUBLIC_KEY", grant_key)
@@ -149,21 +152,21 @@ class _OfflineS3:
 
 def _presigned_cell_urls(endpoint: str) -> list[str]:
     """Every kind of URL a Job receives, made by cellctl's own storage classes and S3 client."""
-    config = dataclasses.replace(_cluster_config(), object_storage_endpoint=endpoint)
-    client = _OfflineS3(reconcile._cell_s3_client(config, "key-id", "key-secret"))
+    config = dataclasses.replace(_cluster_config(), cell_data_endpoint=endpoint)
+    client = _OfflineS3(reconcile._staging_s3_client(config, "key-id", "key-secret"))
     export = ExportRow(str(uuid.uuid4()), CELL_ID, "requested", NOW, upload_id="upload-1",
                        archive_version_id="version-1", ready_at=NOW)
     upload = ImportRow(str(uuid.uuid4()), CELL_ID, "adopt", 1, 1, "uploaded", NOW, ciphertext_bytes=256,
                        ciphertext_sha256="a" * 64, upload_id="upload-1", part_urls=[{"part_number": 1}],
                        part_etags=[{"part_number": 1, "etag": "etag-1"}])
-    exports, imports = ExportStorage(client, config.object_storage_bucket), ImportStorage(client, config.object_storage_bucket)
+    exports, imports = ExportStorage(client, config.cell_data_staging_bucket), ImportStorage(client, config.cell_data_staging_bucket)
     return [*exports.part_urls(export, 1, expires_in=3600), exports.link(export, expires_in=3600),
             imports.prepare(upload)[1][0]["url"], imports.complete(upload)]
 
 
 def test_the_urls_for_a_job_are_path_style() -> None:
     """Defect: a virtual-host URL names another host, and the cell refuses it as one."""
-    bucket = _cluster_config().object_storage_bucket
+    bucket = _cluster_config().cell_data_staging_bucket
     for url in _presigned_cell_urls("https://s3.example"):
         assert urlsplit(url).netloc == "s3.example"
         assert urlsplit(url).path.startswith(f"/{bucket}/cells/{CELL_ID}/")

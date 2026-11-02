@@ -19,7 +19,6 @@ import pytest
 
 from cellctl import alerts, db, k8s_client, reconcile
 from cellctl.reconcile import ClusterConfig, LoopMemory
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .conftest import CellDatabase
@@ -83,7 +82,7 @@ async def _connect(cell_db: CellDatabase) -> asyncpg.Connection:
 
 
 async def _pass(connection: asyncpg.Connection, cluster: Cluster, memory: LoopMemory, at: datetime) -> None:
-    await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+    await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                    CONFIG, now=at, memory=memory)
 
 

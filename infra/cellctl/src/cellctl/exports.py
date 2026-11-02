@@ -283,7 +283,7 @@ def settle_step(row: CellRow, item: ExportRow, *, now: datetime,
 
 
 class ExportStorage:
-    """The maintained S3 SDK with the cell's prefix-restricted credential.
+    """The maintained S3 SDK with cellctl's staging-bucket credential.
     Every call names the row's own key and nothing else."""
 
     def __init__(self, client, bucket: str):
