@@ -908,7 +908,9 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
         if (
             component.component == "embeddings"
             and component.outcome == "accepted"
-            and component.code in {"embeddings_disabled", "no_eligible_paths"}
+            # A backend switched off or never installed leaves keyword search whole: no full replay is
+            # owed, and the per-path semantic receipt still carries the vector backfill.
+            and component.code in {"embeddings_disabled", "embeddings_import_unavailable", "no_eligible_paths"}
         ):
             continue
         if component.component == "epistemic_graph" and component.outcome in {

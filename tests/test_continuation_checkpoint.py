@@ -3523,10 +3523,117 @@ def test_true_kill_before_catalog_publish_resumes_one_bounded_catalog(
     assert not list(root.glob(f"{checkpoint._PRUNE_CATALOG_NAME}.tmp-*"))
 
 
+def test_a_full_catalog_evicts_the_oldest_session_for_a_new_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A busy home fills the catalog well inside the retention window.
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_CATALOG_ENTRIES", 8)
+    home = tmp_path / "home"
+    now = time.time_ns()
+    for number in range(7):
+        checkpoint.write_checkpoint(
+            _event(session_id=f"old-{number}"), home, observed_at_ns=now + number
+        )
+        # A session's age is its directory's last change; set the ages apart.
+        os.utime(
+            checkpoint.session_state_dir(home, "claude", f"old-{number}"),
+            ns=(now - (7 - number) * 1_000_000_000,) * 2,
+        )
+
+    outcome = checkpoint.write_checkpoint(_event(session_id="new"), home, observed_at_ns=now + 10)
+
+    assert outcome["status"] == "written"
+    assert checkpoint.session_state_dir(home, "claude", "new").is_dir()
+    assert not checkpoint.session_state_dir(home, "claude", "old-0").exists()
+    for number in range(1, 7):
+        assert checkpoint.session_state_dir(home, "claude", f"old-{number}").is_dir()
+    root = checkpoint.client_state_root(home, "claude")
+    assert not list(root.glob(".tombstone-*"))
+
+
+def test_a_failed_eviction_keeps_the_session_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Windows sharing violation makes the tombstone rename fail. An unlisted
+    # session is never pruned again where prune scans the catalog.
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_CATALOG_ENTRIES", 8)
+    home = tmp_path / "home"
+    for number in range(7):
+        checkpoint.write_checkpoint(_event(session_id=f"old-{number}"), home)
+
+    def sharing_violation(*_args, **_kwargs):
+        raise PermissionError("the directory is in use")
+
+    monkeypatch.setattr(checkpoint, "_rename_directory_at", sharing_violation)
+    with pytest.raises(OSError):
+        checkpoint.write_checkpoint(_event(session_id="new"), home)
+
+    root_path = checkpoint.client_state_root(home, "claude")
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        for number in range(7):
+            name = checkpoint.session_state_dir(home, "claude", f"old-{number}").name
+            assert (root_path / name).is_dir()
+            assert checkpoint._prune_catalog_contains(root, name)
+
+
+def test_catalog_entries_without_a_directory_are_dropped_to_make_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_CATALOG_ENTRIES", 8)
+    home = tmp_path / "home"
+    root_path = checkpoint.client_state_root(home, "claude")
+    root_path.mkdir(parents=True, mode=0o700)
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
+            for number in range(8):
+                checkpoint._register_prune_catalog_entry(
+                    root,
+                    root_lock,
+                    checkpoint.session_state_dir(home, "claude", f"gone-{number}").name,
+                )
+
+    outcome = checkpoint.write_checkpoint(_event(session_id="new"), home)
+
+    assert outcome["status"] == "written"
+    assert checkpoint.session_state_dir(home, "claude", "new").is_dir()
+
+
+def test_prune_runs_when_the_checkpoint_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A home whose writes fail must still shed expired state, or it never recovers.
+    home = tmp_path / "home"
+    checkpoint.write_checkpoint(
+        _event(client="codex", session_id="expired"), home, observed_at_ns=1_000
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("write refused")
+
+    monkeypatch.setattr(checkpoint, "write_checkpoint", refuse)
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_LOCK_SECONDS", 60.0)
+    event = checkpoint.normalize_event(
+        "codex",
+        {"hook_event_name": "PreCompact", "session_id": "current", "trigger": "manual"},
+    )
+    assert event is not None
+
+    assert checkpoint._dispatch_core(event, home, expected_client="codex") is None
+
+    assert not checkpoint.session_state_dir(home, "codex", "expired").exists()
+
+
 def test_catalog_capacity_exhaustion_soft_fails_without_unregistered_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Nothing here can be evicted: each entry is a directory that is not a
+    # recognized session, so the new session is refused, not half-published.
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_CATALOG_ENTRIES", 8)
     home = tmp_path / "home"
     client = "codex"
     root_path = checkpoint.client_state_root(home, client)
@@ -3534,11 +3641,9 @@ def test_catalog_capacity_exhaustion_soft_fails_without_unregistered_publication
     with checkpoint._open_secure_directory(root_path, create=False) as root:
         with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
             for number in range(checkpoint.MAX_PRUNE_CATALOG_ENTRIES):
-                checkpoint._register_prune_catalog_entry(
-                    root,
-                    root_lock,
-                    checkpoint.session_state_dir(home, client, f"full-{number:04d}").name,
-                )
+                name = checkpoint.session_state_dir(home, client, f"full-{number:04d}").name
+                (root_path / name).mkdir(mode=0o700)
+                checkpoint._register_prune_catalog_entry(root, root_lock, name)
     records: list[tuple[tuple, dict]] = []
     monkeypatch.setattr(
         checkpoint,

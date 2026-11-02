@@ -8,7 +8,7 @@
 
 ## 2. Early checks
 
-- [ ] 2.1 Render every cell StatefulSet and Job kind from `cellctl` and list each command, argument vector and environment name. Evidence: the closed sets for D3, checked against the rendered manifests.
+- [x] 2.1 Render every cell StatefulSet and Job kind from `cellctl` and list each command, argument vector and environment name. Evidence: the closed sets for D3, checked against the rendered manifests.
 - [ ] 2.2 Check that a ValidatingAdmissionPolicy expression can compare environment values with chart-rendered literals for every container and init container, null-safe. Evidence: the K3s Live job admits the rendered set and refuses each forged write.
 - [ ] 2.3 List every caller of the bearer in the gateway and the cell. Evidence: the dual-accept plan covers each one.
 

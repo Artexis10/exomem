@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.156.0](https://github.com/Artexis10/exomem/compare/v0.155.0...v0.156.0) (2026-11-02)
+
+
+### Features
+
+* **cloud:** report which credential a request used and check grants and destinations ([#2334](https://github.com/Artexis10/exomem/issues/2334)) ([f19d6da](https://github.com/Artexis10/exomem/commit/f19d6da4c16d00499ecb54822b6c1665f3e5b0d3))
+
+
+### Bug Fixes
+
+* **activation:** count a shared name word once in graph corroboration ([#2350](https://github.com/Artexis10/exomem/issues/2350)) ([667e477](https://github.com/Artexis10/exomem/commit/667e47775ebecfda40283a87348df34a99226e9e))
+* **benchmarks:** score both referent false-precision fields and refuse loose role bindings ([#2337](https://github.com/Artexis10/exomem/issues/2337)) ([7c2f5b5](https://github.com/Artexis10/exomem/commit/7c2f5b57f207ab880437a325adfb941241c9814e))
+* **capture:** extract the text of a captured Markdown original ([#2329](https://github.com/Artexis10/exomem/issues/2329)) ([5aa0597](https://github.com/Artexis10/exomem/commit/5aa05974fa1d642654b06cacb79682e1c4690530))
+* **governance:** answer withheld items like missing ones on link, compile and dataset doors ([#2330](https://github.com/Artexis10/exomem/issues/2330)) ([8d9b6c3](https://github.com/Artexis10/exomem/commit/8d9b6c3d049ad85237db5ac3f109c6641e5e982a))
+* **graph:** let the standby's cold proof converge under live writes ([#2343](https://github.com/Artexis10/exomem/issues/2343)) ([cc9e1e0](https://github.com/Artexis10/exomem/commit/cc9e1e0a5c51d1084589467e18e8bf9d6f684a64))
+* **hooks:** evict the oldest checkpoint sessions when the prune catalog is full ([#2341](https://github.com/Artexis10/exomem/issues/2341)) ([813d354](https://github.com/Artexis10/exomem/commit/813d354116fc67aea597b38b7769f603505bc086))
+* **latency-gate:** prepare private arms from a real vault copy ([#2347](https://github.com/Artexis10/exomem/issues/2347)) ([67a19a4](https://github.com/Artexis10/exomem/commit/67a19a4d4cb2627d332279c932b84b5cc15af335))
+* **lexstore:** defer observed rewrites so a full repair publishes under sustained imports ([#2322](https://github.com/Artexis10/exomem/issues/2322)) ([2d3e7d1](https://github.com/Artexis10/exomem/commit/2d3e7d1b0e87770a1ee16cc3201f272f86a7a81b))
+* **recall:** exempt media sidecars from the source penalty in every ranking path ([#2336](https://github.com/Artexis10/exomem/issues/2336)) ([20beb91](https://github.com/Artexis10/exomem/commit/20beb9160c79d054050fa3f8991de3f850db646e))
+* **search:** show images only when their text or picture answers the question ([#2321](https://github.com/Artexis10/exomem/issues/2321)) ([c6d3568](https://github.com/Artexis10/exomem/commit/c6d3568c5ff1592092c18f9b255ccd8d400e6a3d))
+
+
+### Performance
+
+* **collections:** bound each derived-rows hold by batch rows, not by the last pace ([#2324](https://github.com/Artexis10/exomem/issues/2324)) ([7abae22](https://github.com/Artexis10/exomem/commit/7abae22640419669a27d5877408bfcdc40430237))
+* **entity-recurrence:** serve entity_recurrence-only audits from persisted per-page evidence ([#2344](https://github.com/Artexis10/exomem/issues/2344)) ([3320926](https://github.com/Artexis10/exomem/commit/332092646f7fcc9a0e0a8694fd36a316401ff9f7))
+* **mcp:** release MCP results through one terminal filter pass, and read enrollment once per scope ([#2339](https://github.com/Artexis10/exomem/issues/2339)) ([35d3581](https://github.com/Artexis10/exomem/commit/35d35816af5c9b14ff33a3af1540374aed8daee2))
+
 ## [0.155.0](https://github.com/Artexis10/exomem/compare/v0.154.0...v0.155.0) (2026-11-01)
 
 

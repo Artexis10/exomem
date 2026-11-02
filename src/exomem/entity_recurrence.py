@@ -39,14 +39,15 @@ Two known v1 trades, recorded rather than hidden:
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 from . import markdown_relations
@@ -448,6 +449,41 @@ class EvidenceContext:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PageEvidence:
+    """What one sweep reads from one page's own bytes, before any cross-page work.
+
+    Every field is a pure function of the page and the entity-type registry's cue
+    nouns. Registry anchors, the resolver, other pages and the audience are not
+    inputs, so a persisted copy stays exact until the page or the cue grammar
+    changes. `frames` carry no origin and no registry fingerprint: the sweep
+    sets both, per identity and per call.
+    """
+
+    path: str
+    title: str
+    #: The raw status label when it is text, else None (classified as live).
+    status: str | None
+    #: The registry-relevant frontmatter of an Entities page, else None.
+    registry_facts: Mapping[str, Any] | None = None
+    #: The whole frontmatter, kept only when `status` is not a canonical label: only
+    #: the page's own registry instance can classify such a label, from its frontmatter.
+    frontmatter: Mapping[str, Any] | None = None
+    #: Distinct body links that name an identity other than the page's own;
+    #: empty on a navigation page (design D4).
+    links: tuple[Wikilink, ...] = ()
+    source_refs: tuple[str, ...] = ()
+    origin_ref: str = ""
+    #: Normalised targets of the page's canonical relations, for `_connected`.
+    relation_keys: tuple[str, ...] = ()
+    #: Per candidate excerpt, the normalised keys of every link in a line or
+    #: clause whose visible text equals it, for `_connected`.
+    excerpt_keys: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Clauses that hold a relation token, in order; the only text an anchor frame can match.
+    relation_clauses: tuple[str, ...] = ()
+    frames: tuple[EvidenceContext, ...] = ()
+
+
 def _bounded_taxonomy_values(values: Iterable[str]) -> tuple[tuple[str, ...], int]:
     """Project one open-vocabulary set without truncating internal evidence."""
     ordered = tuple(sorted(set(values)))
@@ -521,16 +557,33 @@ def registry_index(
 ) -> RegistryIndex:
     """Build the registry's resolution surface from already-parsed pages.
 
-    Mirrors `resolve_entity_candidate`'s predicate — active entity pages sitting
-    directly in a registered kind's folder — but reads the bodies the audit
-    already holds instead of re-globbing `Entities/` from disk. One sweep must
-    not pay a directory walk per candidate.
+    Reads the bodies the audit already holds instead of re-globbing `Entities/` from
+    disk. One sweep must not pay a directory walk per candidate. `_registry_facts`
+    names the frontmatter it reads, here and for `collect_evidence`.
+    """
+    prefix = entities_prefix()
+    return registry_from_facts(
+        (
+            (str(page.rel_path), _registry_facts(page.frontmatter))
+            for page in pages
+            if str(page.rel_path).startswith(prefix)
+        ),
+        entity_types=entity_types,
+    )
+
+
+def registry_from_facts(
+    facts: Iterable[tuple[str, Mapping[str, Any]]], *, entity_types: EntityTypeRegistry
+) -> RegistryIndex:
+    """Build the registry's resolution surface from `(path, _registry_facts)` pairs.
+
+    Mirrors `resolve_entity_candidate`'s predicate: active entity pages sitting
+    directly in a registered kind's folder.
     """
     folders = {definition.folder for definition in entity_types.active_definitions}
     prefix = entities_prefix()
     entries: list[RegistryEntry] = []
-    for page in pages:
-        rel_path = str(page.rel_path)
+    for rel_path, fields in facts:
         if not rel_path.startswith(prefix):
             continue
         remainder = rel_path[len(prefix) :]
@@ -539,16 +592,15 @@ def registry_index(
             continue
         if name.casefold() == "index.md":
             continue
-        frontmatter = page.frontmatter
-        if str(frontmatter.get("type") or "").casefold() != "entity":
+        if fields["type"].casefold() != "entity":
             continue
-        if str(frontmatter.get("status") or "").casefold() != "active":
+        if fields["status"].casefold() != "active":
             continue
-        definition = entity_types.resolve(str(frontmatter.get("entity_type") or ""))
+        definition = entity_types.resolve(fields["entity_type"])
         if definition is None:
             continue
-        title = str(frontmatter.get("title") or Path(rel_path).stem).strip()
-        names = (title, *alias_values(frontmatter.get("aliases")))
+        title = (fields["title"] or Path(rel_path).stem).strip()
+        names = (title, *fields["aliases"])
         identities = frozenset(key for name_ in names if (key := identity_key(name_)))
         if not identities:
             continue
@@ -805,6 +857,22 @@ def _context(
 
 
 @dataclass(frozen=True, slots=True)
+class CueGrammar:
+    """The page-local ``identity-frames-v1`` patterns, shaped only by the cue nouns.
+
+    A page's body-field, typed-copula and typed-label frames depend on nothing
+    else, so `digest` names exactly when a stored copy of them goes stale.
+    """
+
+    snapshot: Mapping[str, tuple[tuple[str, str], ...]]
+    nouns: frozenset[str]
+    digest: str
+    field: re.Pattern[str]
+    copula: re.Pattern[str] | None
+    label: re.Pattern[str] | None
+
+
+@dataclass(frozen=True, slots=True)
 class FrameGrammar:
     """The ``identity-frames-v1`` patterns for one registry, compiled once per sweep.
 
@@ -813,12 +881,8 @@ class FrameGrammar:
     `re` a fresh pattern string to hash on every clause.
     """
 
-    cue_snapshot: Mapping[str, tuple[tuple[str, str], ...]]
-    cue_nouns: frozenset[str]
+    cues: CueGrammar
     resolved_anchors: Mapping[str, RegistryEntry]
-    field: re.Pattern[str]
-    copula: re.Pattern[str] | None
-    label: re.Pattern[str] | None
     subject: re.Pattern[str]
     object_frame: re.Pattern[str] | None
 
@@ -830,32 +894,26 @@ def _alternation(values: Iterable[str]) -> str:
     )
 
 
-def frame_grammar(
-    entity_types: EntityTypeRegistry, registry: RegistryIndex
-) -> FrameGrammar | None:
-    """Compile the frame patterns, or None when no cue and no anchor can match."""
+@functools.cache
+def _relation_token() -> re.Pattern[str]:
+    """A relation token between two whitespace characters.
+
+    Both anchor patterns put `\\s+` on each side of the predicate, so a clause
+    they can match always contains this.
+    """
+    # nosemgrep: ep-word-search -- _RELATIONS is the versioned identity-frames-v1 closed table.
+    return re.compile(rf"\s(?:{_alternation(_RELATIONS)})\s")
+
+
+def cue_grammar(entity_types: EntityTypeRegistry) -> CueGrammar:
+    """Compile the cue-dependent frame patterns for one entity-type registry."""
     cue_snapshot = _cue_snapshot(entity_types)
-    cue_nouns = frozenset(cue_snapshot)
-    if not cue_nouns and not registry.entries:
-        return None
     cue_pattern = _alternation(cue_snapshot)
-    anchor_entries: dict[str, list[RegistryEntry]] = {}
-    for entry in registry.entries:
-        for name in entry.identities:
-            anchor_entries.setdefault(name, []).append(entry)
-    resolved_anchors = {
-        name: values[0]
-        for name, values in anchor_entries.items()
-        if len(values) == 1
-    }
-    anchor_pattern = _alternation(resolved_anchors)
-    relation_pattern = _alternation(_RELATIONS)
     field_pattern = _alternation(_BODY_FIELDS)
-    subject_options = "i|we" + (f"|{anchor_pattern}" if anchor_pattern else "")
-    return FrameGrammar(
-        cue_snapshot=cue_snapshot,
-        cue_nouns=cue_nouns,
-        resolved_anchors=resolved_anchors,
+    return CueGrammar(
+        snapshot=cue_snapshot,
+        nouns=frozenset(cue_snapshot),
+        digest=_digest(cue_snapshot),
         # body-field owns comma separation; ordinary clauses use comma as a stop.
         field=re.compile(rf"(?P<label>{field_pattern})\s*:\s*(?P<values>.+?)\s*[.;!?]?"),
         copula=(
@@ -872,6 +930,34 @@ def frame_grammar(
             if cue_pattern
             else None
         ),
+    )
+
+
+def frame_grammar(
+    entity_types: EntityTypeRegistry,
+    registry: RegistryIndex,
+    *,
+    cues: CueGrammar | None = None,
+) -> FrameGrammar | None:
+    """Compile the frame patterns, or None when no cue and no anchor can match."""
+    cues = cues or cue_grammar(entity_types)
+    if not cues.nouns and not registry.entries:
+        return None
+    anchor_entries: dict[str, list[RegistryEntry]] = {}
+    for entry in registry.entries:
+        for name in entry.identities:
+            anchor_entries.setdefault(name, []).append(entry)
+    resolved_anchors = {
+        name: values[0]
+        for name, values in anchor_entries.items()
+        if len(values) == 1
+    }
+    anchor_pattern = _alternation(resolved_anchors)
+    relation_pattern = _alternation(_RELATIONS)
+    subject_options = "i|we" + (f"|{anchor_pattern}" if anchor_pattern else "")
+    return FrameGrammar(
+        cues=cues,
+        resolved_anchors=resolved_anchors,
         subject=re.compile(
             rf"(?P<subject>{subject_options})\s+(?P<predicate>{relation_pattern})\s+"
             rf"(?P<candidate>.+)"
@@ -887,73 +973,75 @@ def frame_grammar(
     )
 
 
-def extract_identity_frames(
-    body: str,
+def _add_frame(
+    found: dict[tuple[str, str, str], EvidenceContext],
+    raw_span: str,
     *,
     path: str,
-    origin: str,
-    entity_types: EntityTypeRegistry,
-    registry: RegistryIndex,
-    grammar: FrameGrammar | None = None,
-) -> tuple[EvidenceContext, ...]:
-    """Extract only the five closed ``identity-frames-v1`` frame shapes.
+    cue_nouns: frozenset[str],
+    frame_type: str,
+    predicate_id: str,
+    cue: str,
+    resolved_anchor: str | None = None,
+    type_cues: tuple[str, ...] = (),
+    family_cues: tuple[str, ...] = (),
+    skeleton: str,
+    excerpt: str,
+) -> None:
+    """Record one frame, a later copy of the same identity, page and facet replacing it.
 
-    A sweep passes the `grammar` it compiled once for `entity_types` and
-    `registry`; without one, this call compiles its own.
+    The frame carries no origin and no registry fingerprint (see `PageEvidence`).
     """
-    grammar = grammar or frame_grammar(entity_types, registry)
-    if grammar is None:
-        return ()
-    cue_snapshot = grammar.cue_snapshot
-    cue_nouns = grammar.cue_nouns
-    resolved_anchors = grammar.resolved_anchors
+    display = _valid_span(raw_span, cue_nouns=cue_nouns)
+    if display is None:
+        return
+    row = _context(
+        display=display,
+        path=path,
+        origin="",
+        frame_type=frame_type,
+        predicate_id=predicate_id,
+        cue=cue,
+        resolved_anchor=resolved_anchor,
+        type_cues=type_cues,
+        family_cues=family_cues,
+        skeleton=skeleton,
+        excerpt=" ".join(excerpt.split()),
+        registry_fingerprint="",
+    )
+    found[(row.identity, row.path, row.facet_hash)] = row
+
+
+def _scan_body(
+    body: str, cues: CueGrammar, *, path: str
+) -> tuple[tuple[EvidenceContext, ...], tuple[str, ...]]:
+    """One pass over a body: its cue-dependent frames and its relation clauses.
+
+    The relation clauses come from the lines that are neither a body field nor a
+    heading, which are the only text the anchor frames read. A frame never reads
+    outside its own line, so `anchor_frames` over these clauses finds exactly what
+    a pass over the whole body would.
+    """
     text = _markdown_text(body)
     found: dict[tuple[str, str, str], EvidenceContext] = {}
-
-    def add(
-        raw_span: str,
-        *,
-        frame_type: str,
-        predicate_id: str,
-        cue: str,
-        resolved_anchor: str | None = None,
-        type_cues: tuple[str, ...] = (),
-        family_cues: tuple[str, ...] = (),
-        skeleton: str,
-        excerpt: str,
-    ) -> None:
-        display = _valid_span(raw_span, cue_nouns=cue_nouns)
-        if display is None:
-            return
-        row = _context(
-            display=display,
-            path=path,
-            origin=origin,
-            frame_type=frame_type,
-            predicate_id=predicate_id,
-            cue=cue,
-            resolved_anchor=resolved_anchor,
-            type_cues=type_cues,
-            family_cues=family_cues,
-            skeleton=skeleton,
-            excerpt=" ".join(excerpt.split()),
-            registry_fingerprint=entity_types.fingerprint,
-        )
-        found[(row.identity, row.path, row.facet_hash)] = row
-
+    relation_token = _relation_token()
+    relation_clauses: list[str] = []
     for raw_line in text.splitlines():
         line = re.sub(r"^\s*(?:[-*+]\s+|>\s*)?", "", raw_line).strip()
         if not line or line.startswith("#"):
             continue
         line_view = _casefold_view(line)
-        field = grammar.field.fullmatch(line_view.folded)
-        if field is not None:
-            label = identity_key(field.group("label"))
+        field_match = cues.field.fullmatch(line_view.folded)
+        if field_match is not None:
+            label = identity_key(field_match.group("label"))
             predicate_id = _BODY_FIELDS[label]
-            for candidate in line_view.group(field, "values").split(","):
+            for candidate in line_view.group(field_match, "values").split(","):
                 clean = candidate.strip().rstrip(".;:!?").strip()
-                add(
+                _add_frame(
+                    found,
                     clean,
+                    path=path,
+                    cue_nouns=cues.nouns,
                     frame_type="body-field",
                     predicate_id=predicate_id,
                     cue=label,
@@ -965,14 +1053,17 @@ def extract_identity_frames(
         clauses = [part.strip() for part in re.split(r"[.,;!?]+", line) if part.strip()]
         for clause in clauses:
             clause_view = _casefold_view(clause)
-            if grammar.copula is not None and grammar.label is not None:
-                copula = grammar.copula.fullmatch(clause_view.folded)
+            if cues.copula is not None and cues.label is not None:
+                copula = cues.copula.fullmatch(clause_view.folded)
                 if copula is not None:
                     cue = identity_key(copula.group("cue"))
-                    pairs = cue_snapshot[cue]
+                    pairs = cues.snapshot[cue]
                     copula_token = identity_key(copula.group("copula"))
-                    add(
+                    _add_frame(
+                        found,
                         clause_view.group(copula, "candidate"),
+                        path=path,
+                        cue_nouns=cues.nouns,
                         frame_type="typed-copula",
                         predicate_id=_COPULAS[copula_token],
                         cue=cue,
@@ -982,13 +1073,16 @@ def extract_identity_frames(
                         excerpt=clause,
                     )
 
-                label = grammar.label.fullmatch(clause_view.folded)
-                if label is not None:
-                    cue = identity_key(label.group("cue"))
-                    pairs = cue_snapshot[cue]
-                    delimiter = label.group("delimiter")
-                    add(
-                        clause_view.group(label, "candidate"),
+                label_match = cues.label.fullmatch(clause_view.folded)
+                if label_match is not None:
+                    cue = identity_key(label_match.group("cue"))
+                    pairs = cues.snapshot[cue]
+                    delimiter = label_match.group("delimiter")
+                    _add_frame(
+                        found,
+                        clause_view.group(label_match, "candidate"),
+                        path=path,
+                        cue_nouns=cues.nouns,
                         frame_type="typed-label",
                         predicate_id=_LABEL_DELIMITERS[delimiter],
                         cue=cue,
@@ -998,42 +1092,97 @@ def extract_identity_frames(
                         excerpt=clause,
                     )
 
-            subject = grammar.subject.fullmatch(clause_view.folded)
-            if subject is not None:
-                subject_name = identity_key(subject.group("subject"))
-                anchor = resolved_anchors.get(subject_name)
-                anchor_ref = anchor.path if anchor is not None else None
-                predicate = identity_key(subject.group("predicate"))
-                cue = anchor_ref or subject_name
-                add(
-                    clause_view.group(subject, "candidate"),
-                    frame_type="subject-relation",
+            if relation_token.search(clause_view.folded) is not None:
+                relation_clauses.append(clause)
+    return tuple(found.values()), tuple(relation_clauses)
+
+
+def anchor_frames(
+    relation_clauses: Iterable[str], grammar: FrameGrammar, *, path: str
+) -> tuple[EvidenceContext, ...]:
+    """The subject-relation and identity-relation frames of one page, for this registry.
+
+    Run on every sweep because an Entity created or re-aliased anywhere changes
+    which clauses anchor, with no page edited. An Entity titled "We" turns an
+    i/we subject into an anchor, so the subject frame is matched in full here.
+    """
+    found: dict[tuple[str, str, str], EvidenceContext] = {}
+    cue_nouns = grammar.cues.nouns
+    for clause in relation_clauses:
+        clause_view = _casefold_view(clause)
+        subject = grammar.subject.fullmatch(clause_view.folded)
+        if subject is not None:
+            subject_name = identity_key(subject.group("subject"))
+            anchor = grammar.resolved_anchors.get(subject_name)
+            anchor_ref = anchor.path if anchor is not None else None
+            predicate = identity_key(subject.group("predicate"))
+            cue = anchor_ref or subject_name
+            _add_frame(
+                found,
+                clause_view.group(subject, "candidate"),
+                path=path,
+                cue_nouns=cue_nouns,
+                frame_type="subject-relation",
+                predicate_id=_RELATIONS[predicate],
+                cue=cue,
+                resolved_anchor=anchor_ref,
+                skeleton=f"{cue} {predicate} <identity>",
+                excerpt=clause,
+            )
+
+        if grammar.object_frame is not None:
+            object_frame = grammar.object_frame.fullmatch(clause_view.folded)
+            if object_frame is not None:
+                object_name = identity_key(object_frame.group("object"))
+                anchor = grammar.resolved_anchors[object_name]
+                predicate = identity_key(object_frame.group("predicate"))
+                _add_frame(
+                    found,
+                    clause_view.group(object_frame, "candidate"),
+                    path=path,
+                    cue_nouns=cue_nouns,
+                    frame_type="identity-relation",
                     predicate_id=_RELATIONS[predicate],
-                    cue=cue,
-                    resolved_anchor=anchor_ref,
-                    skeleton=f"{cue} {predicate} <identity>",
+                    cue=anchor.path,
+                    resolved_anchor=anchor.path,
+                    skeleton=f"<identity> {predicate} {anchor.path}",
                     excerpt=clause,
                 )
+    return tuple(found.values())
 
-            if grammar.object_frame is not None:
-                object_frame = grammar.object_frame.fullmatch(clause_view.folded)
-                if object_frame is not None:
-                    object_name = identity_key(object_frame.group("object"))
-                    anchor = resolved_anchors[object_name]
-                    predicate = identity_key(object_frame.group("predicate"))
-                    add(
-                        clause_view.group(object_frame, "candidate"),
-                        frame_type="identity-relation",
-                        predicate_id=_RELATIONS[predicate],
-                        cue=anchor.path,
-                        resolved_anchor=anchor.path,
-                        skeleton=f"<identity> {predicate} {anchor.path}",
-                        excerpt=clause,
-                    )
 
+def extract_identity_frames(
+    body: str,
+    *,
+    path: str,
+    origin: str,
+    entity_types: EntityTypeRegistry,
+    registry: RegistryIndex,
+    grammar: FrameGrammar | None = None,
+    scan: tuple[Iterable[EvidenceContext], Iterable[str]] | None = None,
+) -> tuple[EvidenceContext, ...]:
+    """Extract only the five closed ``identity-frames-v1`` frame shapes.
+
+    A sweep passes the `grammar` it compiled once for `entity_types` and
+    `registry`; without one, this call compiles its own. A sweep that holds a
+    page's `PageEvidence` passes its cue frames and relation clauses as `scan`
+    instead of the body, and every sweep reads its frames through this one seam.
+    """
+    grammar = grammar or frame_grammar(entity_types, registry)
+    if grammar is None:
+        return ()
+    cue_frames, relation_clauses = (
+        scan if scan is not None else _scan_body(body, grammar.cues, path=path)
+    )
+    # Frames of different types never share a dedupe key, because the frame type
+    # is part of `facet_hash`, so the two passes' union is the whole body's frames.
+    rows = (*cue_frames, *anchor_frames(relation_clauses, grammar, path=path))
     return tuple(
         sorted(
-            found.values(),
+            (
+                replace(row, origin=origin, registry_fingerprint=entity_types.fingerprint)
+                for row in rows
+            ),
             key=lambda row: (
                 row.identity,
                 row.path,
@@ -1191,24 +1340,31 @@ def _target_dict(entry: RegistryEntry) -> dict[str, Any]:
     }
 
 
-def _segment_connects(raw_segment: str, identities: set[str]) -> bool:
-    """Whether one qualifying Markdown segment links to the resolved target."""
+def _segment_link_keys(raw_segment: str) -> set[str]:
+    """The normalised name and target of every link in one Markdown segment."""
+    keys: set[str] = set()
     for match in find_body_wikilinks(raw_segment):
         link = parse_link(match.group(1))
-        if link is None:
-            continue
-        if identity_key(link.name) in identities or identity_key(link.target) in identities:
-            return True
-    return False
+        if link is not None:
+            keys.add(identity_key(link.name))
+            keys.add(identity_key(link.target))
+    return keys
 
 
-def _accepted_relation_connects(body: str, identities: set[str]) -> bool:
-    """Whether this page has an accepted canonical relation to the target."""
+def _relation_target_keys(body: str) -> tuple[str, ...]:
+    """The normalised target of each accepted canonical relation, whole and by name."""
     document = markdown_relations.parse_markdown_relations(body)
-    return any(
-        identity_key(relation.target) in identities
-        or identity_key(relation.target.rsplit("/", 1)[-1]) in identities
-        for relation in document.canonical_relations
+    return tuple(
+        sorted(
+            {
+                key
+                for relation in document.canonical_relations
+                for key in (
+                    identity_key(relation.target),
+                    identity_key(relation.target.rsplit("/", 1)[-1]),
+                )
+            }
+        )
     )
 
 
@@ -1218,27 +1374,262 @@ def _visible_excerpt(raw_segment: str) -> str:
     return " ".join(visible.split())
 
 
-def _connected(context: EvidenceContext, body: str, target: RegistryEntry) -> bool:
+def _excerpt_text(raw: str) -> str:
+    """A frame's stored excerpt: whitespace-normalised and bounded."""
+    return " ".join(raw.split())[:240]
+
+
+def _wanted_excerpt(excerpt: str) -> str:
+    """The text `_connected` matches a line or clause against for one stored excerpt."""
+    return " ".join(excerpt.split())
+
+
+def _excerpt_link_keys(body: str, wanted: set[str]) -> dict[str, tuple[str, ...]]:
+    """For each wanted excerpt, the link keys of every line or clause that shows it."""
+    found: dict[str, set[str]] = {}
+
+    def visit(segment: str) -> None:
+        # A segment with no wikilink opener has no link to contribute.
+        if "[[" not in segment:
+            return
+        excerpt = _visible_excerpt(segment)
+        if excerpt in wanted:
+            keys = _segment_link_keys(segment)
+            if keys:
+                found.setdefault(excerpt, set()).update(keys)
+
+    for raw_line in body.splitlines():
+        visit(raw_line)
+        for raw_clause in re.split(r"[.,;!?]+", raw_line):
+            visit(raw_clause)
+    return {excerpt: tuple(sorted(keys)) for excerpt, keys in sorted(found.items())}
+
+
+def _connected(
+    context: EvidenceContext, evidence: PageEvidence, target: RegistryEntry
+) -> bool:
     """Whether this exact qualifying context visibly connects to the target."""
     identities = set(target.identities)
     identities.add(identity_key(target.path.removesuffix(".md")))
     identities.add(identity_key(Path(target.path).stem))
-    if _accepted_relation_connects(body, identities):
+    if identities.intersection(evidence.relation_keys):
         return True
-    wanted_excerpt = " ".join(context.excerpt.split())
-    for raw_line in body.splitlines():
-        if (
-            _visible_excerpt(raw_line) == wanted_excerpt
-            and _segment_connects(raw_line, identities)
-        ):
-            return True
-        for raw_clause in re.split(r"[.,;!?]+", raw_line):
-            if (
-                _visible_excerpt(raw_clause) == wanted_excerpt
-                and _segment_connects(raw_clause, identities)
-            ):
-                return True
-    return False
+    return bool(
+        identities.intersection(
+            evidence.excerpt_keys.get(_wanted_excerpt(context.excerpt), ())
+        )
+    )
+
+
+def _self_identities(title: str, rel_path: str) -> set[str]:
+    return {identity_key(title), identity_key(Path(rel_path).stem)}
+
+
+def _registry_facts(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
+    """The frontmatter `registry_index` reads, reduced to text and a list of text."""
+    return {
+        "type": str(frontmatter.get("type") or ""),
+        "status": str(frontmatter.get("status") or ""),
+        "entity_type": str(frontmatter.get("entity_type") or ""),
+        "title": str(frontmatter.get("title") or ""),
+        "aliases": list(alias_values(frontmatter.get("aliases"))),
+    }
+
+
+def page_head(page: Any) -> PageEvidence:
+    """What the cross-page work reads about a page before it knows the page counts.
+
+    The title and registry facts feed the resolver and the registry. The status, and
+    the whole frontmatter when only the page's own registry instance can classify
+    the label, feed eligibility. Reading the body is `page_evidence`'s work.
+    """
+    from . import lifecycle_statuses
+
+    rel_path = str(page.rel_path)
+    raw_status = page.frontmatter.get("status")
+    status = raw_status if isinstance(raw_status, str) else None
+    if rel_path.startswith(entities_prefix()):
+        # An Entities page feeds the registry and the resolver and is never evidence.
+        return PageEvidence(
+            path=rel_path,
+            title=page.title,
+            status=status,
+            registry_facts=_registry_facts(page.frontmatter),
+        )
+    return PageEvidence(
+        path=rel_path,
+        title=page.title,
+        status=status,
+        frontmatter=(
+            page.frontmatter if lifecycle_statuses.canonical_class(status) is None else None
+        ),
+    )
+
+
+def _wanted_excerpts(
+    frames: Iterable[EvidenceContext], relation_clauses: Iterable[str]
+) -> set[str]:
+    """Every excerpt `_connected` can be asked about: a stored frame's, or a relation
+    clause's, which an anchor frame may later use."""
+    wanted = {_wanted_excerpt(row.excerpt) for row in frames}
+    wanted.update(_wanted_excerpt(_excerpt_text(clause)) for clause in relation_clauses)
+    return wanted
+
+
+def connection_keys(page: Any, evidence: PageEvidence) -> PageEvidence:
+    """`evidence` with the keys `_connected` reads, from the same page's body."""
+    from . import provenance
+
+    body = provenance.withheld_prose(page.body, owner_path=evidence.path)
+    wanted = _wanted_excerpts(evidence.frames, evidence.relation_clauses)
+    return replace(
+        evidence,
+        relation_keys=_relation_target_keys(body),
+        excerpt_keys=_excerpt_link_keys(body, wanted),
+    )
+
+
+def page_evidence(page: Any, *, cues: CueGrammar, keys: bool = True) -> PageEvidence:
+    """Everything one sweep reads from one page's own bytes (see `PageEvidence`).
+
+    `keys=False` leaves the connection keys empty for a caller that adds them with
+    `connection_keys` only to the few pages that reach the connection check.
+    """
+    from . import provenance
+
+    head = page_head(page)
+    rel_path = head.path
+    if head.registry_facts is not None:
+        return head
+    # An origin carrier is attribution, not prose or a link: its payload never
+    # becomes a mention, a context excerpt or a page reaching for a name.
+    body = provenance.withheld_prose(page.body, owner_path=rel_path)
+    self_identities = _self_identities(page.title, rel_path)
+    cue_frames, relation_clauses = _scan_body(body, cues, path=rel_path)
+    frames = tuple(
+        row for row in cue_frames if row.identity and row.identity not in self_identities
+    )
+    links: dict[Wikilink, None] = {}
+    if Path(rel_path).name not in NAVIGATION_BASENAMES:
+        # A navigation page (design D4, `capture-identities-at-write-time`)
+        # lists things; it does not reach for them. Excluded from the
+        # wikilink lane's evidence only -- it never supplies spread and
+        # never anchors a finding -- and left alone for the ordinary-text
+        # grammar lane, whose gates this change does not touch.
+        for match in find_body_wikilinks(body):
+            link = parse_link(match.group(1))
+            if link is None:
+                continue
+            identity = identity_key(link.name)
+            if identity and identity not in self_identities:
+                links[link] = None
+    evidence = replace(
+        head,
+        links=tuple(links),
+        source_refs=tuple(sorted(_source_refs(page))),
+        origin_ref=_origin_ref(page),
+        relation_clauses=relation_clauses,
+        frames=frames,
+    )
+    return connection_keys(page, evidence) if keys else evidence
+
+
+def collect_evidence(
+    heads: Iterable[PageEvidence],
+    *,
+    vault_root: Path,
+    entity_types: EntityTypeRegistry,
+    cues: CueGrammar,
+    status_basis: Any,
+    indexable: Callable[[str], bool],
+    make_resolver: Callable[[Iterable[tuple[str, str]]], WikilinkResolver],
+    complete: Callable[[PageEvidence], PageEvidence],
+    attachment_probe: Callable[[str], bool],
+    registry: RegistryIndex | None = None,
+    connection: Callable[[PageEvidence], PageEvidence] | None = None,
+) -> list[Candidate]:
+    """The cross-page half of every sweep, from the evidence of the pages an audience sees.
+
+    The one entry point for the full sweep (`collect_pages`) and the persisted one
+    (`entity_evidence.sweep`). It owns eligibility, the registry, the resolver and the
+    call into `aggregate`, so the two cannot drift.
+
+    `heads` are `page_head` of every visible page, Entities pages included, and `make_resolver`
+    receives each one's `(path, title)`. `complete` returns the whole `PageEvidence` of one
+    eligible head, so the body of an ineligible page is never read. `registry` is for a
+    caller that already holds it; otherwise it is built from the heads' registry facts.
+    `connection` is for a caller whose evidence lacks the connection keys; see `aggregate`.
+    """
+    pages = list(heads)
+    if not pages:
+        return []
+    resolver = make_resolver((head.path, head.title) for head in pages)
+    if registry is None:
+        registry = registry_from_facts(
+            (
+                (head.path, head.registry_facts)
+                for head in pages
+                if head.registry_facts is not None
+            ),
+            entity_types=entity_types,
+        )
+    entities = entities_prefix()
+    eligible = [
+        head
+        for head in sorted(pages, key=lambda head: head.path)
+        if not head.path.startswith(entities)
+        and counts_as_evidence(
+            # A stored head holds the whole frontmatter only where the label needs it.
+            SimpleNamespace(
+                rel_path=head.path,
+                frontmatter=head.frontmatter
+                if head.frontmatter is not None
+                else {"status": head.status},
+            ),
+            indexable=indexable(head.path),
+            status_basis=status_basis,
+        )
+    ]
+    return aggregate(
+        [complete(head) for head in eligible],
+        vault_root=vault_root,
+        resolver=resolver,
+        registry=registry,
+        entity_types=entity_types,
+        attachment_probe=attachment_probe,
+        grammar=frame_grammar(entity_types, registry, cues=cues),
+        connection=connection,
+    )
+
+
+def collect_pages(
+    pages: Iterable[Any],
+    *,
+    vault_root: Path,
+    entity_types: EntityTypeRegistry,
+    indexable: Callable[[str], bool],
+    make_resolver: Callable[[Iterable[tuple[str, str]]], WikilinkResolver],
+    attachment_probe: Callable[[str], bool],
+    status_basis: Any,
+    registry: RegistryIndex | None = None,
+) -> list[Candidate]:
+    """The full sweep: `collect_evidence` over pages the caller has already parsed."""
+    cues = cue_grammar(entity_types)
+    by_path = {str(page.rel_path): page for page in pages}
+    return collect_evidence(
+        [page_head(page) for page in by_path.values()],
+        vault_root=vault_root,
+        entity_types=entity_types,
+        cues=cues,
+        status_basis=status_basis,
+        indexable=indexable,
+        make_resolver=make_resolver,
+        # The connection check reaches few pages, so only those read their link keys.
+        complete=lambda head: page_evidence(by_path[head.path], cues=cues, keys=False),
+        attachment_probe=attachment_probe,
+        registry=registry,
+        connection=lambda evidence: connection_keys(by_path[evidence.path], evidence),
+    )
 
 
 def collect(
@@ -1252,71 +1643,89 @@ def collect(
     attachment_probe: Callable[[str], bool],
     status_basis: Any = None,
 ) -> list[Candidate]:
-    """Collect legacy links and closed-frame evidence into one lifecycle row."""
+    """Collect legacy links and closed-frame evidence into one lifecycle row.
+
+    `collect_pages` for a caller that already holds the resolver and the registry.
+    """
     from . import lifecycle_statuses
 
-    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    page_rows = tuple(sorted(pages, key=lambda page: str(page.rel_path)))
-    entities = entities_prefix()
-    eligible_pages = tuple(
-        page
-        for page in page_rows
-        if not str(page.rel_path).startswith(entities)
-        and counts_as_evidence(
-            page, indexable=indexable(str(page.rel_path)), status_basis=status_basis
-        )
+    return collect_pages(
+        pages,
+        vault_root=vault_root,
+        entity_types=entity_types,
+        indexable=indexable,
+        make_resolver=lambda _titles: resolver,
+        attachment_probe=attachment_probe,
+        status_basis=status_basis or lifecycle_statuses.Basis(vault_root),
+        registry=registry,
     )
+
+
+def aggregate(
+    evidence: Iterable[PageEvidence],
+    *,
+    vault_root: Path,
+    resolver: WikilinkResolver,
+    registry: RegistryIndex,
+    entity_types: EntityTypeRegistry,
+    attachment_probe: Callable[[str], bool],
+    grammar: FrameGrammar | None,
+    connection: Callable[[PageEvidence], PageEvidence] | None = None,
+) -> list[Candidate]:
+    """The cross-page half of a sweep, over the evidence of the eligible pages.
+
+    `grammar` is None when no cue and no anchor exists, and then no page yields a frame.
+    `connection` completes a page's evidence with the keys the connection check reads,
+    when only the pages that reach that check should pay for them.
+    """
+    from . import provenance
+
+    evidence_rows = tuple(sorted(evidence, key=lambda row: row.path))
     mentions: dict[str, dict[str, str]] = {}
     suffixed: dict[str, set[str]] = {}
     ordinary: dict[str, list[EvidenceContext]] = {}
-    pages_by_path: dict[str, Any] = {}
-    # An origin carrier is attribution, not prose or a link: its payload never
-    # becomes a mention, a context excerpt or a page reaching for a name.
-    from . import provenance
+    evidence_by_path: dict[str, PageEvidence] = {}
+    connected_by_path: dict[str, PageEvidence] = {}
+    exists: dict[str, bool] = {}
 
-    bodies: dict[str, str] = {}
-    grammar = frame_grammar(entity_types, registry)
-    for page in eligible_pages:
-        rel_path = str(page.rel_path)
-        pages_by_path[rel_path] = page
-        body = bodies[rel_path] = provenance.withheld_prose(page.body, owner_path=rel_path)
-        self_identities = {
-            identity_key(page.title),
-            identity_key(Path(rel_path).stem),
-        }
-        for context in () if grammar is None else extract_identity_frames(
-            body,
-            path=rel_path,
-            origin=_origin_ref(page),
-            entity_types=entity_types,
-            registry=registry,
-            grammar=grammar,
-        ):
-            if context.identity and context.identity not in self_identities:
-                ordinary.setdefault(context.identity, []).append(context)
+    def connected_evidence(path: str) -> PageEvidence:
+        if connection is None:
+            return evidence_by_path[path]
+        if path not in connected_by_path:
+            connected_by_path[path] = connection(evidence_by_path[path])
+        return connected_by_path[path]
 
-        if Path(rel_path).name in NAVIGATION_BASENAMES:
-            # A navigation page (design D4, `capture-identities-at-write-time`)
-            # lists things; it does not reach for them. Excluded from the
-            # wikilink lane's evidence only -- it never supplies spread and
-            # never anchors a finding -- and left alone for the ordinary-text
-            # grammar lane above, whose gates this change does not touch.
-            continue
-        for match in find_body_wikilinks(body):
-            link = parse_link(match.group(1))
-            if link is None:
-                continue
+    def known(target: str) -> bool:
+        # One answer per target per sweep: the resolver is fixed for the sweep.
+        if target not in exists:
+            exists[target] = page_exists(target, vault_root, resolver)
+        return exists[target]
+
+    for page in evidence_rows:
+        evidence_by_path[page.path] = page
+        if grammar is not None:
+            self_identities = _self_identities(page.title, page.path)
+            for context in extract_identity_frames(
+                "",
+                path=page.path,
+                origin="",
+                entity_types=entity_types,
+                registry=registry,
+                grammar=grammar,
+                scan=(page.frames, page.relation_clauses),
+            ):
+                if context.identity and context.identity not in self_identities:
+                    ordinary.setdefault(context.identity, []).append(context)
+        for link in page.links:
             identity = identity_key(link.name)
-            if not identity or identity in self_identities:
+            if known(link.target):
                 continue
-            if page_exists(link.target, vault_root, resolver):
-                continue
-            if link.name != link.target and page_exists(link.name, vault_root, resolver):
+            if link.name != link.target and known(link.name):
                 continue
             seen = mentions.setdefault(identity, {})
-            written = seen.get(rel_path)
+            written = seen.get(page.path)
             if written is None or link.name < written:
-                seen[rel_path] = link.name
+                seen[page.path] = link.name
             if link.suffix:
                 suffixed.setdefault(identity, set()).add(link.target)
 
@@ -1344,10 +1753,13 @@ def collect(
             )
         )
         contributing_pages = tuple(
-            pages_by_path[path]
+            evidence_by_path[path]
             for path in sorted({row.path for row in raw_rows})
         )
-        identity_origins = _origin_refs(contributing_pages)
+        identity_origins = provenance.origin_keys(
+            {page.path: frozenset(page.source_refs) for page in contributing_pages},
+            fallback={page.path: page.origin_ref for page in contributing_pages},
+        )
         rows = tuple(
             replace(row, origin=identity_origins[row.path]) for row in raw_rows
         )
@@ -1384,7 +1796,7 @@ def collect(
             disconnected = tuple(
                 row
                 for row in rows
-                if not _connected(row, bodies[row.path], resolved_target)
+                if not _connected(row, connected_evidence(row.path), resolved_target)
             )
             if not disconnected:
                 continue

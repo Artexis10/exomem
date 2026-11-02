@@ -695,6 +695,7 @@ jobs:
           build-args: |
             EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
           provenance: mode=min,version=v0.2
+          sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
@@ -711,6 +712,7 @@ jobs:
           file: infra/cellctl/Dockerfile
           platforms: linux/${{ matrix.arch }}
           provenance: mode=min,version=v0.2
+          sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem-cellctl,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
@@ -837,6 +839,7 @@ jobs:
           target: lean
           platforms: linux/amd64,linux/arm64
           provenance: mode=min,version=v0.2
+          sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_LEAN) || '' }}
@@ -877,6 +880,7 @@ jobs:
           target: ml
           platforms: linux/amd64,linux/arm64
           provenance: mode=min,version=v0.2
+          sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_ML) || '' }}
@@ -917,6 +921,7 @@ jobs:
           target: cuda
           platforms: linux/amd64
           provenance: mode=min,version=v0.2
+          sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
           # Cache export added 27 minutes after the build and push took five minutes.

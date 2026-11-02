@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .. import find_corpus, recall_space, reserved_paths, vault
+from .. import find_corpus, find_types, recall_space, reserved_paths, vault
 from . import (
     authorization_custody,
     membership,
@@ -347,10 +347,11 @@ def _planned_navigation_adoptions(
     return frozenset(adopted)
 
 
-def _search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
+def search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
     fields = {"title": page.title}
     for name, value in (
-        ("body", page.body),
+        # The OCR words a media sidecar withheld from search stay out of the projected body too.
+        ("body", find_types.without_low_confidence_ocr(page.body, page.frontmatter)),
         ("status", page.frontmatter.get("status")),
         ("type", page.page_type),
         ("updated", page.updated),
@@ -498,7 +499,7 @@ def _replacement_item(
             scope_ids=scope_ids,
             policy=policy,
             projector_schema_version=target_key.projector_schema_version,
-            full_search_fields=_search_fields(parsed),
+            full_search_fields=search_fields(parsed),
         )
         return projection_store.ProjectionItemVariants(
             item_identity=path,

@@ -674,6 +674,359 @@ def test_a_page_saved_on_every_catch_up_step_declines_as_outpaced_and_the_full_p
     assert lexstore.search_bm25(tmp_path, "outpacedsave", k=3, scope="kb")
 
 
+def test_a_catch_up_outpaced_by_sustained_writes_still_advances_without_a_full_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    live_catalogue,
+) -> None:
+    """An import that writes through every step must not cost a full pass.
+
+    Each step meets a new page in the registry before it takes the barrier, so
+    no step can stamp the registry's checkpoint and the round runs out of
+    steps. Its steps still applied every page up to an earlier checkpoint, so
+    the catalogue advances there, short of the registry, and queues a lag-only
+    catch-up. Once the writes stop, that catch-up reaches the registry and
+    serves the newest page. The first round's finish line says it advanced;
+    only the catch-up that reaches the registry says it is current.
+    """
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    bulk = []
+    for index in range(cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    freshness.on_files_changed(tmp_path, changed=bulk)
+    round_start = freshness.recall_checkpoint(tmp_path, "kb")
+    steps = []
+    after_round = []
+    rebuilds = []
+    real_retry = store.retry_deferred_upsert
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    def retry(paths, **kwargs):
+        steps.append(list(paths))
+        if len(steps) == 5:
+            after_round.append(
+                (store.catalog_checkpoint("kb"), freshness.recall_checkpoint(tmp_path, "kb"))
+            )
+        if len(steps) <= 4:
+            page = changed.parent / f"stream-{len(steps)}.md"
+            page.write_text(f"# Stream\n\nstreamtoken{len(steps)}\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[page])
+        return real_retry(paths, **kwargs)
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    stored, registry = after_round[0]
+    assert round_start.generation <= stored.generation < registry.generation, (
+        "the outpaced round did not record a checkpoint it applied"
+    )
+    assert rebuilds == [], "an outpaced round that made progress escalated to a full pass"
+    results = [
+        record.fields["result"]
+        for record in caplog.records
+        if getattr(record, "event", None) == "lexical_repair_finished"
+        and record.fields["kind"] == "catch_up"
+    ]
+    assert results == ["advanced", "targeted"]
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "streamtoken4", k=3, scope="kb")
+
+
+def test_a_round_never_records_a_checkpoint_newer_than_the_step_that_read_a_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A page read before a checkpoint cannot vouch for that checkpoint.
+
+    The first step replays a page, then the page is edited and the registry
+    moves past the checkpoint the next plan targets. The round runs out of
+    steps before it replays the page again. Recording that newer target would
+    admit the old text; the round must record the checkpoint it started at.
+    """
+    monkeypatch.setattr(lexstore, "_CATCH_UP_SLACK_STEPS", 0)
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    bulk = []
+    for index in range(cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    freshness.on_files_changed(tmp_path, changed=bulk)
+    round_start = freshness.recall_checkpoint(tmp_path, "kb")
+    steps = []
+    stored_after_round = []
+    real_retry = store.retry_deferred_upsert
+
+    def retry(paths, **kwargs):
+        steps.append(list(paths))
+        if len(steps) == 3:
+            stored_after_round.append(store.catalog_checkpoint("kb"))
+        if len(steps) == 2:
+            page = Path(steps[0][0])
+            page.write_text("# Edited\n\neditedafterread\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[page])
+        return real_retry(paths, **kwargs)
+
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert stored_after_round == [round_start]
+    assert lexstore.search_bm25(tmp_path, "editedafterread", k=3, scope="kb"), (
+        "a catalogue admitted as current serves the text a page had before its edit"
+    )
+
+
+def test_a_catch_up_that_moved_no_checkpoint_does_not_report_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    live_catalogue,
+) -> None:
+    """Endless churn on one page must end in the full pass, not in rounds that move one scope.
+
+    The vault scope lags with pages outside the knowledge base. One of them is
+    saved again on every step that holds it, so its step rolls back, it never
+    settles and the round runs out of steps. The knowledge base scope lags with
+    one edited page that the first step settles, and a page created during that
+    step keeps the step from blessing the scope. The round's stamp can move
+    that scope. A round that counted this as progress would queue lag-only
+    catch-ups for as long as the page changes, each one moving the other
+    scope. The round declines as outpaced and the full pass publishes.
+    """
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    pages = []
+    for index in range(cap + 9):
+        page = outside / f"outside-{index:02d}.md"
+        page.write_text(f"# Outside {index}\n\noutsidecontent\n", encoding="utf-8")
+        pages.append(page)
+    hot = pages[-1]
+    late = changed.parent / "late.md"
+    changed.write_text("# After\n\nkbedit\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed, *pages])
+    assert freshness.recall_checkpoint(tmp_path, "kb") != store.catalog_checkpoint("kb"), (
+        "the knowledge base scope does not lag"
+    )
+    attempts = []
+    in_step = False
+    real_retry = store.retry_deferred_upsert
+    real_insert = store._insert_page
+    real_rebuild = store.rebuild_atomic
+    rebuilds = []
+
+    def retry(paths, **kwargs):
+        nonlocal in_step
+        attempts.append(list(paths))
+        if len(attempts) == 1:
+            late.write_text("# Late\n\nlatetoken\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[late])
+        in_step = True
+        try:
+            return real_retry(paths, **kwargs)
+        finally:
+            in_step = False
+
+    def insert_while_the_editor_saves(conn, path, *args, **kwargs):
+        real_insert(conn, path, *args, **kwargs)
+        if in_step and Path(path) == hot and len(attempts) <= 12:
+            # A longer file each time, so no two saves share a signature.
+            hot.write_text("# Hot\n\n" + "hotsave " * len(attempts), encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[hot])
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+    monkeypatch.setattr(store, "_insert_page", insert_while_the_editor_saves)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    # Two steps for the lag, plus two slack steps.
+    assert len(attempts) <= 4, "lag-only catch-ups kept running while one scope stayed frozen"
+    assert rebuilds == [True]
+    assert not any("advanced (outpaced)" in message for message in caplog.messages)
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "hotsave", k=3, scope="vault")
+    assert lexstore.search_bm25(tmp_path, "kbedit", k=3, scope="kb")
+
+
+def test_a_scope_that_a_step_already_blessed_does_not_stall_the_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    live_catalogue,
+) -> None:
+    """A scope that the first step caught up natively is not a frozen scope.
+
+    An edited knowledge base page and pages outside the knowledge base lag.
+    The first step covers the whole knowledge base lag, so its witness blesses
+    that scope. An import keeps creating pages outside the knowledge base, so
+    the vault scope never reaches the registry and the round runs out of
+    steps. The stamp moves the vault scope, and the round advances without a
+    full pass.
+    """
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    pages = []
+    for index in range(cap + 5):
+        page = outside / f"outside-{index:02d}.md"
+        page.write_text(f"# Outside {index}\n\noutsidecontent\n", encoding="utf-8")
+        pages.append(page)
+    changed.write_text("# After\n\nkbedit\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed, *pages])
+    steps = []
+    rebuilds = []
+    real_retry = store.retry_deferred_upsert
+    real_rebuild = store.rebuild_atomic
+
+    def retry(paths, **kwargs):
+        steps.append(list(paths))
+        if len(steps) <= 4:
+            page = outside / f"stream-{len(steps)}.md"
+            page.write_text(f"# Stream\n\nstreamtoken{len(steps)}\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[page])
+        return real_retry(paths, **kwargs)
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [], "a scope that was already current stalled the round into a full pass"
+    assert any("advanced (outpaced)" in message for message in caplog.messages)
+    assert lexstore.search_bm25(tmp_path, "streamtoken4", k=3, scope="vault")
+    assert lexstore.search_bm25(tmp_path, "kbedit", k=3, scope="kb")
+
+
+def test_a_deleted_page_that_came_back_before_its_step_is_never_served_behind_a_current_catalogue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """Absence can recur exactly, and a present page cannot.
+
+    A page is deleted inside the lag, and then it comes back before the
+    catch-up step reads it, so the step writes a row for it. The round runs out
+    of steps, and recording its start would stamp a checkpoint at which the
+    page is absent over a row that holds it. The page is deleted again and
+    everything else matches that checkpoint, so readiness reports current and
+    a search returns the deleted page until another round heals it. The round
+    must not record a checkpoint over such a row.
+    """
+    monkeypatch.setattr(lexstore, "_CATCH_UP_SLACK_STEPS", 0)
+    store, changed, removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    bulk = []
+    for index in range(cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    removed.unlink()
+    freshness.on_files_changed(tmp_path, changed=bulk, deleted=[removed])
+    streamed = changed.parent / "streamed.md"
+    returned = False
+    real_retry = store.retry_deferred_upsert
+
+    def retry(paths, **kwargs):
+        nonlocal returned
+        if removed in paths and not returned:
+            returned = True
+            # The page is back, and a second write keeps the step from stamping.
+            removed.write_text("# Back\n\nghosttoken\n", encoding="utf-8")
+            streamed.write_text("# Streamed\n\nstreamtoken\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[removed, streamed])
+        return real_retry(paths, **kwargs)
+
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    store.catch_up_lagging_delta()
+    removed.unlink()
+    streamed.unlink()
+    freshness.on_files_changed(tmp_path, deleted=[removed, streamed])
+
+    assert returned, "the page never came back inside a step"
+    current = lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    served = lexstore.search_bm25(tmp_path, "ghosttoken", k=3, scope="kb")
+    assert not (current and served), "a deleted page is served behind a current catalogue"
+
+
+def test_a_page_created_after_the_stamped_checkpoint_is_never_served_after_its_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A page that did not exist at a checkpoint cannot leave a row behind it.
+
+    The round starts at a checkpoint where `ghost-new.md` is absent. The first
+    step meets three pages created after it, and the second step, capped at
+    two pages, writes the ghost's row and leaves one page unapplied. So the
+    only checkpoint the round fully applied is the one it started at. The
+    pages are then deleted, and the registry state matches that checkpoint
+    again. Readiness must not report current while a search still returns the
+    deleted page.
+    """
+    monkeypatch.setattr(lexstore, "CATALOG_FOREGROUND_DELTA_CAP", 2)
+    monkeypatch.setattr(lexstore, "_CATCH_UP_SLACK_STEPS", 1)
+    store, changed, _removed = live_catalogue
+    created = [changed.parent / name for name in ("ghost-new.md", "late-0.md", "late-1.md")]
+    changed.write_text("# After\n\nfirstedit\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    steps = 0
+    real_retry = store.retry_deferred_upsert
+
+    def retry(paths, **kwargs):
+        nonlocal steps
+        steps += 1
+        if steps == 1:
+            for page in created:
+                page.write_text("# Created\n\nghostnewtoken\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=created)
+        return real_retry(paths, **kwargs)
+
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    store.catch_up_lagging_delta()
+    for page in created:
+        page.unlink()
+    freshness.on_files_changed(tmp_path, deleted=created)
+
+    assert steps == 2, "the round did not run out of steps at the second one"
+    current = lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    served = lexstore.search_bm25(tmp_path, "ghostnewtoken", k=3, scope="kb")
+    assert not (current and served), "a deleted page is served behind a current catalogue"
+
+
 def test_a_tainted_lag_over_the_foreground_cap_still_rebuilds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

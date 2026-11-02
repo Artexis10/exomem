@@ -92,7 +92,10 @@ A writer-lease holder that is not configured as the preferred writer MUST
 also release its lease authority after a configurable idle period
 (`EXOMEM_WRITER_LEASE_IDLE_SECONDS`, default 60 seconds; `0` disables idle
 release) during which it held no in-flight mutation, so authority can return
-to another replica without an operator manually intervening. A preferred
+to another replica without an operator manually intervening. Under the
+single-host topology the default idle period SHALL be `0`, because no other
+replica can reach its loopback coordinator; an explicit
+`EXOMEM_WRITER_LEASE_IDLE_SECONDS` still applies. A preferred
 writer MUST be exempt from idle release. Idle release MUST NOT clear
 authority while a mutation is in flight, and any straggler write that was
 already authorized before release completes MUST still be rejected by fencing
@@ -126,6 +129,14 @@ if the lease has moved on by the time it reaches the atomic-write boundary.
 - **THEN** it releases its lease authority
 - **AND** another replica can subsequently acquire writer authority without
   operator intervention
+
+#### Scenario: A single-host holder keeps authority while idle
+
+- **WHEN** a service under the single-host topology, with no explicit idle
+  period, holds the lease with no in-flight mutation for longer than the
+  multi-host default idle period
+- **THEN** it retains writer authority
+- **AND** its next read is served without a lease takeover
 
 #### Scenario: A preferred holder never self-releases from idleness
 

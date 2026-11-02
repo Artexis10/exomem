@@ -578,7 +578,9 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
   write nested in an operation that kept the operation's grant instead of
   asking the coordinator again. A non-preferred replica also voluntarily releases
   an idle lease after `EXOMEM_WRITER_LEASE_IDLE_SECONDS` (default tracks the
-  TTL: `max(60, TTL)`; `0` disables; preferred replicas never idle-release).
+  TTL: `max(60, TTL)`; `0` disables; preferred replicas never idle-release). Under
+  the single-host topology the default is `0`, because no other replica can take
+  the lease; an explicit value still applies.
 - `exomem_idempotency_replays_total` — identical retries served from the
   receipt store instead of re-executing.
 - `exomem_http_requests_total{status}`, `exomem_edge_ingress_total{outcome}`,

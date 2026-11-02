@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from . import index_paths, reserved_paths, sidecar_store, vecstore
+from . import chance_band, index_paths, reserved_paths, sidecar_store, vecstore
 from .vector_index_common import vec_gate
 
 log = logging.getLogger(__name__)
@@ -62,6 +62,19 @@ class _ClipCache(NamedTuple):
     paths: list[str]
     frame_ts: list[float | None]
     matrix: np.ndarray
+
+
+class ClipSearch(NamedTuple):
+    """The hits of a CLIP search and what the chance band did to them."""
+
+    hits: list[tuple[str, float | None, float]]
+    #: Distinct pages (a video's frames count once) among the unbanded top-k hits that the
+    #: band removed entirely.
+    withheld_pages: int
+    #: "applied" the band ran; "uncalibrated" the population was too small or uniform to
+    #: calibrate one; "off" no band was asked for (alpha outside (0, 1)); "not_attempted"
+    #: there was no image to score.
+    band: str
 
 
 class ClipIndex:
@@ -680,20 +693,54 @@ class ClipIndex:
             vec_hits = self._vec_search(query_vec, k)
             if vec_hits is not None:
                 return vec_hits
+        return self._brute_force(query_vec, k, allowed_paths, None).hits
+
+    def search_above_chance(
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        allowed_paths: set[str] | None,
+        alpha: float,
+        min_population: int,
+    ) -> ClipSearch:
+        """`search`, keeping only the images whose similarity clears the chance maximum.
+
+        The chance level is measured from every indexed image, not from `allowed_paths`: a
+        filter chooses which images may be returned, and does not change what an unrelated
+        match scores. The in-memory scan alone sees that whole population. The KNN backend
+        returns k rows, so it is never used here and the band is never bypassed. An alpha
+        outside (0, 1) has no chance level, so it switches the band off instead of failing
+        the lane.
+        """
+        band = (alpha, min_population) if 0.0 < alpha < 1.0 else None
+        return self._brute_force(query_vec, k, allowed_paths, band)
+
+    def _brute_force(
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        allowed_paths: set[str] | None,
+        band: tuple[float, int] | None,
+    ) -> ClipSearch:
         paths, frame_ts, matrix = self.all_vectors()
         if not paths:
-            return []
-        if allowed_paths is not None:
-            keep = [index for index, path in enumerate(paths) if path in allowed_paths]
-            if not keep:
-                return []
-            paths = [paths[index] for index in keep]
-            frame_ts = [frame_ts[index] for index in keep]
-            matrix = matrix[keep]
+            return ClipSearch([], 0, "not_attempted")
         scores = matrix @ query_vec.astype(np.float32, copy=False)
-        k_eff = min(k, len(scores))
-        if k_eff <= 0:
-            return []
-        top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
-        top_idx = top_idx[np.argsort(-scores[top_idx])]
-        return [(paths[i], frame_ts[i], float(scores[i])) for i in top_idx]
+        rows = np.arange(len(paths))
+        if allowed_paths is not None:
+            rows = np.array([i for i, path in enumerate(paths) if path in allowed_paths], dtype=np.intp)
+        wanted = min(k, len(rows))
+        if wanted <= 0:
+            return ClipSearch([], 0, "not_attempted")
+        in_rows = scores[rows]
+        top = np.argpartition(-in_rows, wanted - 1)[:wanted]
+        window = [int(i) for i in rows[top[np.argsort(-in_rows[top])]]]
+        state = "off"
+        cleared = None
+        if band is not None:
+            cleared = chance_band.semantic_band(scores, alpha=band[0], min_population=band[1])
+            state = "uncalibrated" if cleared is None else "applied"
+        kept = window if cleared is None else [i for i in window if i in cleared]
+        withheld = {paths[i] for i in window} - {paths[i] for i in kept}
+        return ClipSearch([(paths[i], frame_ts[i], float(scores[i])) for i in kept], len(withheld), state)
