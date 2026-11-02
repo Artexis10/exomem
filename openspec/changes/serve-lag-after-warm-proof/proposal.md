@@ -59,7 +59,7 @@ eligibility and reason codes unchanged.
 
 - `src/exomem/readiness.py`: a proven process whose ready bit is clear reports
   `unavailable` instead of `warming`, and may re-prove and re-admit during the
-  warm.
+  warm. Only a proof made after the managed warm began counts.
 - `src/exomem/runtime_readiness.py`: documentation only. The served-lag check
   already follows the `unavailable` state and the proof flag.
 - `src/exomem/find.py`: no change. Its warm gate refuses only the `warming`

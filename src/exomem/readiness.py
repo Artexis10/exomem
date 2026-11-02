@@ -61,11 +61,9 @@ _runtime_managed = False
 #: the live projection) since its managed warm began. From then on, even while
 #: the rest of the warm runs, a later strict failure reads as after the warm:
 #: recall serves the published catalogue and health reports the lag as
-#: serving. A process that never proved it has no such standing. Only a
-#: managed process can hold it: a standby's `mark_ready` runs unmanaged, and a
-#: flag it left behind could satisfy the promotion wait before the promoted
-#: worker proves anything. Every transition that starts a new proof epoch
-#: clears it.
+#: serving. A process that never proved it has no such standing. Only
+#: `_record_proof_locked` sets it, and only for a managed process inside a
+#: warm. Every transition that starts a new proof epoch clears it.
 _retrieval_proven = False
 _started_at: float | None = None
 _retrieval_generation = 0
@@ -109,13 +107,12 @@ def retrieval_proven() -> bool:
 
 def admit_retrieval_proof(generation: int) -> bool:
     """Publish one exact proof only if no newer invalidation raced it."""
-    global _retrieval_generation, _retrieval_proven
+    global _retrieval_generation
     with _lock:
         if generation != _retrieval_generation:
             return False
         _events["retrieval_catalog"].set()
-        if _runtime_managed:
-            _retrieval_proven = True
+        _record_proof_locked()
         _retrieval_generation += 1
         return True
 
@@ -169,13 +166,12 @@ def required_warm_finished() -> bool:
 
 def mark_ready(component: str) -> list:
     """Set `component`'s event; atomically drain and return its deferred items."""
-    global _retrieval_generation, _retrieval_proven
+    global _retrieval_generation
     _check(component)
     with _lock:
         _events[component].set()
         if component == "retrieval_catalog":
-            if _runtime_managed:
-                _retrieval_proven = True
+            _record_proof_locked()
             _retrieval_generation += 1
         drained = _deferred[component]
         _deferred[component] = []
@@ -240,7 +236,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     promotion callback lost a race.  The check never walks or reprojects the
     corpus.
     """
-    global _retrieval_generation, _retrieval_proven
+    global _retrieval_generation
     with _lock:
         admission = _retrieval_admission_locked()
         managed_recovery = _reprove_allowed_locked()
@@ -268,7 +264,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             # admission.  Publish the exact proof only if no newer invalidation
             # raced it (the generation comparison above is the CAS).
             _events["retrieval_catalog"].set()
-            _retrieval_proven = True
+            _record_proof_locked()
             _retrieval_generation += 1
         elif not proof_current and admission["admitted"]:
             _events["retrieval_catalog"].clear()
@@ -341,6 +337,21 @@ def _retrieval_admission_locked() -> dict[str, object]:
     if _runtime_managed:
         return {"state": "warming", "admitted": False}
     return {"state": "unverified", "admitted": False}
+
+
+def _record_proof_locked() -> None:
+    """Record a strict catalogue proof as this warm's standing, if it can be one.
+
+    Only a managed process that has started a warm records it. A standby's
+    `mark_ready` runs unmanaged, and a flag it left behind could satisfy the
+    promotion wait before the promoted worker proves anything. A proof made
+    between `manage_runtime` and `begin_warm`, such as a bounded apply during
+    the recall-seed wait, would serve a lag before any warm and then drop back
+    to warming when the warm begins. The caller holds ``_lock``.
+    """
+    global _retrieval_proven
+    if _runtime_managed and (_warm_active or _warm_finished):
+        _retrieval_proven = True
 
 
 def _reprove_allowed_locked() -> bool:

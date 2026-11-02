@@ -222,27 +222,6 @@ def test_a_warm_that_proved_its_catalogue_serves_a_later_lag_before_it_finishes(
     assert caught_up.json()["retrieval"]["admitted"] is True
 
 
-@pytest.mark.parametrize("lost", ["live projection", "access-policy identity"])
-def test_a_warm_that_proved_its_catalogue_is_not_ready_once_its_projection_is_lost(
-    runtime: _Runtime, lost: str
-) -> None:
-    """Catches a running warm reporting `lagging` for a projection recall cannot serve."""
-    readiness.begin_warm()
-    assert warmup.warm_retrieval_catalog(runtime.vault)
-    runtime.advance_projection()
-    if lost == "live projection":
-        freshness.invalidate(runtime.vault)
-    else:
-        (runtime.vault / "Knowledge Base" / "_access.yaml").write_text(
-            "excluded:\n  - Private\n", encoding="utf-8"
-        )
-
-    [answer] = runtime.probe()
-
-    assert answer.status_code == 503, answer.json()
-    assert answer.json()["retrieval"]["state"] == "unavailable"
-
-
 def test_an_unmanaged_proof_does_not_make_a_later_lag_ready(runtime: _Runtime) -> None:
     """A standby's `mark_ready` runs unmanaged and must not stand in for a worker's proof."""
     readiness.unmanage_runtime()

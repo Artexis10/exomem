@@ -27,7 +27,9 @@ def _fresh_readiness():
     readiness.reset()
 
 
-def _managed_warm_with_revoked_catalogue(monkeypatch: pytest.MonkeyPatch, proof: list[bool]):
+def _managed_warm_without_admission(monkeypatch: pytest.MonkeyPatch, proof: list[bool]):
+    """A warm whose catalogue was never admitted, as when a repair's proof loses the
+    generation check to a warm transition: only the required-warm arm re-proves it."""
     monkeypatch.setattr(freshness, "event_indexes_enabled", lambda: True)
     monkeypatch.setattr(
         lexstore,
@@ -36,15 +38,13 @@ def _managed_warm_with_revoked_catalogue(monkeypatch: pytest.MonkeyPatch, proof:
     )
     readiness.manage_runtime()
     readiness.begin_warm()
-    readiness.mark_ready("retrieval_catalog")
-    readiness.mark_unready("retrieval_catalog")
 
 
-def test_a_revoked_catalogue_is_re_proved_once_the_required_warm_is_done(
+def test_an_unadmitted_catalogue_is_re_proved_once_the_required_warm_is_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     proof = [True]
-    _managed_warm_with_revoked_catalogue(monkeypatch, proof)
+    _managed_warm_without_admission(monkeypatch, proof)
     readiness.finish_required_warm()
     assert readiness.is_warming()  # optional preloads are still running
     assert readiness.retrieval_admission(tmp_path) == {"state": "ready", "admitted": True}
@@ -54,12 +54,22 @@ def test_before_the_required_warm_is_done_an_unproven_catalogue_waits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches a probe admitting before the warm's own catalogue step heals and rebases it."""
+    _managed_warm_without_admission(monkeypatch, [True])
+    assert readiness.retrieval_admission(tmp_path) == {"state": "warming", "admitted": False}
+
+
+def test_a_proof_made_before_the_warm_grants_no_standing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a proof from the recall-seed wait serving a lag before any warm begins."""
     monkeypatch.setattr(freshness, "event_indexes_enabled", lambda: True)
     monkeypatch.setattr(
         lexstore, "runtime_retrieval_catalog_current", lambda _root, **_kwargs: True
     )
     readiness.manage_runtime()
-    readiness.begin_warm()
+    assert readiness.admit_retrieval_proof(readiness.retrieval_proof_generation())
+    readiness.mark_unready("retrieval_catalog")
+    assert not readiness.retrieval_proven()
     assert readiness.retrieval_admission(tmp_path) == {"state": "warming", "admitted": False}
 
 
@@ -67,8 +77,9 @@ def test_a_catalogue_proved_in_this_warm_is_re_proved_before_the_required_warm_i
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches a caught-up catalogue reading 503 until the graph handoff and corpus finish."""
-    proof = [True]
-    _managed_warm_with_revoked_catalogue(monkeypatch, proof)
+    _managed_warm_without_admission(monkeypatch, [True])
+    readiness.mark_ready("retrieval_catalog")  # the warm's own catalogue step
+    readiness.mark_unready("retrieval_catalog")  # a later write revokes it
     assert not readiness.required_warm_finished()
     assert readiness.retrieval_admission(tmp_path) == {"state": "ready", "admitted": True}
 
@@ -77,7 +88,7 @@ def test_a_failing_proof_after_the_required_warm_still_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     proof = [False]
-    _managed_warm_with_revoked_catalogue(monkeypatch, proof)
+    _managed_warm_without_admission(monkeypatch, proof)
     readiness.finish_required_warm()
     assert readiness.retrieval_admission(tmp_path)["admitted"] is False
     proof[0] = True
@@ -250,7 +261,7 @@ def test_concurrent_unadmitted_requests_share_one_proof(
         gate.wait(5.0)
         return False
 
-    _managed_warm_with_revoked_catalogue(monkeypatch, [False])
+    _managed_warm_without_admission(monkeypatch, [False])
     monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_current", slow_proof)
     readiness.finish_required_warm()
     answers: list[dict] = []

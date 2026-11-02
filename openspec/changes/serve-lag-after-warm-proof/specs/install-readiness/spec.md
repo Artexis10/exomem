@@ -55,7 +55,7 @@ The readiness surface MAY answer from a ready proof for at most 30 seconds. It S
 
 #### Scenario: A fresh process waits for a strict proof
 
-- **WHEN** a process begins a managed warm, or holds only a proof made while it was unmanaged, and a live projection is ahead of the maintained catalogue
+- **WHEN** a process begins a managed warm, or holds only a proof made while it was unmanaged or before its managed warm began, and a live projection is ahead of the maintained catalogue
 - **THEN** health reports retrieval as warming or unavailable with `admitted=false` and status not ready
 - **AND** only a strict proof made by that managed process allows `lagging` afterwards
 
