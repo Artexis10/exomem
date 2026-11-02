@@ -6,8 +6,9 @@ read-only proof of the current graph snapshot — while the previous worker keep
 serving.  Until the supervisor promotes it, the standby owns nothing: it takes
 no writer lease, publishes no index or graph state, schedules no drain, media or
 watcher work, and starts no descendants. Where the live lexical catalogue is
-proven incompatible or compatible but stale, the standby builds a private temp.
-Only promotion publishes it; runtime admission still needs the subsequent proof.
+proven incompatible, compatible but stale, or built by another release, the
+standby builds a private temp. Only promotion publishes it; runtime admission
+still needs the subsequent heal and proof.
 
 Promotion is the only place ownership changes hands.  It runs after the previous
 worker and its descendants have provably exited, re-validates the checkpoint the
@@ -69,6 +70,10 @@ COLLECTIONS_PREIMPORT_MARGIN_SECONDS = 10.0
 _detached_catalog: Any = None
 #: Preparation only; the promoted worker still proves runtime retrieval.
 _detached_built = False
+#: Whether a detached build RAN, however it ended. Until it has, a live
+#: catalogue that another release built is not proven current; see
+#: `prove_retrieval_catalog`.
+_detached_attempted = False
 #: Set once an unpromoted standby is being stopped; a build that finishes
 #: afterwards discards what it built instead of holding it.
 _discarded = False
@@ -602,6 +607,12 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     for this vault. The standby therefore only asks whether the catalog is
     already current, with repair scheduling explicitly off. A failed proof may
     permit isolated preparation, but never a publication by the standby.
+
+    A catalogue that another release built is not proven until a detached build
+    has run. Promoted over it, this process would inherit the serving worker's
+    registry stamp, which no lag repair can bridge, so its first repair would
+    rebuild the whole catalogue while ingress waits. A build that ran and
+    failed falls back to this proof, which is as good as this standby can do.
     """
     from . import freshness, lexstore
 
@@ -609,6 +620,10 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
         if not lexstore.maintained_content_index_enabled():
             # No maintained content index to prove; nothing gates retrieval.
             return True
+        with _lock:
+            attempted = _detached_attempted
+        if not attempted and lexstore.live_catalog_release_current(Path(vault_root)) is False:
+            return False
         return lexstore.runtime_retrieval_catalog_current(
             Path(vault_root),
             require_live_projection=freshness.event_indexes_enabled(),
@@ -636,14 +651,15 @@ def _warm_proven_catalogue(vault_root: Path) -> None:
 
 
 def prepare_detached_catalog(vault_root: Path) -> bool:
-    """Prepare beside a proven incompatible or compatible stale live catalogue.
+    """Prepare beside a proven incompatible, stale or other-release live catalogue.
 
-    A failed readiness proof alone establishes neither case. Missing, busy and
-    unknown observations leave the standby waiting. A complete private build
-    survives ordinary source edits; promotion owns adoption and the subsequent
-    watcher seed, heal and strict runtime proof. Preparation never publishes.
+    A failed readiness proof alone establishes none of these cases. Missing,
+    busy and unknown observations leave the standby waiting. A complete private
+    build survives ordinary source edits; promotion owns adoption and the
+    subsequent watcher seed, heal and strict runtime proof. Preparation never
+    publishes.
     """
-    global _detached_catalog, _detached_built
+    global _detached_catalog, _detached_built, _detached_attempted
     from . import freshness, lexstore
 
     try:
@@ -653,19 +669,23 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
         assessment = lexstore.assess_live_catalog(
             vault_root, require_live_projection=freshness.event_indexes_enabled()
         )
-        if not (
-            assessment.compatibility == "incompatible"
-            or (
-                assessment.compatibility == "compatible"
-                and any(not scope.complete for scope in assessment.scopes.values())
-            )
-        ):
+        if assessment.compatibility == "compatible":
+            owed = any(
+                not scope.complete for scope in assessment.scopes.values()
+            ) or lexstore.live_catalog_release_current(vault_root) is False
+        else:
+            owed = assessment.compatibility == "incompatible"
+        if not owed:
             return False
         with _lock:
             if _discarded or _promoted or _detached_built:
                 return False
         started = time.monotonic()
-        detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
+        try:
+            detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
+        finally:
+            with _lock:
+                _detached_attempted = True
     except Exception:  # noqa: BLE001 - an unbuilt catalogue is a waiting component
         log.warning("standby detached catalogue build failed", exc_info=True)
         return False
@@ -854,8 +874,9 @@ def warm(vault_root: Path) -> None:
     make while another worker owns the vault. Everything here reads: the catalog
     is proved, the rebuildable caches are populated in memory, the models are
     loaded, and the graph snapshot is proved against disk. The one write is a
-    catalogue built detached, beside the serving worker's live one,
-    which nothing reads until promotion adopts it. Never raises; an unready
+    catalogue built detached, beside the serving worker's live one, when the
+    live one is incompatible, stale or another release's; nothing reads it
+    until promotion adopts it. Never raises; an unready
     component stays ``waiting`` and the supervisor's warm budget decides what
     happens next.
     """
@@ -885,6 +906,10 @@ def warm(vault_root: Path) -> None:
                 freshness.rebaseline(vault_root)
             except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
                 log.warning("standby recall registry reseed failed", exc_info=True)
+        elif prove_retrieval_catalog(vault_root):
+            # A release-change build that ran and failed falls back to the
+            # ordinary proof now, not at the next re-proof poll.
+            _warm_proven_catalogue(vault_root)
         else:
             log.info(
                 "standby retrieval catalog is not current; awaiting a current "
@@ -1183,7 +1208,8 @@ def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
     global _carried, _corpus_built, _corpus_attempted, _collections_settled
-    global _detached_catalog, _detached_built, _discarded, _discard_requested
+    global _detached_catalog, _detached_built, _detached_attempted
+    global _discarded, _discard_requested
     global _promoting, _proof_signal, _proof_marker
     global _attempt_signal, _attempt_stat, _attempt_ended_at
     with _lock:
@@ -1195,6 +1221,7 @@ def reset_for_tests() -> None:
         _attempt_ended_at = None
         _detached_catalog = None
         _detached_built = False
+        _detached_attempted = False
         _discarded = False
         _discard_requested = threading.Event()
         _standby = False

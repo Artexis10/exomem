@@ -7762,7 +7762,11 @@ def recall_resolver_snapshot(
     candidate = expected_checkpoint
     if candidate is not None and not allow_fallback:
         if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
-            lexstore.request_repair(root)
+            # The registry moved past the request's admission, so the catalogue
+            # may trail it. The lag repair replays that delta and falls back to
+            # the full pass on any refusal. Admission stays: the registry moving
+            # does not prove the catalogue trails it.
+            lexstore.request_repair(root, lag_only=True, cause=lexstore.RepairCause.CATALOGUE_LAG)
             raise RetrievalIndexWarming(
                 site="resolver_checkpoint_stale",
                 status="temporarily_unavailable",
@@ -7774,7 +7778,7 @@ def recall_resolver_snapshot(
     if candidate is not None and identity == _recall_checkpoint_identity(candidate):
         checkpoint = candidate
     if not allow_fallback and checkpoint is None:
-        lexstore.request_repair(root)
+        lexstore.request_repair(root, cause=lexstore.RepairCause.RESOLVER_CHECKPOINT_ABSENT)
         raise RetrievalIndexWarming(
             site="resolver_checkpoint_absent",
             status="temporarily_unavailable",
@@ -7818,8 +7822,8 @@ def recall_resolver_snapshot(
             if not allow_fallback:
                 # Declining beats both alternatives: blocking past the client's
                 # deadline answers nobody, and building our own here would pay
-                # the same whole-vault walk the leader is already paying.
-                lexstore.request_repair(root)
+                # the same whole-vault walk the leader is already paying. The
+                # catalogue is not at fault, so no repair is asked for.
                 raise RetrievalIndexWarming(
                     site="resolver_build_wait",
                     status="temporarily_unavailable",
@@ -7845,7 +7849,9 @@ def recall_resolver_snapshot(
         entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
             if not allow_fallback:
-                lexstore.request_repair(root)
+                lexstore.request_repair(
+                    root, cause=lexstore.RepairCause.RESOLVER_ENTRIES_UNAVAILABLE
+                )
                 raise RetrievalIndexWarming(
                     site="resolver_entries_unavailable",
                     status="temporarily_unavailable",
