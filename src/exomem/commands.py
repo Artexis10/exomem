@@ -9398,12 +9398,11 @@ def _process_media(
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
-    if operation in {"retry", "reprocess"}:
+    if operation in mutation_terminal_module.MEDIA_REQUEUE_OPERATIONS:
         payload["requeued"] = result.requeued
     payload["index_refreshed"] = 0
     payload["index_refresh_remaining"] = _index_refresh_remaining()
     return payload
-
 
 
 def _run_media_operation(

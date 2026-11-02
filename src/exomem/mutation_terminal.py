@@ -146,6 +146,8 @@ _MAX_DERIVED_DIAGNOSTICS = 9
 #: Each media operation and the outcome its result reports.
 # nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
 MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+#: The media operations whose result reports how many jobs they requeued.
+MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 
 #: How an agent tells the user about a write. One sentence, carried by the bootstrap
 #: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
@@ -437,7 +439,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
             "sidecar_path": result["sidecar_path"],
             "job_id": result["job_id"],
         }
-        if operation in {"retry", "reprocess"}:
+        if operation in MEDIA_REQUEUE_OPERATIONS:
             if not integer(result.get("requeued")):
                 return {}
             projected["requeued"] = result["requeued"]
@@ -472,6 +474,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
                 }
             )
             continue
+        # nosemgrep: ep-word-membership -- the media job's closed states, which this projection reports.
         if outcome not in MEDIA_OUTCOMES.values() or state not in {
             "pending",
             "running",
@@ -2060,8 +2063,20 @@ def project_terminal(
     compact: dict[str, Any] = {}
     artifact_receipt = _artifact_receipt_projection(leaf)
     media_projection = _media_result_projection(leaf)
-    user_summary = _user_summary(
-        result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
+    # A media batch whose rows did not project gives no per-file states, and its `paths`
+    # include failed files, so no sentence is safer than one that claims them all.
+    unread_media_batch = (
+        isinstance(leaf, Mapping)
+        and leaf.get("operation") in MEDIA_OUTCOMES
+        and leaf.get("results") is not None
+        and not media_projection
+    )
+    user_summary = (
+        None
+        if unread_media_batch
+        else _user_summary(
+            result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
+        )
     )
     if user_summary is not None:
         compact["user_summary"] = user_summary
