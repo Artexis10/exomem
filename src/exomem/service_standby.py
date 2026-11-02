@@ -479,6 +479,12 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     change. After a proof succeeds it re-proves only for a generation that
     landed without a publication: a publication since the held proof is left
     to promotion, which records it as `advanced`.
+
+    A held proof stays held while it is re-proved, and the re-proof replaces
+    it only when it succeeds. Withdrawing it first, as this did through
+    0.157.1, left a window of the proof's whole length in which a promotion
+    read no proof and recorded `unproven`; a rehearsal of that upgrade hit it
+    under steady writes, and the promoted worker paid the whole handoff again.
     """
     global _attempt_stat
     from . import freshness
@@ -504,13 +510,27 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         return False
     with _lock:
         held = _proved_token
-    if held is not None and signal[1] != held:
-        # A snapshot published since the one the held proof names. Promotion
-        # records it as `advanced` and the promoted worker runs the handoff in
-        # full, so a re-proof here would only withdraw the held proof for its
-        # whole length. A generation that lands without a publication is the
-        # movement a re-proof is for.
-        return False
+    if held is not None:
+        if signal[1] != held:
+            # A snapshot published since the one the held proof names.
+            # Promotion records it as `advanced` and the promoted worker runs
+            # the handoff in full, so a re-proof here would buy nothing. A
+            # generation that lands without a publication is the movement a
+            # re-proof is for.
+            return False
+        # Re-prove over the held lineage: no reseed, no resolver eviction.
+        # Reseeding pops the adopted origin the held proof relies on, which is
+        # why the reseeding paths withdraw the proof first. Kept, that origin
+        # stays a valid delta origin: this process has no watcher and every
+        # reseed in it withdraws the proof, so its registry has not moved since
+        # the held proof sampled it, and `adopt_recall_origin` can only lower an
+        # origin, which only widens the first delta. The proof itself reads
+        # disk, so the residue it returns covers the generation that landed. A
+        # decline keeps the held proof, and a result that lands after promotion
+        # is dropped in `prove_graph_snapshot`.
+        proved = prove_graph_snapshot(vault_root)
+        log.info("standby graph snapshot re-proof over the held proof adopted=%s", proved)
+        return proved
     if not _invalidate_graph_proof():
         return False
     # This process has no watcher, so its recall registry is as old as the

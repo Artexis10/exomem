@@ -2877,6 +2877,7 @@ def publish_corpus_files_changed_classified(
     *,
     changed: Iterable[Path] = (),
     deleted: Iterable[Path | str] = (),
+    populate_on_miss: bool = True,
 ) -> CorpusPublicationFailure | None:
     """:func:`publish_corpus_files_changed`, reporting WHICH half failed.
 
@@ -2885,6 +2886,10 @@ def publish_corpus_files_changed_classified(
     only wants to propagate can re-raise it unchanged. Interpreter-level
     exits (anything that is not an ``Exception``) are never turned into a
     result; they propagate as before.
+
+    ``populate_on_miss=False`` leaves a cold cache cold. The watcher passes it
+    because its consumers' apply follows this publication, and calls
+    :func:`populate_cold_corpus_context` once that apply has landed.
     """
     root = Path(vault_root)
     changed_values = tuple(Path(value) for value in changed)
@@ -2926,9 +2931,19 @@ def publish_corpus_files_changed_classified(
             return CorpusPublicationFailure(CORPUS_PUBLICATION_PROJECTION_PATCH, error)
     # Outside the update lock on purpose: the populate walks and parses the
     # whole vault, and the publisher advances freshness under that same lock.
-    if disposition == _CORPUS_PATCH_MISS:
+    if disposition == _CORPUS_PATCH_MISS and populate_on_miss:
         _populate_corpus_context_after_miss(root)
     return None
+
+
+def populate_cold_corpus_context(vault_root: Path) -> None:
+    """Build the corpus context when none is cached; a warm cache is a no-op.
+
+    The populate a publication skipped with ``populate_on_miss=False``, under
+    the same admission rules. It also fills a cache that the publication
+    evicted for config drift, which a reader would otherwise build.
+    """
+    _populate_corpus_context_after_miss(Path(vault_root))
 
 
 def _patch_corpus_files_changed_locked(
@@ -2944,8 +2959,10 @@ def _patch_corpus_files_changed_locked(
     cold cache has nothing to patch, and populating it means a full walk that
     must NOT happen inside this lock (see
     :func:`_populate_corpus_context_after_miss`). ``"evicted"`` is the
-    config-census drift pop and stays eviction-only — a drifted config makes
-    the stored context unusable, not merely absent.
+    config-census drift pop: a drifted config makes the stored context
+    unusable, not merely absent. The patch only evicts. Publishers populate only
+    on a miss, so only the watcher's deferred populate, which checks for an empty
+    slot, refills an evicted entry.
     """
     root = Path(vault_root)
     cache_key = _corpus_cache_key(root)
@@ -3270,9 +3287,19 @@ def corpus_registry_overrides(
 
 
 def warm_corpus_context(vault_root: Path) -> None:
-    """Fill the shared structural corpus cache without classifying for any caller."""
-    _context, census = _build_corpus_context_with_census(Path(vault_root), warm=True)
+    """Fill the shared structural corpus cache without classifying for any caller.
+
+    A build that writes kept outrunning still counts: it is cached for the next
+    reader to confirm with a census walk, which spares that reader the build.
+    """
+    root = Path(vault_root)
+    held_before = cached_corpus_census(root)
+    _context, census = _build_corpus_context_with_census(root, warm=True)
     if corpus_context_cache_enabled() and census is None:
+        held_after = cached_corpus_census(root)
+        # A new entry is this build's, or a publication's patch of it.
+        if held_after is not None and held_after is not held_before:
+            return
         raise OpError(
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
@@ -3475,7 +3502,8 @@ def _build_corpus_context_with_census(
     one. The census is ``None`` whenever no single walk unambiguously matches
     the returned context: candidate-bearing builds, a disabled cache, a
     registry that does not match disk, a cold build whose post-publish
-    reconciliation never stabilized, or an in-flight-dedup waiter (it only
+    reconciliation never stabilized (it is still cached, uncaptioned, for the
+    next reader's census walk to confirm), or an in-flight-dedup waiter (it only
     confirmed its own pre-wait walk matched the flight it is chasing, not
     whatever the owning build's stabilization loop settles on or gives up on
     afterward). A caller that gets ``None`` here has no cheaper option than
@@ -3715,6 +3743,7 @@ def _build_corpus_context_with_census(
             {"caller": current_call_context(), "outcome": "rebuild"},
         )
         stored = False
+        kept_unconfirmed = False
         if census is not None and cache_key is not None:
             # Entered outside the update lock, so its queued samples are
             # emitted only after that lock releases.
@@ -3756,11 +3785,28 @@ def _build_corpus_context_with_census(
                         _caption_corpus_context_locked(cache_key, current_checkpoint)
                         _trim_corpus_cache_locked(cache_key)
                     stored = True
+                elif stable_census is not None:
+                    # Writes outran every confirmation. The context matches its
+                    # last census for each page that census still describes, and
+                    # a page changed since differs from it, so the next reader's
+                    # census walk reparses only that page. Uncaptioned: no single
+                    # checkpoint describes this context, so no event serves it
+                    # without a walk. Dropping it made that reader, or a promoted
+                    # standby, pay the whole cold build again.
+                    with _CORPUS_CONTEXT_CACHE_LOCK:
+                        _CORPUS_CONTEXT_CACHE[cache_key] = (stable_census, context)
+                        _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                            f"{language.schema_version}:{language.content_hash}"
+                        )
+                        _drop_corpus_caption_locked(cache_key)
+                        _trim_corpus_cache_locked(cache_key)
+                    log.info("semantic corpus context kept unconfirmed: writes outran the census")
+                    kept_unconfirmed = True
         log.info(
             "semantic corpus context built pages=%d build_ms=%.1f cached=%s event_miss=%s",
             len(context.pages),
             build_ms,
-            stored,
+            "unconfirmed" if kept_unconfirmed else stored,
             miss_reason,
         )
     except BaseException as error:

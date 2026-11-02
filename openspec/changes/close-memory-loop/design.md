@@ -1787,11 +1787,13 @@ cannot prove final runtime admission before stopping the serving worker, so this
 repair establishes delivery correctness rather than a full availability guarantee.
 Native preparation and stop-to-admission latency remain separate acceptance facts.
 
-A catalogue retry or graph reproof replaces the candidate's recall baseline and
-invalidates adopted graph origins. Withdraw the held graph proof before reseeding.
-Evict the exact vault's resolver cache, prime it at the new checkpoint, and
-reprove the graph before carrying its handoff. A declined reproof keeps graph
-cutover readiness waiting.
+A catalogue retry, or a graph reproof while no proof is held, replaces the
+candidate's recall baseline and invalidates adopted graph origins. Withdraw any
+held graph proof before such a reseed. Evict the exact vault's resolver cache, prime
+it at the new checkpoint, and reprove the graph before carrying its handoff. A
+declined reproof keeps graph cutover readiness waiting. A graph reproof of a held
+proof does not reseed: the held proof and its origin stay until the reproof
+succeeds, so a promotion during the reproof relies on the held proof.
 
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
