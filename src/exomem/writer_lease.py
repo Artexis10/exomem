@@ -5252,7 +5252,7 @@ class LeaseManager:
         if mutation.next_borrower_deadline() is None:
             # Every borrower gave up during the handoff, so no reader needs a new generation.
             return 0
-        _bump_commit_generation(self.config.state_dir, vault_root)
+        _bump_commit_generation(self.config.state_dir, vault_root, operation="boundary_lend")
         return mutation.lend(until=now + room_seconds)
 
     @contextmanager
@@ -5476,7 +5476,9 @@ class LeaseManager:
                     # (wide or narrow), which is what lets the validity-stamp
                     # comparison skip the in-boundary corpus stat-walk.
                     if advance_generation:
-                        _bump_commit_generation(self.config.state_dir, vault_root)
+                        _bump_commit_generation(
+                            self.config.state_dir, vault_root, operation=operation
+                        )
         finally:
             _ACTIVE_LEASE_MANAGER.reset(manager_token)
             if direct_token is not None:
@@ -8026,8 +8028,14 @@ def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
         return None
 
 
-def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | str) -> None:
-    """Advance the counter; called while the mutation boundary is held."""
+def _bump_commit_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str, *, operation: str | None = None
+) -> None:
+    """Advance the counter; called while the mutation boundary is held.
+
+    `operation` only labels the log line that says which writer staled the stamps.
+    """
+    logger.info("commit generation advanced by %s", operation or "unnamed operation")
     try:
         path = _commit_generation_path(state_dir, vault_or_cell)
         path.parent.mkdir(parents=True, exist_ok=True)
