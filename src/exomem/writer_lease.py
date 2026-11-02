@@ -5364,7 +5364,11 @@ class LeaseManager:
 
     @contextmanager
     def absorbing_mutation_guard(
-        self, vault_root: os.PathLike[str] | str, *, operation: str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        operation: str,
+        request_id: str | None = None,
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, waiting out an ordinary busy boundary before the body runs.
 
@@ -5376,8 +5380,14 @@ class LeaseManager:
         because it may have consumed the request stream. The caller's place in line and its
         waiter slot end with the acquire: it no longer waits.
         """
-        if not _writes_absorb_contention():
-            with self.mutation_guard(vault_root, operation=operation) as mutation:
+        # A re-entrant hold never contends, and waiting in line would wait on this thread.
+        if (
+            not _writes_absorb_contention()
+            or self._mutation_coordinator_for(vault_root).current_thread_holds_boundary()
+        ):
+            with self.mutation_guard(
+                vault_root, request_id=request_id, operation=operation
+            ) as mutation:
                 yield mutation
             return
 
@@ -5388,7 +5398,9 @@ class LeaseManager:
 
             def acquire() -> VaultMutationCoordinator:
                 with mutation_lock.absorbing_busy():
-                    return held.enter_context(self.mutation_guard(vault_root, operation=operation))
+                    return held.enter_context(
+                        self.mutation_guard(vault_root, request_id=request_id, operation=operation)
+                    )
 
             yield self._absorb_contention(
                 operation,
@@ -5397,9 +5409,9 @@ class LeaseManager:
                 ),
                 acquire,
                 absorbable=refused_before_the_body,
-                request_id=str(uuid.uuid4()),
+                request_id=request_id or str(uuid.uuid4()),
                 join_on_arrival=True,
-                # The /upload route or the session park hands the refusal to its caller and records it.
+                # The caller of the guard hands the refusal to its client and records it.
                 seam_records=True,
             )
 
@@ -6619,6 +6631,9 @@ class LeaseManager:
             or narrow_maintenance_job
             or narrow_curation_proposal
             or narrow_episode_record
+            # Issuance writes no vault-owned file: upload and download mint a token over a private
+            # copy or store, and a session open or rotate writes only its own SQLite transaction.
+            or authorization_issuance
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")

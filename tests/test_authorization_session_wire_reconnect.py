@@ -383,8 +383,10 @@ def _call(
     client: TestClient,
     request_id: int,
     arguments: dict[str, object],
+    *,
+    tool_name: str = "govern_memory",
 ) -> dict[str, object]:
-    response = _request(client, request_id, arguments)
+    response = _request(client, request_id, arguments, tool_name=tool_name)
     assert response.status_code == 200, response.text
     result = response.json()["result"]
     assert result.get("isError") is not True, result

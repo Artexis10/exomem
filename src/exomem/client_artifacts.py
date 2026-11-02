@@ -667,6 +667,29 @@ def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, st
     return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": reason}
 
 
+#: Once any file commits, the batch's identity is settled and a repeat of the identical call
+#: replays it, so a busy file is retried by a new call that names only the failed files.
+_BUSY_FILE_REASON = (
+    "The boundary was busy; this file was not stored. "
+    "Retry it in a new call that names only the failed files."
+)
+
+
+def _busy_failed(file_id: str) -> dict[str, str]:
+    """A file's commit refused before it began: failed with the retryable busy code, so the batch keeps its other files."""
+    return {"file_id": file_id, "outcome": "failed", "code": "MUTATION_BUSY", "reason": _BUSY_FILE_REASON}
+
+
+def _refused_before_commit(error: OpError, *, body_started: bool) -> bool:
+    # `_mutation_busy` reports committed false even when raised after the canonical commit
+    # (e.g. at catalog publication), so only a busy raised before the file's body ran is safe.
+    return (
+        not body_started
+        and error.code == "MUTATION_BUSY"
+        and error.details.get("committed") is False
+    )
+
+
 #: The three terminal states one preserved file can end in. `outcome` mirrors
 #: them for one release -- an existing client branching on `stored`/`failed`
 #: keeps working, and `already_stored` reports `outcome="stored"` beside a
@@ -831,6 +854,7 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
     """
 
     def guard():  # noqa: ANN202
+        # Not absorbing: this runs after the evidence committed, and a failed reconcile only warns.
         return manager.mutation_guard(
             vault_root,
             request_id=active_mutation_request_id(),
@@ -1269,11 +1293,10 @@ def _capture_source_adoption(
         manager = active_manager()
         payload: dict | None = None
         try:
-            with manager.mutation_guard(
+            with manager.absorbing_mutation_guard(
                 vault_root,
                 request_id=active_mutation_request_id(),
-                operation="capture_source_artifacts_commit",
-                holder_kind="command",
+                operation="capture_source_adoption_commit",
             ):
                 raced = _existing_receipt(
                     vault_root, envelope, lane="source", destination=destination,
@@ -1405,11 +1428,10 @@ def _preserve_evidence_adoption(
 
         manager = active_manager()
         try:
-            with manager.mutation_guard(
+            with manager.absorbing_mutation_guard(
                 vault_root,
                 request_id=active_mutation_request_id(),
-                operation="preserve_artifacts_commit",
-                holder_kind="command",
+                operation="preserve_artifacts_adoption_commit",
             ):
                 raced = _existing_receipt(
                     vault_root, envelope, lane="evidence", destination=destination, raw_protection=raw_protection,
@@ -1536,8 +1558,10 @@ def capture_source_artifacts(
             outcomes[index] = _failed(file_id, error)
 
     manager = active_manager()
+    refusals: list[OpError] = []
     try:
         for index, artifact in staged.items():
+            body_started = False
             try:
                 if (
                     not artifact.file_id
@@ -1550,12 +1574,12 @@ def capture_source_artifacts(
                 # page. A batch would otherwise land several pages under one
                 # name and rely on uniquify to tell them apart.
                 item_title = title if len(staged) == 1 else f"{title} — {artifact.filename}"
-                with manager.mutation_guard(
+                with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="capture_source_artifacts_commit",
-                    holder_kind="command",
                 ):
+                    body_started = True
                     result = add_module.add(
                         vault_root,
                         source_schema,
@@ -1601,8 +1625,16 @@ def capture_source_artifacts(
                 outcomes[index] = _failed(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
                 )
+            except OpError as error:
+                if not _refused_before_commit(error, body_started=body_started):
+                    raise
+                outcomes[index] = _busy_failed(artifact.file_id)
+                refusals.append(error)
     finally:
         _release_staged(vault_root, staged, outcomes)
+    if staged and len(refusals) == len(staged):
+        # Nothing began, so the call stays retryable under its own key instead of recording a failure.
+        raise refusals[0]
 
     resolved = [outcome for outcome in outcomes if outcome is not None]
     stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
@@ -1685,8 +1717,10 @@ def preserve_artifacts(
         vault_root, scope=scope, category=category, raw_protection=raw_protection,
         wanted_hashes=frozenset(artifact.sha256 for artifact in staged.values()),
     )
+    refusals: list[OpError] = []
     try:
         for index, artifact in staged.items():
+            body_started = False
             try:
                 if (
                     not artifact.file_id
@@ -1733,12 +1767,12 @@ def preserve_artifacts(
                         }
                     continue
                 transcription = transcribed.get(index)
-                with manager.mutation_guard(
+                with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="preserve_artifacts_commit",
-                    holder_kind="command",
                 ):
+                    body_started = True
                     with artifact.path.open("rb") as stream:
                         result = preserve_stream(
                             vault_root,
@@ -1813,8 +1847,16 @@ def preserve_artifacts(
                     }
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
+            except OpError as error:
+                if not _refused_before_commit(error, body_started=body_started):
+                    raise
+                outcomes[index] = _busy_failed(artifact.file_id)
+                refusals.append(error)
     finally:
         _release_staged(vault_root, staged, outcomes)
+    if staged and len(refusals) == len(staged):
+        # Nothing began, so the call stays retryable under its own key instead of recording a failure.
+        raise refusals[0]
     return _batch_result(outcomes)
 
 
