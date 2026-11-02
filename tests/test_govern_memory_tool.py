@@ -434,6 +434,21 @@ def test_ungoverned_inspection_stays_frictionless_and_noncreating(vault: Path) -
     assert not store.sidecar_path(vault).exists()
 
 
+def test_a_non_owner_lists_no_policy_ids_while_the_owner_keeps_them(vault: Path) -> None:
+    """Rule and grant ids name policy that a non-owner cannot inspect or use."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope_with_a_rule(vault, default_deny=False)
+
+    owner = op_govern_memory(vault, operation="list", principal=owner_principal())
+    guest = op_govern_memory(vault, operation="list", principal=_external())
+
+    assert owner["rules"]
+    assert guest["enabled"] is True
+    assert guest["rules"] == [] and guest["grants"] == []
+    assert guest["scopes"] == [] and guest["fingerprint"] is None
+
+
 def test_v3_store_owns_tools_schema_and_uses_full_durability(vault: Path) -> None:
     conn = store.open_connection(vault)
     try:

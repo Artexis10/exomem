@@ -32,7 +32,12 @@ from exomem.governance import (
     receipts,
 )
 from exomem.governance.decisions import Decision
-from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.governance.principal import (
+    RequestPrincipal,
+    library_scope,
+    owner_principal,
+    request_scope,
+)
 
 pytestmark = pytest.mark.reads_repository_docs
 
@@ -2569,10 +2574,75 @@ def test_a_repeated_postfilter_is_receipt_silent(vault: Path) -> None:
     assert _receipt_records(vault) == []
 
 
-def test_ungoverned_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
-    with request_scope(_external()):
+def test_ungoverned_owner_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
+    """The owner on an empty policy governs nothing: no receipt, no store write."""
+    with library_scope():
         _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Nowhere")
     assert _receipt_records(vault) == []
+
+
+def test_a_restricted_probe_that_touches_nothing_is_receipted(vault: Path) -> None:
+    """A path outside every scope decides no item, so the boundary collects no outcome.
+
+    The receipt is still due: a call that withheld an item appends one, and a
+    store fault would otherwise refuse only that call.
+    """
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Nowhere")
+    (record,) = _receipt_records(vault)
+    assert record["event_type"] == "disclosure"
+    assert record["outcomes"] == []
+
+
+def test_an_owner_call_that_touched_nothing_needs_no_receipt_store(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is withheld from the owner, so a governed vault's store fault refuses no owner read.
+
+    The empty receipt is for a restricted caller, whose missing and withheld
+    items must fail alike. The owner has no withheld items to tell apart.
+    """
+    _restricted_vault(vault)
+
+    def fail(*_args, **_kwargs):
+        raise receipts.ReceiptError("sidecar unavailable")
+
+    monkeypatch.setattr(receipts, "append_event", fail)
+    with library_scope():
+        _through_dispatcher(vault, "search", query="zzqxnonexistentterm")
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Nowhere")
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("list_directory", {"path": "Knowledge Base/Notes/Nowhere"}),
+        ("search", {"query": "zzqxnonexistentterm"}),
+    ],
+    ids=["absent-path", "zero-hit-search"],
+)
+def test_a_receipt_store_fault_refuses_a_call_that_touched_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, name: str, arguments: dict
+) -> None:
+    """Withheld and absent items must fail alike when the store is down.
+
+    Only the call that withheld an item used to touch the store, so a fault
+    refused it and let the absent-path probe and the empty search succeed.
+    """
+    _restricted_vault(vault)
+
+    def fail(*_args, **_kwargs):
+        raise receipts.ReceiptError("sidecar unavailable")
+
+    monkeypatch.setattr(receipts, "append_event", fail)
+    with request_scope(_external()):
+        with pytest.raises(egress.ReceiptUnavailableError, match="retry"):
+            _through_dispatcher(vault, name, **arguments)
 
 
 def test_external_dispatcher_retries_mint_distinct_boundary_ids(vault: Path) -> None:
@@ -2618,13 +2688,15 @@ def test_credential_block_is_receipted_without_a_policy(vault: Path) -> None:
         with egress.disclosure_boundary(vault, "test") as collector:
             cleaned = egress.postfilter("test", {"value": secret}, vault)
             egress.emit_boundary_receipt(collector)
-    records = _receipt_records(vault)
+    # The external caller is restricted, so the boundary also files its empty disclosure.
+    everything = _receipt_records(vault)
+    records = [r for r in everything if r["event_type"] == "credential_block"]
     assert cleaned["value"] != secret
-    assert len(records) == 1 and records[0]["event_type"] == "credential_block"
+    assert len(records) == 1
     assert records[0]["command"] == "test"
     assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
     assert records[0]["purpose"] == "credential-review"
-    assert secret not in json.dumps(records)
+    assert secret not in json.dumps(everything)
 
 
 def test_credential_block_does_not_suppress_the_disclosure_receipt(vault: Path) -> None:
@@ -3851,6 +3923,26 @@ def test_inbound_links_withheld_matches_the_no_links_shape(vault: Path) -> None:
     never_existed = _inbound(vault, "Knowledge Base/Notes/Patterns/nope.md", _external())
     assert withheld["count"] == never_existed["count"] == 0
     assert withheld["inbound"] == never_existed["inbound"] == []
+    # The whole payload, not two fields of it: the echoed `target` told them apart.
+    assert withheld == never_existed
+
+
+def test_inbound_links_never_echo_the_target_to_a_restricted_caller(vault: Path) -> None:
+    """The echo of a target is the one field that names what the caller asked about.
+
+    The dispatcher filter dropped it only for a withheld target, so its presence
+    was the answer. A restricted caller now never gets it, whether the target is
+    withheld, missing or released.
+    """
+    _link_to_restricted(vault)
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    released = "Knowledge Base/Notes/Insights/links-out.md"
+    for target in (RESTRICTED_PATH, "Knowledge Base/Notes/Patterns/nope.md", released):
+        assert "target" not in _inbound(vault, target, _external()), target
+    # What the owner asks about is the owner's own, so it comes back to them.
+    assert _inbound(vault, RESTRICTED_PATH, owner_principal())["target"] == RESTRICTED_PATH
 
 
 def test_inbound_links_still_answer_the_owner(vault: Path) -> None:
@@ -3869,25 +3961,25 @@ def test_inbound_links_ungoverned_is_untouched(vault: Path) -> None:
     assert result["count"] >= 1
 
 
-def test_release_permits_link_target_escaping_the_vault_is_never_opened(
+def test_link_target_pages_escaping_the_vault_are_never_opened(
     vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """`_release_permits_link_target` joined the raw `target` string with
-    `vault_root` and stat'd (then, for a `.md`-shaped candidate, read) the
-    result with no containment check, so a `../` traversal or an absolute
-    path reached the filesystem outside the vault before any decision was
-    made.
+    """The inbound-links target lookup (now `_link_target_pages`) joined the
+    raw `target` string with `vault_root` and stat'd (then, for a
+    `.md`-shaped candidate, read) the result with no containment check, so a
+    `../` traversal or an absolute path reached the filesystem outside the
+    vault before any decision was made.
 
     `op_list_inbound_links` itself already refuses a `../` or absolute
     `target` earlier, through `_resolve_memory_identifier`'s
     `reserved_paths.classify_logical` check, before this function ever runs
-    — so this exercises `_release_permits_link_target` directly, the way a
+    — so this exercises `_link_target_pages` directly, the way a
     future or internal caller could still reach it, exactly as the receipt
     hash in `_outcome_for_decision` is confined even though its own caller
     is expected to have already decided the candidate.
 
     Every escaping form must answer exactly as the function's own contract
-    for a target that resolves to nothing under the vault (`True`, i.e. not
+    for a target that resolves to nothing under the vault (no pages, i.e. not
     the release plane's business), and none may touch a file outside the
     vault to get there."""
     write_scope(vault)
@@ -3918,7 +4010,7 @@ def test_release_permits_link_target_escaping_the_vault_is_never_opened(
     forms = [traversal_md, traversal_bare, absolute]
 
     for target in forms:
-        assert commands._release_permits_link_target(vault, target) is True, target
+        assert commands._link_target_pages(vault, target) == [], target
 
     assert opened_outside == []
 
