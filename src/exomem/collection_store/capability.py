@@ -23,6 +23,8 @@ added it to ``RELEASED``; the per-vault rollback narrows it too.
 
 from __future__ import annotations
 
+import threading
+
 from .. import structured_collections as collections
 from . import connection
 
@@ -40,15 +42,48 @@ DISABLED_KEY = "records_summary_disabled"
 DISABLED = "COLLECTION_STORE_DISABLED"
 
 
+# The disable is a one-way insert, so a store file seen disabled stays disabled. A false is never kept:
+# a rollback can still land, and `require_not_disabled` at each checkout stays the live gate. A process
+# serves a handful of vaults, so a full cache is cleared, which only costs one more read each.
+_DISABLED_SEEN_MAX = 64
+_DISABLED_SEEN: set[tuple[str, int, int]] = set()
+_DISABLED_SEEN_LOCK = threading.Lock()
+
+
+def _store_identity(root, path):
+    try:
+        status = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return str(root), status.st_dev, status.st_ino
+
+
+def disabled_seen(root) -> bool:
+    """Whether this process already saw the store at ``root`` disabled; False means unknown, and nothing is opened."""
+    identity = _store_identity(root, connection.store_path(root))
+    with _DISABLED_SEEN_LOCK:
+        return identity in _DISABLED_SEEN
+
+
 def records_summary_disabled(root) -> bool:
     path = connection.store_path(root)
-    if not path.exists():
+    identity = _store_identity(root, path)
+    if identity is None:
         return False
+    with _DISABLED_SEEN_LOCK:
+        if identity in _DISABLED_SEEN:
+            return True
     from .runtime import reader_pool
 
     # store_meta keeps this key in every schema version, so a store awaiting its writer's migration answers too.
     with connection.head_reader(path, reader_pool(root, path)) as reader:
-        return _disabled(reader)
+        disabled = _disabled(reader)
+    if disabled:
+        with _DISABLED_SEEN_LOCK:
+            if len(_DISABLED_SEEN) >= _DISABLED_SEEN_MAX:
+                _DISABLED_SEEN.clear()
+            _DISABLED_SEEN.add(identity)
+    return disabled
 
 
 def _disabled(conn) -> bool:

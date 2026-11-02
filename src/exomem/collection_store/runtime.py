@@ -1507,7 +1507,8 @@ class StoreServer:
         from ..governance import principal
         from . import admission, authority, capability
 
-        if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self.session is None or self._idle_released() \
+                or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             # The resume migrates a store an earlier release left with this intent; until then only its head reads.
@@ -1537,7 +1538,7 @@ class StoreServer:
         from . import capability, derived_rows, importer
         from .preview import preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             # A plain read first: an idle store takes no lease and no checkout.
@@ -1569,7 +1570,7 @@ class StoreServer:
         from . import capability, index_migrations
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
@@ -1616,15 +1617,13 @@ class StoreServer:
 
         # The running rebuild's pass continues only from a step that advanced; any other return ends it.
         rebuild, self._derived_pass = self._derived_pass, None
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM collections WHERE derived=1 LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
-            # An idle release retires the handle without changing the store, so it needs no new reconcile.
-            if self._derived_handle is not None \
-                    and (self._derived_handle is self.runtime._handle or self._idle_released()) \
+            if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
             if rebuild is not None:
@@ -1724,13 +1723,19 @@ class StoreServer:
         # A starved tick runs one bounded turn whatever else is going on; any other yields at its next seam.
         starved = self._starved("views", time.monotonic())
         owed, self._views_owed = self._views_owed, False  # this tick runs the owed pass, unless it yields
+        if self.runtime is not None and self._idle_released():
+            # Decided before any store read, from the release and a rollback seen earlier. Proven work goes on
+            # to the checks below, which read the store, so a rollback not seen yet still ends the tick there.
+            rolled_back = capability.disabled_seen(self.root)
+            views = capability.collection_views_enabled() and not rolled_back
+            self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
+            if rolled_back or not self._view_work_needs_lease(views, owed):
+                return IMPORT_IDLE_SECONDS
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
         views = capability.collection_views_enabled(self.root)
         self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
-        if self._idle_released() and not self._view_work_needs_lease(views, owed):
-            return IMPORT_IDLE_SECONDS
         if views and (self._edit_back is None or self._edit_handle is not self.runtime._handle):
             self._edit_back = edit_back.EditBack()
         with self._condition:
@@ -1831,6 +1836,8 @@ class StoreServer:
     def _idle_released(self):
         """Whether this process released the lease on idle and has not taken it again.
 
+        While it holds, a tick opens neither the store nor the lease: the release drained the work, and
+        a request takes the lease again (a views tick also, for work it proved without it).
         A lost lease or a standby store is not this: its ticks run as before."""
         return self.manager._store_released and self.manager._fencing_token is None
 
