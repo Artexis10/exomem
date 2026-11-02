@@ -8,10 +8,17 @@ admitted instrument, appends readings to the ledger and exits.
 
 The supervisor is the policy:
 
-* It inherits the dreamer's gate (`dreamer_policy.decide`). The child runs only
-  while a dreamer tick could run, and is terminated the moment the gate closes.
-* It kills the child in quiet mode, under auto-quiet pressure and in standby,
-  so the child's memory returns to the host.
+* It follows its own gate (`dreamer_policy.sensor_gate`): the setting and
+  standby. The child is terminated the moment that gate closes, so its memory
+  returns to the host. Quiet mode, a busy service and the dreamer's tick holds
+  do not stop it: it is CPU only, one thread, at the lowest priority, in its
+  own process.
+* It never launches in a Cloud cell (`cloud_placement`): until
+  add-sensed-epistemic-model task 9.3's Cloud placement, cells write no readings.
+* It launches only while the host's available memory is above the peak resident
+  memory the last child recorded for the active instrument (`memory`). A
+  running child is never killed for memory. With no such peak it launches, and
+  that child records one.
 * It spends at most `CPU_SECONDS_PER_HOUR` CPU-seconds (model load included)
   and `JUDGEMENTS_PER_HOUR` judgements per rolling hour. A child that dies
   without reporting its spend is charged its whole allotment.
@@ -37,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import sensing, sensing_ledger
+from . import cloud_cell, runtime_resources, sensing, sensing_ledger
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +71,11 @@ EXIT_REFUSED = 78
 SPEND_FILE = "spend.json"
 STATUS_FILE = "worker-status.json"
 ADMISSION_FILE = "admission.json"
+#: The last child's peak resident memory and the instrument key it was recorded
+#: under. The supervisor owns this file: each child overwrites `SPEND_FILE` from
+#: its first report, which would erase it.
+PEAK_FILE = "peak-rss.json"
+
 
 def _state_file(vault_root: Path, name: str) -> Path:
     return sensing_ledger.ledger_path(vault_root).with_name(name)
@@ -116,7 +128,13 @@ class Supervisor:
         self._window: deque[_Charge] = deque()
         self._refusal: tuple[str, str] | None = None
         self._refusal_key: str | None = None
+        #: The instrument key of the running child, taken at launch, so its peak
+        #: is filed under the model it loaded.
+        self._launch_key: str | None = None
         self.last_action: str = "off"
+        #: The recorded peak as (instrument key, bytes), loaded once from `PEAK_FILE`.
+        self._peak: tuple[str, int] | None = None
+        self._peak_loaded = False
         self.launches = 0
         self.kills = 0
 
@@ -149,6 +167,43 @@ class Supervisor:
             return None
         return spend
 
+    def _recorded_peak(self, key: str) -> int | None:
+        if not self._peak_loaded:
+            stored = _read_json(_state_file(self.vault_root, PEAK_FILE)) or {}
+            peak = _peak_value(stored.get("peak_rss_bytes"))
+            stored_key = stored.get("key")
+            self._peak = (stored_key, peak) if peak is not None and isinstance(stored_key, str) else None
+            self._peak_loaded = True
+        if self._peak is None or self._peak[0] != key:
+            return None
+        return self._peak[1]
+
+    def peak_rss_bytes(self) -> int | None:
+        """The recorded child peak in bytes for the active instrument, else None.
+
+        A peak recorded under another instrument key says nothing about the
+        model that would load now, so it is ignored.
+        """
+        return self._recorded_peak(_instrument_key())
+
+    def _note_peak(self, spend: dict[str, Any]) -> None:
+        """Keep a child's reported peak. A final report replaces the last one.
+
+        A report cut off mid-load is a lower bound, so it can only raise it.
+        """
+        reported = _peak_value(spend.get("peak_rss_bytes"))
+        if reported is None:
+            return
+        key = self._launch_key or _instrument_key()
+        recorded = self._recorded_peak(key)
+        if recorded is not None and not spend.get("final"):
+            reported = max(reported, recorded)
+        self._peak = (key, reported)
+        with contextlib.suppress(OSError):
+            _write_json(
+                _state_file(self.vault_root, PEAK_FILE), {"peak_rss_bytes": reported, "key": key}
+            )
+
     def _harvest(self) -> None:
         """Charge a finished child and record why it ended."""
         child = self._child
@@ -157,6 +212,10 @@ class Supervisor:
         self._child = None
         pid = getattr(child, "pid", None)
         spend = self._reported(pid)
+        if spend is not None and child.returncode != EXIT_REFUSED:
+            # A refused child never loaded the instrument: its peak says nothing
+            # about what the next launch needs.
+            self._note_peak(spend)
         if spend is not None and spend.get("final"):
             self._charge(float(spend.get("cpu") or 0.0), int(spend.get("judgements") or 0))
         else:
@@ -195,6 +254,7 @@ class Supervisor:
         spend = self._reported(pid)
         if spend is not None and not spend.get("final"):
             self._child = None
+            self._note_peak(spend)
             since = 0.0
             with contextlib.suppress(OSError):
                 since = max(0.0, time.time() - _state_file(self.vault_root, SPEND_FILE).stat().st_mtime)
@@ -206,7 +266,11 @@ class Supervisor:
     # the step ------------------------------------------------------------
 
     def step(self, *, gate_run: bool, gate_reason: str, queue_depth: Callable[[], int]) -> str:
-        """One supervision decision. Returns the action taken, a closed code."""
+        """One supervision decision. Returns the action taken, a closed code.
+
+        The codes: `off`, `gate:<reason>`, `cloud_placement`, `running`, `refused`,
+        `budget`, `idle`, `memory`, `launch_failed` and `launched`.
+        """
         self._harvest()
         if not sensing.enabled():
             self.terminate("off")
@@ -214,6 +278,11 @@ class Supervisor:
         if not gate_run:
             self.terminate(gate_reason)
             return self._act(f"gate:{gate_reason}")
+        if cloud_cell.cloud_mode_enabled():
+            # Until add-sensed-epistemic-model task 9.3's Cloud placement, cells
+            # write no readings (that change's design, R3's export note).
+            self.terminate("cloud_placement")
+            return self._act("cloud_placement")
         if self.alive():
             return self._act("running")
         if self._refusal is not None:
@@ -228,7 +297,24 @@ class Supervisor:
             return self._act("budget")
         if queue_depth() <= 0:
             return self._act("idle")
+        # A child that could not fit is killed by the kernel after it loaded the
+        # model for nothing. With no peak on record the first child measures it.
+        # A host that reports no available memory launches, as an unmeasurable
+        # host builds in `embedding_backend`: refusing would lock sensing out for
+        # good on a host that can record a peak but not read free memory.
+        peak = self.peak_rss_bytes()
+        if peak is not None:
+            available = runtime_resources.available_memory()
+            if available is not None and available <= peak:
+                if self.last_action != "memory":
+                    log.info(
+                        "sensor worker not launched (memory): peak %d bytes, available %d bytes",
+                        peak,
+                        available,
+                    )
+                return self._act("memory")
         self._allotment = (cpu_left, judgements_left)
+        self._launch_key = _instrument_key()
         try:
             self._child = self._launch(self.vault_root, cpu_left, judgements_left)
         except OSError:
@@ -250,16 +336,30 @@ class Supervisor:
             "hour_cpu_used": round(cpu, 3),
             "hour_judgements": judgements,
             "refused": None if self._refusal is None else self._refusal[0],
+            "peak_rss_bytes": self.peak_rss_bytes(),
             "launches": self.launches,
             "kills": self.kills,
         }
 
 
-def _refusal_key() -> str:
-    """What must change before a refused child is tried again."""
+def _peak_value(value: Any) -> int | None:
+    """A peak in bytes: an int above zero. A bool is an int in Python, and no peak."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _instrument_key() -> str:
+    """The active instruments: what a recorded peak holds for."""
     from . import sensed_model
 
-    return json.dumps([sensing.setting(), sorted(sensed_model.active_instruments())])
+    return json.dumps(sorted(sensed_model.active_instruments()))
+
+
+def _refusal_key() -> str:
+    """The setting and active instruments: a refused child is tried again only
+    when this changes."""
+    return json.dumps([sensing.setting(), json.loads(_instrument_key())])
 
 
 #: The only variables the child inherits: where state, logs and the model
@@ -417,15 +517,18 @@ def run_child(
     judgements = 0
 
     def report(final: bool) -> None:
-        _write_json(
-            _state_file(vault_root, SPEND_FILE),
-            {
-                "pid": pid,
-                "cpu": round(max(0.0, cpu_clock() - started_cpu), 3),
-                "judgements": judgements,
-                "final": final,
-            },
-        )
+        spend: dict[str, Any] = {
+            "pid": pid,
+            "cpu": round(max(0.0, cpu_clock() - started_cpu), 3),
+            "judgements": judgements,
+            "final": final,
+        }
+        # Recorded only where the host reports it, so the supervisor can admit
+        # the next launch against what this child needed.
+        peak = runtime_resources.peak_rss_bytes()
+        if peak is not None:
+            spend["peak_rss_bytes"] = peak
+        _write_json(_state_file(vault_root, SPEND_FILE), spend)
 
     report(False)
     if instrument is None:
