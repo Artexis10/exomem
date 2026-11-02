@@ -315,6 +315,29 @@ def accepted_envelope(
     return envelope
 
 
+def is_accepted_envelope(result: Any) -> bool:
+    """Whether `result` is the nonterminal answer of an accepted write."""
+    return isinstance(result, dict) and result.get("state") == "accepted" and result.get("terminal") is False and "intent_id" in result
+
+
+def filter_accepted(run_filter: Callable[[], Any], envelope: dict[str, Any], deadline: float) -> Any:
+    """Run the egress filter of an accepted answer inside what is left of the accept window.
+
+    The filter may wait on the held boundary, and the caller must have its answer by the accept deadline. When the
+    window runs out the filter is refused busy: the answer then omits the planned paths, which it cannot prove
+    visible, and keeps `intent_id` and `poll_after_ms`. A later poll filters them with no deadline.
+    """
+    with mutation_lock.accept_window(mutation_lock.AcceptWindow(deadline)):
+        try:
+            return run_filter()
+        except OpError as busy:
+            if busy.code != "MUTATION_BUSY":
+                raise
+    withheld = {key: value for key, value in envelope.items() if key != "planned_paths"}
+    withheld["planned_paths_withheld"] = True
+    return withheld
+
+
 def answer_for(intent: write_intents.Intent, *, receipt_id: str | None, idempotency_key: str | None) -> Any:
     """What a resend under an intent's identity receives: its terminal once it has one, else its state."""
     if intent.terminal is not None and intent.state in write_intents.TERMINAL_STATES:

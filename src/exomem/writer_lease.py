@@ -9042,12 +9042,20 @@ def invoke_command(
         if command.name == "manage_memory_file" else nullcontext()
     )
     if not read_only:
+        # An accepted answer must reach the caller by the accept deadline, so its filter waits inside that window.
+        accept_at = None if intent_accept.mode() == "off" else intent_accept.deadline_at()
         try:
             # The same fixed phase labels as the read-only path below.
             with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
             with call_spans.span("command.terminal_filter"):
                 try:
+                    if accept_at is not None and intent_accept.is_accepted_envelope(result):
+                        return intent_accept.filter_accepted(
+                            lambda: postfilter(command.name, result, injected[0], request_kwargs=kwargs),
+                            result,
+                            accept_at,
+                        )
                     return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
                 except Exception as error:
                     converted = post_leaf_refusal(error)
