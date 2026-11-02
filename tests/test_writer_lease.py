@@ -4619,6 +4619,25 @@ def test_idle_release_config_defaults_to_60_seconds() -> None:
     assert config.idle_release_seconds == 60.0
 
 
+def test_single_host_keeps_an_idle_lease_unless_an_idle_period_is_set() -> None:
+    single_host = {
+        "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+        "EXOMEM_WRITER_LEASE_URL": "http://127.0.0.1:8766",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+    }
+    assert LeaseConfig.from_env(single_host).idle_release_seconds == 0.0
+    assert LeaseConfig.from_env(
+        {**single_host, "EXOMEM_WRITER_LEASE_IDLE_SECONDS": "60"}
+    ).idle_release_seconds == 60.0
+    # Multi-host keeps the hand-back default, so an idle laptop still returns the lease.
+    assert LeaseConfig.from_env({
+        "EXOMEM_WRITER_LEASE_URL": "https://lease.example",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "laptop",
+    }).idle_release_seconds == 60.0
+
+
 def test_idle_release_config_zero_disables_and_is_valid() -> None:
     config = LeaseConfig.from_env(
         {

@@ -618,6 +618,12 @@ EXOMEM_WRITER_LEASE_REPLICA_ID=local
 EXOMEM_WRITER_LEASE_TOKEN=<coordinator-writer-secret>
 ```
 
+Under this topology the service keeps the writer lease while it is idle: no other
+replica can reach a loopback coordinator, so an idle release would hand authority
+to nobody. Set `EXOMEM_WRITER_LEASE_IDLE_SECONDS` to a value of at least the TTL
+to release an idle lease anyway. Owner offline steps still need the service
+stopped first.
+
 Run the coordinator under the service manager on the same host, bound to
 `127.0.0.1`, with its database outside the vault. Give the coordinator the same
 writer credential through `EXOMEM_LEASE_COORDINATOR_TOKEN`. Keep its distinct
