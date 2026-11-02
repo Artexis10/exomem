@@ -52,7 +52,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _STANDBY_CHILD = '''
-import json, sys, threading, time
+import json, subprocess, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, {tests_dir!r})
@@ -70,7 +70,8 @@ from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 root = Path(sys.argv[1])
 retry_catalogue = len(sys.argv) > 2 and sys.argv[2] == "retry"
 reprove_graph = len(sys.argv) > 2 and sys.argv[2] == "reproof"
-watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] in ("seed", "retry", "reproof")
+promote_midproof = len(sys.argv) > 2 and sys.argv[2] == "midproof"
+watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] in ("seed", "retry", "reproof", "midproof")
 generated = root / GENERATED
 
 passes = []
@@ -138,8 +139,45 @@ if retry_catalogue:
 readiness = service_standby.readiness_payload()
 warm_passes = len(passes)
 
-# D8: the previous worker and its descendants have exited; take ownership.
-promotion = service_standby.promote(root, migrated=False)
+promotion = None
+if promote_midproof:
+    # The serving worker commits a batch it has not published yet: the durable
+    # generation moves under the snapshot the held proof names, so a re-proof
+    # is due. A separate interpreter, so this registry stays the standby's own.
+    landed = subprocess.run(
+        [sys.executable, "-c", """
+import sys
+from pathlib import Path
+from exomem import vault
+root = Path(sys.argv[1])
+page = root / sys.argv[2]
+text = page.read_text(encoding="utf-8") + chr(10) + "- landed unpublished" + chr(10)
+vault.batch_atomic_write(
+    [vault.PlannedWrite(page, text)], vault_root=root, post_commit_fanout=False
+)
+""", str(root), GENERATED + "/generated-note-0011.md"],
+        capture_output=True, text=True, check=False,
+    )
+    assert landed.returncode == 0, landed.stderr[-4000:]
+    from exomem.epistemic_graph import SnapshotAdoption  # noqa: E402
+
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+
+    def promoted_during_the_proof(self, **kwargs):
+        # D8 lands while the re-proof is still walking the corpus, and writes
+        # keep the walk from converging.
+        global promotion
+        EpistemicGraphIndex.adopt_published_snapshot = real_adopt
+        promotion = service_standby.promote(root, migrated=False)
+        return SnapshotAdoption(False, reason="sources_kept_moving")
+
+    EpistemicGraphIndex.adopt_published_snapshot = promoted_during_the_proof
+    service_standby.REPROVE_INTERVAL_SECONDS = 0.0
+    assert service_standby.reprove_graph_snapshot_if_due(root) is False
+    assert promotion is not None, "the landed batch must make a re-proof due"
+else:
+    # D8: the previous worker and its descendants have exited; take ownership.
+    promotion = service_standby.promote(root, migrated=False)
 if observer is not None:
     observer.join(5)
     assert not observer.is_alive()
@@ -169,6 +207,14 @@ if watcher_boot_seed:
 
     for scope in freshness.SCOPES:
         freshness.seed(root, scope, _entries(scope))
+
+if promote_midproof:
+    # The promoted worker's graph drain takes the landed batch's queued debt,
+    # incrementally only while the held proof's origin is still this
+    # registry's delta origin.
+    from exomem import index_sync  # noqa: E402
+
+    index_sync.drain_graph_work(root, limit=64)
 
 if retry_catalogue:
     # This arm adopted a detached catalogue, so activation heals it after seed.
@@ -261,6 +307,29 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
     assert report["rebuilds"] == 0
     assert report["available"] is True, report
     _assert_incremental_latency(report["acknowledgements"])
+
+
+def test_a_promotion_during_a_reproof_keeps_the_held_proof(
+    handoff_vault: Path, tmp_path: Path
+) -> None:
+    """Promotion lands while the standby re-proves the proof it holds.
+
+    The serving worker commits a batch it has not published, so the standby's
+    re-proof is due, and promotion arrives before that re-proof returns.
+    Withdrawing the held proof for the re-proof's length made that promotion
+    `unproven`, and the promoted worker paid the whole handoff again under
+    load. Reseeding the registry under the held proof kept the verdict but
+    retired the proof's delta origin, and the graph never caught up again.
+    """
+    _run_child(handoff_vault, tmp_path, ["outgoing"])
+    report = _run_standby(handoff_vault, tmp_path, "midproof")
+
+    assert report["promotion"]["snapshot"] == "current", report["promotion"]
+    assert "graph_handoff" in report["promotion"]["carried_from_standby"]
+    assert report["rebuilds"] == 0, (
+        f"the drain and the writes must stay incremental: {report['per_write_rebuilds']}"
+    )
+    assert report["available"] is True, report
 
 
 def test_a_promotion_after_a_deferred_write_is_still_incremental(

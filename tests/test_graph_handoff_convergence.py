@@ -1090,23 +1090,38 @@ def test_a_proved_standby_keeps_reproving_while_the_graph_moves(
     assert record["full_marker"] == "retired"
 
 
-def test_a_failed_reproof_retires_the_proof_whose_lineage_was_reseeded(
+def test_a_declined_reproof_keeps_the_held_proof(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A re-proof of a held proof replaces it only when it succeeds."""
     root = handoff_vault
     _enter_standby(monkeypatch)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is True
+    held = service_standby.proved_checkpoint()
 
-    _decline_on_an_oversized_residue(root, monkeypatch)
+    for i in range(3):
+        page = root / GENERATED / f"generated-note-{80 + i:04d}.md"
+        page.write_text(page.read_text(encoding="utf-8") + "\n- unattributed\n", encoding="utf-8")
+    monkeypatch.setattr(graph_drain, "DRAIN_LIMIT", 2, raising=True)
     _land_a_batch_without_fanout(root)
+    outcomes: list[str] = []
+    adopt = EpistemicGraphIndex.adopt_published_snapshot
+
+    def observed(self, **kwargs):
+        adoption = adopt(self, **kwargs)
+        outcomes.append(adoption.reason)
+        return adoption
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", observed)
     assert service_standby.reprove_graph_snapshot_if_due(root) is False
 
-    assert service_standby.cutover_components()["graph_snapshot"] == "waiting"
-    assert service_standby.proved_checkpoint() is None
+    assert outcomes == ["residue_exceeds_drain_limit"]
+    assert service_standby.proved_checkpoint() == held
+    assert service_standby.cutover_components()["graph_snapshot"] == "ready"
     record = service_standby.promote(root, migrated=False)
-    assert record["snapshot"] == "unproven"
-    assert "graph_handoff" not in record["carried_from_standby"]
+    assert record["snapshot"] == "current"
+    assert "graph_handoff" in record["carried_from_standby"]
 
 
 class _Clock:
