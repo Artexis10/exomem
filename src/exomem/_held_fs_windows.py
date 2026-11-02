@@ -713,15 +713,20 @@ class WindowsHeldFilesystem(HeldFilesystem):
         create: bool = False,
         exclusive: bool = False,
     ) -> HeldResult[HeldFile]:
-        if not _leaf(leaf) or access not in {"read", "write", "mutate"}:
+        if not _leaf(leaf) or access not in {"read", "write", "mutate", "identity"}:
             return HeldResult(error=_invalid())
         if exclusive and not create:
             return HeldResult(error=HeldFsError("INVALID_INPUT", "exclusive requires create"))
+        if create and access == "identity":
+            return HeldResult(error=HeldFsError("INVALID_INPUT", "identity access cannot create"))
         parent_descriptor: int | None = None
         descriptor: int | None = None
         try:
             checked = self._check_directory(parent)
             parent_descriptor = os.dup(checked.descriptor)
+            # Identity access keeps the read handle: a LockFileEx byte-range lock
+            # belongs to the handle that took it, so closing this handle leaves
+            # every SQLite lock of this process in place.
             desired = FILE_READ_DATA | FILE_READ_ATTRIBUTES
             descriptor_access = "read"
             if access == "write":
@@ -772,6 +777,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
     def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         try:
             checked = self._check_file(file)
+            if checked.access == "identity":
+                return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is identity-only"))
             if max_bytes is not None and checked.version().size > max_bytes:
                 return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
             os.lseek(checked.descriptor, 0, os.SEEK_SET)
@@ -987,6 +994,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
         destination_filesystem: WindowsHeldFilesystem | None = None
         try:
             checked = self._check_file(source)
+            if checked.access == "identity":
+                return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is identity-only"))
             if not _leaf(destination_leaf):
                 raise OSError(errno.ELOOP, "invalid destination leaf")
             if not isinstance(destination_parent, WindowsHeldDirectory):

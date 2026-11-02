@@ -224,6 +224,15 @@ class HeldFilesystem:
         create: bool = False,
         exclusive: bool = False,
     ) -> HeldResult[HeldFile]:
+        """Hold the regular file `leaf` under `parent`.
+
+        `access="identity"` holds the file only to observe and compare its
+        identity: such a handle cannot be created, read, copied, written or
+        renamed. On POSIX it opens no descriptor that can carry a record lock.
+        Closing any ordinary descriptor for a file drops every POSIX lock that
+        this process holds on the file, including the locks of its own open
+        SQLite connections.
+        """
         raise NotImplementedError
 
     def validate_directory(
@@ -667,7 +676,8 @@ def publish_sqlite_identities(
     names = (primary, f"{primary}-wal", f"{primary}-shm")
     identities: dict[str, StableIdentity] = {}
     for name in names:
-        result = filesystem.file(parent, name)
+        # The caller's connection is live: an ordinary descriptor would drop its locks on close.
+        result = filesystem.file(parent, name, access="identity")
         if not result.ok:
             return HeldResult(error=result.error)
         with result.require() as file:
