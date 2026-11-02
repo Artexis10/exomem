@@ -39,7 +39,7 @@ Resolution of memory references for a governed read SHALL return, for each reque
 
 Both sources SHALL apply one page membership rule, so the source never changes the answer. A page belongs when it is Markdown by a case-insensitive `.md` suffix, lies under the Knowledge Base outside the directories that ordinary scans exclude, and carries a well-formed `exomem_id`. Line endings SHALL NOT change whether a page's `exomem_id` is read. A missing or malformed `exomem_id` maps to no page. When the Knowledge Base root holds a directory that the identity census never admits but ordinary scans read, such as `trash/`, resolution SHALL take the scan, so that pages in that directory resolve as the scan resolves them.
 
-A reference that the vault does not hold and a reference that only pages hidden from the reader hold SHALL produce identical responses. This requirement bounds the resolution work only. It does not make the completion time of the read that follows resolution constant.
+A reference that the vault does not hold and a reference that only pages hidden from the reader hold SHALL produce identical responses. This requirement bounds the resolution work only. When the read that follows resolution refuses a restricted caller, its completion time SHALL follow the `get-payload-shape` requirement "Restricted direct-read refusals complete at a fixed floor".
 
 #### Scenario: A hidden twin does not shadow a visible page
 - **WHEN** one page that the reader may see and one page that the reader may not see both hold the same reference, and the server holds a current identity projection

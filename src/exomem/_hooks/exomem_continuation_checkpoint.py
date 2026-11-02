@@ -91,6 +91,14 @@ MAX_PRUNE_LOCK_SECONDS = 0.05
 MAX_PRUNE_ENUM_ENTRIES = 16
 MAX_STATE_ENUM_ENTRIES = 32
 MAX_PRUNE_CATALOG_ENTRIES = 512
+#: Free catalog slots a new session needs at its peak: its pending manifest and
+#: that manifest's temporary file, which is released before the session
+#: directory takes its slot.
+NEW_SESSION_CATALOG_SLOTS = 2
+#: Time the room check may hold the root lock while it evicts. Other hook runs
+#: wait 0.5 s for that lock (`_advisory_lock_at`), so half of it leaves them room;
+#: a session left short of room is refused, and the next new session evicts again.
+MAX_CATALOG_ROOM_SECONDS = 0.25
 
 
 def _over_budget(deadline: float, inspected: int) -> bool:
@@ -1702,14 +1710,19 @@ def _open_secure_file(path: Path, flags: int, mode: int = 0o600) -> int:
         return _open_secure_file_at(directory, path.name, flags, mode)
 
 
-def _existing_kind(directory: _SecureDirectory, name: str) -> int | None:
+def _entry_stat(directory: _SecureDirectory, name: str) -> os.stat_result | None:
     _validate_child_name(name)
     try:
         if os.name == "nt":
-            return os.lstat(directory.path / name).st_mode
-        return os.stat(name, dir_fd=directory.fd, follow_symlinks=False).st_mode
+            return os.lstat(directory.path / name)
+        return os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+
+
+def _existing_kind(directory: _SecureDirectory, name: str) -> int | None:
+    info = _entry_stat(directory, name)
+    return None if info is None else info.st_mode
 
 
 def _windows_rename_at(
@@ -2422,6 +2435,8 @@ def _session_lock(
         _require_private_state_directory(root_handle)
         with _advisory_lock_at(root_handle, ".root.lock") as root_lock:
             state_existed = _existing_kind(root_handle, state_name) is not None
+            if create and not state_existed:
+                _ensure_prune_catalog_room(root_handle, root_lock, home, client, keep=state_name)
             pending: dict[str, Any] | None = None
             if create:
                 if state_existed:
@@ -3445,7 +3460,18 @@ def _tombstone_expired_candidate(
     *,
     force_fallback: bool,
     deadline: float | None = None,
+    evict: bool = False,
 ) -> tuple[str, tuple[object, ...]] | None:
+    """Tombstone `name` if it is an expired, recognized, unlocked session.
+
+    `evict` drops only the age and recent-activity checks, for a full catalog
+    that must make room (`_ensure_prune_catalog_room`); every check that the
+    directory is this root's own session still applies.
+    """
+
+    def expired(at_ns: int) -> bool:
+        return evict or now - at_ns > RETENTION_NS
+
     state_context = None
     state_open = False
     try:
@@ -3463,7 +3489,7 @@ def _tombstone_expired_candidate(
     try:
         if not _recognized_state_directory(state_handle, deadline=deadline):
             return None
-        if _refresh_state_is_current(state_handle, home, client, name, now):
+        if not evict and _refresh_state_is_current(state_handle, home, client, name, now):
             return None
         current = load_checkpoint_at(state_handle, "current.json")
         previous = load_checkpoint_at(state_handle, "previous.json")
@@ -3474,8 +3500,7 @@ def _tombstone_expired_candidate(
             previous, home, client, name
         )
         if current_authorized and isinstance(current.get("observed_at_ns"), int):
-            current_expired = now - int(current["observed_at_ns"]) > RETENTION_NS
-            if not current_expired:
+            if not expired(int(current["observed_at_ns"])):
                 if (
                     previous_authorized
                     and isinstance(previous.get("observed_at_ns"), int)
@@ -3484,7 +3509,7 @@ def _tombstone_expired_candidate(
                     _unlink_at(state_handle, "previous.json")
                 return None
         elif previous_authorized and isinstance(previous.get("observed_at_ns"), int):
-            if now - int(previous["observed_at_ns"]) <= RETENTION_NS:
+            if not expired(int(previous["observed_at_ns"])):
                 return None
         else:
             manifest, manifest_status = load_session_manifest_at(
@@ -3522,38 +3547,50 @@ def _tombstone_expired_candidate(
             if (
                 manifest_status != "valid"
                 or manifest is None
-                or now - int(manifest["created_at_ns"]) <= RETENTION_NS
+                or not expired(int(manifest["created_at_ns"]))
             ):
                 return None
         state_identity = _directory_identity(state_handle)
         if _directory_entry_identity(root_handle, name) != state_identity:
             return None
         tombstone = f".tombstone-{name}-{secrets.token_hex(8)}"
-        _register_prune_catalog_entry(root_handle, root_lock, tombstone)
-        if force_fallback:
-            lock.__exit__(None, None, None)
-            locked = False
-            state_context.__exit__(None, None, None)
-            state_open = False
+        if evict:
+            # A full catalog has no slot for the tombstone, so hand it the
+            # session's own, and give it back below if the rename fails. Only
+            # a crash before the rename leaves the session unlisted: the Linux
+            # directory scan still finds it, but elsewhere prune skips it until
+            # its next write lists it again (`_session_lock`).
+            _unregister_prune_catalog_entry(root_handle, root_lock, name)
         try:
-            _rename_directory_at(root_handle, name, tombstone)
-        except PermissionError:
-            if locked:
+            _register_prune_catalog_entry(root_handle, root_lock, tombstone)
+            if force_fallback:
                 lock.__exit__(None, None, None)
                 locked = False
-            if state_open:
                 state_context.__exit__(None, None, None)
                 state_open = False
-            _rename_directory_at(root_handle, name, tombstone)
-        _unregister_prune_catalog_entry(root_handle, root_lock, name)
+            try:
+                _rename_directory_at(root_handle, name, tombstone)
+            except PermissionError:
+                if locked:
+                    lock.__exit__(None, None, None)
+                    locked = False
+                if state_open:
+                    state_context.__exit__(None, None, None)
+                    state_open = False
+                _rename_directory_at(root_handle, name, tombstone)
+        except BaseException:
+            if evict and _existing_kind(root_handle, name) is not None:
+                _return_catalog_slot(root_handle, root_lock, tombstone, name)
+            raise
+        if not evict:
+            _unregister_prune_catalog_entry(root_handle, root_lock, name)
         if _directory_entry_identity(root_handle, tombstone) != state_identity:
             if _existing_kind(root_handle, name) is None:
                 try:
                     _rename_directory_at(root_handle, tombstone, name)
-                    _register_prune_catalog_entry(root_handle, root_lock, name)
-                    _unregister_prune_catalog_entry(root_handle, root_lock, tombstone)
                 except OSError:
-                    pass
+                    return None
+                _return_catalog_slot(root_handle, root_lock, tombstone, name)
             return None
         return tombstone, state_identity
     finally:
@@ -3770,6 +3807,99 @@ def _register_prune_catalog_entry(
         raise OSError("prune catalog capacity is exhausted")
     finally:
         os.close(fd)
+
+
+def _return_catalog_slot(
+    root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
+    tombstone: str,
+    name: str,
+) -> None:
+    """List `name` again after its tombstone rename was undone or never happened.
+
+    The tombstone's slot is released first, because on a full catalog `name`
+    needs it. Each step runs on its own, so a failed release still lets the
+    registration try.
+    """
+    try:
+        _unregister_prune_catalog_entry(root, root_lock, tombstone)
+    except OSError:
+        pass
+    try:
+        _register_prune_catalog_entry(root, root_lock, name)
+    except OSError:
+        pass
+
+
+def _ensure_prune_catalog_room(
+    root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
+    home: Path,
+    client: str,
+    *,
+    keep: str,
+) -> None:
+    """Free catalog slots for a new session instead of refusing it.
+
+    A busy home fills the fixed-size catalog well inside the retention window,
+    and a refused registration then fails every checkpoint the home writes.
+    Entries whose root entry is gone are dropped first. Then the sessions whose
+    directories changed least recently are pruned through the expired-session
+    tombstone path, with only its age checks lifted. `keep` is never evicted.
+    """
+    if root_lock.fd is None:
+        raise OSError("prune catalog room requires the root lock")
+    deadline = time.monotonic() + MAX_CATALOG_ROOM_SECONDS
+    try:
+        fd = _open_prune_catalog(root, create=False)
+    except FileNotFoundError:
+        return
+    live: list[str] = []
+    unreadable = 0
+    try:
+        for slot in range(MAX_PRUNE_CATALOG_ENTRIES):
+            try:
+                status_value, name = _read_prune_catalog_slot(fd, slot)
+            except OSError:
+                # A torn record is not free; skip it rather than refuse the session.
+                unreadable += 1
+                continue
+            if status_value == "live" and name is not None:
+                live.append(name)
+    finally:
+        os.close(fd)
+    free = MAX_PRUNE_CATALOG_ENTRIES - len(live) - unreadable
+    if free >= NEW_SESSION_CATALOG_SLOTS:
+        return
+    sessions: list[tuple[int, str]] = []
+    for name in live:
+        info = _entry_stat(root, name)
+        if info is None:
+            try:
+                _unregister_prune_catalog_entry(root, root_lock, name)
+            except OSError:
+                continue
+            free += 1
+        elif stat.S_ISDIR(info.st_mode) and not name.startswith(".") and name != keep:
+            sessions.append((info.st_mtime_ns, name))
+    now = time.time_ns()
+    attempts = 0
+    for _changed_ns, name in sorted(sessions):
+        if free >= NEW_SESSION_CATALOG_SLOTS or _over_budget(deadline, attempts):
+            return
+        attempts += 1
+        try:
+            evicted = _tombstone_expired_candidate(
+                root, root_lock, home, client, name, now, force_fallback=False, evict=True
+            )
+        except (OSError, TimeoutError):
+            continue
+        if evicted is None:
+            continue
+        tombstone, identity = evicted
+        if _delete_tombstone_at(root, tombstone, identity):
+            _unregister_prune_catalog_entry(root, root_lock, tombstone)
+            free += 1
 
 
 def _unregister_prune_catalog_entry(
@@ -4438,12 +4568,13 @@ def _dispatch_core(
     _clear_activation_token(home, client, str(event["session_id"]))
     _rearm_nudges(home, str(event["session_id"]))
     if event["event"] in {"PreCompact", "SessionEnd"}:
+        # Prune before the write: a home whose writes fail must still shed state.
+        try:
+            prune_expired(home, client, current_session=event["session_id"])
+        except BaseException:  # noqa: BLE001 - hook must contain every failure
+            pass
         try:
             outcome = write_checkpoint(event, home)
-            try:
-                prune_expired(home, client, current_session=event["session_id"])
-            except BaseException:  # noqa: BLE001 - hook must contain every failure
-                pass
             try:
                 _metadata_log(
                     home,
