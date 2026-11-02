@@ -31,9 +31,9 @@ Gate markers: a group or task marked `Gate: step 1 —` is built in full but kep
 ## 5. Scope rule and selection — Gate: step 1 — the whole task layer ships only if the stub arm beats the ablation arm and the stance-only arm
 
 - [ ] 5.1 Build the declaration index from units and index rows, never from page text at read time: item ref, activities, role, origin, `entity`-family targets, `as_of`, `until`, `check_by`.
-- [ ] 5.2 Unit test: a page that supersedes its own method unit for `review-contract` never yields the superseded unit as guidance (addendum section 4).
-- [ ] 5.3 Unit test: with person B declared, selection returns no unit scoped to person A (addendum section 7b).
-- [ ] 5.4 Unit test: for a restricted caller who cannot see an item, or cannot see its target entity, the guidance state equals the state of a vault with no such item (addendum section 7b).
+- [ ] 5.2 Unit test: a page that supersedes its own method unit for `review-contract` never yields the superseded unit as guidance.
+- [ ] 5.3 Unit test: with person B declared, selection returns no unit scoped to person A.
+- [ ] 5.4 Unit test: for a restricted caller who cannot see an item, or cannot see its target entity, the guidance state equals the state of a vault with no such item.
 - [ ] 5.5 Unit tests: an activity-only declaration does not unlock an entity-scoped item; an item with no scope and no stance mark is not guidance; an `inferred` item counts as absent; code reads entity scope only through the relation family `entity` and the anchor kind `entity`.
 - [ ] 5.6 Implement selection over the caller's view to pass 5.2–5.5.
   Proof: the selection tests pass, and a code search finds no branch on a relation key, an entity-type key or `cue_nouns` in the new code.
@@ -81,7 +81,7 @@ Gate markers: a group or task marked `Gate: step 1 —` is built in full but kep
 - [ ] 11.2 Write the moves: `ambiguous` (moved from the hook), `guidance_selected`, `guidance_unknown_activity`, `guidance_none_declared` (maps never pre-select task context; declare the activity from the index), `review_due`, `slice_empty`, and `search_miss` carrying the bootstrap `miss_rule`, which leaves bootstrap.
 - [ ] 11.3 Gate: step 1 — the check sentence stays if "Stub + check" beats Stub; otherwise `guidance_selected` keeps only "read the named guidance before a substantive conclusion" and "name the guidance that shaped the answer". Put the check sentence in `guidance_selected`: before a substantive conclusion, check the draft against each served guidance item, then state in one line which items the answer applied or set aside, by ref.
 - [ ] 11.4 Gate: step 1 — the correction route (rule as in task 13.1). Accept `refresh_reason` (`new_evidence`, `task_change`, `correction`) on `task_refresh` on every door; ignore an unknown or misplaced value and name `refresh_reason_ignored` in diagnostics; add the `correction` move.
-- [ ] 11.5 Add `next_action` to `recall_context` and `search_memory` after the packet cache lookup; reserve 240 characters of `max_chars` in every maps packet; omit the field when the table fails.
+- [ ] 11.5 Add `next_action` to `recall_context` and `search_memory` after the packet cache lookup; reserve 240 characters of `max_chars` in every maps packet; when the table fails, omit the field and name `next_action_unavailable` in diagnostics.
 - [ ] 11.6 Replace the per-state moves in the server instructions, both tool descriptions and the skill recall loop with "Follow `next_action` when present."; keep the server instructions within 900 characters.
   Proof: the state-table tests pass, and the per-state move text exists once in `src/exomem`.
 
@@ -113,7 +113,7 @@ Gate markers: a group or task marked `Gate: step 1 —` is built in full but kep
 ## 16. Acceptance
 
 - [ ] 16.1 Measure activation p95 on the activation benchmark with `include_timings`, before and after, on the same fixture; report the stance, guidance, record and `next_action` stage times.
-- [ ] 16.2 Ground-truth check of the record: on the step-2 development run, compare each case's recorded guidance refs, opens and cites with the tool calls in the harness transcript. It passes with zero disagreements across the development cases.
+- [ ] 16.2 Ground-truth check of the record: on the first development run of the built change on the step-1 harness (step 2), compare each case's recorded guidance refs, opens and cites with the tool calls in the harness transcript. It passes with zero disagreements across the development cases.
 - [ ] 16.3 Replay one incident shape through the context-miss-learning workflow and check that the incident links its delivered context by `served_context_id`.
 - [ ] 16.4 Prove the client-dependent behaviour on real models on the step-1 harness (declare rate, guidance-read rate, required items used), with realistic and hostile inputs and a provider outage injected at the transport.
 - [ ] 16.5 Run the full test corpus in CI-shaped shards, and get an independent adversarial review of the diff with a recheck of each correction.

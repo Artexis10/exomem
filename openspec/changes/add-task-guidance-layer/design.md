@@ -45,9 +45,9 @@ Rejected: reusing `context-roles.yaml`, because those roles are retrieval lanes 
 
 ### D4. Pages and rich units declare scope; nothing inherits
 
-A guidance item is a page (frontmatter) or a rich unit (governed metadata rows) that declares `activities`, an `entity`-family relation, or both. A page declaration does not pass to its units, and a unit declaration does not pass to its page. Inheritance would make one frontmatter edit change what many units serve, which the owner cannot see in the unit.
+A guidance item is a page (frontmatter) or a rich unit (governed metadata rows) that declares `activities` or a `guidance` role, or a scoped page or unit on a stance page. An `entity`-family relation narrows its scope. A page declaration does not pass to its units, and a unit declaration does not pass to its page. Inheritance would make one frontmatter edit change what many units serve, which the owner cannot see in the unit.
 
-A stance page is a page with `stance: true`. Its unscoped lines enter the stance block. A scoped stance page, or a scoped rich unit on a stance page, is a guidance item instead. Compact lines cannot carry metadata, so they take the page's scope and origin.
+A stance page is a page with `stance: true`. Its unscoped lines enter the stance block. A scoped stance page, or a scoped rich unit on a stance page, is a guidance item instead. Compact lines cannot carry metadata: on an unscoped stance page they enter the stance block with the page's origin, and on a scoped stance page they stay out of the block because the page itself is the guidance item.
 
 Rejected: a separate stance file, because stance lines are ordinary notes with history, sources and supersession.
 
@@ -69,9 +69,9 @@ Rejected: one shared cap, because a long index would starve the stance lines; ca
 
 OPEN: The design gives one "small fixed cap". The draft uses two caps, with first values chosen here, not measured.
 
-OPEN: Report section 11 lists each activity's guidance refs in the activity index. The packet's item list does not. The draft lists only key and description, and serves guidance refs only for a declared activity.
+OPEN: One part of the design lists each activity's guidance refs in the activity index; the change's scope does not. The draft lists only key and description, and serves guidance refs only for a declared activity.
 
-OPEN: Report section 10 computes the stance block "over the caller's view and the engagement level" but defines no effect of the level. The draft makes the block independent of the level.
+OPEN: The design computes the stance block over the caller's view and the engagement level, but defines no effect of the level. The draft makes the block independent of the level.
 
 ### D7. The client declares the activity on each call
 
@@ -83,7 +83,7 @@ Rejected: carrying the declaration in the continuity token, which the conversati
 
 The guidance block serves `{ref, title, role, why}` and no item text; the agent reads an item with `read_memory`. Guidance items take the slice reserve first and slice items fill the rest, so the map budget is unchanged. Order is by scope (activity and entity, entity, activity), then family, then ref.
 
-OPEN: Report section 10 item 4 serves guidance content through an `exomem://guidance/<key>` view. The packet's item list does not include it. The draft leaves it out; `read_memory` reads each ref.
+OPEN: One part of the design serves guidance content through an `exomem://guidance/<key>` view; the change's scope does not include it. The draft leaves it out; `read_memory` reads each ref.
 
 ### D9. Guidance states are closed, and failure is visible
 
@@ -96,6 +96,8 @@ OPEN: The design fixes four states and none for a failed lookup. The house rule 
 Scope takes four forms: global (the stance block), activity, entity, and activity and entity. Entity scope is a relation of family `entity` to a page whose anchor kind is `entity`. Code reads only the closed family and the closed anchor kind, as currency reads the `supersession` family. An item is selected only when every dimension it declares matches the client's declaration, over the caller's view. So an entity-scoped precedent never serves on another entity's task or on a task that declares no entity.
 
 Without `conversation.entities` (gated), no client can declare an entity, so entity-scoped items stay unserved. The scope rule ships anyway, because adding it later would narrow guidance that was already served unscoped. A stance page that carries a note-level `entity`-family relation becomes scoped and leaves the always-on block; that follows from D4.
+
+OPEN: The design says that an item with no activity, no entity and no stance mark is not guidance, which implies that an entity relation alone makes an item guidance. Ordinary notes carry `about_entity` relations, so that reading would serve every note about a declared person as guidance. The draft requires `activities`, a `guidance` role or a stance page, and lets the entity relation only narrow the scope.
 
 Rejected: scoping by entity type, which is vocabulary; the entity-type `cue_nouns` attribute, which is a word list; reusing `anchor`, which in anchors mode is a correction pick that the learning sensor counts.
 
@@ -113,7 +115,7 @@ Anchors mode keeps its content-free activation log; the record covers maps activ
 
 Rejected: extending `activations.jsonl`, which must stay content-free; writing into the heat ring, for the cost above.
 
-OPEN: Report section 9 omits logged keys and refs in content-private hosted mode. Addendum section 1 keeps rows in tenant state, which works in that mode. The draft keeps rows in tenant state in every mode and never in host logs.
+OPEN: One part of the design omits logged keys and refs in content-private hosted mode; another keeps rows in tenant state, which works in that mode. The draft keeps rows in tenant state in every mode and never in host logs.
 
 OPEN: The design says "never serve one caller's rows to another" and also names an owner read-out. The draft lets only the owner read-out read across principals, because the owner owns the vault and delegated agents act for the owner.
 
@@ -121,13 +123,13 @@ OPEN: The read-out surface is unnamed. The draft puts it on the CLI and the owne
 
 ### D13. `next_action` is the only copy of per-state moves
 
-Every `recall_context` and `search_memory` response carries one move, `{state, say, tool?, args?}`, chosen from one state table by a fixed precedence: `correction`, `ambiguous`, `guidance_selected`, `guidance_unknown_activity`, `guidance_none_declared`, `review_due`, `slice_empty`; and `search_miss` for search. The field reuses the write terminal's name and widens its shape additively. Every named call comes from `capabilities.active_call_text`, so a move never names a call the caller cannot make, which keeps the rule that no `next_action` advertises a path that no code performs. The hook, the server instructions, the tool descriptions and the skill carry only "Follow `next_action` when present." The section 10 item 6 sentences, the check sentence and the Sources move arrive per state through this table.
+Every `recall_context` and `search_memory` response carries one move, `{state, say, tool?, args?}`, chosen from one state table by a fixed precedence: `correction`, `ambiguous`, `guidance_selected`, `guidance_unknown_activity`, `guidance_none_declared`, `review_due`, `slice_empty`; and `search_miss` for search. The field reuses the write terminal's name and widens its shape additively. Every named call comes from `capabilities.active_call_text`, so a move never names a call the caller cannot make, which keeps the rule that no `next_action` advertises a path that no code performs. The hook, the server instructions, the tool descriptions and the skill carry only "Follow `next_action` when present." The sentences that say maps never pre-select task context, declare the activity, read the named guidance and name what shaped the answer, the check sentence and the Sources move arrive per state through this table.
 
 The precedence puts a correction first, because saving it is the move the user just asked for in substance; then ambiguity, because the agent cannot proceed without a choice; then guidance application, then declaration repairs, then review and empty-slice moves.
 
-`next_action` covers anchors-mode abstentions too (`ambiguous`), because the hook's own lines must have one source in both modes.
+OPEN: The first increment is maps mode only, but the hook's `anchor` line must come from one source in both modes. The draft lets the `ambiguous` state cover anchors-mode abstentions too.
 
-OPEN: Addendum section 9.1 takes `say` "from the packet budget" and also adds the field "after the packet cache". The draft reserves a fixed 240 characters of `max_chars` in every maps packet, so the response stays within `max_chars` and the cached packet does not depend on the state.
+OPEN: The design takes `say` from the packet budget and also adds the field after the packet cache. The draft reserves a fixed 240 characters of `max_chars` in every maps packet, so the response stays within `max_chars` and the cached packet does not depend on the state.
 
 OPEN: The bootstrap `miss_rule` moves into the `search_miss` move. The active `shrink-bootstrap` change edits the same payload; the two must agree on the field's removal.
 
@@ -180,7 +182,7 @@ OPEN: The shipped guidance-roles pack ships three entries. The design says the r
 - **Latency.** Stance: a cached read; a cache miss reads the stance pages' units through the index. Guidance: one indexed lookup by declared key over the declaration index. Record: one best-effort insert after the packet is built, with a short busy timeout. `next_action`: a table lookup. None of these is measured yet; task 16.1 measures activation p95.
 - **Tokens.** The stance block takes up to 1,200 characters of `max_chars` when stance pages and activities exist, and nothing else otherwise. Guidance refs displace slice items inside the existing reserve. `next_action` reserves 240 characters. `served_context_id` adds about 20 characters outside the cached packet.
 - **Privacy.** Every block is computed over the caller's view; withheld items and entities count as absent. The activities registry is default-deny for restricted callers. The record holds refs, keys, counts and closed states in tenant state, records each row under its caller, never writes host logs, and counts unknown keys without their values.
-- **Maintenance.** Two registries, one table with one retention sweep, one read-out, and one module of move text that replaces several copies. The owner carries a curation cost: notes must declare activities and stance marks before anything is served. Compile-time authoring (report section 12) and upkeep proposals are the planned relief.
+- **Maintenance.** Two registries, one table with one retention sweep, one read-out, and one module of move text that replaces several copies. The owner carries a curation cost: notes must declare activities and stance marks before anything is served. Compile-time authoring, where capture and curation propose unit roles and activity links for owner review, and upkeep proposals are the planned relief.
 
 ## Risks
 
@@ -191,7 +193,7 @@ OPEN: The shipped guidance-roles pack ships three entries. The design says the r
 
 ## Proof plan
 
-The workflow this change alters is the first `recall_context` call of a task and its refresh. The highest-level check is the step-2 development run on the step-1 harness with real models: per case, the declare rate, the guidance-read rate and the required items used, with the served-context record compared against the harness transcript. Behaviour that depends on the client model (declaring, reading, applying, correcting) is proven only on real models; stubbed models prove wiring.
+The workflow this change alters is the first `recall_context` call of a task and its refresh. The highest-level check is the first development run of the built change on the step-1 harness with real models (step 2): per case, the declare rate, the guidance-read rate and the required items used, with the served-context record compared against the harness transcript. Behaviour that depends on the client model (declaring, reading, applying, correcting) is proven only on real models; stubbed models prove wiring.
 
 ## Migration and rollout
 

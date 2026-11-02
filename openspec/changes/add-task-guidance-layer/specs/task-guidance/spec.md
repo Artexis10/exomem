@@ -39,7 +39,7 @@ Exomem SHALL keep the roles that a guidance item can declare in one vocabulary r
 
 ### Requirement: Pages and units declare guidance scope
 
-A guidance item SHALL be a page or a rich semantic unit that declares a scope. A page SHALL declare scope in frontmatter and a rich unit SHALL declare it in governed metadata rows (semantic-unit-language). The declarations are:
+A guidance item SHALL be a page or a rich semantic unit that declares `activities` or a `guidance` role, or a scoped page or unit on a stance page. A page SHALL declare in frontmatter and a rich unit SHALL declare in governed metadata rows (semantic-unit-language). The declarations are:
 
 - `activities`: a list of activity keys, at most 16, each in the activity registry;
 - an entity scope: a relation of family `entity` from the item to an entity page, as a note-level relation for a page or a block relation for a rich unit; the shipped relation `about_entity` has that family, and a relation that a vault adds to the family scopes in the same way;
@@ -47,7 +47,7 @@ A guidance item SHALL be a page or a rich semantic unit that declares a scope. A
 - `stance: true`: a page-level mark that makes the page a stance page;
 - `guidance_origin`: the recorded origin of the declarations above, `inferred` or `reviewed`.
 
-Code SHALL read an entity scope only through the closed relation family `entity` and the closed anchor kind `entity`, never through a relation key, an entity-type key or the entity-type `cue_nouns` attribute. A page declaration SHALL NOT pass to the page's units, and a unit declaration SHALL NOT pass to its page. Scope SHALL change no authority: supersession and `contradicts` relations apply as before.
+An entity-family relation SHALL narrow the scope of a guidance item and SHALL NOT make an item guidance by itself, because ordinary notes carry such relations. Code SHALL read an entity scope only through the closed relation family `entity` and the closed anchor kind `entity`, never through a relation key, an entity-type key or the entity-type `cue_nouns` attribute. A page declaration SHALL NOT pass to the page's units, and a unit declaration SHALL NOT pass to its page. Scope SHALL change no authority: supersession and `contradicts` relations apply as before.
 
 A governed write SHALL refuse an `activities` value that holds a key absent from the caller's view of the activity registry, and its error SHALL name `schema_memory(subject="activities")`. A hand edit that holds such a key SHALL produce a validation finding, and the key SHALL match no declaration.
 
@@ -61,6 +61,11 @@ A governed write SHALL refuse an `activities` value that holds a key absent from
 - **WHEN** a rich unit carries `- activities: reply-message`, `- guidance: precedent` and the block relation `about_entity` to the page of an invented person A
 - **THEN** the unit is a guidance item scoped to `reply-message` and to person A
 
+#### Scenario: An entity relation alone does not make guidance
+
+- **WHEN** an ordinary note about an invented person A carries the note-level relation `about_entity` and declares no `activities`, no `guidance` role and no `stance` mark
+- **THEN** the note is not a guidance item, and declaring person A does not select it
+
 #### Scenario: A governed write refuses an unregistered activity
 
 - **WHEN** an agent writes a page with `activities: [plan-trip]` and the registry has no `plan-trip`
@@ -70,7 +75,7 @@ A governed write SHALL refuse an `activities` value that holds a key absent from
 
 A declaration's origin SHALL decide whether it is served. A page or unit with no `guidance_origin` SHALL read as owner-written (`authored`), because only a hand edit writes a declaration without an origin. `guidance_origin: reviewed` SHALL read as owner-reviewed. `guidance_origin: inferred` SHALL never be served as guidance or as a stance line.
 
-A governed write that adds or changes `activities`, `guidance`, `stance` or an entity-family relation on an item SHALL record `guidance_origin: inferred`, unless an owner principal passes the owner's confirmation, which records `reviewed`. A nonowner principal SHALL only record `inferred`. Compact lines of a stance page SHALL take the page's origin. A governed write that adds a line to a stance page SHALL record the page's origin again under the same rule.
+A governed write that adds or changes `activities`, `guidance` or `stance` on an item, or an entity-family relation on a guidance item or a stance page, SHALL record `guidance_origin: inferred`, unless an owner principal passes the owner's confirmation, which records `reviewed`. A nonowner principal SHALL only record `inferred`. Compact lines of a stance page SHALL take the page's origin. A governed write that adds a line to a stance page SHALL record the page's origin again under the same rule.
 
 Each served guidance item SHALL report its origin in `why.origin` as `authored` or `reviewed`.
 
@@ -93,8 +98,8 @@ Each served guidance item SHALL report its origin in `why.origin` as `authored` 
 
 Every maps-mode packet SHALL carry a `stance` block, after the continuity fields and before the map. The block SHALL hold two parts, each under its own hard character cap:
 
-- `lines`: the stance lines, each an object `{ref, text}` with `review_due` when it applies, under `STANCE_LINES_MAX_CHARS`;
-- `activities`: the activity index, each an object `{key, description}` from the caller's view of the activity registry, under `STANCE_INDEX_MAX_CHARS`.
+- `lines`: `{items, omitted, expired}`, where each item is a stance line `{ref, text}` with `review_due` when it applies, under `STANCE_LINES_MAX_CHARS`;
+- `activities`: `{items, omitted}`, where each item is an index entry `{key, description}` from the caller's view of the activity registry, under `STANCE_INDEX_MAX_CHARS`.
 
 A stance line SHALL be a semantic unit of a stance page whose origin is served. A line SHALL enter the block only when it is unscoped: neither the line nor its page declares `activities` or an entity-family relation. A scoped stance page or a scoped rich unit on a stance page SHALL be a guidance item instead. Lines SHALL follow the stance pages in path order, then the units in page order. Each part SHALL keep whole items only and report `omitted` with the count of items that did not fit. The block SHALL report `state`: `ready` when it holds at least one line or index entry, `empty` when it holds neither, and `unavailable` when its compile failed. A failure SHALL leave the map and the slice served.
 
@@ -196,7 +201,7 @@ Scope SHALL take four forms: global, activity, entity, and activity and entity t
 - if the item declares activities, the client SHALL declare at least one of them;
 - if the item declares an entity scope, the client SHALL declare at least one of its target entities.
 
-An item with no activity, no entity scope and no stance mark SHALL NOT be guidance. An entity-scoped item SHALL never be served on a task that declares another entity or no entity. Selection SHALL run over the caller's view, and a withheld entity SHALL count as undeclared.
+An item with only an entity-family relation SHALL NOT be guidance. An entity-scoped item SHALL never be served on a task that declares another entity or no entity. Selection SHALL run over the caller's view, and a withheld entity SHALL count as undeclared.
 
 #### Scenario: An entity-scoped precedent stays with its entity
 

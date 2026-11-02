@@ -9,7 +9,7 @@ Every `recall_context` and `search_memory` response SHALL carry `next_action` in
 - `tool` names the one tool that the move calls, by the name that `capabilities` exposes to the caller's surface, and appears only when the move calls one tool;
 - `args` appears only when the server can fill every argument of that call.
 
-The server SHALL add `next_action` after the packet cache lookup and SHALL never store it in a cached packet. A maps packet SHALL always reserve 240 characters of `max_chars` for `next_action`, whatever the state, so the response stays within `max_chars` and the cached packet does not depend on the state. When the state table fails, the response SHALL omit `next_action` and SHALL still be served. Every tool call that `say` names SHALL be rendered through `capabilities.active_call_text`, so a move names only a call that the caller can make.
+The server SHALL add `next_action` after the packet cache lookup and SHALL never store it in a cached packet. A maps packet SHALL always reserve 240 characters of `max_chars` for `next_action`, whatever the state, so the response stays within `max_chars` and the cached packet does not depend on the state. When the state table fails, the response SHALL omit `next_action`, its diagnostics part SHALL name `next_action_unavailable`, and the response SHALL still be served. Every tool call that `say` names SHALL be rendered through `capabilities.active_call_text`, so a move names only a call that the caller can make.
 
 #### Scenario: An empty slice gets one move
 
