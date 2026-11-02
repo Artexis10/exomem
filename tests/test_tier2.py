@@ -1270,6 +1270,9 @@ def test_semantic_create_marks_generated_index_and_log_as_derived_auxiliaries(
         def as_dict(self):
             return {}
 
+        def review_field_warnings(self):
+            return []
+
     def commit(root, **kwargs):
         captured.update(kwargs)
         return _Committed()

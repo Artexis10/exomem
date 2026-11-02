@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from . import capabilities, operation_entries, relation_registry
 from . import curation as curation_module
+from .operation_entries import OutcomeVerb
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +141,14 @@ _ADVISORY_FAILURE = (
 #: Bounds the diagnostics carried by one acknowledgement, not one batch: a
 #: multi-batch mutation shares this budget rather than multiplying it.
 _MAX_DERIVED_DIAGNOSTICS = 9
+
+#: How an agent tells the user about a write. One sentence, carried by the bootstrap
+#: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
+#: keeps both copies equal to this one.
+NARRATION_RULE = (
+    "Tell the user the user_summary. Give codes, ids, hashes, retries and sync state "
+    "only if asked. State a blocker plainly."
+)
 
 #: Keys a client may branch on. Everything else in a response is advisory.
 _ENVELOPE_KEYS = (
@@ -1910,7 +1919,44 @@ def split_response_detail(
     return payload, cast(ResponseDetail, detail)
 
 
-def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
+def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | None:
+    """One plain sentence for the person, built only from fields the terminal stores.
+
+    A replay stores the same `path` or `paths`, so it yields the same sentence.
+    A refusal, a call that awaits review, or a write that declares no verb has no outcome to state.
+    """
+    if verb is None or result.get("ok") is not True:
+        return None
+    if result.get("status") == "committed":
+        head = verb.capitalize()
+    elif result.get("status") == "replayed":
+        head = f"Already {verb}"
+    else:
+        return None
+    path = result.get("path")
+    paths = result.get("paths")
+    if isinstance(path, str):
+        names = [path]
+    elif isinstance(paths, (list, tuple)):
+        names = [item for item in paths if isinstance(item, str)]
+    else:
+        names = []
+    if not names:
+        return head
+    if len(names) == 1:
+        return f"{head} -> {names[0]}"
+    if verb == "moved" and len(names) == 2:
+        # A move stores its two ends as `paths`: [from, to].
+        return f"{head} {names[0]} -> {names[1]}"
+    if verb == "replaced" and len(names) == 2:
+        # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
+        return f"{head} -> {names[1]} (was {names[0]})"
+    return f"{head} {len(names)} files -> {names[0]} and {len(names) - 1} more"
+
+
+def project_terminal(
+    result: Any, detail: ResponseDetail = "compact", *, outcome_verb: OutcomeVerb | None = None
+) -> Any:
     """Project a canonical terminal, preserving unversioned legacy results."""
     if not isinstance(detail, str) or detail not in _RESPONSE_DETAILS:
         raise ValueError("response_detail must be one of: compact, full, legacy")
@@ -1936,7 +1982,11 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     )
     if detail == "legacy":
         return leaf
-    compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
+    compact: dict[str, Any] = {}
+    user_summary = _user_summary(result, outcome_verb)
+    if user_summary is not None:
+        compact["user_summary"] = user_summary
+    compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
     if result.get("derived_sync") in DERIVED_SYNC_OUTCOMES:

@@ -455,3 +455,41 @@ def test_travel_append_commits_four_observations(
     assert "## Route options" in written
     assert written.count("#travel") == 4
     assert semantic.get("after_hash") == vault.content_hash(written)
+
+
+def test_commit_without_a_relation_review_hash_names_the_missing_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("2026-08-09")
+    _write(tmp_path, PAGE, source)
+    _save_current_review(tmp_path, source)
+    monkeypatch.setattr(
+        temporal,
+        "now",
+        lambda: dt.datetime(2026, 8, 10, 12, 0, 0, tzinfo=dt.UTC),
+    )
+    operation = _operation("replace_string")
+    semantic = commands.op_edit_memory(
+        tmp_path,
+        path=PAGE,
+        why="validate the edit before committing without a hash",
+        operation={**operation, "validate_only": True},
+    )["semantic"]
+
+    with pytest.raises(ValueError) as refused:
+        commands.op_edit_memory(
+            tmp_path,
+            path=PAGE,
+            why="commit without the relation review hash",
+            operation={
+                **operation,
+                "transition_token": semantic["transition_token"],
+                "relation_disposition": "reviewed_none",
+                "relation_review_reason": REVIEW_REASON,
+            },
+        )
+
+    text = str(refused.value)
+    assert text.startswith("INVALID_RELATION_REVIEW")
+    assert "(missing: ['relation_review_hash'])" in text
+    assert "semantic.relation_review_hash" in text

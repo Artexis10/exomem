@@ -46,6 +46,9 @@ _COMPACT_MUTATION_OUTER = frozenset(
 _COMPACT_MUTATION_OPTIONAL = frozenset(
     {
         "idempotency_key",
+        # The plain sentence for the person. Optional because a server before the
+        # plain-write-outcomes release does not send it.
+        "user_summary",
         "graph_sync",
         "graph_sync_code",
         "graph_sync_checkpoint",

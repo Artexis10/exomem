@@ -35,6 +35,7 @@ from .call_spans import (  # noqa: F401 - re-exported for existing importers
 )
 from .governance import operations as governance_operations
 from .mutation_terminal import ResponseDetail
+from .operation_entries import OutcomeVerb
 
 _log = logging.getLogger(__name__)
 
@@ -373,6 +374,10 @@ class Command:
     )
     #: The command's own argument rules, which every spelling of it shares.
     argument_rules: ArgumentRules | None = field(default=None, compare=False, hash=False)
+    #: What a completed write reports, so the user-facing summary says "Deleted" and not "Saved".
+    #: A write declares one; a grouped command declares it on each operation row instead, and a
+    #: read declares none. A write that declares none gets no summary.
+    outcome_verb: OutcomeVerb | None = None
 
     def __post_init__(self) -> None:
         if self.renderings and self.argument_rules is None:
@@ -422,6 +427,14 @@ class Command:
             self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS,
             public_title=self.public_title or self.public_name.replace("_", " ").title(),
         )
+
+
+def outcome_verb_of(command: object, arguments: Mapping[str, typing.Any]) -> OutcomeVerb | None:
+    """The verb a completed call of `command` reports, or None when the write declares none."""
+    operations = operation_entries.OPERATIONS.get(getattr(command, "name", ""))
+    if operations is not None:
+        return operations.outcome_verb(arguments.get(operations.selector), arguments)
+    return getattr(command, "outcome_verb", None)
 
 
 def gateway_required_error(name: str):
