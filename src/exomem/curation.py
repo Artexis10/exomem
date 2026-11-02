@@ -1277,7 +1277,6 @@ class _PlanPeers:
     """The pages a plan's earlier steps create, as a later step's leaf will count them."""
 
     possible: bool = False  # an earlier create that may be a governed page
-    certain: bool = False  # an earlier create whose leaf reported a fully governed page
     applicability: str | None = None  # what the step being prepared reported, for the next
 
 
@@ -1294,7 +1293,8 @@ def _require_committable(
     to it there; its validation still says whether the page needs one. Only a
     fully governed page is reviewed at commit; the leaf ignores a review elsewhere.
     A page that needs no review only because no other governed page exists
-    (`bootstrap`) needs one once an earlier step's governed page exists.
+    (`bootstrap`) may need one once an earlier step's page exists, so the leaf
+    judges a given review at execution.
     """
     from . import semantic_contract
 
@@ -1309,12 +1309,6 @@ def _require_committable(
         raise _error(
             "RELATION_REVIEW_NOT_APPLICABLE",
             "the page needs no reviewed-none relation review; drop relation_disposition",
-        )
-    if not review and bootstrap and peers.certain and not relation_pending:
-        raise _error(
-            "SEMANTIC_CONTRACT_BLOCKED",
-            "the step would block at commit: RELATION_DISPOSITION_MISSING once an earlier "
-            "step's page exists; give the page a relation or a reviewed_none review",
         )
     _refuse_blocked(
         validation.get("contract_result"), relation_answered=bool(review) or relation_pending
@@ -1814,7 +1808,6 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
         if new_pages:
             # A create whose leaf reported nothing (an entity) may still be governed.
             peers.possible |= peers.applicability is None or peers.applicability == "full"
-            peers.certain |= peers.applicability == "full"
         if step["kind"] == "supersede":
             from .vault import parse_frontmatter, resolve_display_title
 

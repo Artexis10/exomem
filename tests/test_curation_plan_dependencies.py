@@ -411,7 +411,6 @@ def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_revie
     assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
 
 
-
 def _fresh_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A new scaffold vault: it has no governed page, so a first page needs no review."""
     from exomem import find as find_module
@@ -451,23 +450,24 @@ def test_a_review_needed_only_once_an_earlier_page_lands_applies(
     assert _resume(fresh, proposed)["phase"] == "completed"
 
 
-def test_a_page_that_will_need_a_review_once_an_earlier_page_lands_is_refused_at_proposal(
+def test_a_page_an_earlier_step_relates_to_applies_without_a_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fresh = _fresh_vault(tmp_path, monkeypatch)
     first = _create_step(
-        "first", "curation-first", "## Observations\n\n- [finding] First. ^first" + _SHARED_NEW_LINK
+        "first",
+        "curation-first",
+        "## Observations\n\n- [finding] First. ^first\n\n"
+        "## Relations\n\n- supports [[Curation curation-second]]\n",
     )
     second = _create_step(
-        "second",
-        "curation-second",
-        "## Observations\n\n- [finding] Second. ^second" + _SHARED_NEW_LINK,
+        "second", "curation-second", "## Observations\n\n- [finding] Second. ^second\n"
     )
 
-    with pytest.raises(curation.CurationError) as refused:
-        _propose(fresh, first, second)
+    proposed = _propose(fresh, first, second)
+    _apply(fresh, proposed)
 
-    assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert _resume(fresh, proposed)["phase"] == "completed"
 
 
 def test_an_unneeded_review_after_an_earlier_create_is_still_refused_at_proposal(
