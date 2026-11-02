@@ -39,9 +39,11 @@ def test_scoring_refuses_a_case_without_a_key_and_a_key_that_names_an_unseeded_p
     session_score.refuse_unkeyed([case(KEY)])
 
 
-def test_every_shipped_case_loads_and_c06_is_c01_at_light() -> None:
+def test_every_shipped_case_loads_and_the_variants_change_only_engagement() -> None:
     cases = {c.id: c for c in session_close.load_cases("all")}
-    assert len(cases) == 7
+    assert cases["c08-regression-maximal"].turns == cases["c07-regression"].turns
+    assert cases["c08-regression-maximal"].seed == cases["c07-regression"].seed
+    assert cases["c08-regression-maximal"].engagement == "maximal"
     assert cases["c06-policy-light"].turns == cases["c01-person"].turns
     assert cases["c06-policy-light"].seed == cases["c01-person"].seed
     assert cases["c06-policy-light"].engagement == "light"
