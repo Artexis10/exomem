@@ -906,6 +906,10 @@ def warm(vault_root: Path) -> None:
                 freshness.rebaseline(vault_root)
             except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
                 log.warning("standby recall registry reseed failed", exc_info=True)
+        elif prove_retrieval_catalog(vault_root):
+            # A release-change build that ran and failed falls back to the
+            # ordinary proof now, not at the next re-proof poll.
+            _warm_proven_catalogue(vault_root)
         else:
             log.info(
                 "standby retrieval catalog is not current; awaiting a current "

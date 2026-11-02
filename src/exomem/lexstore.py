@@ -2302,14 +2302,18 @@ def request_repair(
     vault_root: Path,
     *,
     deferred_paths: list[Path] | None = None,
+    lag_only: bool = False,
     cause: RepairCause | None = None,
 ) -> None:
     """Non-walking retry seam for a request refused by runtime admission.
 
     `deferred_paths` narrows the repair to a targeted retry of those paths (see
-    `_schedule_repair`); `cause` is the token the worker logs. A narrow
-    request that names nothing the catalogue indexes is dropped, never widened
-    into the whole-catalogue pass that an empty path list would request.
+    `_schedule_repair`); `lag_only` asks for the catch-up of the registry delta,
+    which moves up to the full pass on any decline; `cause` is the token the
+    worker logs. A narrow request that names nothing the catalogue indexes is
+    dropped, never widened into the whole-catalogue pass that an empty path
+    list would request. Unlike `request_lag_repair`, this seam leaves runtime
+    admission as it is: a refused request proves nothing about the catalogue.
     """
     if not maintained_content_index_enabled():
         return
@@ -2317,7 +2321,7 @@ def request_repair(
         deferred_paths = _lexical_markdown(deferred_paths)
         if not deferred_paths:
             return
-    _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
+    _schedule_repair(vault_root, deferred_paths=deferred_paths, lag_only=lag_only, cause=cause)
 
 
 def request_lag_repair(vault_root: Path) -> None:

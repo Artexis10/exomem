@@ -7764,8 +7764,9 @@ def recall_resolver_snapshot(
         if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
             # The registry moved past the request's admission, so the catalogue
             # may trail it. The lag repair replays that delta and falls back to
-            # the full pass on any refusal.
-            lexstore.request_lag_repair(root)
+            # the full pass on any refusal. Admission stays: the registry moving
+            # does not prove the catalogue trails it.
+            lexstore.request_repair(root, lag_only=True, cause=lexstore.RepairCause.CATALOGUE_LAG)
             raise RetrievalIndexWarming(
                 site="resolver_checkpoint_stale",
                 status="temporarily_unavailable",

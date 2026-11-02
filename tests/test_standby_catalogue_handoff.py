@@ -1127,6 +1127,27 @@ def test_an_upgrade_heals_this_releases_catalogue_instead_of_rebuilding_the_old_
     assert lexstore.search_bm25(root, "quokkalastsave", k=3, scope="kb")
 
 
+def test_a_failed_release_change_build_falls_back_to_proving_the_live_catalogue(
+    earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every upgrade now builds in the standby; a build that fails must not hold `lexical`.
+
+    Without the fallback the component waits until the warm budget expires,
+    and the supervisor refuses the upgrade the old path would have completed.
+    """
+    root = earlier_release_catalogue
+    _stub_graph_and_models(monkeypatch)
+
+    def build_fails(vault_root: Path, *, cancel=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lexstore, "build_detached_catalog", build_fails)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+
+    assert service_standby.cutover_components()["lexical"] == "ready"
+
+
 def test_a_save_between_the_heal_and_the_proof_is_caught_up_not_rebuilt(
     earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
