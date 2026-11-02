@@ -183,8 +183,11 @@ def test_a_command_asks_the_store_once_for_all_its_pages(
     assert _refs(unresolved) == []
     assert _refs(phrase) == [SHARED]
     store_spans = [span for span in spans if span["name"].startswith("store.call@")]
+    # The body and the terminal pass each decide every page; policy withholds an external caller's
+    # store pages before the terminal pass, so only its body asks.
+    passes = 1 if caller == "external" else 2
     assert [(span["count"], span["fields"]["pages"], span["fields"]["refused"], span["fields"]["wake"])
-            for span in store_spans] == [(2, 2 * PAGE_COUNT, 0, 0)]  # the body's request and the terminal pass's, each deciding every page
+            for span in store_spans] == [(passes, passes * PAGE_COUNT, 0, 0)]
     # The site is the code that asked, not the plumbing between it and the store.
     assert not store_spans[0]["name"].removeprefix("store.call@").startswith(
         ("collection_store.", "published_admission", "functools", "contextlib", "unknown")
