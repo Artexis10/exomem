@@ -713,11 +713,11 @@ def replace(
         relation_review.RelationReviewError,
         semantic_writes.SemanticWriteError,
     ) as error:
-        raise ReplaceError(error.code, [], error.reason) from error
+        raise ReplaceError(error.code, list(error.missing), error.reason) from error
     return ReplaceResult(
         rel_old_with_ext,
         prepared.destination,
-        list(prepared.warnings),
+        [*prepared.warnings, *committed.review_field_warnings()],
         memory_refs.ReferenceIndex(root).ref_for_path(rel_old_with_ext),
         memory_refs.memory_ref(prepared.identity),
         committed.as_dict(),

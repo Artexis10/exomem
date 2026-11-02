@@ -393,6 +393,8 @@ class SemanticWriteError(ValueError):
     reason: str
     validation_findings: tuple[semantic_contract.ContractFinding, ...] = ()
     details: dict[str, Any] | None = None
+    #: The request fields the caller must add, for a refusal that names them.
+    missing: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
@@ -972,6 +974,8 @@ class CreationPreflight:
     generic_cleared: relation_barrier.Cleared | None = None
     #: Generic edges between two notes that a specific relation fits, offered after the commit.
     specific_offers: tuple[relation_barrier.Offer, ...] = ()
+    #: The review fields a commit of this draft would find missing or ignored.
+    review_fields: relation_review.ReviewFieldCheck = relation_review.ReviewFieldCheck()
 
     @property
     def draft_hash(self) -> str | None:
@@ -1005,6 +1009,8 @@ class CreationPreflight:
             value["vocabulary_resolution"] = self.vocabulary_binding.as_dict()
         if self.placement is not None:
             value["placement"] = self.placement
+        if fields := self.review_fields.as_dict():
+            value["relation_review_fields"] = fields
         return value
 
 
@@ -1043,6 +1049,14 @@ class CreationCommit:
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, Any] | None = None
     vocabulary_resolution: dict[str, str] | None = None
+    #: Review fields the commit dropped because the page needs no relation review.
+    ignored_review_fields: tuple[str, ...] = ()
+
+    def review_field_warnings(self) -> list[str]:
+        """The one warning a commit owes for the review fields it dropped, if any."""
+        if not self.ignored_review_fields:
+            return []
+        return [relation_review.ignored_review_fields_warning(self.ignored_review_fields)]
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -2190,6 +2204,12 @@ def _preflight_existing(
                 "INVALID_RELATION_REVIEW",
                 "reviewed-none applies only to an active compiled result",
             )
+        if not validate_only and relation_review_hash is None:
+            absent = relation_review.missing_review_fields_error(
+                ("relation_review_hash",),
+                hash_source="semantic.relation_review_hash in the validate_only result",
+            )
+            raise SemanticWriteError(absent.code, absent.reason, missing=absent.missing)
         if not validate_only and relation_review_hash != transition_hash:
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
@@ -4591,6 +4611,7 @@ def preflight_creation(
     draft_token: str,
     registrations: tuple[DraftRegistration, ...] = (),
     relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     generic_reasons: tuple[tuple[str, str, str], ...] = (),
     predecessor_path: str | None = None,
@@ -4613,6 +4634,7 @@ def preflight_creation(
             draft_token=draft_token,
             registrations=registrations,
             relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
             generic_reasons=generic_reasons,
             predecessor_path=predecessor_path,
@@ -4635,6 +4657,7 @@ def _preflight_creation(
     draft_token: str,
     registrations: tuple[DraftRegistration, ...],
     relation_disposition: str | None,
+    relation_review_hash: str | None,
     relation_review_reason: str | None,
     generic_reasons: tuple[tuple[str, str, str], ...],
     predecessor_path: str | None,
@@ -4655,8 +4678,18 @@ def _preflight_creation(
     choice = _generic_choice(relation_disposition, relation_review_reason)
     if generic_reasons:
         choice = replace(choice or relation_barrier.Choice(), by_edge=generic_reasons)
-    # `generic` answers the barrier only; the relation review below never sees it.
+    # `generic` answers the barrier only; the relation review below never sees it, and the reason
+    # it carries is the barrier's, so no review field counts as supplied.
     review_disposition = None if relation_disposition == relation_barrier.GENERIC else relation_disposition
+    supplied_review_fields = (
+        {}
+        if relation_disposition == relation_barrier.GENERIC
+        else {
+            "relation_disposition": relation_disposition,
+            "relation_review_hash": relation_review_hash,
+            "relation_review_reason": relation_review_reason,
+        }
+    )
     token = DraftToken.decode(draft_token)
     if (
         token.writer != writer
@@ -4773,6 +4806,10 @@ def _preflight_creation(
             provenance_server_at=provenance_server_at,
             generic_cleared=cleared,
             specific_offers=offers,
+            review_fields=relation_review.check_review_fields(
+                supplied_review_fields,
+                relation_review.review_applies(validation.relation_disposition),
+            ),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4820,6 +4857,7 @@ def _preflight_creation(
         provenance_server_at=_new_provenance_time(root) if cleared and cleared.edges else None,
         generic_cleared=cleared,
         specific_offers=offers,
+        review_fields=relation_review.check_review_fields(supplied_review_fields, False),
     )
 
 
@@ -5690,7 +5728,12 @@ def _commit_creation(
                 )
             _publish_creation_catalog(catalog_target)
             return CreationCommit(
-                "full", True, committed.written_paths, committed.contract_result, committed
+                "full",
+                True,
+                committed.written_paths,
+                committed.contract_result,
+                committed,
+                ignored_review_fields=committed.ignored_review_fields,
             )
         commits, failure = _commit_structural(
             root,
@@ -5701,4 +5744,13 @@ def _commit_creation(
         )
         if failure is not None:
             raise failure
-        return commits[0]
+        # A page the review never reaches has no use for review fields: drop them too.
+        ignored = relation_review.check_review_fields(
+            {
+                "relation_disposition": relation_disposition,
+                "relation_review_hash": relation_review_hash,
+                "relation_review_reason": relation_review_reason,
+            },
+            False,
+        ).ignored
+        return replace(commits[0], ignored_review_fields=ignored) if ignored else commits[0]

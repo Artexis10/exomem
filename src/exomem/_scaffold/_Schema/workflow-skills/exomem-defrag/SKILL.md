@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: 2b616de1574c9f2d7cfc9e1604541faf936e526b42e30560c750bd37deeddd22
+  skill_contract: b24b077e56d4ebd0ca400a3287d635b40d3bd90ce17f0929c8decd6837dbcc1a
   version: "0.1.0"
 ---
 
@@ -37,6 +37,10 @@ the structured error. For warming, busy, pending, or
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
+
+Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
+only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+conversation diagnostic.
 
 ## Workflow
 1. Search the topic with `search_memory`, using `search_memory(deep=true)`, `read_connections/change_connections`, or `read_review/triage_memory` when graph, stale, audit, or evolution context matters.

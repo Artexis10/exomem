@@ -18,8 +18,11 @@ env:
   # The store-blind release the collection-store gate runs as an actual older
   # interpreter (tests/test_collection_store_s1_gate.py fails without it).
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
+  EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
+  # Each pinned release comes with its published wheel's SHA-256 (scripts/ci_install_release.sh).
   EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "ff3f131ea45c4108a419405f3675c1b1d80d24e1be9d7b310cea21960f19fc8a"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
@@ -191,11 +194,11 @@ jobs:
       - name: Install the pinned older readers for the collection-store gate
         timeout-minutes: 5
         run: |
-          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
-          uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          scripts/ci_install_release.sh "$EXOMEM_TEST_OLDER_READER_VERSION" \
+            "$RUNNER_TEMP/older-reader" "$EXOMEM_TEST_OLDER_READER_SHA256"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
-          uv venv "$RUNNER_TEMP/previous-schema" --python 3.13
-          uv pip install --python "$RUNNER_TEMP/previous-schema/bin/python" "exomem==$EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION"
+          scripts/ci_install_release.sh "$EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION" \
+            "$RUNNER_TEMP/previous-schema" "$EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256"
           echo "EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON=$RUNNER_TEMP/previous-schema/bin/python" >> "$GITHUB_ENV"
       - *prepare-duration-snapshot
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
@@ -538,8 +541,8 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true'
         timeout-minutes: 5
         run: |
-          uv venv "$RUNNER_TEMP/older-reader" --python 3.13
-          uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          scripts/ci_install_release.sh "$EXOMEM_TEST_OLDER_READER_VERSION" \
+            "$RUNNER_TEMP/older-reader" "$EXOMEM_TEST_OLDER_READER_SHA256"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
       # Release evidence pins the rollback application (move-structured-collections-to-sqlite
       # design §10, "Reversal"). The install script checks the wheel against the pinned SHA-256.
