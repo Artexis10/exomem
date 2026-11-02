@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.157.0](https://github.com/Artexis10/exomem/compare/v0.156.0...v0.157.0) (2026-11-02)
+
+
+### Features
+
+* **cloud:** move object-store key creation to a key custodian ([#2333](https://github.com/Artexis10/exomem/issues/2333)) ([acf3e5e](https://github.com/Artexis10/exomem/commit/acf3e5ed7ae67b2bde0ed3c78e47e549169af2b9))
+* **cloud:** verify a gateway proof on every cell and relay operation grants to Jobs ([#2366](https://github.com/Artexis10/exomem/issues/2366)) ([9011ef1](https://github.com/Artexis10/exomem/commit/9011ef1bd9d23b4a9e307b2d53e58a65a1884585))
+* **extraction:** make every extracted document fully searchable as one document ([#2351](https://github.com/Artexis10/exomem/issues/2351)) ([43c61d9](https://github.com/Artexis10/exomem/commit/43c61d946f4610cabff9b8bc8bdbf962964ae0de))
+* **maintenance:** run a remote maintenance preview as a read-only job ([#2332](https://github.com/Artexis10/exomem/issues/2332)) ([7222bee](https://github.com/Artexis10/exomem/commit/7222bee338b71469bbff7615f363c8c9d8dd8f6a))
+* **media:** drain a turned-off cell's store and report a final evicted count ([#2346](https://github.com/Artexis10/exomem/issues/2346)) ([962f147](https://github.com/Artexis10/exomem/commit/962f147bec46d4a10a3faa897337e8036389b82f))
+* **media:** serve original downloads from a held handle and release it on disconnect ([#2338](https://github.com/Artexis10/exomem/issues/2338)) ([83ab1ca](https://github.com/Artexis10/exomem/commit/83ab1ca2311b4cdde1223bfed88b6e1530358517))
+
+
+### Bug Fixes
+
+* **collections:** one store request per decision shape, and reads that survive unrelated boundary holders ([#2224](https://github.com/Artexis10/exomem/issues/2224)) ([4c57c85](https://github.com/Artexis10/exomem/commit/4c57c8591e47c2d6d3ca5a9223f2e464f141488c))
+* **governance:** govern a scene frame by its video as well as its own scopes ([#2375](https://github.com/Artexis10/exomem/issues/2375)) ([f78205a](https://github.com/Artexis10/exomem/commit/f78205ae892a6a1239cd62df51df139f5c1c01b0))
+* **graph:** retry a batch that lost a commit race instead of replaying every receipt ([#2359](https://github.com/Artexis10/exomem/issues/2359)) ([a4451a3](https://github.com/Artexis10/exomem/commit/a4451a314fb5bbe014140303d00c875b9faeaafb))
+* **import:** keep an import's apply calls from slowing as the vault grows ([#2374](https://github.com/Artexis10/exomem/issues/2374)) ([5bb1d5c](https://github.com/Artexis10/exomem/commit/5bb1d5c084ada4ebd4c02c282061377d73c419cb))
+* **index:** treat a missing embedding backend as a complete upsert ([#2357](https://github.com/Artexis10/exomem/issues/2357)) ([e370267](https://github.com/Artexis10/exomem/commit/e3702676bf8c2c23855097b9a7263d83c4ae711b))
+* **lexstore:** name why a catch-up declined on its finish line ([#2354](https://github.com/Artexis10/exomem/issues/2354)) ([e4cee1d](https://github.com/Artexis10/exomem/commit/e4cee1d9cab6ba7477f84f0e9ec2bec2c049d733))
+* **locks:** re-land reserved-gate read path with a bounded timing map ([#2362](https://github.com/Artexis10/exomem/issues/2362)) ([8822104](https://github.com/Artexis10/exomem/commit/88221048847764282d4eda86e9c0b1eefa0c89c4))
+* **query:** compare a declared string field as a whole string ([#2348](https://github.com/Artexis10/exomem/issues/2348)) ([ce39c4e](https://github.com/Artexis10/exomem/commit/ce39c4e741213aaf6eac28af7c9cc90b54f8cf06))
+* **rehearsal:** score raw data honestly in the raw-import mode ([#2326](https://github.com/Artexis10/exomem/issues/2326)) ([25c21fe](https://github.com/Artexis10/exomem/commit/25c21fe18fd9d697d75518cb7437ffb0ee21c610))
+* **sqlite:** keep this process's SQLite locks when Exomem checks a sidecar's identity ([#2377](https://github.com/Artexis10/exomem/issues/2377)) ([825eb7d](https://github.com/Artexis10/exomem/commit/825eb7d8a5b5c64fc25137ed351248706b9f4a2d))
+* **writes:** captures wait out a busy boundary, and credential issuance takes none ([#2328](https://github.com/Artexis10/exomem/issues/2328)) ([5e1d251](https://github.com/Artexis10/exomem/commit/5e1d251b4f3485eac8fe88639f08d81b40d41197))
+* **writes:** lead write results with a plain outcome and name the exact field a refusal needs ([#2355](https://github.com/Artexis10/exomem/issues/2355)) ([10fb2ad](https://github.com/Artexis10/exomem/commit/10fb2ad4a06c3c66ec8398733b9b0a25a5c7999a))
+
+
+### Performance
+
+* **activation:** measure the turn slice as the server runs it, and skip a stat per admitted page ([#2371](https://github.com/Artexis10/exomem/issues/2371)) ([df6d288](https://github.com/Artexis10/exomem/commit/df6d288295a0c93e4db69753aed98f5b8888d3a1))
+* **collection-store:** cut repeated guard work on store reads ([#2360](https://github.com/Artexis10/exomem/issues/2360)) ([ed1273e](https://github.com/Artexis10/exomem/commit/ed1273ede3c300c63381172a9510871362206de9))
+* **graph:** recheck a folding proof by stat generation and prove each folder once per walk ([#2379](https://github.com/Artexis10/exomem/issues/2379)) ([7d0d256](https://github.com/Artexis10/exomem/commit/7d0d256b52e8b627415e2ae2db5714f98242bd58))
+* **lease:** keep an idle single-host lease by default ([#2356](https://github.com/Artexis10/exomem/issues/2356)) ([fc425f0](https://github.com/Artexis10/exomem/commit/fc425f0ec6603da05c9b48892ef3de716a181b7a))
+* **semantic-contract:** stop re-deriving every page's facts when a stale edit revalidates ([#2342](https://github.com/Artexis10/exomem/issues/2342)) ([9cfd767](https://github.com/Artexis10/exomem/commit/9cfd767bf130e308e11de17b89130017d47f30ff))
+* **write:** revalidate a stale edit before the boundary and keep CLIP commits from staling stamps ([#2349](https://github.com/Artexis10/exomem/issues/2349)) ([72b412a](https://github.com/Artexis10/exomem/commit/72b412a8ae699f8bf2bdaa5cfc843668eec76839))
+
 ## [0.156.0](https://github.com/Artexis10/exomem/compare/v0.155.0...v0.156.0) (2026-11-02)
 
 
