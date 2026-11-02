@@ -1007,7 +1007,7 @@ def _check_write_journal(vault_root: Path | None) -> DoctorCheck:
     message = (
         f"{depth} write(s) queued (oldest {'-' if age is None else f'{age:.0f}s'}); "
         f"{health['conflicted']} undecided conflict(s); applier {'alive' if health['applier_alive'] else 'not running'}; "
-        f"format {health['format_version']}"
+        f"format {health['format_version'] if health['format_version'] is not None else 'unknown'}"
     )
     stale = age is not None and age > intent_observability.STALE_ACCEPTED_SECONDS
     orphaned = (

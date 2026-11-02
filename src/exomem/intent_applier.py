@@ -319,8 +319,13 @@ class Applier:
             log.warning("write-intent journal could not record a recovery step", exc_info=True)
             self._stop.wait(RETRY_PAUSE_SECONDS)
 
-    def _outcome_unknown(self, intent: write_intents.Intent) -> dict[str, Any]:
-        """The conflict record of a write that may or may not have committed, with the evidence an owner decides on."""
+    def _outcome_unknown(
+        self, intent: write_intents.Intent, logged: list[str] | None = None
+    ) -> dict[str, Any]:
+        """The conflict record of a write that may or may not have committed, with the evidence an owner decides on.
+
+        `logged` is what the log held before this dispatch: the dispatch's own failed row is not evidence of the write.
+        """
         now = intent_accept.planned_hashes(self.vault_root, intent.planned_paths)
         at_accept = intent.target_hashes or {}
         return {
@@ -330,7 +335,7 @@ class Applier:
                     path: {"at_accept": at_accept.get(path), "now": now.get(path)}
                     for path in intent.planned_paths or ()
                 },
-                "logged_outcomes": mutation_journal.outcomes_for_request(intent.request_id),
+                "logged_outcomes": mutation_journal.outcomes_for_request(intent.request_id) if logged is None else logged,
             },
         }
 
@@ -390,6 +395,7 @@ class Applier:
         budget = request_budget.RequestBudget(seconds=dispatch.budget_seconds)
         # The leaf receives the rewritten arguments when a rewrite exists; the claim keeps the original digest.
         arguments = dict(intent.leaf_arguments if intent.leaf_arguments is not None else intent.arguments)
+        logged_before = mutation_journal.outcomes_for_request(intent.request_id)
         budget_token = request_budget.set_current(budget)
         try:
             with (
@@ -402,7 +408,7 @@ class Applier:
                     command, *injected, mutation_request_id=intent.request_id, **arguments
                 )
         except Exception as error:  # noqa: BLE001 - every dispatch failure is classified, never lost
-            return self._classify_error(intent, error)
+            return self._classify_error(intent, error, logged_before)
         finally:
             request_budget.reset_current(budget_token)
         return self._classify_result(result)
@@ -414,7 +420,9 @@ class Applier:
         row = intent_outcomes.classify_result(result)
         return row.kind, {"cause": row.cause, "result": _portable_value(result)}
 
-    def _classify_error(self, intent: write_intents.Intent, error: Exception) -> tuple[str, Any]:
+    def _classify_error(
+        self, intent: write_intents.Intent, error: Exception, logged_before: list[str] | None = None
+    ) -> tuple[str, Any]:
         """Map a dispatch that raised to its row of the outcome table (design D5)."""
         public = error_dict(error)
         if intent_outcomes.error_code(error) == intent_outcomes.NOT_FOUND:
@@ -433,7 +441,7 @@ class Applier:
             return "rejected", {"error": public}
         if row.cause == CAUSE_OUTCOME_UNKNOWN:
             # The claim on K died without evidence. The write may have landed, so it is never re-run (design D4).
-            return "conflicted", self._outcome_unknown(intent)
+            return "conflicted", self._outcome_unknown(intent, logged_before)
         return "conflicted", {"cause": row.cause, "error": public}
 
     def _follow_moved_target(self, intent: write_intents.Intent) -> tuple[str, Any] | None:

@@ -51,6 +51,10 @@ class Outcome:
     counts: bool = False
     #: The error is the terminal of a write that did commit.
     uncertain: bool = False
+    #: The refusal comes before anything commits, so accept may journal the write instead of answering it.
+    precommit: bool = False
+    #: For a precommit refusal: why the write was journaled, in the cause vocabulary of the `accepted` row.
+    accept_cause: str | None = None
 
 
 # Wait and re-run. `None` as the cause means the code names itself. Lost authority blocks every intent alike, so it
@@ -61,8 +65,8 @@ _WAITS: dict[
     "WRITER_FENCED": Outcome(WAIT, CAUSE_WRITER_LEASE),
     "WRITER_LEASE_REQUIRED": Outcome(WAIT, CAUSE_WRITER_LEASE),
     "WRITER_COORDINATOR_UNAVAILABLE": Outcome(WAIT, CAUSE_WRITER_LEASE),
-    "MUTATION_WARMING": Outcome(WAIT, counts=True),
-    "REFERENCE_PREPARATION_UNAVAILABLE": Outcome(WAIT, counts=True),
+    "MUTATION_WARMING": Outcome(WAIT, counts=True, precommit=True, accept_cause="warming"),
+    "REFERENCE_PREPARATION_UNAVAILABLE": Outcome(WAIT, counts=True, precommit=True, accept_cause="reference_unprepared"),
     "CLOUD_CELL_READ_ONLY": Outcome(WAIT, counts=True),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": Outcome(WAIT, CAUSE_ACKNOWLEDGEMENT_PENDING, counts=True),
 }
@@ -93,6 +97,18 @@ def error_code(error: BaseException) -> str | None:
     public = cli_ops.error_dict(error) if isinstance(error, Exception) else {}
     code = public.get("code")
     return code if isinstance(code, str) and code else None
+
+
+def is_precommit_code(code: str | None) -> bool:
+    """Whether the outcome table marks this error code as one the writer raises before any effect."""
+    outcome = _WAITS.get(code or "")
+    return outcome is not None and outcome.precommit
+
+
+def accept_cause(code: str | None) -> str | None:
+    """Why a precommit refusal made the write journal, as a cause and never as the error code."""
+    outcome = _WAITS.get(code or "")
+    return None if outcome is None else outcome.accept_cause
 
 
 def classify_error(error: BaseException, *, validation: str) -> Outcome:

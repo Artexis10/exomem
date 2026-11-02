@@ -18,7 +18,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from . import capabilities, mutation_journal, mutation_lock, request_budget, write_intents
+from . import capabilities, intent_outcomes, mutation_journal, mutation_lock, request_budget, write_intents
 from .cli_ops import OpError
 
 log = logging.getLogger(__name__)
@@ -260,8 +260,7 @@ def is_precommit_refusal(error: BaseException) -> bool:
     """Whether the error ended an attempt before anything committed, so the write may be journaled instead."""
     if not isinstance(error, OpError):
         return False
-    # Two closed protocol error codes that the writer raises before any effect; not a vocabulary.
-    if error.code in ("MUTATION_WARMING", "REFERENCE_PREPARATION_UNAVAILABLE"):  # nosemgrep: ep-word-membership
+    if intent_outcomes.is_precommit_code(error.code):
         return True
     return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
 
@@ -341,7 +340,8 @@ def filter_accepted(run_filter: Callable[[], Any], envelope: dict[str, Any], dea
 def answer_for(intent: write_intents.Intent, *, receipt_id: str | None, idempotency_key: str | None) -> Any:
     """What a resend under an intent's identity receives: its terminal once it has one, else its state."""
     if intent.terminal is not None and intent.state in write_intents.TERMINAL_STATES:
-        return intent.terminal
+        # The caller that learns of its write through a resend gets the intent id the accepted answer gave.
+        return {**intent.terminal, "intent_id": intent.intent_id} if isinstance(intent.terminal, dict) else intent.terminal
     if intent.active:
         return accepted_envelope(intent, receipt_id=receipt_id, idempotency_key=idempotency_key)
     # `conflicted` waits for an owner decision. It is not `needs_review`, the draft handshake.
@@ -349,6 +349,7 @@ def answer_for(intent: write_intents.Intent, *, receipt_id: str | None, idempote
     envelope.update(
         state=intent.state,
         status=intent.state,
+        cause=(intent.conflict or {}).get("cause"),
         next_action=(
             f'review_memory(mode="item", ref="{envelope["intent_ref"]}"), then triage_memory with '
             'action="retry-write" or action="discard-write"'
@@ -416,7 +417,7 @@ class Accept:
     refusal: BaseException | None = None
     created: bool = False
     waited_ms: float | None = None
-    #: Why the write journaled: the busy cause, or the code of the other pre-commit refusal. For the `accepted` row.
+    #: Why the write journaled: the busy cause, or the accept cause of the other pre-commit refusal. For the `accepted` row.
     cause: str | None = None
 
     @property
@@ -429,7 +430,7 @@ class Accept:
             return
         self.waited_ms = None if cause is None else mutation_journal.boundary_wait_ms(cause)
         if cause is not None:
-            self.cause = mutation_journal.refusal_cause(cause) or getattr(cause, "code", None)
+            self.cause = mutation_journal.refusal_cause(cause) or intent_outcomes.accept_cause(getattr(cause, "code", None))
         try:
             validation = "deferred" if deferred else self._validate_before_accept(narrow=narrow)
         except Exception as invalid:  # noqa: BLE001 - the command's own validation error answers the caller

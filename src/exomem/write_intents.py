@@ -746,6 +746,7 @@ class WriteIntentJournal:
             oldest = conn.execute(
                 "SELECT accepted_at, wait_cause FROM intents WHERE state = 'accepted' ORDER BY seq LIMIT 1"
             ).fetchone()
+            stored = conn.execute("SELECT value FROM meta WHERE key = 'format_version'").fetchone()
         finally:
             conn.close()
         return {
@@ -754,7 +755,8 @@ class WriteIntentJournal:
             "conflicted": counts.get("conflicted", 0),
             "oldest_accepted_at": None if oldest is None else oldest[0],
             "oldest_wait_cause": None if oldest is None else oldest[1],
-            "format_version": FORMAT_VERSION,
+            # The file's own version: a doctor that printed the code's constant would hide an older file.
+            "format_version": None if stored is None else int(stored[0]),
         }
 
     @_unavailable_on_sqlite_error

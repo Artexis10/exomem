@@ -165,6 +165,8 @@ def test_an_applier_killed_after_the_claim_before_the_commit_ends_outcome_unknow
     assert (done.state, done.conflict["cause"]) == ("conflicted", "outcome_unknown")
     assert not _pages(vault, 62)
     assert done.arguments is not None, "the owner decides from the retained arguments"
+    # The recovery's own refused dispatch logs a row; it is not evidence of what the dead applier did.
+    assert done.conflict["evidence"]["logged_outcomes"] == ["accepted"]
 
 
 def test_an_applier_killed_after_the_canonical_commit_resumes_the_terminal_from_the_receipt(

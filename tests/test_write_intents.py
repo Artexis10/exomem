@@ -310,6 +310,35 @@ def test_a_resend_dedupes_and_the_row_is_purged_for_the_keys_own_window_not_a_da
     assert journal.purge_expired() == 1
 
 
+def test_a_resend_answer_names_the_intent_and_a_conflicted_one_keeps_its_cause(vault: Path) -> None:
+    """A caller that learns of its write through a resend must be able to find the intent and its cause."""
+    from exomem import intent_accept
+
+    journal = _journal(vault)
+    done, _ = journal.accept(**_ACCEPT, retry_key="resend-done")
+    journal.finish(done.intent_id, "committed", terminal={"ok": True, "state": "committed"})
+    stuck, _ = journal.accept(**_ACCEPT, retry_key="resend-stuck")
+    journal.begin_apply(stuck.intent_id)
+    journal.finish(stuck.intent_id, "conflicted", conflict={"cause": "basis_changed"})
+
+    committed = intent_accept.answer_for(journal.get(done.intent_id), receipt_id=None, idempotency_key=None)
+    conflicted = intent_accept.answer_for(journal.get(stuck.intent_id), receipt_id=None, idempotency_key=None)
+
+    assert committed["intent_id"] == done.intent_id and committed["state"] == "committed"
+    assert conflicted["state"] == "conflicted" and conflicted["cause"] == "basis_changed"
+
+
+def test_the_queue_status_reports_the_version_stored_in_the_file(vault: Path) -> None:
+    """A doctor that printed the code's constant would hide a journal file written by another version."""
+    import sqlite3
+
+    journal = _journal(vault)
+    with sqlite3.connect(journal.path) as conn:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'format_version'")
+
+    assert journal.queue_status()["format_version"] == 0
+
+
 def test_the_orphan_sweep_removes_inputs_without_a_row_and_keeps_those_of_an_accepted_intent(
     vault: Path, tmp_path: Path
 ) -> None:

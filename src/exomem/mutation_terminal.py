@@ -102,7 +102,8 @@ _PLAN_RECEIPT_FIELDS = (
 #: guarded write is mid-flight and the caller should complete the review step, not that
 #: anything failed. Conflating it with failure is the 2026-08-06 misclassification.
 #: `accepted` is nonterminal too: the write is durable in the intent journal and will commit or end in an owner decision.
-STATES = ("accepted", "needs_review", "committed", "rejected", "retryable", "indeterminate", "settled")
+#: `conflicted` is the nonterminal state that waits for that decision.
+STATES = ("accepted", "conflicted", "needs_review", "committed", "rejected", "retryable", "indeterminate", "settled")
 TERMINAL_STATES = frozenset({"committed", "rejected", "settled"})
 
 #: The closed derived-graph outcome vocabulary a client may branch on. Absent
