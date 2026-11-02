@@ -216,8 +216,8 @@ def test_a_rename_across_devices_falls_back_to_the_streamed_copy(vault: Path, mo
     import_id = _job_stage(vault, {"scan.bin": PDF})
     staged = _staged(vault, import_id)
     inode = staged.stat().st_ino
-    monkeypatch.setattr(consume._held_fs_posix, "_rename_noreplace",
-                        consume._rename_across_devices(consume._held_fs_posix._rename_noreplace, "scan.bin"))
+    monkeypatch.setattr(consume.posix_backend(), "_rename_noreplace",
+                        consume._rename_across_devices(consume.posix_backend()._rename_noreplace, "scan.bin"))
 
     _run_id, _plan_id, reply = consume._adopt(vault, f"_Imports/{import_id}")
 
@@ -708,7 +708,7 @@ def test_a_rename_that_reports_an_error_after_it_took_place_still_files_the_memb
     inode = staged.stat().st_ino
     run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
     state = {"renamed": False, "refused": False}
-    real_rename, real_sync = consume._held_fs_posix._rename_noreplace, consume._held_fs_posix._fsync
+    real_rename, real_sync = consume.posix_backend()._rename_noreplace, consume.posix_backend()._fsync
 
     def rename_then_remember(*arguments, **keywords):
         real_rename(*arguments, **keywords)
@@ -720,8 +720,8 @@ def test_a_rename_that_reports_an_error_after_it_took_place_still_files_the_memb
             raise OSError(5, "input/output error")
         real_sync(descriptor)
 
-    monkeypatch.setattr(consume._held_fs_posix, "_rename_noreplace", rename_then_remember)
-    monkeypatch.setattr(consume._held_fs_posix, "_fsync", refuse_to_sync_once_after_the_rename)
+    monkeypatch.setattr(consume.posix_backend(), "_rename_noreplace", rename_then_remember)
+    monkeypatch.setattr(consume.posix_backend(), "_fsync", refuse_to_sync_once_after_the_rename)
 
     reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
 
@@ -812,8 +812,8 @@ def test_a_copy_fallback_member_above_the_ceiling_fails_instead_of_copying_witho
     staged = _staged(vault, import_id)
     monkeypatch.setenv("EXOMEM_ADOPTION_MAX_FILE_BYTES", str(MiB))
     run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
-    monkeypatch.setattr(consume._held_fs_posix, "_rename_noreplace",
-                        consume._rename_across_devices(consume._held_fs_posix._rename_noreplace, "scan.bin"))
+    monkeypatch.setattr(consume.posix_backend(), "_rename_noreplace",
+                        consume._rename_across_devices(consume.posix_backend()._rename_noreplace, "scan.bin"))
 
     reply = consume._apply(vault, run_id, plan_id)
 

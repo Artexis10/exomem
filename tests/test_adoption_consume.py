@@ -27,6 +27,11 @@ PDF = b"%PDF-1.4\n1 0 obj\n<< >>\nendobj\n%%EOF\n"
 IMAGE = b"\x89PNG\r\n\x1a\n" + b"pixels" * 20
 
 
+def posix_backend():  # noqa: ANN201
+    """Return the POSIX held-filesystem backend, or skip: it imports `posix`, which Windows lacks."""
+    return pytest.importorskip("exomem._held_fs_posix")
+
+
 @pytest.fixture(autouse=True)
 def _private_journal_folder(tmp_path, monkeypatch):
     """`exomem import` keeps its journals in the user's state folder; a test must never write the real one."""
@@ -279,11 +284,9 @@ def test_a_removal_that_fails_leaves_the_item_applied_and_a_later_call_removes_t
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
     staged = _stage(tmp_path, vault, {"paper.pdf": PDF})
-    # The test drives the POSIX backend; importing it here keeps the module collectable on Windows.
-    _held_fs_posix = pytest.importorskip("exomem._held_fs_posix")
     # A rename leaves nothing to remove, so the stage sits on another device for this file: it files by copy.
     monkeypatch.setattr(
-        _held_fs_posix, "_rename_noreplace", _rename_across_devices(_held_fs_posix._rename_noreplace, "paper.pdf"))
+        posix_backend(), "_rename_noreplace", _rename_across_devices(posix_backend()._rename_noreplace, "paper.pdf"))
     # Only adoption's removal sees the refusal; the batch writer keeps the real filesystem.
     refusing = types.SimpleNamespace(
         HeldFsError=held_fs.HeldFsError, HeldFile=held_fs.HeldFile,
