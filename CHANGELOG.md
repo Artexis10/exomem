@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.157.0](https://github.com/Artexis10/exomem/compare/v0.156.0...v0.157.0) (2026-11-02)
+
+
+### Features
+
+* **cloud:** move object-store key creation to a key custodian ([#2333](https://github.com/Artexis10/exomem/issues/2333)) ([acf3e5e](https://github.com/Artexis10/exomem/commit/acf3e5ed7ae67b2bde0ed3c78e47e549169af2b9))
+
+
+### Bug Fixes
+
+* **collections:** one store request per decision shape, and reads that survive unrelated boundary holders ([#2224](https://github.com/Artexis10/exomem/issues/2224)) ([4c57c85](https://github.com/Artexis10/exomem/commit/4c57c8591e47c2d6d3ca5a9223f2e464f141488c))
+* **graph:** retry a batch that lost a commit race instead of replaying every receipt ([#2359](https://github.com/Artexis10/exomem/issues/2359)) ([a4451a3](https://github.com/Artexis10/exomem/commit/a4451a314fb5bbe014140303d00c875b9faeaafb))
+* **index:** treat a missing embedding backend as a complete upsert ([#2357](https://github.com/Artexis10/exomem/issues/2357)) ([e370267](https://github.com/Artexis10/exomem/commit/e3702676bf8c2c23855097b9a7263d83c4ae711b))
+* **lexstore:** name why a catch-up declined on its finish line ([#2354](https://github.com/Artexis10/exomem/issues/2354)) ([e4cee1d](https://github.com/Artexis10/exomem/commit/e4cee1d9cab6ba7477f84f0e9ec2bec2c049d733))
+* **query:** compare a declared string field as a whole string ([#2348](https://github.com/Artexis10/exomem/issues/2348)) ([ce39c4e](https://github.com/Artexis10/exomem/commit/ce39c4e741213aaf6eac28af7c9cc90b54f8cf06))
+
+
+### Performance
+
+* **lease:** keep an idle single-host lease by default ([#2356](https://github.com/Artexis10/exomem/issues/2356)) ([fc425f0](https://github.com/Artexis10/exomem/commit/fc425f0ec6603da05c9b48892ef3de716a181b7a))
+* **semantic-contract:** stop re-deriving every page's facts when a stale edit revalidates ([#2342](https://github.com/Artexis10/exomem/issues/2342)) ([9cfd767](https://github.com/Artexis10/exomem/commit/9cfd767bf130e308e11de17b89130017d47f30ff))
+
 ## [0.156.0](https://github.com/Artexis10/exomem/compare/v0.155.0...v0.156.0) (2026-11-02)
 
 
