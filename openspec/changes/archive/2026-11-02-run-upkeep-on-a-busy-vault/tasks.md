@@ -8,7 +8,7 @@
 
 - [x] 2.1 Move `available_memory` to `runtime_resources` and add `peak_rss_bytes`. Keep one reader, imported by `embedding_backend` and `sensor_worker`.
 - [x] 2.2 The child reports its peak in its spend report. The supervisor persists the last peak, refuses to launch with `memory`, and never kills a running child for memory.
-- [x] 2.3 Tests: a recorded peak at or above available memory, or unknown availability, refuses; no peak launches; a running child survives; the peak persists across restarts and a cut-off or refused child cannot lower it; the child reports its peak.
+- [x] 2.3 Tests: a recorded peak at or above available memory refuses; unknown availability launches; no peak launches; a running child survives; the peak persists across restarts and a cut-off or refused child cannot lower it; the child reports its peak.
 
 ## 3. Cloud cell
 

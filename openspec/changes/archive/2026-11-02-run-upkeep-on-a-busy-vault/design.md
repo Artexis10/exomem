@@ -39,7 +39,7 @@ The pressure probe is gathered only when the tick's cheap gate passes, as before
 
 ### D5. Memory admission before launch
 
-`Supervisor.step` refuses to launch with the action `memory` when a peak is recorded and `runtime_resources.available_memory()` is not above it, or is unknown. With no recorded peak it launches, and the child records its peak. A running child is never killed for memory.
+`Supervisor.step` refuses to launch with the action `memory` when a peak is recorded and `runtime_resources.available_memory()` is not above it. With no recorded peak it launches, and the child records its peak. A host that cannot report available memory also launches, as an unmeasurable host builds in `embedding_backend`. A running child is never killed for memory.
 
 The child records `VmHWM` where the host reports it, else `ru_maxrss` in the platform's unit, else nothing, in its spend report. The supervisor keeps the last peak in its own file (`peak-rss.json`) beside the ledger. Each child overwrites `spend.json` from its first report, which would erase a peak kept there. A final report replaces the recorded peak. A report from a child cut off mid-load can only raise it. A refused child records nothing, because it never loaded the instrument.
 
@@ -51,6 +51,6 @@ The child records `VmHWM` where the host reports it, else `ru_maxrss` in the pla
 
 ## Risks
 
-- A host that reports no available memory refuses every launch once a peak is on record. Linux reports it. A host that reports a peak but not available memory (macOS `ru_maxrss` without `SC_AVPHYS_PAGES`) would stay refused, and the status shows the `memory` action and the recorded peak.
+- A host that reports no available memory launches without the check. Refusing there would lock sensing out for good on a host that records a peak but cannot read free memory (macOS `ru_maxrss` without `SC_AVPHYS_PAGES`). Linux, the live service and Cloud cells report it.
 - In a container, `MemAvailable` shows the host, not the cgroup limit. The admission check does not replace the cell's own memory bound.
 - A tick that starts on a busy vault may do one page before it sees a request. That page is the cost of the bound, and it is small and transactional.

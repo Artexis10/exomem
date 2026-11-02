@@ -270,12 +270,14 @@ class Supervisor:
         if queue_depth() <= 0:
             return self._act("idle")
         # A child that could not fit is killed by the kernel after it loaded the
-        # model for nothing. With no peak on record the first child measures it;
-        # a host that reports no available memory cannot show the peak fits.
+        # model for nothing. With no peak on record the first child measures it.
+        # A host that reports no available memory launches, as an unmeasurable
+        # host builds in `embedding_backend`: refusing would lock sensing out for
+        # good on a host that can record a peak but not read free memory.
         peak = self.peak_rss_bytes()
         if peak is not None:
             available = runtime_resources.available_memory()
-            if available is None or available <= peak:
+            if available is not None and available <= peak:
                 return self._act("memory")
         self._allotment = (cpu_left, judgements_left)
         try:

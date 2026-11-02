@@ -128,7 +128,7 @@ def _record_peak(vault: Path, launcher: Launcher, sup, *, peak: int = PEAK) -> N
     sup._harvest()
 
 
-@pytest.mark.parametrize("available", [PEAK, PEAK - 1, None], ids=["equal", "below", "unknown"])
+@pytest.mark.parametrize("available", [PEAK, PEAK - 1], ids=["equal", "below"])
 def test_a_launch_needs_available_memory_above_the_recorded_peak(
     tmp_path: Path, monkeypatch, available
 ) -> None:
@@ -142,6 +142,17 @@ def test_a_launch_needs_available_memory_above_the_recorded_peak(
     assert len(launcher.children) == 1
     monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK + 1)
     assert _step(sup) == "launched"
+
+
+def test_a_host_that_cannot_read_free_memory_still_launches(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    assert _step(sup) == "launched"
+    _record_peak(vault, launcher, sup)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: None)
+    assert _step(sup) == "launched"
+    assert len(launcher.children) == 2
 
 
 @pytest.mark.parametrize("available", [0, None], ids=["none_free", "unknown"])
