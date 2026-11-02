@@ -508,6 +508,37 @@ def test_maintenance_diagnostics_accepts_raw_noop_or_committed_full_result(
     ) == expected
 
 
+def test_remote_maintenance_preview_returns_the_report_of_a_completed_preview_job() -> None:
+    # The job read as `_call` returns it: its receipt's `result` field is already unwrapped to the report.
+    handle = {"run_id": "run-1", "state": "running", "mode": "reconcile", "preview": True, "plan_id": None}
+    job = {"run_id": "run-1", "state": "completed", "receipt": {"plan_id": "plan-1", "dry_run": True}}
+
+    assert e2e_product_loop._remote_maintenance_preview(handle, job) == {"plan_id": "plan-1", "dry_run": True}
+
+
+@pytest.mark.parametrize(
+    ("handle", "job"),
+    [
+        # The preview ran synchronously: its report came back, not a job handle.
+        ({"plan_id": "plan-1", "dry_run": True}, {"run_id": "run-1", "state": "completed", "receipt": {}}),
+        (
+            {"run_id": "run-1", "state": "running", "preview": True},
+            {"run_id": "run-1", "state": "failed", "receipt": None},
+        ),
+        (
+            {"run_id": "run-1", "state": "running", "preview": True},
+            {"run_id": "run-1", "state": "completed", "receipt": {"dry_run": True}},
+        ),
+    ],
+)
+def test_remote_maintenance_preview_rejects_a_synchronous_failed_or_planless_preview(
+    handle: dict[str, object],
+    job: dict[str, object],
+) -> None:
+    with pytest.raises(RuntimeError, match="preview job"):
+        e2e_product_loop._remote_maintenance_preview(handle, job)
+
+
 def test_remote_maintenance_job_accepts_a_completed_job_started_from_its_preview() -> None:
     handle = {"run_id": "run-1", "state": "running", "mode": "reconcile", "plan_id": "plan-1"}
     job = {"run_id": "run-1", "state": "completed", "receipt": {"chunks": []}}

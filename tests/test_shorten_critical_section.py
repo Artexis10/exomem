@@ -636,6 +636,44 @@ def test_commit_existing_revalidates_on_census_mismatch_and_surfaces_stale_write
 
     assert exc.value.code == "STALE_SEMANTIC_WRITE"
 
+def test_a_stamp_that_went_stale_before_the_boundary_is_revalidated_with_the_boundary_free(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A governed commit lands after preflight and an external edit lands with it:
+    the revalidation runs once, outside the hold, and the caller gets STALE in one attempt."""
+    rel = "Knowledge Base/Notes/Insights/stale-before-boundary.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c2")
+    after_source = (vault / rel).read_text(encoding="utf-8").replace("Before.", "Updated.")
+    preflight = semantic_writes.preflight_existing(
+        vault, path=rel, after_source=after_source, operation="edit"
+    )
+    assert preflight.census_token is not None
+
+    manager = writer_lease.active_manager()
+    with manager.mutation_guard(vault, operation="test_other_commit", holder_kind="background"):
+        pass
+    (vault / rel).write_text(
+        (vault / rel).read_text(encoding="utf-8").replace("Before.", "A sibling raced ahead."),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    real_revalidate = semantic_writes._revalidate_existing_preflight
+    boundary_states: list[str] = []
+
+    def observe(*args, **kwargs):
+        boundary_states.append(str(mutation_lock.active_mutation_snapshot()["state"]))
+        return real_revalidate(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_writes, "_revalidate_existing_preflight", observe)
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+    assert boundary_states == ["free"]
+
+
 def test_wide_boundary_kill_switch_observes_validation_inside_the_hold(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

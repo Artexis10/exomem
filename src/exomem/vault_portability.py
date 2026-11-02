@@ -214,6 +214,17 @@ def _is_shipped_schema(_path: str, parts: tuple[str, ...]) -> bool:
     return len(parts) >= 2 and parts[0].casefold() == ".exomem" and parts[1].casefold() == "schema"
 
 
+def _is_extraction_part(path: str, _parts: tuple[str, ...]) -> bool:
+    """A hidden part page that holds the rest of a Source's extracted text.
+
+    Its Source page is the only owner of that text, and the original is not enough to
+    rebuild it for a recording or an image, so the page is canonical.
+    """
+    from . import extraction_parts
+
+    return extraction_parts.source_page_for(PurePosixPath(path)) is not None
+
+
 def _is_unregistered_hidden_state(_path: str, parts: tuple[str, ...]) -> bool:
     # New machine-local sidecars are conventionally hidden.  Defaulting them to
     # disposable prevents a new cache/database from silently entering exports;
@@ -291,6 +302,12 @@ _CLASSIFICATION_RULES = (
         ArtifactClass.CANONICAL,
         "The governance contract is vault content wherever it is stored.",
         _is_shipped_schema,
+    ),
+    _ClassificationRule(
+        "extraction-part",
+        ArtifactClass.CANONICAL,
+        "Hidden part pages hold the rest of a Source's extracted text, which no other file keeps.",
+        _is_extraction_part,
     ),
     _ClassificationRule(
         "unregistered-hidden-state",

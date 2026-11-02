@@ -386,10 +386,36 @@ def evaluate_path_only(
     return MembershipOutcome("classified", frozenset(matched))
 
 
+def _source_of_part(page: ParsedPage) -> ParsedPage | None:
+    """The live Source page when `page` is one of its part pages, else None.
+
+    A part holds more of its Source's extracted text, so its scope membership, and with it the
+    audience that may read it, is its Source's: decided here for every evaluation, from the
+    part's path. A Source page that cannot be read leaves the part's membership unresolved.
+    """
+    # The same rule as search (`ParsedPage.part_of`): a page at a part's path without the
+    # `part_of` field a written part carries is governed as itself, never as its neighbour.
+    source = page.part_of
+    if source is None:
+        return None
+    if page.vault_root is None:
+        raise MembershipUnresolved(f"the Source page of part {page.rel_path!r} has no vault root")
+    path = page.vault_root / source
+    try:
+        parsed = find_corpus.parse_page(path, path.stat().st_mtime, page.vault_root)
+    except OSError as exc:
+        raise MembershipUnresolved(f"cannot read the Source page of part {page.rel_path!r}: {exc}") from exc
+    if parsed is None:
+        raise MembershipUnresolved(f"cannot read the Source page of part {page.rel_path!r}")
+    return parsed
+
+
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     """Return the set of scope ids `page` belongs to under `policy`, memoized."""
     if policy.empty or not policy.scopes:
         return frozenset()
+    if (source := _source_of_part(page)) is not None:
+        return evaluate(source, policy)
     # `st_size` alongside `st_mtime_ns`, not `st_mtime_ns` alone. Two writes
     # in quick succession can share an identical `st_mtime_ns` — the platform
     # timestamp is not always as fine-grained as the field width suggests
@@ -461,6 +487,9 @@ def evaluate_snapshot(
     """
     if policy.empty or not policy.scopes:
         return frozenset()
+    if (source := _source_of_part(page)) is not None:
+        # The part's own bytes do not decide its membership, so nothing is memoized under them.
+        return evaluate(source, policy)
     key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:

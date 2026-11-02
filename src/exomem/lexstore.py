@@ -5019,13 +5019,32 @@ class LexicalStore:
         # identity work; a catalogue read opens two of these.
         with call_spans.span("lexical.connect"):
             with reserved_paths._subsystem_authority_scope("lexstore"):
-                with call_spans.entered(
-                    "lexical.connect.guard",
-                    reserved_paths._identity_coordination_scope(
-                        self.vault_root,
-                        descriptor_ids=descriptor_ids,
-                    ),
-                ):
+                if descriptor_id == "lexical-store":
+                    # An open of the live store that is already there changes no identity, so
+                    # it skips the identity gate and the generation bump: a read must not
+                    # queue behind a writer. A missing store is created under the full guard.
+                    try:
+                        with call_spans.entered(
+                            "lexical.connect.guard",
+                            reserved_paths._identity_coordination_scope(
+                                self.vault_root,
+                                descriptor_ids=descriptor_ids,
+                                identity_may_change=False,
+                            ),
+                        ):
+                            return self._connect_owned(path, create=False)
+                    except FileNotFoundError:
+                        pass
+                # The guard span above already covered a missing live store's connect; only a
+                # connect that has not been spanned yet gets one here.
+                fallback = reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=descriptor_ids,
+                )
+                if descriptor_id == "lexical-store":
+                    with fallback:
+                        return self._connect_owned(path)
+                with call_spans.entered("lexical.connect.guard", fallback):
                     return self._connect_owned(path)
 
     def _connect_owned(
@@ -5033,6 +5052,7 @@ class LexicalStore:
         path: Path | None = None,
         *,
         publish: bool = True,
+        create: bool = True,
     ) -> sqlite3.Connection:
         target = path if path is not None else self.path
         descriptor_id = reserved_paths.state_target_descriptor_id(
@@ -5047,7 +5067,7 @@ class LexicalStore:
                 self.vault_root,
                 target,
                 descriptor_id,
-                create=True,
+                create=create,
             ) as retained_target:
                 return self._connect_retained(
                     retained_target,
@@ -6604,7 +6624,7 @@ class LexicalStore:
             updated = page.updated or "0000-00-00"
             # Scene-frame children carry the parent video they collapse into;
             # unparseable rows (page is None) stay NULL like ordinary pages.
-            emitted_parent_path = page.parent_media + ".md" if page.parent_media else None
+            emitted_parent_path = page.emitted_parent
             eligibility = _eligibility_columns(page)
             eligibility_view = _eligibility_view_json(page)
             content_hash = getattr(page, "snapshot_hash", None)
@@ -10726,7 +10746,7 @@ class LexicalStore:
                 if page is None:
                     continue
                 expected_title = page.title
-                expected_parent = page.parent_media + ".md" if page.parent_media else None
+                expected_parent = page.emitted_parent
                 stored_eligibility = tuple(None if value is None else str(value) for value in row[4:])
                 if (
                     row[1] != expected_title
