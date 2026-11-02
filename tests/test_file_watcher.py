@@ -13,6 +13,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ from exomem import (
     lexstore,
     media_processing,
     semantic_contract,
+    semantic_writes,
 )
 from exomem import find as find_module
 from exomem import reconcile as reconcile_module
@@ -1946,6 +1948,9 @@ def test_a_cold_semantic_corpus_does_not_delay_the_lexical_apply(
         return build(*args, **kwargs)
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", observed_build)
+    # Posthoc also builds a cold corpus; stub it so only the deferred populate can.
+    quiet_posthoc = SimpleNamespace(as_dict=lambda: {"semantic_contract_findings": []})
+    monkeypatch.setattr(semantic_writes, "evaluate_posthoc_batch", lambda *a, **k: quiet_posthoc)
     page = next(find_module._walk_md(vault / "Knowledge Base"))
     page.write_text(page.read_text(encoding="utf-8") + "\n- external edit\n", encoding="utf-8")
 

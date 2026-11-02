@@ -2959,8 +2959,9 @@ def _patch_corpus_files_changed_locked(
     cold cache has nothing to patch, and populating it means a full walk that
     must NOT happen inside this lock (see
     :func:`_populate_corpus_context_after_miss`). ``"evicted"`` is the
-    config-census drift pop and stays eviction-only — a drifted config makes
-    the stored context unusable, not merely absent.
+    config-census drift pop: a drifted config makes the stored context
+    unusable, not merely absent. The patch only evicts; a publisher that passes
+    ``populate_on_miss`` refills it, and the watcher refills it after its apply.
     """
     root = Path(vault_root)
     cache_key = _corpus_cache_key(root)
@@ -3798,6 +3799,7 @@ def _build_corpus_context_with_census(
                         _drop_corpus_caption_locked(cache_key)
                         _trim_corpus_cache_locked(cache_key)
                     log.info("semantic corpus context kept unconfirmed: writes outran the census")
+                    stored = "unconfirmed"
         log.info(
             "semantic corpus context built pages=%d build_ms=%.1f cached=%s event_miss=%s",
             len(context.pages),

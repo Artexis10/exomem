@@ -17,5 +17,5 @@ The governed write path SHALL reuse a previously built corpus context only when 
 #### Scenario: Writes outrun every census confirmation
 - **WHEN** a writer changes a Markdown page before each census confirmation of a cold build
 - **THEN** the build is kept with its last census and no caption, and corpus warm-up succeeds
-- **AND** the next caller's census walk reparses only the pages changed since that census, without a cold build
+- **AND** the next caller's census walk reparses only the pages changed since that census, and pays no cold build when its own confirmation agrees
 - **AND** an edit that no event reported is still read by that caller

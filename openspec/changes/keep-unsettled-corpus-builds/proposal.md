@@ -24,7 +24,9 @@ walk confirms it.
 - Corpus warm-up accepts a kept build, so a standby that warmed under steady
   writes carries its corpus to promotion.
 - The builder still returns no census for an unsettled build, so callers that pin
-  a census to a context see no change.
+  a census to a context see no change. Callers that fall back to the cached census
+  may now issue a validity stamp after an unsettled build; the stamp never compares
+  the corpus census.
 
 ## Capabilities
 
@@ -42,4 +44,4 @@ None.
 - Code: `semantic_contract._build_corpus_context_with_census` and
   `semantic_contract.warm_corpus_context`.
 - Tests: `tests/test_corpus_context_cache.py`.
-- No change to readiness, to the flight-join bound, or to event-captioned reuse.
+- No change to the flight-join bound or to event-captioned reuse. Warm-up now marks `semantic_corpus` ready after an unsettled build, because the kept entry serves the next reader.
