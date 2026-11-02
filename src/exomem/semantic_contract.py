@@ -3285,9 +3285,19 @@ def corpus_registry_overrides(
 
 
 def warm_corpus_context(vault_root: Path) -> None:
-    """Fill the shared structural corpus cache without classifying for any caller."""
-    _context, census = _build_corpus_context_with_census(Path(vault_root), warm=True)
+    """Fill the shared structural corpus cache without classifying for any caller.
+
+    A build that writes kept outrunning still counts: it is cached for the next
+    reader to confirm with a census walk, which spares that reader the build.
+    """
+    root = Path(vault_root)
+    held_before = cached_corpus_census(root)
+    _context, census = _build_corpus_context_with_census(root, warm=True)
     if corpus_context_cache_enabled() and census is None:
+        held_after = cached_corpus_census(root)
+        # A new entry is this build's, or a publication's patch of it.
+        if held_after is not None and held_after is not held_before:
+            return
         raise OpError(
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
@@ -3490,7 +3500,8 @@ def _build_corpus_context_with_census(
     one. The census is ``None`` whenever no single walk unambiguously matches
     the returned context: candidate-bearing builds, a disabled cache, a
     registry that does not match disk, a cold build whose post-publish
-    reconciliation never stabilized, or an in-flight-dedup waiter (it only
+    reconciliation never stabilized (it is still cached, uncaptioned, for the
+    next reader's census walk to confirm), or an in-flight-dedup waiter (it only
     confirmed its own pre-wait walk matched the flight it is chasing, not
     whatever the owning build's stabilization loop settles on or gives up on
     afterward). A caller that gets ``None`` here has no cheaper option than
@@ -3771,6 +3782,22 @@ def _build_corpus_context_with_census(
                         _caption_corpus_context_locked(cache_key, current_checkpoint)
                         _trim_corpus_cache_locked(cache_key)
                     stored = True
+                elif stable_census is not None:
+                    # Writes outran every confirmation. The context matches its
+                    # last census for each page that census still describes, and
+                    # a page changed since differs from it, so the next reader's
+                    # census walk reparses only that page. Uncaptioned: no single
+                    # checkpoint describes this context, so no event serves it
+                    # without a walk. Dropping it made that reader, or a promoted
+                    # standby, pay the whole cold build again.
+                    with _CORPUS_CONTEXT_CACHE_LOCK:
+                        _CORPUS_CONTEXT_CACHE[cache_key] = (stable_census, context)
+                        _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                            f"{language.schema_version}:{language.content_hash}"
+                        )
+                        _drop_corpus_caption_locked(cache_key)
+                        _trim_corpus_cache_locked(cache_key)
+                    log.info("semantic corpus context kept unconfirmed: writes outran the census")
         log.info(
             "semantic corpus context built pages=%d build_ms=%.1f cached=%s event_miss=%s",
             len(context.pages),

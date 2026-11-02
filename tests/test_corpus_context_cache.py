@@ -702,6 +702,53 @@ def test_cold_build_absorbs_markdown_churn_instead_of_discarding_cache(
     assert second is first
 
 
+def test_a_cold_build_that_writes_outrun_still_spares_the_next_reader(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm-up beside a steady writer keeps its build for the next reader.
+
+    A standby warms while the serving worker writes. When every census
+    confirmation after the build differs from the one before it, warm-up threw
+    the build away and failed, and the promoted worker paid the whole cold build
+    again. The kept build must still never answer from a page it has not read.
+    """
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
+    )
+    real_census = semantic_contract._deferred_corpus_census
+    writes = 0
+
+    def census_beside_a_writer(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        # A longer title each time, so the size moves even within one mtime tick.
+        (vault / _PAGE_REL).write_text(_page(title="Write " + "x" * writes), encoding="utf-8")
+        return real_census(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", census_beside_a_writer)
+    semantic_contract.warm_corpus_context(vault)
+    monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", real_census)
+    # One more write that no event reports, as from another process.
+    other_rel = "Knowledge Base/Notes/Insights/two.md"
+    (vault / other_rel).write_text(_page(title="Unreported write"), encoding="utf-8")
+    real_build = semantic_contract._build_corpus_context_uncached
+    builds = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", counted_build)
+    context = _shared_context(vault)
+
+    assert builds == 0
+    assert context.pages[_PAGE_REL].title == "Write " + "x" * writes
+    assert context.pages[other_rel].title == "Unreported write"
+
+
 def test_concurrent_cold_builds_share_one_uncached_result(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
