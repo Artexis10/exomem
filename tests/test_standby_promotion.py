@@ -108,8 +108,12 @@ def _stub_adoption(monkeypatch, *, adopted=True, residue=(), reason="adopted"):
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "adopt_published_snapshot",
+        # An adoption names the snapshot its proof read, as the real proof does.
         lambda self, **_kwargs: epistemic_graph.SnapshotAdoption(
-            adopted, residue=tuple(residue), reason=reason
+            adopted,
+            residue=tuple(residue),
+            reason=reason,
+            proved_token=service_standby.snapshot_token(self.vault_root) if adopted else None,
         ),
         raising=True,
     )

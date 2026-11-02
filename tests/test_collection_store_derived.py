@@ -4,7 +4,7 @@ A derived collection's rows live in a file beside the store and rebuild from its
 log. Each test names the defect only it catches. The export is invented: a device's
 November days of local samples, preserved through the real archive expansion. The
 service journey runs the real server lifecycle through the shared ``invoke_command``
-dispatcher, which skips the MCP server's second egress pass.
+dispatcher, which runs the same terminal egress filter as the MCP server.
 """
 
 from __future__ import annotations
@@ -803,6 +803,58 @@ def test_slow_rows_keep_each_derived_boundary_hold_near_the_step_budget(derived,
         assert _rows_file(derived_rows.path(path)) == before
     assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
     assert max(holds) < 0.75  # a 240-row batch at this pace held the boundary for about 1.5 s
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["import", "rebuild"])
+def test_a_swinging_row_cost_keeps_each_derived_boundary_hold_near_the_step_budget(derived, monkeypatch, replay):
+    """Defect: a batch was sized from the last batch's pace alone. On a loaded host the writer thread's
+    wall pace swings many times over between batches while its CPU cost per row stays flat, so a
+    cheap batch sized a large next batch that then held the boundary for several step budgets.
+    The pacing clock here is virtual and advances only by the modelled row cost, cheap and dear in turn."""
+    day = "2026-11-01"
+    writer, job = derived("swing", {f"samples/{day}.json": samples((day, at(day, *(
+        (f"{minute // 60:02d}:{minute % 60:02d}", minute) for minute in range(240)))))})
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 500)
+    now, calls, holds = [0.0], [0], []
+    clock = SimpleNamespace(perf_counter=lambda: now[0], monotonic=time.monotonic, time=time.time,
+                            sleep=time.sleep, thread_time=time.thread_time)
+    apply, transaction = derived_rows.apply, derived_rows.Store.transaction
+
+    def swinging(conn, goal, items, **kwargs):
+        calls[0] += 1
+        now[0] += (0.002 if calls[0] % 2 == 0 else 0.00005) * len(items)
+        return apply(conn, goal, items, **kwargs)
+
+    @contextlib.contextmanager
+    def timed(self):
+        started = now[0]
+        with transaction(self) as conn:
+            yield conn
+        holds.append(now[0] - started)
+
+    def swung():
+        for module in (derived_rows, importer):
+            monkeypatch.setattr(module, "time", clock)
+        monkeypatch.setattr(derived_rows, "apply", swinging)
+        monkeypatch.setattr(derived_rows.Store, "transaction", timed)
+
+    path = writer.handle.path
+    if not replay:
+        swung()
+        assert finish(writer, job)["state"] == "complete"
+    else:
+        assert finish(writer, job)["state"] == "complete"
+        writer.handle.close()
+        for suffix in ("", "-wal", "-shm"):
+            derived_rows.path(path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+        swung()
+        with connection.open_writer(path, lease_check=lambda: True) as handle:
+            restarted = CollectionWriter(writer.root, handle)
+            with preview_store(writer.root, handle):
+                outcomes = [derived_rows.step(writer.root, restarted) for _ in range(64)]
+            assert "done" in outcomes
+    assert len(_rows_file(derived_rows.path(path))) == 240
+    assert max(holds) <= 2 * derived_rows.STEP_SECONDS
 
 
 def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(derived):

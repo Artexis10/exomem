@@ -25,6 +25,29 @@ def _outcome(report: index_sync.IndexSyncReport, component: str):
     return next(item for item in report.components if item.component == component)
 
 
+def test_a_batch_write_completes_on_an_install_without_an_embedding_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the embeddings extra, a batch write still completes.
+
+    Treating the missing backend as an incomplete upsert made every batch
+    write record a full-index refresh, and made a media job's result never
+    finalise, so its supervisor retried it indefinitely.
+    """
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n\nkeyword only\n", encoding="utf-8")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", True)
+    deferred_index.clear_full(tmp_path)
+
+    report = index_sync.upsert_after_write(tmp_path, [target])
+
+    assert _outcome(report, "embeddings").code == "embeddings_import_unavailable"
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is True
+    assert vault_module.post_commit_batch_fanout(tmp_path, [target], None, None) is True
+
+
 def test_embedding_upsert_status_distinguishes_disabled_and_warmup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

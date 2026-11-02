@@ -16,9 +16,7 @@ exercised by the unit tests and by the live operation.
 from __future__ import annotations
 
 import functools
-import math
 import re
-import statistics
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -27,6 +25,7 @@ from pathlib import PurePosixPath
 from typing import Any, NamedTuple
 
 from . import activation_result, working_set_anaphora
+from .chance_band import semantic_band
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
@@ -2215,38 +2214,6 @@ def _claims_winner(analysis: TurnAnalysis, routing_targets: Sequence[Any]) -> st
     return str(collection) if isinstance(collection, str) else None
 
 
-#: A spread below this is a population whose signatures are all alike (empty
-#: or identical), which has no chance level to measure a turn against.
-_BAND_MIN_SPREAD = 1e-6
-
-
-def semantic_band(similarities: Any, *, alpha: float, min_population: int) -> frozenset[int] | None:
-    """Rows whose similarity to the turn clears the chance maximum; None when
-    the population cannot be calibrated.
-
-    `m = median(s)`, `σ = 1.4826 · MAD(s)`, and `k(N, α) = Φ⁻¹((1-α)^(1/N))` is
-    the level the largest of N unrelated similarities exceeds with probability
-    α. Row i clears when `s_i ≥ m + k·σ`. The median and MAD are unmoved by the
-    few rows a turn is really about, and the rule is invariant to adding a
-    constant to every similarity or scaling them all, so no number in it
-    belongs to one model, one language or one vault. Fewer than
-    `min_population` rows, or a degenerate spread, has no chance level (design
-    §5.1).
-    """
-    import numpy as np
-
-    values = np.asarray(similarities, dtype="float64").reshape(-1)
-    n = int(values.size)
-    if n < max(1, int(min_population)) or not np.all(np.isfinite(values)):
-        return None
-    centre = float(np.median(values))
-    spread = 1.4826 * float(np.median(np.abs(values - centre)))
-    if spread < _BAND_MIN_SPREAD:
-        return None
-    level = statistics.NormalDist().inv_cdf(math.pow(1.0 - float(alpha), 1.0 / n))
-    return frozenset(int(i) for i in np.flatnonzero(values >= centre + level * spread))
-
-
 def vector_bands(
     vectors: Mapping[str, Any] | None,
     query_vector: Any,
@@ -2323,6 +2290,27 @@ def _vector_bands(
     return vector_bands(vectors, query_vector, config)[0]
 
 
+def _contact_terms(item: CandidateFacts) -> frozenset[str]:
+    """The turn words that earned this candidate's worded contact; empty when its kind records none.
+
+    Alias phrases are split and folded with `_fold_lexical_term`, the fold `name_contact` already carries.
+    """
+    phrase_words = (_fold_lexical_term(word) for phrase in item.exact_alias_phrases for word in phrase.lower().split())
+    return item.name_contact | frozenset(word for word in phrase_words if word)
+
+
+def _independent(partner: CandidateFacts, item: CandidateFacts, terms: Mapping[str, frozenset[str]]) -> bool:
+    """Whether `partner` adds a fact about `item` beyond the words that already reached `item`.
+
+    `terms` holds each candidate's `_contact_terms`, computed once per call. A partner whose
+    kind records no words keeps the earlier rule and counts.
+    """
+    if partner.anchor_id == item.anchor_id:
+        return False
+    words = terms[partner.anchor_id]
+    return not words or not words <= terms[item.anchor_id]
+
+
 def add_graph_corroboration(
     candidates: Sequence[CandidateFacts],
     *,
@@ -2345,21 +2333,30 @@ def add_graph_corroboration(
     carries a worded contact kind — the turn's own words reached it — is the
     independent fact a link can legitimately corroborate.
     `retrieval_paths` is accepted so that intent is explicit at the call site.
+
+    A partner reached only by turn words this candidate was also reached by is
+    not independent either: one word shared by two linked names ("domain" in
+    two concept titles) is one contact counted twice, not a second fact.
     """
     del retrieval_paths  # deliberately unused: see the docstring.
-    named_paths: dict[str, set[str]] = {}
-    named_neighbours: dict[str, set[str]] = {}
+    named_paths: dict[str, list[CandidateFacts]] = {}
+    named_neighbours: dict[str, list[CandidateFacts]] = {}
     for item in candidates:
         if not item.evidence & WORDED_CONTACT_KINDS:
             continue
         if item.path:
-            named_paths.setdefault(item.path, set()).add(item.anchor_id)
+            named_paths.setdefault(item.path, []).append(item)
         for path in item.neighbourhood:
-            named_neighbours.setdefault(path, set()).add(item.anchor_id)
+            named_neighbours.setdefault(path, []).append(item)
+    terms = {item.anchor_id: _contact_terms(item) for item in candidates}
     corroborated = {
         item.anchor_id for item in candidates
-        if (item.path and named_neighbours.get(item.path, set()) - {item.anchor_id})
-        or any(named_paths.get(path, set()) - {item.anchor_id} for path in item.neighbourhood)
+        if (item.path and any(_independent(partner, item, terms) for partner in named_neighbours.get(item.path, ())))
+        or any(
+            _independent(partner, item, terms)
+            for path in item.neighbourhood
+            for partner in named_paths.get(path, ())
+        )
     }
     return tuple(
         replace(item, evidence=item.evidence | {"graph_corroboration"})

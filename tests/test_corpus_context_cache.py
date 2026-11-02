@@ -309,8 +309,8 @@ def test_markdown_delete_reconciles_without_full_rebuild(
 @pytest.mark.parametrize(
     ("title", "body", "rebuilds_corpus"),
     [
-        # A new title can change how every other page's links resolve.
-        ("Incremental", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", True),
+        # A new title changes how links resolve, which the delta path follows.
+        ("Incremental", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", False),
         # An in-place edit re-derives only the edited page's own facts.
         ("One", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", False),
     ],
@@ -407,6 +407,169 @@ def test_edit_to_a_unit_target_keeps_shared_id_inbound_identities(
 
     assert len({fact.identity for fact in rebuilt.relation_facts}) == 6
     assert incremental.as_dict() == rebuilt.as_dict()
+
+
+_INSIGHTS = "Knowledge Base/Notes/Insights"
+_SHARED_ID = "7e2c9b4a-5d1f-4a83-b6c0-3f8e1d2a9c57"
+
+
+def _linked_vault(root: Path) -> None:
+    """Pages whose links resolve by path, partial path, stem, title and not at all."""
+    links = {
+        "by-title": "[[Target]]",
+        "by-path": f"[[{_INSIGHTS}/target]]",
+        "by-partial-path": "[[Notes/Insights/target]]",
+        "by-case-variant": "[[TARGET.md]]",
+        "dangling": "[[Shared Title]]",
+    }
+    insights = root / _INSIGHTS
+    insights.mkdir(parents=True, exist_ok=True)
+    (insights / "target.md").write_text(
+        _page(title="Target", body="## Observations\n\n- [claim] Wording ^claim\n"),
+        encoding="utf-8",
+    )
+    for name, link in links.items():
+        (insights / f"{name}.md").write_text(
+            _page(title=f"Linker {name}", body=f"## Relations\n- supports {link}\n"),
+            encoding="utf-8",
+        )
+    for name in ("unrelated-a", "unrelated-b"):
+        (insights / f"{name}.md").write_text(_page(title=name), encoding="utf-8")
+
+
+def _write(root: Path, name: str, **page: str) -> None:
+    (root / _INSIGHTS / name).write_text(_page(**page), encoding="utf-8")
+
+
+_DELTAS = {
+    "unrelated edit": lambda r: _write(r, "unrelated-a.md", title="unrelated-a", body="Edited.\n"),
+    "two-page batch": lambda r: (
+        _write(r, "unrelated-a.md", title="unrelated-a", body="Edited.\n"),
+        _write(r, "unrelated-b.md", title="unrelated-b", body="Edited.\n"),
+    ),
+    "new page resolves a dangling title": lambda r: _write(r, "shared.md", title="Shared Title"),
+    "new page makes a stem ambiguous": lambda r: (
+        (r / _INSIGHTS / "more").mkdir(),
+        (r / _INSIGHTS / "more" / "target.md").write_text(_page(title="Other"), encoding="utf-8"),
+    ),
+    "new page makes a title ambiguous": lambda r: _write(r, "twin.md", title="Target"),
+    "deleted target": lambda r: (r / _INSIGHTS / "target.md").unlink(),
+    "retitled target": lambda r: _write(
+        r, "target.md", title="Renamed", body="## Observations\n\n- [claim] Wording ^claim\n"
+    ),
+    "edited target anchor": lambda r: _write(
+        r, "target.md", title="Target", body="## Observations\n\n- [claim] Reworded ^claim\n"
+    ),
+    "new relation into the edited page": lambda r: _write(
+        r, "unrelated-a.md", title="unrelated-a", body="## Relations\n- supports [[Target]]\n"
+    ),
+    "deleted linker": lambda r: (r / _INSIGHTS / "by-title.md").unlink(),
+    "page type and identity change": lambda r: (r / _INSIGHTS / "unrelated-a.md").write_text(
+        f"---\ntitle: unrelated-a\ntype: decision\nstatus: active\nproject: atlas\n"
+        f"{memory_refs.ID_FIELD}: {_SHARED_ID}\n---\n\nBody.\n",
+        encoding="utf-8",
+    ),
+}
+
+
+@pytest.mark.parametrize("delta", sorted(_DELTAS))
+def test_a_page_delta_yields_the_corpus_a_full_build_would(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delta: str
+) -> None:
+    # Failure caught: a link that resolves differently after the delta keeps its
+    # stale fact, so a commit judges against a corpus no build would produce.
+    _linked_vault(tmp_path)
+    _shared_context(tmp_path)
+    semantic_contract.build_corpus_context_with_census(tmp_path)
+    _DELTAS[delta](tmp_path)
+    derived: list[int] = []
+    real_derive = semantic_contract._derive_relation_facts
+
+    def record(root, states, *args, **kwargs):
+        derived.append(len(states))
+        return real_derive(root, states, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_derive_relation_facts", record)
+    structural = _shared_context(tmp_path)
+    enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
+    monkeypatch.setattr(semantic_contract, "_derive_relation_facts", real_derive)
+    assert derived and max(derived) < len(structural.pages), "the delta path derived the corpus"
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    assert structural.as_dict() == _shared_context(tmp_path).as_dict()
+    assert enriched.as_dict() == semantic_contract.build_corpus_context_with_census(tmp_path)[0].as_dict()
+
+
+def _shared_id_vault(root: Path) -> None:
+    """Two pages share an id and a common relation; only the second links to Target."""
+    _linked_vault(root)
+    _write(root, "common.md", title="Common")
+    for name, extra in (("copy-a", ""), ("copy-b", "- supports [[Target]]\n")):
+        (root / _INSIGHTS / f"{name}.md").write_text(
+            f"---\ntitle: {name}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {_SHARED_ID}\n---\n\n"
+            f"## Relations\n- supports [[Common]]\n{extra}",
+            encoding="utf-8",
+        )
+
+
+_SHARED_ID_DELTAS = {
+    "edited target anchor": _DELTAS["edited target anchor"],
+    "deleted target": _DELTAS["deleted target"],
+    "page created with the target's title": _DELTAS["new page makes a title ambiguous"],
+    "retitled target": _DELTAS["retitled target"],
+}
+
+
+@pytest.mark.parametrize("delta", sorted(_SHARED_ID_DELTAS))
+def test_pages_sharing_an_id_keep_the_fact_identities_a_full_build_gives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delta: str
+) -> None:
+    # Failure caught: fact identities count occurrences per authored id across the
+    # corpus, so re-deriving one holder alone numbers its facts differently.
+    _shared_id_vault(tmp_path)
+    _shared_context(tmp_path)
+    semantic_contract.build_corpus_context_with_census(tmp_path)
+    _SHARED_ID_DELTAS[delta](tmp_path)
+    structural = _shared_context(tmp_path)
+    enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    full_structural = _shared_context(tmp_path)
+    full_enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
+    assert structural.relation_facts == full_structural.relation_facts
+    assert enriched.relation_facts == full_enriched.relation_facts
+    assert structural.as_dict() == full_structural.as_dict()
+    assert enriched.as_dict() == full_enriched.as_dict()
+
+
+@pytest.mark.parametrize("direction", ["delete", "create"])
+def test_a_link_with_a_blank_before_md_follows_its_page_like_a_full_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction: str
+) -> None:
+    # Failure caught: the dependency key and link resolution normalise `.md` and
+    # blanks in different orders, so a link keeps a stale resolution.
+    _linked_vault(tmp_path)
+    _write(tmp_path, "blank-linker.md", title="blank-linker",
+           body="## Relations\n- supports [[alpha .md]]\n- supports [[Notes/Insights/alpha .md]]\n")
+    alpha = tmp_path / _INSIGHTS / "alpha.md"
+    if direction == "delete":
+        _write(tmp_path, "alpha.md", title="Alpha")
+    _shared_context(tmp_path)
+    semantic_contract.build_corpus_context_with_census(tmp_path)
+    if direction == "delete":
+        alpha.unlink()
+    else:
+        _write(tmp_path, "alpha.md", title="Alpha")
+    structural = _shared_context(tmp_path)
+    enriched = semantic_contract.build_corpus_context_with_census(tmp_path)[0]
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    assert structural.relation_facts == _shared_context(tmp_path).relation_facts
+    assert enriched.relation_facts == semantic_contract.build_corpus_context_with_census(tmp_path)[0].relation_facts
 
 
 def test_live_event_patch_makes_hot_reads_census_free(

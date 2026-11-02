@@ -710,23 +710,84 @@ validation.
 
 #### Scenario: A write still publishing during a detached replay is replayed, not discarded
 
-- **WHEN** a governed write changes a replayed page on disk before its event
-  reaches the registry
+- **WHEN** a governed write changes a replayed page on disk after the replay's
+  target checkpoint
 - **AND** the detached replay runs off the publication barrier
-- **THEN** the replay waits for the registry to observe the newer state of
-  that page, and then replays the newer delta
+- **THEN** the replay waits once for the registry to observe a newer state of
+  that page
 - **AND** waits only while a write in the process holds a mutation boundary or
   has a publication intent still open for one of the pages, and for at most a
-  bounded time shared by every path of one round
-- **AND** retargets at most a bounded number of times in one replay
+  bounded time shared by every path of the replay
+- **AND** once the registry names the page after the target, the replay records
+  its original target checkpoint and leaves the page to the next replay as
+  ordinary lag
+- **AND** never replays the newer delta inside the same replay
 - **AND** declines the pass as `source_changed` when the registry does not
-  observe the newer state in time, when no write is in flight and the page
-  still differs, or when the page changes again after each retarget
-- **AND** a replay under the publication barrier never waits and declines as
-  before
-- **AND** the repair telemetry counts the retargets of each pass
-- **AND** `lexical_repair_finished` names which of those three bounds ended a
-  pass that declined, as `declined_for`
+  observe the newer state in time, or when no write is in flight and the page
+  still differs
+- **AND** a replay under the publication barrier never waits: it defers only
+  pages that one registry read already names after its target, and declines as
+  before otherwise
+- **AND** a delta that needs a source proof defers no page
+- **AND** a page whose rows both scopes share is deferred only when every scope
+  that covers it either names it after its target or proved the page in its own
+  delta
+- **AND** the repair telemetry counts the deferred pages of each pass that
+  published, and reports none for a pass that declined
+- **AND** `lexical_repair_finished` names which bound ended a pass that
+  declined, as `declined_for`
+
+#### Scenario: A deferred page never sits behind a current checkpoint
+
+- **WHEN** a replacement publishes with deferred pages
+- **THEN** each deferred page has an observed event after the published
+  checkpoint
+- **AND** readers that require a current catalogue treat the catalogue as
+  lagging until a later replay applies that event
+- **AND** the next replay or catch-up serves the page's newest content
+
+#### Scenario: A deleted page never outlives its deletion behind a current checkpoint
+
+- **WHEN** a page is absent at the checkpoint that a replacement or a catch-up
+  records, whether the checkpoint's delta deleted it or the page was created
+  after the checkpoint
+- **THEN** the catalogue holds no row for that page in that scope that the
+  replay or the catch-up wrote, because readers compare the content state of a
+  checkpoint without its generation and absence is the one state that can
+  recur exactly
+- **AND** a row that a bounded watcher apply wrote before the round first
+  planned the page may remain until the next catch-up or watcher batch removes
+  it, as the live write path already allows for a write in flight
+- **AND** a replay never defers a page that is absent at its target while its
+  row holds a present state
+- **AND** a catch-up round records no checkpoint for a scope while a page that
+  one of its steps applied and that is absent at that checkpoint has such a row
+
+#### Scenario: A full repair publishes under a sustained import
+
+- **WHEN** an import writes new pages and rewrites the same index pages on every
+  call, for longer than several repair passes
+- **THEN** a full repair still publishes, with the rewritten pages deferred
+- **AND** the published catalogue lags the registry by about one pass, not by
+  the whole import
+
+#### Scenario: A catch-up outpaced by sustained writes still advances
+
+- **WHEN** an off-barrier catch-up round runs out of steps because new events
+  keep arriving
+- **AND** a scope lags, and a registry checkpoint that the round planned for it
+  has every path of its delta applied by a committed step that read the page
+  after that checkpoint, or that no event has touched since the step began
+- **AND** no page that a step of the round applied and that is absent at that
+  checkpoint has a row in the scope
+- **THEN** the catch-up records the newest such checkpoint for that scope
+- **AND** queues a lag-only catch-up for the newer events instead of a full
+  repair
+- **AND** the worker's finish line reports the result `advanced`, not `targeted`
+- **AND** a scope without lag records nothing, and the round counts as advanced
+  only when every lagging scope moved a stored checkpoint
+- **AND** a round in which a lagging scope stays frozen declines as outpaced,
+  and the full pass runs
 
 #### Scenario: A write still publishing during the census walk is replayed, not refused
 

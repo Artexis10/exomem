@@ -26,6 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import (
     adoption_run,
     archive_members,
+    cloud_containment,
+    cloud_grant,
     import_stage,
     private_state,
     rename_journal,
@@ -456,10 +458,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--import-id", required=True)
     parser.add_argument("--request")
     parser.add_argument("--url")
+    parser.add_argument("--grant")
     parser.add_argument("--keep-adoption", action="store_true")
     parser.add_argument("--walk-stage", action="store_true")
     parser.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
     args = parser.parse_args(argv)
+    cloud_containment.log_to_stderr()
     try:
         cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
         _check_cell(args.vault.parent, cell_id)
@@ -472,6 +476,14 @@ def main(argv: list[str] | None = None) -> int:
             request = CloudImportRequest.model_validate_json(args.request)
             if request.import_id != args.import_id or not args.url.startswith("https://"):
                 raise ArchiveRefused("IMPORT_REQUEST_INVALID", "request")
+            try:
+                # Reports, or in enforce mode checks, the grant and the destination before any byte moves.
+                cloud_grant.authorize_operation(
+                    operation=cloud_grant.Operation.IMPORT, operation_id=args.import_id, cell_id=cell_id,
+                    urls=[args.url], grant=args.grant,
+                    bound={"ciphertext_bytes": request.ciphertext_bytes, "ciphertext_sha256": request.ciphertext_sha256})
+            except cloud_grant.OperationRefused:
+                raise ArchiveRefused("IMPORT_REQUEST_INVALID", "grant") from None
             result = run_import(request, args.vault, lambda: urlopen(args.url, timeout=30))
     except ArchiveRefused as error:
         result = {"ok": False, "error": error.code}

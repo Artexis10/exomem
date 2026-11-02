@@ -62,11 +62,20 @@ DISK_LOW_ALERT = "cell-disk-low"
 # A serving cell whose recall serves a catalogue that has not advanced, read
 # from the cell's own readiness answer.
 RECALL_LAG_ALERT = "cell-recall-lagging"
+# contain-cloud-controller-compromise D9: a deleted cell's object-store key and backup files are
+# removed by the operator, never by cellctl. The alert name carries the cell
+# id because the receiver's transition has no other field for it; the alert never resolves
+# itself, since cellctl cannot see the provider's key listing.
+CLEANUP_PENDING_ALERT = "cell-storage-cleanup-pending"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
 NIGHTLY_ALERT_AFTER = timedelta(hours=26)
 SERVING_STATES = ("running", "read_only")
+
+
+def cleanup_pending_alert(cell_id: str) -> str:
+    return f"{CLEANUP_PENDING_ALERT}-{cell_id}"
 
 
 @dataclass(frozen=True)

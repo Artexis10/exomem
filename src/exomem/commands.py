@@ -107,6 +107,7 @@ from . import memory_refs as memory_refs_module
 from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
+from . import mutation_terminal as mutation_terminal_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
@@ -181,6 +182,7 @@ from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
 from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
+from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .query_compat import public_filter_annotation as _public_filter_annotation
@@ -1814,13 +1816,13 @@ def op_bootstrap(
                     "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
-                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')} as appropriate",
+                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')}",
                 (
                     "inspect write warnings; response_detail='full' reveals write_feedback; "
                     "create_note(suggestions=true) also reveals suggestions"
                 ),
                 "apply any accepted links through edit_note",
-                "report the written path",
+                mutation_terminal_module.NARRATION_RULE,
             ],
             "route_by_intent": {
                 "raw_material": "capture_source",
@@ -3099,6 +3101,10 @@ def op_find(
     # these hits are lexical-only ranking. Present only during that window
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
+    from .collection_store import preview as store_preview
+
+    if store_preview.pages_unavailable(vault_root):
+        degraded.append(find_module._STORE_UNAVAILABLE_COMPONENT)
     if restricted:
         # These internal status tokens disclose pending writes before RAW admission.
         hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
@@ -3194,27 +3200,30 @@ def _resolve_memory_identifier(
     return resolved
 
 
-def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
+def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.GetResult:
     """Answer a withheld seed page exactly as an absent one, as `op_get` does.
 
-    A context seeded from a page is assembled from that page, so whether it
-    assembles at all is a fact about the page. An absent page already raises
-    here, through the same read `op_get` takes.
+    A context or a link ranking seeded from a page is assembled from that
+    page, so whether it assembles at all is a fact about the page. An absent
+    page already raises here, through the same read `op_get` takes. The
+    release gate's own decision refuses a page withheld entirely, without
+    rendering it; a page it would serve with a notice (L1-L4) goes on, as in
+    `op_get`. A page that goes on is returned for the caller to use.
     """
     try:
         page = get_page_module.get_page(vault_root, path=path)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    released = egress_module.annotate_page(
+    if egress_module.page_withheld_entirely(
         vault_root,
         page.as_dict(include_raw=False),
         snapshot_content=page.content,
         stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
-    )
-    if released is None:
+    ):
         raise ValueError(
             f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
         )
+    return page
 
 
 def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
@@ -3542,10 +3551,8 @@ def op_suggest_links(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
-        try:
-            gp = get_page_module.get_page(vault_root, path=path)
-        except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+        # Ranking takes work that a missing page skips, so a withheld page refuses first.
+        gp = _refuse_withheld_page_seed(vault_root, path)
         page = find_module._CACHE.get(vault_root / gp.path, vault_root)
         if page is None:
             raise ValueError(f"UNREADABLE: could not parse {gp.path}")
@@ -3791,7 +3798,7 @@ def _add_source(
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if result.capture_outcome != "reused":
         query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
     return result.as_dict()
@@ -4797,9 +4804,7 @@ def op_edit(
         set_take_module.SetTakeError,
         set_frontmatter_field_module.SetFrontmatterError,
     ) as e:
-        msg = f"{e.code}: {e.reason}"
-        if getattr(e, "missing", None):
-            msg += f" (missing: {e.missing})"
+        msg = _leaf_error_message(e)
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
         raise ValueError(msg) from e
@@ -5001,10 +5006,10 @@ def op_replace(
             relation_review_hash=effective_relation_review_hash,
         )
     except replace_module.ReplaceError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     except note_module.NoteError as e:
         # New-page validation failed before the supersession could land.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if written_path := getattr(result, "new_path", None):
         query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
         working_set_heat_module.note_citations(vault_root, sources or ())
@@ -5040,6 +5045,14 @@ def _replacement_review_hash(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _leaf_error_message(error: Any) -> str:
+    """`CODE: reason`, plus the request fields the caller must add when the error names any."""
+    message = f"{error.code}: {error.reason}"
+    if missing := getattr(error, "missing", None):
+        message += f" (missing: {list(missing)})"
+    return message
 
 
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
@@ -5180,12 +5193,12 @@ def op_link(
             origin=_creation_origin(vault_root, ref),
         )
     except link_module.LinkError as e:
-        suffix = f" (missing: {e.missing})"
+        msg = _leaf_error_message(e)
         if e.candidates:
-            suffix += f" (candidates: {e.candidates})"
+            msg += f" (candidates: {e.candidates})"
         if e.candidate_fingerprint is not None:
-            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
-        raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
+            msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
+        raise ValueError(msg) from e
     return result.as_dict()
 
 
@@ -5283,7 +5296,7 @@ def op_preserve(
             filename, destination=str(Path(scope) / category), raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     # Same destination-scoped lookup the batch command uses, run before the
     # write: Evidence is append-only, so the same bytes under the same family
     # are one fact, and reporting the copy that is already there beats adding a
@@ -5320,7 +5333,7 @@ def op_preserve(
             raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     payload = result.as_dict()
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
@@ -5585,7 +5598,7 @@ def _invoke_note(
     try:
         result = note_module.note(**arguments.arguments)
     except note_module.NoteError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if written_path := getattr(result, "path", None):
         sources = arguments.arguments["sources"]
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
@@ -5667,16 +5680,13 @@ def op_query_data(
             date_from=date_from,
             date_to=date_to,
             date_column=date_column,
-            authorize_path=lambda rel_path: (
-                egress_module.release_level_for_path_only(
-                    vault_root,
-                    rel_path,
-                    receipt_decision="released",
-                )
-                >= egress_module.LEVEL_FULL
-            ),
+            authorize_path=partial(_authorize_dataset_path, vault_root),
         )
     except query_data_module.QueryDataError as e:
+        # A folder may exist only to hold pages withheld from this caller, and a
+        # policy path cannot name a folder, so a restricted caller is told it is absent.
+        if e.code == "NOT_A_FILE" and egress_module.caller_restricted(vault_root):
+            raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}") from e
         raise ValueError(f"{e.code}: {e.reason}") from e
     representation = (
         "profile"
@@ -5687,8 +5697,21 @@ def op_query_data(
         vault_root, result.as_dict(), representation=representation
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
+        raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}")
     return released
+
+
+def _authorize_dataset_path(vault_root: Path, rel_path: str) -> bool:
+    """Decide a dataset path before anything says whether it exists.
+
+    The path may not exist, so a release recorded here could be false
+    evidence; `annotate_dataset` records the release of rows that were read.
+    A refusal leaves the withheld receipt that a direct read leaves.
+    """
+    if egress_module.release_level_for_path_only(vault_root, rel_path) >= egress_module.LEVEL_FULL:
+        return True
+    egress_module.release_level_for_path_only(vault_root, rel_path, receipt_decision="withheld")
+    return False
 
 
 def op_create_file(
@@ -5795,7 +5818,7 @@ def op_create_file(
             relation_review_reason=relation_review_reason,
         )
     except create_file_module.CreateFileError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise ValueError(_leaf_error_message(e)) from e
     return result.as_dict()
 
 
@@ -6286,10 +6309,9 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         target: Vault-relative path or bare basename. `.md` optional.
 
     Returns: {target, inbound: [{path, line_number, context, raw_target}],
-             count}.
+             count}. A caller that some page is withheld from gets no `target`.
     Errors: INVALID_TARGET; INVALID_PATH.
     """
-    requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
     # The caller's view (`None` for the owner): a bare link counts when the
     # target's basename is unique among the pages the caller may see.
@@ -6314,29 +6336,53 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # raising NOT_FOUND would invent a signal the surface otherwise never
     # emits, which is its own oracle.
     #
-    # The echoed `target` reverts to what the CALLER sent, because the
-    # normalized form can be strictly more specific than the input — a bare
-    # basename resolves to a full vault path — and confirming the canonical
-    # location of a withheld page is the same disclosure the L17 fix removed
-    # from sub-floor notices.
-    if not _release_permits_link_target(vault_root, target):
-        payload["target"] = requested.strip().replace("\\", "/").lstrip("/")
+    # Policy state is the right question for the gate: with no policy RAW is
+    # the only floor, and a protected target lists the same links its absent
+    # twin does, since an inbound link resolves by name whether or not its
+    # target exists. So the target's pages are found and decided only under a policy.
+    #
+    # A restricted caller hears the same empty answer for every target it cannot
+    # see. A missing target still collects the dangling links that visible pages
+    # hold, so listing them would tell it apart from a withheld target, whose
+    # links the release gate drops; the caller reads those links verbatim
+    # elsewhere, so only this answer could disclose which of the two exists.
+    governed = not egress_module.gate_state(Path(vault_root))[0].empty
+    pages = _link_target_pages(vault_root, target) if governed else []
+    unseen = (
+        governed
+        and visible is not None
+        and (not pages or not all(visible(page) for page in pages))
+    )
+    if unseen or (
+        governed and not all(_link_target_released(vault_root, page) for page in pages)
+    ):
         payload["inbound"] = []
         payload["count"] = 0
-        return payload
-    # The count is the length of the list the caller receives: a link from a
-    # page it may not see is decided here, before counting, rather than left
-    # for the entry filter to drop beside a count that still includes it.
-    if visible is not None:
+    elif visible is not None:
+        # The count is the length of the list the caller receives: a link from
+        # a page it may not see is decided here, before counting, rather than
+        # left for the entry filter to drop beside a count that still includes it.
         payload["inbound"] = [
             row for row in payload["inbound"] if visible(str(row.get("path") or ""))
         ]
         payload["count"] = len(payload["inbound"])
+    if visible is not None:
+        # The echoed `target` is the normalised form, which can be strictly
+        # more specific than the input (a bare basename resolves to a full
+        # vault path), and the terminal filter strips it only for a withheld
+        # target. A restricted caller already holds what it sent.
+        payload.pop("target", None)
+        # Deciding a withheld target reads it, so its answer would come later
+        # than a missing target's, and later still for a larger page. Both
+        # complete at the refusal floor. A target the caller sees is its own
+        # knowledge, so it is not held.
+        if unseen:
+            projection_timing_module.floor_restricted_outcome()
     return payload
 
 
-def _release_permits_link_target(vault_root: Path, target: object) -> bool:
-    """False only when `target` names a real vault page released below the floor.
+def _link_target_pages(vault_root: Path, target: object) -> list[str]:
+    """The vault pages that `target` names: none for a target that names no page.
 
     A target that resolves to nothing under the vault is not a vault item and
     is therefore not the release plane's business (finding N6) — the caller is
@@ -6347,23 +6393,10 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
     on its own, so a path-only check would have left the cheapest probe open.
     """
     if not isinstance(target, str) or not target.strip():
-        return True
-    from .governance import egress as egress_module
-
-    # Policy state is the right question here: with no policy RAW is the only
-    # floor, and a protected target lists the same links its absent twin does,
-    # since an inbound link resolves by name whether or not its target exists.
-    policy, _ = egress_module.gate_state(Path(vault_root))
-    if policy.empty:
-        return True
-
-    def _permits(rel_path: str) -> bool:
-        level = egress_module.release_level_for(vault_root, rel_path)
-        return level is not None and level >= egress_module.RELEASE_FLOOR
-
+        return []
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
-        for candidate in {clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}:
+        for candidate in (clean,) if clean.lower().endswith(".md") else (clean, f"{clean}.md"):
             try:
                 candidate_abs, confined = resolve_under_vault(vault_root, candidate)
             except VaultPathError:
@@ -6372,16 +6405,22 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
                 # business, and never stat'd or read to get there.
                 continue
             if candidate_abs.is_file():
-                return _permits(confined)
-        return True
+                return [confined]
+        return []
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
     # not a vault item.
     stem = clean[: -len(".md")] if clean.lower().endswith(".md") else clean
-    matches = [p for p in Path(vault_root).rglob(f"{stem}.md") if p.is_file()]
-    if not matches:
-        return True
-    return all(_permits(str(p.relative_to(Path(vault_root))).replace("\\", "/")) for p in matches)
+    return [
+        str(p.relative_to(Path(vault_root))).replace("\\", "/")
+        for p in Path(vault_root).rglob(f"{stem}.md")
+        if p.is_file()
+    ]
+
+
+def _link_target_released(vault_root: Path, rel_path: str) -> bool:
+    level = egress_module.release_level_for(vault_root, rel_path)
+    return level is not None and level >= egress_module.RELEASE_FLOOR
 
 
 def op_get_video_frames(
@@ -6827,6 +6866,11 @@ def op_activate_context(
                     # already said `absent` when it skipped the stage for the request's budget.
                     if isinstance(packet.get("generation"), dict):
                         packet["generation"].setdefault("conversation", bounded.state)
+                        # The pages the store owns were withheld together after its refusal: say so.
+                        from .collection_store import preview as store_preview
+
+                        if store_preview.pages_unavailable(vault_root):
+                            packet["generation"]["collection_store"] = activation_result_module.UNAVAILABLE
                     # Served packets include optional omissions; abstentions retain their own cause.
                     if packet.get("abstained") is False:
                         active_budget = request_budget_module.current()
@@ -10473,9 +10517,7 @@ def op_connect_memory(
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
-                msg = f"{e.code}: {e.reason}"
-                if getattr(e, "missing", None):
-                    msg += f" (missing: {e.missing})"
+                msg = _leaf_error_message(e)
                 if getattr(e, "candidates", None):
                     msg += f" (candidates: {e.candidates})"
                 raise ValueError(msg) from e
@@ -13136,9 +13178,21 @@ def remember_description(project_keys_hint: str) -> str:
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
+    from .governance.raw_protection import is_owner
     from .writer_lease import coordination_status
 
-    return coordination_status(vault_root)
+    status = coordination_status(vault_root)
+    boundary = status.get("mutation_boundary")
+    # The contention counters name the last lock holder and how often writers
+    # collided. Only the owner needs them, so another caller gets the boundary state alone.
+    if isinstance(boundary, Mapping) and "contention" in boundary and not is_owner(
+        principal_module.effective_principal()
+    ):
+        status = {
+            **status,
+            "mutation_boundary": {k: v for k, v in boundary.items() if k != "contention"},
+        }
+    return status
 
 
 _GovernanceOperation = Literal[
@@ -13518,19 +13572,9 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "overview": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "search": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
-    "fetch": {
-        "surface": "primary",
-        "actions": ("ask",),
-        "first_run_safe": True,
-        "restricted_refusal_floor": True,
-    },
+    "fetch": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "find": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
-    "get": {
-        "surface": "primary",
-        "actions": ("ask",),
-        "first_run_safe": True,
-        "restricted_refusal_floor": True,
-    },
+    "get": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "add": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
     "note": {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
     "preserve": {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
@@ -13577,6 +13621,18 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "episode_memory": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
 }
+#: What each write command reports on success. A grouped command declares its verbs on its operation
+#: rows (`operation_entries`) instead. A write in neither place gets no `user_summary`, and
+#: tests/test_plain_write_outcomes.py fails until it declares one. The keys are command names.
+_COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingProxyType({  # nosemgrep: ep-word-dict -- the registry's own command names, each mapped to a closed contract verb.
+    "add": "saved", "adopt": "saved", "audit_fix": "updated", "reconcile": "updated",
+    "edit": "updated", "replace": "replaced", "link": "saved", "preserve": "saved",
+    "note": "saved", "create_file": "saved", "move_file": "moved", "delete": "deleted",
+    "append_to_file": "updated", "recover_from_trash": "restored",
+    "remember": "saved", "edit_memory": "updated", "replace_memory": "replaced",
+    "capture_source": "saved", "preserve_evidence": "saved", "preserve_artifacts": "saved",
+    "transfer_artifact": "saved", "transfer_memory": "saved",
+})
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -13632,6 +13688,14 @@ _SPEC: tuple[tuple, ...] = (
 
 
 def _build_commands() -> tuple[Command, ...]:
+    # A legacy name takes the floor of the product command that absorbs it, so
+    # an alias of a floored door cannot drift from it.
+    floored = frozenset(
+        route
+        for *_, routes, product_meta in _PRODUCT_SPEC
+        if product_meta.get("restricted_refusal_floor")
+        for route in routes
+    )
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces in _SPEC:
         meta = _PRODUCT_METADATA.get(name, {})
@@ -13657,22 +13721,12 @@ def _build_commands() -> tuple[Command, ...]:
                 product_actions=tuple(meta.get("actions", ())),
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
-                restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
+                restricted_refusal_floor=name in floored,
+                outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
             )
         )
     return tuple(cmds)
 
-
-COMMANDS: tuple[Command, ...] = _build_commands()
-
-#: Boot refusal (design D3 risk mitigation). Coverage is derived from THIS
-#: registry and default-deny, so a command added without declaring how it
-#: renders through the release plane fails at import — the process refuses to
-#: start rather than serving an ungated surface. This is the check that would
-#: have caught `fetch` and the eight structure surfaces on the day each was
-#: written, instead of at security review.
-egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
-egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 # Preferred spellings are closed API tokens; execution names keep receipts and policies stable.
 _PRODUCT_SPEC: tuple[tuple, ...] = (
@@ -13751,7 +13805,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("overview", "list_directory"),
-        {"public_title": "Browse memory folders", "surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True},
+        {"public_title": "Browse memory folders", "surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "viewer_map",
@@ -13845,7 +13899,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("propose_compilation",),
-        {"public_title": "Prepare a sourced note", "preferred_name": "prepare_note", "surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
+        {"public_title": "Prepare a sourced note", "preferred_name": "prepare_note", "surface": "primary", "actions": ("review", "save"), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "preserve_evidence",
@@ -13949,7 +14003,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("suggest_links", "graph_context", "suggest_relations", "link", "list_inbound_links"),
-        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True},
+        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "adopt_vault",
@@ -14066,7 +14120,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("query_data",),
-        {"public_title": "Query a data file", "surface": "advanced", "actions": ("ask",), "first_run_safe": True},
+        {"public_title": "Query a data file", "surface": "advanced", "actions": ("ask",), "first_run_safe": True, "restricted_refusal_floor": True},
     ),
     (
         "read_media",
@@ -14114,6 +14168,18 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         },
     ),
 )
+
+# The legacy registry reads its floor from the product spec above, so it is built here.
+COMMANDS: tuple[Command, ...] = _build_commands()
+
+#: Boot refusal (design D3 risk mitigation). Coverage is derived from THIS
+#: registry and default-deny, so a command added without declaring how it
+#: renders through the release plane fails at import — the process refuses to
+#: start rather than serving an ungated surface. This is the check that would
+#: have caught `fetch` and the eight structure surfaces on the day each was
+#: written, instead of at security review.
+egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
+egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 
 #: The argument rules each converted command's own leaf owns. A rendering validates
@@ -14341,6 +14407,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
+                outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
             )
         )
     return tuple(cmds)

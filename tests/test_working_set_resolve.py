@@ -25,6 +25,7 @@ def _facts(
     neighbourhood: tuple[str, ...] = (),
     anchor_neighbourhood: tuple[str, ...] | None = None,
     exact_alias_phrases: tuple[str, ...] = (),
+    name_contact: tuple[str, ...] = (),
 ) -> resolve_module.CandidateFacts:
     """One candidate. Listed neighbours are anchors unless stated otherwise.
 
@@ -46,6 +47,7 @@ def _facts(
         ),
         evidence=frozenset(evidence),
         exact_alias_phrases=frozenset(exact_alias_phrases),
+        name_contact=frozenset(name_contact),
     )
 
 
@@ -432,6 +434,39 @@ def test_corroboration_needs_an_independently_reached_partner() -> None:
     corroborated = resolve_module.add_graph_corroboration((left, right))
 
     assert all("graph_corroboration" not in item.evidence for item in corroborated)
+
+
+def test_one_turn_word_shared_by_two_linked_names_corroborates_neither() -> None:
+    """Two linked concepts whose titles share one word ("domain") are both
+    reached by that single turn word. Counting the link as corroboration would
+    count the same word as a second, independent fact for a turn about something
+    else (a gardening question that says "which domain should I check"). With
+    two shared words (lexical overlap) that second fact is what resolves the pair.
+    """
+    contract = _facts(
+        "contract.md", evidence=("rare_term",), neighbourhood=("tenant.md",), name_contact=("domain",)
+    )
+    tenant = _facts(
+        "tenant.md", evidence=("rare_term",), neighbourhood=("contract.md",), name_contact=("domain",)
+    )
+
+    corroborated = resolve_module.add_graph_corroboration((contract, tenant))
+
+    assert all("graph_corroboration" not in item.evidence for item in corroborated)
+
+
+def test_a_partner_reached_by_another_turn_word_still_corroborates() -> None:
+    """Two linked anchors the turn names by different words are two facts."""
+    lantern = _facts(
+        "lantern.md", evidence=("rare_term",), neighbourhood=("harbour.md",), name_contact=("lantern",)
+    )
+    harbour = _facts(
+        "harbour.md", evidence=("rare_term",), neighbourhood=("lantern.md",), name_contact=("harbour",)
+    )
+
+    corroborated = resolve_module.add_graph_corroboration((lantern, harbour))
+
+    assert all("graph_corroboration" in item.evidence for item in corroborated)
 
 
 def test_corroboration_from_a_worded_partner_is_granted_but_does_not_alone_resolve() -> None:

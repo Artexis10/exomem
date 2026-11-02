@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import itertools
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -26,9 +25,9 @@ from cellctl.exports import (
 )
 from cellctl.manifests import CellManifestSpec, namespace_name, render_export_job
 from cellctl.state import CellRow, ClusterObservation
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
+from .fake_s3 import FakeS3
 from .test_reconcile import (
     FakeClusterGateway,
     _cluster_config,
@@ -216,108 +215,17 @@ def test_a_local_export_job_tolerates_its_cordoned_node():
 # --- C6 against real Postgres roles, with object storage at its SDK boundary ---------
 
 
-class FakeS3:
-    """S3 at the SDK boundary. One store; each client is one B2 key, refused
-    outside its cell's prefix exactly as FakeB2 refuses that key."""
-
-    def __init__(self, b2: FakeB2) -> None:
-        self.b2 = b2
-        self.uploads: dict[str, dict] = {}
-        self.versions: dict[str, list[tuple[str, bytes]]] = {}
-        self.calls: list[tuple[str, str]] = []  # (key id, object name)
-        self.abort_error: Exception | None = None
-        self._ids = itertools.count(1)
-
-    def client(self, cluster_config, key_id: str, key_secret: str) -> FakeS3Client:
-        return FakeS3Client(self, key_id)
-
-    def put_part(self, url: str, data: bytes) -> str:
-        """What the export Job's PUT through a presigned part URL does."""
-        query = {name: values[0] for name, values in parse_qs(urlsplit(url).query).items()}
-        etag = '"' + hashlib.md5(data).hexdigest() + '"'  # noqa: S324 - S3's part ETag
-        self.uploads[query["upload_id"]]["parts"][int(query["part"])] = (etag, data)
-        return etag
-
-
-class FakeS3Client:
-    def __init__(self, store: FakeS3, key_id: str) -> None:
-        self.store, self.key_id = store, key_id
-
-    def _use(self, name: str) -> None:
-        self.store.b2.authorize(self.key_id, name)
-        self.store.calls.append((self.key_id, name))
-
-    def get_paginator(self, operation: str):
-        return type("Paginator", (), {"paginate": lambda _self, **kwargs: [getattr(self, operation)(**kwargs)]})()
-
-    def list_multipart_uploads(self, Bucket, Prefix):
-        self._use(Prefix)
-        return {"Uploads": [{"Key": upload["key"], "UploadId": upload_id}
-                            for upload_id, upload in self.store.uploads.items() if upload["key"].startswith(Prefix)]}
-
-    def list_object_versions(self, Bucket, Prefix):
-        self._use(Prefix)
-        return {"Versions": [{"Key": key, "VersionId": version} for key, versions in self.store.versions.items()
-                             if key.startswith(Prefix) for version, _data in versions]}
-
-    def list_parts(self, Bucket, Key, UploadId):
-        self._use(Key)
-        if UploadId not in self.store.uploads:
-            raise ClientError({"Error": {"Code": "NoSuchUpload"}}, "ListParts")
-        parts = self.store.uploads[UploadId]["parts"]
-        return {"Parts": [{"PartNumber": number, "ETag": parts[number][0], "Size": len(parts[number][1])}
-                          for number in sorted(parts)]}
-
-    def create_multipart_upload(self, Bucket, Key, **_headers):
-        self._use(Key)
-        upload_id = f"upload-{next(self.store._ids)}"
-        self.store.uploads[upload_id] = {"key": Key, "parts": {}}
-        return {"UploadId": upload_id}
-
-    def generate_presigned_url(self, operation, Params, ExpiresIn, HttpMethod=None):
-        self._use(Params["Key"])
-        query = {"op": operation, "key_id": self.key_id, "expires": ExpiresIn, "upload_id": Params.get("UploadId"),
-                 "part": Params.get("PartNumber"), "version": Params.get("VersionId")}
-        return f"https://storage.test/{Params['Bucket']}/{Params['Key']}?" + "&".join(
-            f"{name}={value}" for name, value in query.items() if value is not None)
-
-    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload):
-        self._use(Key)
-        upload = self.store.uploads.pop(UploadId)
-        data = b"".join(upload["parts"][part["PartNumber"]][1] for part in MultipartUpload["Parts"])
-        version = f"version-{next(self.store._ids)}"
-        self.store.versions.setdefault(Key, []).append((version, data))
-        return {"VersionId": version}
-
-    def head_object(self, Bucket, Key, VersionId=None):
-        self._use(Key)
-        return {"ContentLength": len(dict(self.store.versions[Key])[VersionId]), "VersionId": VersionId}
-
-    def abort_multipart_upload(self, Bucket, Key, UploadId):
-        self._use(Key)
-        if self.store.abort_error is not None:
-            raise self.store.abort_error
-        self.store.uploads.pop(UploadId, None)
-
-    def delete_object(self, Bucket, Key, VersionId):
-        self._use(Key)
-        self.store.versions[Key] = [entry for entry in self.store.versions[Key] if entry[0] != VersionId]
-        if not self.store.versions[Key]:
-            del self.store.versions[Key]
-
-
 class Harness:
     """One cellctl process against the real C6 schema and grants."""
 
     def __init__(self, cell_db, monkeypatch) -> None:
         self.cell_db = cell_db
         self.cluster = FakeClusterGateway()
-        self.b2 = FakeB2()
-        self.s3 = FakeS3(self.b2)
+        self.s3 = FakeS3()
         self.jobs: dict[str, ExportJob] = {}
         self.cluster.observe_export_job = lambda namespace, export_id, verify=False: self.jobs.get(
             export_id + ("-verify" if verify else ""), ExportJob())
-        monkeypatch.setattr(reconcile, "_cell_s3_client", self.s3.client)
+        monkeypatch.setattr(reconcile, "_staging_s3_client", self.s3.client)
 
     async def __aenter__(self) -> Harness:
         self.app = await asyncpg.connect(self.cell_db.dsn(role="substrate_app"))
@@ -329,7 +237,7 @@ class Harness:
         await self.cellctl.close()
 
     async def run(self, now: datetime = NOW) -> None:
-        await reconcile.reconcile_once(self.cellctl, self.cluster, self.b2, FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(self.cellctl, self.cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), _cluster_config(), now=now)
 
     async def serve(self, cell_id: str, desired_state: str = "running") -> None:
@@ -521,8 +429,8 @@ async def test_a_large_cells_job_and_part_urls_last_as_long_as_its_hold(cell_db,
         assert {parse_qs(urlsplit(url).query)["expires"][0] for url in packed["urls"]} == {str(330 * 60)}
 
 
-async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkeypatch):
-    """Defect: one tenant's export is created, completed or linked with another cell's key or prefix."""
+async def test_every_export_goes_through_the_staging_key_under_its_own_cells_prefix(cell_db, monkeypatch):
+    """Defect: an export is created, completed or linked outside its cell's prefix, or in the backup bucket."""
     async with Harness(cell_db, monkeypatch) as harness:
         await harness.serve(CELL)
         await harness.serve(OTHER_CELL)
@@ -535,13 +443,14 @@ async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkey
             await harness.app.execute("UPDATE exomem_cloud_exports SET link_requested_at=now() WHERE export_id=$1",
                                       uuid.UUID(export_id))
         await harness.run()
+        staging_key_id = _secrets_config().staging_key_id
         for cell_id, export_id in exports.items():
-            key_id = (await harness.cell(cell_id)).b2_key_id
             url = urlsplit((await harness.export(export_id))["download_url"])
-            assert url.path == f"/exomem-cloud-backups/cells/{cell_id}/exports/{export_id}.zip"
-            assert parse_qs(url.query)["key_id"] == [key_id]
-            assert {name for used, name in harness.s3.calls if used == key_id} <= {
-                f"cells/{cell_id}/exports/{export_id}.zip"}
+            staging_bucket = _cluster_config().cell_data_staging_bucket
+            assert url.path == f"/{staging_bucket}/cells/{cell_id}/exports/{export_id}.zip"
+            assert parse_qs(url.query)["key_id"] == [staging_key_id]
+        assert {used for used, _name in harness.s3.calls} == {staging_key_id}
+        assert {name.split("/")[1] for _used, name in harness.s3.calls} == {CELL, OTHER_CELL}
 
 
 async def test_each_role_holds_exactly_its_c6_columns(cell_db):

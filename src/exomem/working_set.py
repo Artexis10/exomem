@@ -38,6 +38,7 @@ from . import (
     activation_conventions,
     activation_result,
     call_spans,
+    chance_band,
     context_intents,
     context_roles,
     lifecycle_statuses,
@@ -1823,6 +1824,7 @@ def _material_lane(
     from . import (
         bm25,
         find,
+        find_types,
         lexstore,
         provenance,
         relation_registry,
@@ -1964,15 +1966,17 @@ def _material_lane(
         if not _is_current_page(vault_root, path, status_basis=status_basis):
             continue
         call_spans.measure(call_spans.PAGES_PARSED)
+        # The OCR words a sidecar withheld from search do not pick a page for a turn either.
+        page_body = find_types.without_low_confidence_ocr(page.body, page.frontmatter)
         with call_spans.measure_ms(call_spans.HYDRATION_MS):
             document = semantic_units.parse_semantic_units(
-                page.body, path=path, validate=False,
+                page_body, path=path, validate=False,
                 language_registry=semantic_language_registry.for_attached_projects(
                     language, tuple(find._all_projects(page.frontmatter)),
                 ),
                 relation_registry=relations, page_type=page.page_type,
             )
-        prose = page.body
+        prose = page_body
         for unit in sorted(document.units, key=lambda unit: unit.span.start_offset, reverse=True):
             prose = prose[:unit.span.start_offset] + "\n" + prose[unit.span.end_offset:]
         prose = "\n".join(line for line in prose.splitlines() if not line.lstrip().startswith("#"))
@@ -2979,7 +2983,7 @@ def related_pages(
     current row of the title query's `window` (the lexical reading), and one of
     its stored recall chunks clears the corpus-relative band over every chunk
     of the resident matrix against the turn vector the anchor lane already
-    encoded (the semantic reading, `working_set_resolve.semantic_band`
+    encoded (the semantic reading, `chance_band.semantic_band`
     unchanged). Listed, never served: the caller adds no unit, anchor or ref.
 
     Owner only, decided before any similarity is computed, since the band's
@@ -3027,7 +3031,7 @@ def related_pages(
                 return (), (), "unavailable"
             similarities = resident.matrix @ (query / norm)
             config = ranking_config.DEFAULT_RANKING
-            cleared = working_set_resolve.semantic_band(
+            cleared = chance_band.semantic_band(
                 similarities,
                 alpha=float(config.working_set_semantic_alpha),
                 min_population=int(config.working_set_semantic_min_population),

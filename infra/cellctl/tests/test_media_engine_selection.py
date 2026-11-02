@@ -10,7 +10,6 @@ import asyncpg
 
 from cellctl import main, reconcile
 from cellctl.state import CellRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_reconcile import (
@@ -28,6 +27,9 @@ OTHER = "bbbbbbbbbbbbbbbb"
 def test_only_a_selected_cell_changes_its_render_digest(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_MEDIA_ENGINE_CELL_IDS", json.dumps({"documents": [CANARY], "ocr": [CANARY]}))
     selected = main.build_cluster_config()
     unselected = dataclasses.replace(selected, media_engine_cell_ids={})
@@ -43,7 +45,7 @@ async def _reconcile(cell_db, config: reconcile.ClusterConfig, *cell_ids: str) -
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
     finally:
         await connection.close()
@@ -96,6 +98,9 @@ async def test_a_cells_own_entries_add_to_the_fleet_default(cell_db) -> None:
 async def test_an_empty_fleet_default_renders_no_switch_into_a_cell(cell_db, monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT", "[]")
     config = dataclasses.replace(main.build_cluster_config(), media_engine_cell_ids={"ocr": (CANARY,)})
     assert config.media_engine_fleet_default == ()
@@ -110,6 +115,9 @@ async def test_an_empty_fleet_default_renders_no_switch_into_a_cell(cell_db, mon
 def test_a_default_that_names_what_a_cell_already_runs_restarts_no_cell(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     per_cell = {"documents": (CANARY, OTHER), "ocr": (CANARY, OTHER)}
     rolled_out = dataclasses.replace(main.build_cluster_config(), media_engine_cell_ids=per_cell)
     with_default = dataclasses.replace(rolled_out, media_engine_fleet_default=("ocr", "documents"))

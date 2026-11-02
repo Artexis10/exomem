@@ -31,6 +31,14 @@ from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 RENDER_VERSION = 3
 
 NAMESPACE_PREFIX = "exo-cell-"
+# The one pattern of a cell namespace: the prefix and a base32 cell id. The key custodian and
+# the cellctl admission policy read the same shape.
+CELL_NAMESPACE_RE = re.compile(re.escape(NAMESPACE_PREFIX) + r"[a-z2-7]{16}")
+# contain-cloud-controller-compromise D9: the key custodian writes this Secret in a new
+# cell's namespace, and the backup and restore Jobs read it. cellctl never writes it.
+OBJECT_STORE_KEY_SECRET = "cell-object-store-key"
+OBJECT_STORE_KEY_ID_FIELD = "keyId"
+OBJECT_STORE_KEY_SECRET_FIELD = "applicationKey"
 GATEWAY_NAMESPACE = "exomem-cloud"
 GATEWAY_POD_LABEL = "app.kubernetes.io/name"
 GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
@@ -120,6 +128,13 @@ def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
 
 
+def cell_id_from_namespace(namespace: str | None) -> str | None:
+    """The cell id of a cell namespace, or None for any other namespace."""
+    if namespace and CELL_NAMESPACE_RE.fullmatch(namespace):
+        return namespace[len(NAMESPACE_PREFIX):]
+    return None
+
+
 def _check_literal_service_url(endpoint: str, port: int, name: str) -> None:
     """The preflighted Service IPv4 address needs neither runtime DNS nor discovery."""
     if not endpoint:
@@ -149,9 +164,8 @@ def check_media_slot_url(endpoint: str) -> None:
     _check_literal_service_url(endpoint, MEDIA_SLOT_PORT, "media slot")
 
 
-def check_upload_public_key(pem: str) -> None:
-    """The cell refuses to start on a malformed upload key, so refuse it here first.
-    Like the cell, accept only an Ed25519 public key PEM, and never echo the value."""
+def _check_ed25519_public_key(pem: str, name: str) -> None:
+    """Like the cell, accept only an Ed25519 public key PEM, and never echo the value."""
     if not pem:
         return
     try:
@@ -159,7 +173,17 @@ def check_upload_public_key(pem: str) -> None:
     except (ValueError, TypeError, UnicodeError):
         key = None
     if not isinstance(key, Ed25519PublicKey):
-        raise ValueError("cell upload public key must be an Ed25519 public key PEM")
+        raise ValueError(f"{name} must be an Ed25519 public key PEM")
+
+
+def check_upload_public_key(pem: str) -> None:
+    """The cell refuses to start on a malformed upload key, so refuse it here first."""
+    _check_ed25519_public_key(pem, "cell upload public key")
+
+
+def check_grant_public_key(pem: str) -> None:
+    """The key that verifies the signed grants of an import and an export; empty leaves them unverified."""
+    _check_ed25519_public_key(pem, "cell grant public key")
 
 
 @dataclass(frozen=True)
@@ -226,6 +250,8 @@ class CellManifestSpec:
     bearer_previous: str | None = None
     backup_password: str = ""
     volume_passphrase: str = ""
+    # An old cell's own stored key, rendered into its Secret. A new cell has none: its Jobs
+    # read the key the custodian wrote (OBJECT_STORE_KEY_SECRET).
     b2_key_id: str = ""
     b2_key_secret: str = ""
 
@@ -263,6 +289,12 @@ class CellManifestSpec:
     # The PEM public half of the gateway's artifact signing pair, or "" for a cell
     # that does not serve the upload handoff. Public material, so it renders as a value.
     upload_public_key: str = ""
+    # contain-cloud-controller-compromise D2/D4: the anchors an import or export Job checks its grant and
+    # presigned URLs against. Only those Jobs receive them. The endpoint and the bucket are the ones
+    # cellctl itself presigns for; the grant key is "" until Substrate signs grants.
+    object_store_endpoint: str = ""
+    object_store_bucket: str = ""
+    grant_public_key: str = ""
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
@@ -290,6 +322,7 @@ class CellManifestSpec:
         check_media_edge_url(self.media_edge_url)
         check_media_slot_url(self.media_slot_url)
         check_upload_public_key(self.upload_public_key)
+        check_grant_public_key(self.grant_public_key)
         if self.media_edge_url and not (
             self.media_edge_credential and self.media_age_identity and self.media_recipient
             and len(self.media_name_key) == 32 and self.media_key_version > 0 and self.media_max_object_bytes > 0
@@ -579,9 +612,9 @@ def render_secret(spec: CellManifestSpec) -> dict:
         "cell-token": _b64(spec.bearer_current),
         "backup-password": _b64(spec.backup_password),
         "encryption-passphrase": _b64(spec.volume_passphrase),
-        "b2-key-id": _b64(spec.b2_key_id),
-        "b2-key-secret": _b64(spec.b2_key_secret),
     }
+    if spec.b2_key_id:
+        data.update({"b2-key-id": _b64(spec.b2_key_id), "b2-key-secret": _b64(spec.b2_key_secret)})
     if spec.bearer_previous:
         data["cell-token-previous"] = _b64(spec.bearer_previous)
     if spec.local_volume and spec.backed_up:
@@ -834,6 +867,17 @@ def _init_env(spec: CellManifestSpec) -> list[dict]:
             "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": BACKED_UP_KEY, "optional": True}},
         })
     return env
+
+
+def _containment_env(spec: CellManifestSpec) -> list[dict]:
+    """The anchors a Job that moves a cell's data checks its grant and presigned URLs against
+    (src/exomem/cloud_grant.py names them). An anchor that is not configured is not rendered."""
+    anchors = {
+        "EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT": spec.object_store_endpoint,
+        "EXOMEM_CLOUD_OBJECT_STORE_BUCKET": spec.object_store_bucket,
+        "EXOMEM_CLOUD_GRANT_PUBLIC_KEY": spec.grant_public_key,
+    }
+    return [{"name": name, "value": value} for name, value in anchors.items() if value]
 
 
 def _media_mounts(spec: CellManifestSpec) -> list[dict]:
@@ -1130,19 +1174,25 @@ def _restic_repo(spec: CellManifestSpec, bucket_name: str, endpoint: str) -> str
 
 
 def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
+    # The key id and secret double as the S3 access key id and secret against B2's
+    # S3-compatible endpoint. An old cell reads its own stored key from its Secret; a new
+    # cell reads the key the custodian minted for it.
+    if spec.b2_key_id:
+        key_secret, key_id_field, key_secret_field = spec.secret_name, "b2-key-id", "b2-key-secret"
+    else:
+        key_secret, key_id_field, key_secret_field = (
+            OBJECT_STORE_KEY_SECRET, OBJECT_STORE_KEY_ID_FIELD, OBJECT_STORE_KEY_SECRET_FIELD)
     return [
         # The repository carries chart values (endpoint, bucket); it reaches
         # restic through its environment, never through the `sh -c` string.
         {"name": "RESTIC_REPOSITORY", "value": repo},
         {
-            # The per-cell B2 application key id/secret double as the S3
-            # access key id/secret against B2's S3-compatible endpoint.
             "name": "AWS_ACCESS_KEY_ID",
-            "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "b2-key-id"}},
+            "valueFrom": {"secretKeyRef": {"name": key_secret, "key": key_id_field}},
         },
         {
             "name": "AWS_SECRET_ACCESS_KEY",
-            "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "b2-key-secret"}},
+            "valueFrom": {"secretKeyRef": {"name": key_secret, "key": key_secret_field}},
         },
         {
             "name": "RESTIC_PASSWORD",
@@ -1389,6 +1439,7 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
     container["env"] = _init_env(spec) + [
         {"name": "EXOMEM_IMPORT_MAX_MEMBERS", "value": str(MAX_MEMBERS)},
         {"name": "EXOMEM_IMPORT_RESERVE_BYTES", "value": str(RESERVE_BYTES)},
+        *_containment_env(spec),
     ]
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: "import"}
     return {
@@ -1433,7 +1484,8 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
                         tolerate_cordon=spec.local_volume)
     container = pod["containers"][0]
     container["command"] = _cell_command(command)
-    container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}]
+    container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"},
+                        *_containment_env(spec)]
     if verify:
         # Verification sees only its signed object version, never a cell volume or a cell key Secret.
         container["command"] = _cell_command(command, scratch=False)
@@ -1441,7 +1493,8 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
                             {"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
                             {"name": "TMPDIR", "value": "/tmp"},
                             {"name": "EXOMEM_EXPORT_VERIFY_URL", "valueFrom": {"secretKeyRef": {
-                                "name": verification_secret_name(item.export_id), "key": "get-url"}}}]
+                                "name": verification_secret_name(item.export_id), "key": "get-url"}}},
+                            *_containment_env(spec)]
         container["volumeMounts"] = [{"name": "tmp", "mountPath": "/tmp"}]
         pod["volumes"] = [{"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}

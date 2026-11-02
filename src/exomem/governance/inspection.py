@@ -63,15 +63,16 @@ def inspect_operation(
         )
     audience = requested_audience or who.audience_id
     if operation == "list":
+        # Rule and grant ids name policy a non-owner cannot inspect: only the owner needs them.
         return {
             "enabled": True,
             "fingerprint": pol.fingerprint if owner else None,
             "scopes": sorted(pol.scopes) if owner else [],
-            "rules": sorted(rule.id for rule in pol.rules),
+            "rules": sorted(rule.id for rule in pol.rules) if owner else [],
             "grants": sorted(
                 [grant.id for grant in pol.grants]
                 + [grant.id for grant in pol.release_grants]
-            ),
+            ) if owner else [],
         }
     if pol.blocked:
         raise InspectionError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
@@ -121,9 +122,9 @@ def inspect_operation(
         # no rule matched, so `rule_ids` is legitimately empty and a bare
         # "nothing matched" would read as a missing item. Name the declaring
         # scope instead of attributing the outcome to a rule that does not
-        # exist. Owner-only, matching `list`, which already withholds scope ids
-        # from a non-owner while disclosing rule ids — a default denial must
-        # not become the one place a third party learns the scope structure.
+        # exist. Owner-only, matching `list`, which withholds scope, rule and
+        # grant ids from a non-owner — a default denial must not become the one
+        # place a third party learns the scope structure.
         declaring_scopes = [] if decision is None else list(decision.default_deny_scope_ids)
         scope_contributions = (
             []
