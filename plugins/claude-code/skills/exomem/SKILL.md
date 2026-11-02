@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: e654feaee0409e3f9a6ddf7e048042b95c58c9febaebc0d8d28de99ae93b32b3
+  skill_contract: 72dd7fa36176b95fc88521370180c4b1ef6d5a760e5e51b1e4951f3ed78c8b27
   version: "0.32.0"
 ---
 
@@ -110,6 +110,10 @@ the structured error. For warming, busy, pending, or
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
+
+Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
+only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+conversation diagnostic.
 
 ## Proactive engagement
 

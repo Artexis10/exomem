@@ -26,6 +26,8 @@ LIVE_PATHS = {
     "infra/helm/platform/templates/cloud-gateway.yaml",
     "infra/helm/platform/templates/namespaces.yaml",
     "infra/helm/platform/templates/cellctl.yaml",
+    "infra/helm/platform/templates/key-custodian.yaml",
+    "infra/helm/platform/templates/_cell-namespace.tpl",
     "infra/helm/platform/values.schema.json",
     "infra/helm/platform/values.validation.yaml",
     "infra/helm/platform/Chart.lock",

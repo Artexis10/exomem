@@ -34,7 +34,6 @@ from cellctl.manifests import (
 )
 from cellctl.reconcile import ClusterConfig
 from cellctl.state import ClusterObservation, RolloutRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage_config import StorageConfig
 
@@ -378,7 +377,7 @@ async def test_a_planned_move_through_the_controller_backs_up_first_then_restore
         return cluster.applied[(namespace, "StatefulSet", "cell")]["metadata"]["annotations"]
 
     async def run(minute: int) -> None:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
                                        config, now=NOW + timedelta(minutes=minute))
 
     try:
@@ -443,11 +442,11 @@ async def test_move_acceptance_keeps_old_volume_until_exact_mark_and_provider_ab
         cluster.observations[cell_id] = _bound(STORAGE_CLASS, pvc_volume_id="vol-new", pvc_exists=True,
             namespace_move_accepted_volume="vol-old")
         for minute in (0, 1):
-            await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(),
+            await reconcile.reconcile_once(connection, cluster, provider, _secrets_config(),
                 ClusterConfig(object_storage_bucket="b"), now=NOW + timedelta(minutes=minute))
             assert (await db.select_all_rows(connection))[0].relocation_old_volume_id == "vol-old"
         provider.remove_volume("vol-old")
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, provider, _secrets_config(),
             ClusterConfig(object_storage_bucket="b"), now=NOW + timedelta(minutes=2))
         row = (await db.select_all_rows(connection))[0]
         assert row.relocation_old_volume_id is None
@@ -475,7 +474,7 @@ async def test_a_second_move_and_acceptance_preserve_every_earlier_retained_copy
                                                "retained_old_storage_class": earlier_class})})
         cluster.observations["aaaaaaaaaaaaaaaa"] = _bound("per-cell", pvc_exists=True,
             pvc_volume_id="vol-current", namespace_move_volume="vol-current", namespace_move_storage_class="per-cell")
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=NOW)
         row = (await db.select_all_rows(connection))[0]
         retained = json.loads(row.custody_observation)["retained_volumes"]
@@ -484,7 +483,7 @@ async def test_a_second_move_and_acceptance_preserve_every_earlier_retained_copy
         await db.write_observed(connection, row.cell_id, {"volume_id": "vol-new"})
         cluster.observations[row.cell_id] = _bound("per-cell", pvc_exists=True, pvc_volume_id="vol-new",
                                                    namespace_move_accepted_volume="vol-current")
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=NOW + timedelta(minutes=2))
         row = (await db.select_all_rows(connection))[0]
         assert json.loads(row.custody_observation)["retained_volumes"] == [
@@ -496,7 +495,7 @@ async def test_a_second_move_and_acceptance_preserve_every_earlier_retained_copy
         finally:
             await owner.close()
         cluster.observations[row.cell_id] = ClusterObservation()
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=NOW + timedelta(minutes=3))
         assert (await db.select_all_rows(connection))[0].keys_expire_at is None
     finally:
@@ -528,7 +527,7 @@ async def test_missing_acceptance_preserves_an_unidentified_retained_copy_throug
             "ready": True, "volume_id": "vol-current", "custody_observation": json.dumps({
                 "volume": "per-cell-key", "retained_volumes": retained})})
         cluster.observations[cell_id] = _bound("per-cell", pvc_exists=True, pvc_volume_id="vol-current")
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(), config, now=NOW)
+        await reconcile.reconcile_once(connection, cluster, provider, _secrets_config(), config, now=NOW)
         row = (await db.select_all_rows(connection))[0]
         assert json.loads(row.custody_observation)["retained_volumes"] == retained
         assert all(call.args[0] is not None for call in lookup.call_args_list)
@@ -539,7 +538,7 @@ async def test_missing_acceptance_preserves_an_unidentified_retained_copy_throug
             await owner.close()
         await db.write_observed(connection, cell_id, {"volume_id": None})
         cluster.observations[cell_id] = ClusterObservation()
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), provider, _secrets_config(), config,
+        await reconcile.reconcile_once(connection, cluster, provider, _secrets_config(), config,
                                        now=NOW + timedelta(minutes=1))
         row = (await db.select_all_rows(connection))[0]
         assert json.loads(row.custody_observation)["retained_volumes"] == retained

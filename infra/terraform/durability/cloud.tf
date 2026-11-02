@@ -37,11 +37,3 @@ resource "b2_bucket" "cloud_backups" {
     prevent_destroy = true
   }
 }
-
-# Key creation requires account scope. cellctl uses this parent only to mint
-# tenant keys; tenant prefix restrictions are enforced by the runtime.
-resource "b2_application_key" "cloud_controller" {
-  count        = var.cloud_backup_enabled ? 1 : 0
-  key_name     = "exomem-cloud-controller"
-  capabilities = ["listKeys", "writeKeys", "deleteKeys", "listFiles", "deleteFiles"]
-}

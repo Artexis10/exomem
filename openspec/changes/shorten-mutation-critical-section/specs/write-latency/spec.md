@@ -257,8 +257,8 @@ SHALL NOT wait in line or between attempts: the request's own thread waits and
 submits the write again under the same bounds, order and waiter cap, while the
 store thread serves other requests. The request's thread SHALL also wait out,
 for any write, a store handoff that refused the write before its leaf started,
-a store queue that has not yet taken the write, and a busy ownership proof at
-routing, because none of them ran the write. It MUST NOT submit again a write
+and a store queue that has not yet taken the write, because neither ran the
+write. Routing reads ownership without the boundary and SHALL NOT refuse as busy. It MUST NOT submit again a write
 that received `MUTATION_ACKNOWLEDGEMENT_PENDING`. Waiting parks a shared
 synchronous worker, so no more than half of the workers (at least one)
 MAY wait at once (the waiter cap; four at the default eight); a write past
@@ -346,12 +346,13 @@ to every keyed write.
   that turn
 - **AND** the write commits once after its turn comes
 
-#### Scenario: A store write waits out a hold met at routing or on the store thread
+#### Scenario: A store write waits out a hold met on the store thread
 
-- **WHEN** a keyed `record_memory` append meets a boundary held inside its
-  allowance, while it proves ownership at routing or while it runs on the store
+- **WHEN** a keyed `record_memory` append routes while an unrelated holder keeps
+  the boundary, and then meets that hold inside its allowance on the store
   thread
-- **THEN** it commits once after the holder releases
+- **THEN** routing does not refuse, and the write commits once after the holder
+  releases
 - **AND** neither `MUTATION_BUSY` nor `COLLECTION_STORE_BUSY` reaches the caller
 
 #### Scenario: A store write that the store has not taken never runs late

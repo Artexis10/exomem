@@ -20,7 +20,15 @@ import pytest
 from bootstrap_populated import CUSTOM_ENTITY_TYPES, populated_blocks, populated_root
 from budget_gate import check_budget
 
-from exomem import bootstrap_core, capabilities, commands, prominence, source_taxonomy, workflow_skills
+from exomem import (
+    bootstrap_core,
+    capabilities,
+    commands,
+    mutation_terminal,
+    prominence,
+    source_taxonomy,
+    workflow_skills,
+)
 
 #: Core ceiling at maximal on the worst-case surface. Ruled 15,000; measured
 #: 14,407 (claude-code, maximal) when set, i.e. about 590 bytes of margin.
@@ -142,6 +150,10 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     "canonical-write-loop": (
         prominence.CANON,
         lambda core: len(core["write"]["canonical_loop"]) >= 8,
+    ),
+    "narrate-a-write-plainly": (
+        prominence.CANON,
+        lambda core: mutation_terminal.NARRATION_RULE in core["write"]["canonical_loop"],
     ),
     "preserve-the-record": (
         prominence.CANON,

@@ -666,7 +666,16 @@ def test_a_page_saved_on_every_catch_up_step_declines_as_outpaced_and_the_full_p
 
     # One step for the lag, plus two slack steps.
     assert len(attempts) <= 3, "the catch-up kept replaying a page that moved on every step"
-    assert any("catch-up declined (outpaced)" in message for message in caplog.messages)
+    # A hosted cell redacts the free-text decline line; only the finish line's
+    # closed token tells it why the catch-up cost a full pass.
+    declined = [
+        record.fields.get("declined_for")
+        for record in caplog.records
+        if getattr(record, "event", None) == "lexical_repair_finished"
+        and record.fields["kind"] == "catch_up"
+        and record.fields["result"] == "declined"
+    ]
+    assert declined == ["outpaced"]
     assert rebuilds == [True]
     assert lexstore.runtime_retrieval_catalog_proof(
         tmp_path, require_live_projection=True, schedule_repair=False

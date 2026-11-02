@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: e654feaee0409e3f9a6ddf7e048042b95c58c9febaebc0d8d28de99ae93b32b3
+  skill_contract: 72dd7fa36176b95fc88521370180c4b1ef6d5a760e5e51b1e4951f3ed78c8b27
   version: "0.1.0"
 ---
 
@@ -37,6 +37,10 @@ the structured error. For warming, busy, pending, or
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
+
+Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
+only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+conversation diagnostic.
 
 ## Workflow
 1. Search with media-aware filters or artifact terms using `search_memory`.
