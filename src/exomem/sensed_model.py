@@ -12,6 +12,9 @@ graph. Once per dreamer tick it:
 * projects each pair from the ledger by CONTENT, meaning the current text hashes
   of its two units. The state is `current`, `stale`, `pending`, `migrating` or
   `instruments_disagree`, and the verdict comes from the active label map;
+* reads each Decided line of an episode recap against the units of the page
+  it links (`recap.covered_by`), under the same rules: the claims, and the pairs
+  of a claim with its home's units, depend on those two pages only;
 * queues what still needs a reading for the sensor worker.
 
 It never loads or runs a model, never writes the vault and never decides
@@ -30,13 +33,14 @@ only, so a page the caller may not see cannot move what that caller is served.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
 import math
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,8 +53,9 @@ log = logging.getLogger(__name__)
 #: 2 added each page's content hash and each pair's instrument key, so a request
 #: can tell a projection that no longer describes the live page. 3 caps each
 #: page pair instead of each page, and is rebuilt from the ledger without
-#: re-sensing.
-SCHEMA_VERSION = 3
+#: re-sensing. 4 adds the recap claims and their coverage pairs, and is rebuilt
+#: the same way.
+SCHEMA_VERSION = 4
 FILENAME = "projection.sqlite"
 
 #: Pairs one page pair may send to sensing: its first PAIR_CAP pairs in the
@@ -130,6 +135,33 @@ _TABLES = (
     "CREATE INDEX IF NOT EXISTS pairs_partner ON pairs(path_a, path_b, pair_key)",
     "CREATE INDEX IF NOT EXISTS pairs_input ON pairs(input_key)",
     "CREATE INDEX IF NOT EXISTS pairs_queue ON pairs(queued, priority, pair_key)",
+    # A recap's Decided lines that name a home page, and what the home's units say of each. Kept
+    # in tables of their own: `pairs` is the pair.relation projection and stays what it was.
+    """
+    CREATE TABLE IF NOT EXISTS claims (
+        episode_path TEXT NOT NULL, home_path TEXT NOT NULL, text_sha256 TEXT NOT NULL,
+        text TEXT NOT NULL, PRIMARY KEY (episode_path, home_path, text_sha256)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS claims_home ON claims(home_path)",
+    # Shaped like `pairs` and in slot order: a = the home's unit (premise), b = the claim
+    # (hypothesis). `path_b` is the recap page, so a page pair is (home, recap).
+    """
+    CREATE TABLE IF NOT EXISTS coverage_pairs (
+        pair_key TEXT PRIMARY KEY,
+        path_a TEXT NOT NULL, unit_a TEXT NOT NULL, hash_a TEXT NOT NULL,
+        path_b TEXT NOT NULL, unit_b TEXT NOT NULL, hash_b TEXT NOT NULL,
+        input_key TEXT NOT NULL, order_key TEXT NOT NULL, state TEXT NOT NULL,
+        priority INTEGER NOT NULL, selected INTEGER NOT NULL DEFAULT 1,
+        queued INTEGER NOT NULL DEFAULT 0, verdict TEXT, direction TEXT, p REAL,
+        reading_id TEXT, instrument_json TEXT, verdicts_json TEXT, fingerprint TEXT,
+        consumed_hashes TEXT, missing INTEGER NOT NULL DEFAULT 0, instrument_key TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS coverage_pairs_a ON coverage_pairs(path_a)",
+    "CREATE INDEX IF NOT EXISTS coverage_pairs_b ON coverage_pairs(path_b)",
+    "CREATE INDEX IF NOT EXISTS coverage_pairs_input ON coverage_pairs(input_key)",
+    "CREATE INDEX IF NOT EXISTS coverage_pairs_queue ON coverage_pairs(queued, priority, pair_key)",
 )
 
 
@@ -153,18 +185,57 @@ def _digest(*parts: Any) -> str:
 def active_instruments() -> dict[str, sensing.InstrumentIdentity]:
     """Instruments whose readings are consumed now, by instrument id.
 
-    The pinned NLI instrument's identity, computed from the repository pin and
-    installed package metadata. Nothing is imported or loaded. An empty result
-    means no reading is consumed, so the status degrades to absence.
+    The pinned NLI instrument's identity for each registered question (the pin
+    answers every one today), computed from the repository pin and installed
+    package metadata. Nothing is imported or loaded. An empty result means no
+    reading is consumed, so the status degrades to absence.
     """
     from . import sensing_nli
 
-    identity = sensing_nli.identity()
-    return {} if identity is None else {identity.instrument_id: identity}
+    found: dict[str, sensing.InstrumentIdentity] = {}
+    for question_type in sensing.QUESTIONS:
+        identity = sensing_nli.identity(question_type)
+        if identity is not None:
+            found[identity.instrument_id] = identity
+    return found
+
+
+def active_for(
+    active: Mapping[str, sensing.InstrumentIdentity], question: sensing.Question
+) -> dict[str, sensing.InstrumentIdentity]:
+    """The active instruments that answer `question`: those on its template.
+
+    One question's reading of the ledger must not change because another
+    question gained an instrument, so each question keys its projection on its
+    own instruments (`_question_key`).
+    """
+    return {
+        instrument_id: identity
+        for instrument_id, identity in active.items()
+        if identity.template_version == question.template_version
+    }
 
 
 def _active_key(active: Mapping[str, sensing.InstrumentIdentity], label_map_version: str) -> str:
     return _digest("active", sorted(active), label_map_version)
+
+
+def _question_key(active: Mapping[str, sensing.InstrumentIdentity], question: sensing.Question) -> str:
+    return _active_key(active_for(active, question), question.label_map_version)
+
+
+def _prefix(question: sensing.Question) -> str:
+    """The meta-key prefix of a question's key and cursor. pair.relation keeps the
+    bare names it always had."""
+    return "" if question.slots is None else f"{question.question_type}:"
+
+
+def _table(question: sensing.Question) -> str:
+    """The pair table of a question: the slotted one holds claims against units.
+
+    A fixed internal name, never caller input, so it is safe in SQL text.
+    """
+    return "pairs" if question.slots is None else "coverage_pairs"
 
 
 # ----------------------------------------------------------------------
@@ -316,6 +387,10 @@ class PageFacts:
     supersession: frozenset[str]
     #: This page's own authored link targets, normalised (temporal subject keys).
     link_keys: frozenset[str]
+    #: Pages this page's own links resolve to (outgoing edges only).
+    destinations: frozenset[str] = frozenset()
+    #: The Decided lines of a live recap page that name a home (`recap_claims`).
+    claims: tuple[Claim, ...] = ()
 
 
 def _link_key(raw: str) -> str:
@@ -362,6 +437,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts
         units.setdefault(str(unit_ref), Unit(str(unit_ref), fed, sensing.text_sha256(fed)))
     neighbours: set[str] = set()
     supersession: set[str] = set()
+    destinations: set[str] = set()
     for other, *edge_row in graph.execute(
         f"SELECT n.path, {epistemic_graph.EDGE_COLUMNS} FROM graph_edges e "
         "JOIN graph_nodes n ON n.node_key = e.dst_page_key "
@@ -372,6 +448,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts
         other = str(other)
         if edge is not None and other and other != rel_path:
             neighbours.add(other)
+            destinations.add(other)
             if edge.get("relation_type") == "supersedes":
                 supersession.add(other)
     file_key = graph.execute(
@@ -404,7 +481,97 @@ def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts
         neighbours=frozenset(neighbours),
         supersession=frozenset(supersession),
         link_keys=frozenset(link_keys),
+        destinations=frozenset(destinations),
     )
+
+
+# ----------------------------------------------------------------------
+# recap claims: the Decided lines a recap makes about a page
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Claim:
+    """One Decided line of an episode recap and the page it names as its home."""
+
+    #: `recap-claim-v1`: the line with its link syntax removed, as `extract_text` reads it.
+    text: str
+    text_sha256: str
+    #: Vault-relative path of the page the line links.
+    home: str
+
+
+def _display(line: str, links: list[Any]) -> str:
+    """`line` with each `[[link]]` shown as a reader sees it: its alias, else the note's name."""
+    from . import vault as vault_module
+
+    for match in reversed(links):
+        target, _bar, alias = match.group(0)[2:-2].partition("|")
+        name = vault_module.split_wikilink_target(target)[0].rsplit("/", 1)[-1].removesuffix(".md")
+        line = line[: match.start()] + (alias.strip() or name) + line[match.end() :]
+    return line
+
+
+def _home_of(target: str, destinations: Iterable[str]) -> str | None:
+    """The one destination that `target` names, or None when it names none or several.
+
+    The link resolves the way a reader's does: the whole path, or its tail
+    (`Insights/x`, or just `x`), against the pages the recap links to.
+    """
+    want = _link_key(target)
+    if not want:
+        return None
+    found = [
+        path
+        for path in sorted(set(destinations))
+        if (have := path.casefold().removesuffix(".md")) == want or have.endswith("/" + want)
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def recap_claims(raw_page: str, destinations: Iterable[str]) -> list[Claim]:
+    """The claims of one recap page: its Decided lines that name exactly one home.
+
+    `destinations` are the pages the recap's links resolve to. A line is a claim
+    only when its own `[[link]]` names exactly one of them. Nothing is guessed
+    from the recap's other links, its `about` refs or any search. A recap that
+    `episode_capture.parse` does not accept, as a hand edit is not, yields none.
+    """
+    from . import episode_capture, source_coverage
+    from . import vault as vault_module
+
+    _head, found, rest = raw_page.partition(f"\n{source_coverage.CAPTURE_HEADING}\n\n")
+    parsed = episode_capture.parse(rest[:-1]) if found and rest.endswith("\n") else None
+    if parsed is None:
+        return []
+    claims: dict[tuple[str, str], Claim] = {}
+    # The recap format is closed and server-written, and `decided` is the section whose lines are claims.
+    for line in parsed.sections["decided"]:
+        links = vault_module.find_body_wikilinks(line)
+        targets = {vault_module.split_wikilink_target(match.group(1))[0] for match in links}
+        home = _home_of(next(iter(targets)), destinations) if len(targets) == 1 else None
+        text = sensing.extract_text(_display(line, links)) if home else ""
+        if text:
+            digest = sensing.text_sha256(text)
+            claims[(home, digest)] = Claim(text, digest, home)
+    return list(claims.values())
+
+
+def _page_claims(vault_root: Path, facts: PageFacts) -> tuple[Claim, ...]:
+    """The claims of a live recap page, read from the page itself; none for any other page.
+
+    A recap's file name is the cheap test, and `recap_claims` the real one. A
+    retired revision (`superseded`) proposes nothing: the live revision speaks.
+    """
+    from . import episode_capture
+
+    if facts.lifecycle in _INACTIVE or episode_capture.filename_parts(facts.path) is None:
+        return ()
+    try:
+        raw = (Path(vault_root) / facts.path).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    return tuple(recap_claims(raw, facts.destinations))
 
 
 # ----------------------------------------------------------------------
@@ -817,10 +984,15 @@ def project(
     label_map_version: str,
     *,
     stale: bool,
+    question_type: str = sensing.PAIR_RELATION,
 ) -> Projected:
-    """One pair's state from the ledger, by content. A pure function of its inputs."""
+    """One pair's state from the ledger, by content. A pure function of its inputs.
+
+    `hashes` are in the question's input order and `active` are the instruments
+    that answer it (`active_for`).
+    """
     rows = (
-        sensing_ledger.by_input_key(ledger, sensing.PAIR_RELATION, input_key)
+        sensing_ledger.by_input_key(ledger, question_type, input_key)
         if ledger is not None
         else []
     )
@@ -858,7 +1030,7 @@ def project(
         p=verdict.p,
         reading_id=row.reading_id,
         instrument=_instrument_view(active[row.instrument_id]),
-        fingerprint=sensing.edge_fingerprint(sensing.PAIR_RELATION, hashes, verdict),
+        fingerprint=sensing.edge_fingerprint(question_type, hashes, verdict),
         missing=missing,
     )
 
@@ -875,12 +1047,17 @@ def _instrument_view(identity: sensing.InstrumentIdentity) -> dict[str, Any]:
 
 
 def _write_projection(
-    conn: sqlite3.Connection, key: str, projected: Projected, priority: int, instrument_key: str
+    conn: sqlite3.Connection,
+    key: str,
+    projected: Projected,
+    priority: int,
+    instrument_key: str,
+    table: str = "pairs",
 ) -> None:
     """Store one pair's projection, stamped with the active instrument key it
     was made under: a request serves it only while that key is still active."""
     conn.execute(
-        "UPDATE pairs SET state=?, priority=?, verdict=?, direction=?, p=?, reading_id=?, "
+        f"UPDATE {table} SET state=?, priority=?, verdict=?, direction=?, p=?, reading_id=?, "
         "instrument_json=?, verdicts_json=?, fingerprint=?, missing=?, instrument_key=?, "
         "consumed_hashes=CASE WHEN ? THEN hash_a || ':' || hash_b ELSE consumed_hashes END "
         "WHERE pair_key=?",
@@ -907,7 +1084,9 @@ def _write_projection(
 # ----------------------------------------------------------------------
 
 
-def _refresh_selection(conn: sqlite3.Connection, paths: Iterable[str]) -> None:
+def _refresh_selection(
+    conn: sqlite3.Connection, paths: Iterable[str], table: str = "pairs"
+) -> None:
     """Select and queue every pair of the page pairs `paths` take part in.
 
     A pair is selected when it is among its page pair's first `PAIR_CAP` pairs
@@ -918,7 +1097,7 @@ def _refresh_selection(conn: sqlite3.Connection, paths: Iterable[str]) -> None:
     for path in sorted(set(paths)):
         ranks: dict[tuple[str, str], int] = {}
         for key, path_a, path_b, state, missing in conn.execute(
-            "SELECT pair_key, path_a, path_b, state, missing FROM pairs "
+            f"SELECT pair_key, path_a, path_b, state, missing FROM {table} "
             "WHERE path_a=? OR path_b=? ORDER BY order_key",
             (path, path),
         ).fetchall():
@@ -930,7 +1109,7 @@ def _refresh_selection(conn: sqlite3.Connection, paths: Iterable[str]) -> None:
             selected = rank < PAIR_CAP
             needs = state in _OPEN_STATES or int(missing or 0) > 0
             conn.execute(
-                "UPDATE pairs SET selected=?, queued=? WHERE pair_key=?",
+                f"UPDATE {table} SET selected=?, queued=? WHERE pair_key=?",
                 (1 if selected else 0, 1 if selected and needs else 0, key),
             )
         done.update(ranks)
@@ -978,8 +1157,9 @@ def run_tick(
         active = active_instruments()
         label_map_version = sensing.QUESTIONS[sensing.PAIR_RELATION].label_map_version
         _follow_ledger(store, conn, ledger)
-        _follow_active(store, conn, ledger, active, label_map_version, report, halt)
-        _ingest(store, conn, ledger, active, label_map_version, report, halt)
+        for question in sensing.QUESTIONS.values():
+            _follow_active(store, conn, ledger, active, question, report, halt)
+        _ingest(store, conn, ledger, active, report, halt)
         cosine = _follow_cosine(vault_root, store, conn)
         _follow_pages(
             vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now,
@@ -1012,7 +1192,8 @@ def _follow_ledger(store, conn, ledger) -> None:
         # The full reprojection reads the whole new ledger, so ingestion resumes
         # after the rows it has seen.
         _set_meta(conn, "ledger_seq", 0 if ledger is None else sensing_ledger.max_seq(ledger))
-        _set_meta(conn, "reproject_after", "")
+        for question in sensing.QUESTIONS.values():
+            _set_meta(conn, f"{_prefix(question)}reproject_after", "")
 
 
 def _follow_seeding(store, conn, seen: Mapping[str, str]) -> None:
@@ -1086,46 +1267,60 @@ def _requeue_pages_with_units(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE pages SET sig=NULL WHERE path IN (SELECT DISTINCT path FROM units)")
 
 
-def _follow_active(store, conn, ledger, active, label_map_version, report, halt) -> None:
-    """Reproject every pair when the active instruments or label map change."""
-    key = _active_key(active, label_map_version)
-    if _get_meta(conn, "active_key") != key:
+def _follow_active(store, conn, ledger, active, question, report, halt) -> None:
+    """Reproject every pair of `question` when its active instruments or label map change.
+
+    Each question keeps its own key and cursor, and pair.relation keeps the
+    names it always had, so a second question never moves the first's.
+    """
+    table = _table(question)
+    prefix = _prefix(question)
+    key = _question_key(active, question)
+    if _get_meta(conn, f"{prefix}active_key") != key:
         with store.write(conn):
-            _set_meta(conn, "active_key", key)
-            _set_meta(conn, "reproject_after", "")
-    cursor = _get_meta(conn, "reproject_after")
+            _set_meta(conn, f"{prefix}active_key", key)
+            _set_meta(conn, f"{prefix}reproject_after", "")
+    cursor = _get_meta(conn, f"{prefix}reproject_after")
     while isinstance(cursor, str) and halt() is None:
         rows = conn.execute(
-            "SELECT pair_key, input_key, hash_a, hash_b, state, consumed_hashes FROM pairs "
-            "WHERE pair_key > ? ORDER BY pair_key LIMIT ?",
+            "SELECT pair_key, input_key, hash_a, hash_b, state, consumed_hashes "
+            f"FROM {table} WHERE pair_key > ? ORDER BY pair_key LIMIT ?",
             (cursor, INGEST_PER_TICK),
         ).fetchall()
         with store.write(conn):
             for pair in rows:
-                _reproject(conn, ledger, pair, active, label_map_version)
+                _reproject(conn, ledger, pair, active, question)
                 report.reprojected += 1
             cursor = str(rows[-1][0]) if len(rows) == INGEST_PER_TICK else None
-            _set_meta(conn, "reproject_after", cursor)
+            _set_meta(conn, f"{prefix}reproject_after", cursor)
             if cursor is None:
-                _refresh_selection(conn, _all_paths(conn))
+                _refresh_selection(conn, _all_paths(conn), table)
 
 
 def _all_paths(conn: sqlite3.Connection) -> list[str]:
     return [str(row[0]) for row in conn.execute("SELECT path FROM pages ORDER BY path")]
 
 
-def _reproject(conn, ledger, pair, active, label_map_version) -> None:
+def _reproject(conn, ledger, pair, active, question) -> None:
     key, input_key, hash_a, hash_b, state, consumed = pair
     served_before = state in _SERVED_STATES
     stale = bool(consumed) and consumed != f"{hash_a}:{hash_b}"
-    projected = project(ledger, input_key, (hash_a, hash_b), active, label_map_version, stale=stale)
+    projected = project(
+        ledger, input_key, (hash_a, hash_b), active_for(active, question),
+        question.label_map_version, stale=stale, question_type=question.question_type,
+    )
     # Pairs that carried a served edge (open work) re-sense first.
     priority = 0 if (served_before or stale or projected.state == "migrating") else 1
-    _write_projection(conn, key, projected, priority, _active_key(active, label_map_version))
+    _write_projection(
+        conn, key, projected, priority, _question_key(active, question), _table(question)
+    )
 
 
-def _ingest(store, conn, ledger, active, label_map_version, report, halt) -> None:
-    """Reproject the pairs whose inputs gained a reading since the last tick."""
+def _ingest(store, conn, ledger, active, report, halt) -> None:
+    """Reproject the pairs whose inputs gained a reading since the last tick.
+
+    A reading belongs to its question: it moves that question's pairs only.
+    """
     if ledger is None:
         return
     cursor = int(_get_meta(conn, "ledger_seq") or 0)
@@ -1136,20 +1331,24 @@ def _ingest(store, conn, ledger, active, label_map_version, report, halt) -> Non
         rows = sensing_ledger.since(ledger, cursor, limit=INGEST_PER_TICK)
         if not rows:
             break
-        paths: set[str] = set()
+        paths: dict[str, set[str]] = {}
         with store.write(conn):
             for row in rows:
-                for pair in conn.execute(
-                    "SELECT pair_key, input_key, hash_a, hash_b, state, consumed_hashes, path_a, "
-                    "path_b FROM pairs WHERE input_key=?",
-                    (row.input_key,),
-                ).fetchall():
-                    _reproject(conn, ledger, pair[:6], active, label_map_version)
-                    paths.update((str(pair[6]), str(pair[7])))
+                question = sensing.QUESTIONS.get(row.question_type)
+                if question is not None:
+                    table = _table(question)
+                    for pair in conn.execute(
+                        "SELECT pair_key, input_key, hash_a, hash_b, state, consumed_hashes, "
+                        f"path_a, path_b FROM {table} WHERE input_key=?",
+                        (row.input_key,),
+                    ).fetchall():
+                        _reproject(conn, ledger, pair[:6], active, question)
+                        paths.setdefault(table, set()).update((str(pair[6]), str(pair[7])))
                 report.ingested += 1
             cursor = rows[-1].seq
             _set_meta(conn, "ledger_seq", cursor)
-            _refresh_selection(conn, paths)
+            for table, touched in paths.items():
+                _refresh_selection(conn, touched, table)
 
 
 #: Halt reasons that are the tick's own budgets. They stop a tick from reading
@@ -1196,6 +1395,8 @@ def _follow_pages(
                 report.stop = "graph_unavailable"
                 break
             facts = page_facts(graph, rel, ctx.graph_view())
+            if facts is not None:
+                facts = dataclasses.replace(facts, claims=_page_claims(vault_root, facts))
             vectors = (
                 stored_unit_vectors(vault_root, rel, fingerprint) if facts and facts.units else {}
             )
@@ -1277,6 +1478,8 @@ def _drop_page(conn: sqlite3.Connection, rel: str, store_key: str) -> None:
     """Forget a page. Every other page pair's selection is its own, so nothing
     else moves."""
     conn.execute("DELETE FROM pairs WHERE path_a=? OR path_b=?", (rel, rel))
+    conn.execute("DELETE FROM coverage_pairs WHERE path_a=? OR path_b=?", (rel, rel))
+    conn.execute("DELETE FROM claims WHERE episode_path=?", (rel,))
     conn.execute("DELETE FROM units WHERE path=?", (rel,))
     conn.execute("DELETE FROM links WHERE path=?", (rel,))
     conn.execute("DELETE FROM pages WHERE path=?", (rel,))
@@ -1304,6 +1507,7 @@ def _apply_page(
     label_map_version, store_key: str,
 ) -> None:
     rel = facts.path
+    every, active = active, active_for(active, sensing.QUESTIONS[sensing.PAIR_RELATION])
     before = {
         str(row[0]): row[1:]
         for row in conn.execute(
@@ -1378,6 +1582,84 @@ def _apply_page(
         priority = 0 if (served_before or stale or projected.state == "migrating") else 1
         _write_projection(conn, key, projected, priority, instrument_key)
     _refresh_selection(conn, {rel})
+    conn.execute("DELETE FROM claims WHERE episode_path=?", (rel,))
+    conn.executemany(
+        "INSERT INTO claims(episode_path, home_path, text_sha256, text) VALUES (?, ?, ?, ?)",
+        ((rel, claim.home, claim.text_sha256, claim.text) for claim in facts.claims),
+    )
+    _rebuild_coverage(conn, ledger, every, _coverage_pages(conn, rel))
+
+
+def _coverage_pages(conn: sqlite3.Connection, rel: str) -> list[tuple[str, str]]:
+    """The `(home, recap)` page pairs a change to page `rel` can move: its claims
+    as a recap, its units as a home, and every pair it still holds."""
+    rows = conn.execute(
+        "SELECT home_path, episode_path FROM claims WHERE episode_path=? OR home_path=? "
+        "UNION SELECT path_a, path_b FROM coverage_pairs WHERE path_a=? OR path_b=?",
+        (rel, rel, rel, rel),
+    )
+    return sorted({(str(home), str(episode)) for home, episode in rows})
+
+
+def _rebuild_coverage(conn, ledger, active, page_pairs: list[tuple[str, str]]) -> None:
+    """Replace the coverage pairs of each `(home, recap)` page pair from the claims
+    and units stored now: one pair for every claim of the recap against every unit
+    of its live home.
+
+    A pure function of those two pages' rows, so it reads the same in any order of
+    pages. The rank under `PAIR_CAP` is taken within the page pair and goes by the
+    unit's position first and the claim second, so a cap never leaves one claim
+    unread while another is read against every unit.
+    """
+    question = sensing.QUESTIONS[sensing.RECAP_COVERED_BY]
+    answering = active_for(active, question)
+    instrument_key = _question_key(active, question)
+    for home, episode in page_pairs:
+        before = {
+            str(key): (state, consumed)
+            for key, state, consumed in conn.execute(
+                "SELECT pair_key, state, consumed_hashes FROM coverage_pairs "
+                "WHERE path_a=? AND path_b=?",
+                (home, episode),
+            )
+        }
+        conn.execute("DELETE FROM coverage_pairs WHERE path_a=? AND path_b=?", (home, episode))
+        live = conn.execute("SELECT lifecycle FROM pages WHERE path=?", (home,)).fetchone()
+        if live is None or live[0] in _INACTIVE:
+            continue
+        claims = conn.execute(
+            "SELECT text_sha256 FROM claims WHERE episode_path=? AND home_path=? "
+            "ORDER BY text_sha256",
+            (episode, home),
+        ).fetchall()
+        for position, unit in enumerate(_units_of(conn, [home]).get(home, [])):
+            for (claim_hash,) in claims:
+                key = _digest("coverage", home, unit.unit_ref, episode, claim_hash)[:32]
+                hashes = (unit.text_sha256, str(claim_hash))
+                input_key = sensing.input_key(sensing.RECAP_COVERED_BY, hashes)
+                prior = before.get(key)
+                consumed = None if prior is None else prior[1]
+                conn.execute(
+                    "INSERT INTO coverage_pairs(pair_key, path_a, unit_a, hash_a, path_b, unit_b, "
+                    "hash_b, input_key, order_key, state, priority, consumed_hashes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1, ?)",
+                    (
+                        key, home, unit.unit_ref, unit.text_sha256, episode,
+                        f"{episode}#claim-{claim_hash}", claim_hash, input_key,
+                        f"{position:06d}|{claim_hash}", consumed,
+                    ),
+                )
+                stale = bool(consumed) and consumed != f"{hashes[0]}:{hashes[1]}"
+                projected = project(
+                    ledger, input_key, hashes, answering, question.label_map_version,
+                    stale=stale, question_type=question.question_type,
+                )
+                served_before = prior is not None and prior[0] in _SERVED_STATES
+                priority = 0 if (served_before or stale or projected.state == "migrating") else 1
+                _write_projection(conn, key, projected, priority, instrument_key, "coverage_pairs")
+    _refresh_selection(
+        conn, {path for pages in page_pairs for path in pages}, _table(question)
+    )
 
 
 # ----------------------------------------------------------------------
@@ -1388,43 +1670,205 @@ def _apply_page(
 @dataclass(frozen=True)
 class QueuedPair:
     pair_key: str
+    #: In the question's input order: a slotted question's slot order.
     inputs: tuple[sensing.InputUnit, sensing.InputUnit]
     texts: tuple[str, str]
+    question_type: str = sensing.PAIR_RELATION
 
 
-def queued_pairs(conn: sqlite3.Connection, limit: int) -> list[QueuedPair]:
-    """The next pairs to sense, open work first. Read-only."""
-    out: list[QueuedPair] = []
-    for row in conn.execute(
-        "SELECT p.pair_key, p.path_a, p.unit_a, p.hash_a, ua.text, p.path_b, p.unit_b, p.hash_b, "
-        "ub.text FROM pairs p "
+#: The questions the sensor worker reads today. The queue and its depth default
+#: to them, so a question the worker cannot yet sense never starts a child.
+_WORKER_QUESTIONS = (sensing.PAIR_RELATION,)
+
+
+def _queue_rows(conn: sqlite3.Connection, question: sensing.Question, limit: int):
+    if question.slots is None:
+        return conn.execute(
+            "SELECT p.pair_key, p.priority, p.path_a, p.unit_a, p.hash_a, ua.text, p.path_b, "
+            "p.unit_b, p.hash_b, ub.text FROM pairs p "
+            "JOIN units ua ON ua.path=p.path_a AND ua.unit_ref=p.unit_a "
+            "JOIN units ub ON ub.path=p.path_b AND ub.unit_ref=p.unit_b "
+            "WHERE p.queued=1 ORDER BY p.priority, p.pair_key LIMIT ?",
+            (int(limit),),
+        )
+    return conn.execute(
+        "SELECT p.pair_key, p.priority, p.path_a, p.unit_a, p.hash_a, ua.text, p.path_b, "
+        "p.unit_b, p.hash_b, c.text FROM coverage_pairs p "
         "JOIN units ua ON ua.path=p.path_a AND ua.unit_ref=p.unit_a "
-        "JOIN units ub ON ub.path=p.path_b AND ub.unit_ref=p.unit_b "
+        "JOIN claims c ON c.episode_path=p.path_b AND c.home_path=p.path_a "
+        "AND c.text_sha256=p.hash_b "
         "WHERE p.queued=1 ORDER BY p.priority, p.pair_key LIMIT ?",
         (int(limit),),
-    ):
-        key, path_a, unit_a, hash_a, text_a, path_b, unit_b, hash_b, text_b = row
-        out.append(
-            QueuedPair(
-                str(key),
-                (
-                    sensing.InputUnit(str(unit_a), str(path_a), str(hash_a)),
-                    sensing.InputUnit(str(unit_b), str(path_b), str(hash_b)),
-                ),
-                (str(text_a), str(text_b)),
+    )
+
+
+def queued_pairs(
+    conn: sqlite3.Connection,
+    limit: int,
+    *,
+    question_types: Sequence[str] = _WORKER_QUESTIONS,
+) -> list[QueuedPair]:
+    """The next pairs to sense across `question_types`, open work first. Read-only."""
+    ranked: list[tuple[int, str, QueuedPair]] = []
+    for question_type in dict.fromkeys(question_types):
+        question = sensing.question(question_type)
+        names = [
+            (slot.name, slot.extractor) for slot in question.slots or ()
+        ] or [(None, sensing.EXTRACTOR)] * 2
+        for row in _queue_rows(conn, question, limit):
+            key, priority, path_a, unit_a, hash_a, text_a, path_b, unit_b, hash_b, text_b = row
+            first, second = (
+                sensing.InputUnit(str(unit), str(path), str(digest), extractor, name)
+                for (unit, path, digest), (name, extractor) in zip(
+                    ((unit_a, path_a, hash_a), (unit_b, path_b, hash_b)), names, strict=True
+                )
             )
-        )
-    return out
+            ranked.append(
+                (int(priority), str(key),
+                 QueuedPair(str(key), (first, second), (str(text_a), str(text_b)), question_type))
+            )
+    ranked.sort(key=lambda item: item[:2])
+    return [pair for _priority, _key, pair in ranked[: int(limit)]]
 
 
-def queue_depth(vault_root: Path) -> int:
+def queue_depth(vault_root: Path, *, question_types: Sequence[str] = _WORKER_QUESTIONS) -> int:
     conn = open_readonly(vault_root)
     if conn is None:
         return 0
     try:
-        return int(conn.execute("SELECT count(*) FROM pairs WHERE queued=1").fetchone()[0])
+        return sum(
+            int(
+                conn.execute(
+                    f"SELECT count(*) FROM {_table(sensing.question(question_type))} WHERE queued=1"
+                ).fetchone()[0]
+            )
+            for question_type in dict.fromkeys(question_types)
+        )
     except sqlite3.Error:
         return 0
+    finally:
+        conn.close()
+
+
+# ----------------------------------------------------------------------
+# what a recap says that its home does not: the homes due for compilation
+# ----------------------------------------------------------------------
+
+
+#: The coverage-v1 labels that say a home does not cover a claim: the only
+#: labels that make it due, and every label but `entailed` that a complete read
+#: may hold. `abstain` and a missing read are not among them, so a claim that
+#: could still be entailed never prompts a compile of a page that may cover it.
+_NOT_ENTAILED = ("absent", "partial")
+
+
+@dataclass(frozen=True)
+class CoverageClaim:
+    text: str
+    text_sha256: str
+    #: `entailed`, `partial` or `absent` once every unit of the home has been read
+    #: under the active instrument; `incomplete` while any read is missing.
+    state: str
+
+
+@dataclass(frozen=True)
+class CoverageItem:
+    """A home page that a recap's Decided lines say more about than the home says.
+
+    One item per (recap, home). It is due while at least one claim reads
+    `absent` or `partial`, and clears only when a re-sense reads every one of
+    them `entailed`.
+    """
+
+    home: str
+    episode: str
+    claims: tuple[CoverageClaim, ...]
+    #: Binds the home, the episode, the due claims' hashes and the coverage
+    #: instrument key. Never a reading id, so a re-sense that agrees keeps it.
+    fingerprint: str
+
+    @property
+    def due(self) -> tuple[CoverageClaim, ...]:
+        return tuple(claim for claim in self.claims if claim.state in _NOT_ENTAILED)
+
+
+def _claim_state(pairs: list[tuple[Any, ...]], key: str) -> str:
+    """One claim's state from its pairs' `(state, verdict, instrument_key)`.
+
+    `absent` and `partial` both need every unit read: a pair still pending,
+    stale, abstained, left unread by the cap or read under another instrument
+    could entail the claim, so the claim stays `incomplete`, never absent. A home
+    with no unit to read has no reading either, so its claim is `incomplete` too.
+    """
+    served = [pair[1] for pair in pairs if pair[0] == "current" and pair[2] == key]
+    if "entailed" in served:
+        return "entailed"
+    complete = bool(pairs) and all(
+        state == "current" and instrument == key and verdict in _NOT_ENTAILED
+        for state, verdict, instrument in pairs
+    )
+    if not complete:
+        return "incomplete"
+    return "partial" if "partial" in served else "absent"
+
+
+def _coverage_items(conn: sqlite3.Connection, key: str) -> list[CoverageItem]:
+    from . import episode_capture
+
+    inactive = sorted(_INACTIVE)
+    rows = conn.execute(
+        "SELECT c.episode_path, c.home_path, c.text_sha256, c.text, p.state, p.verdict, "
+        "p.instrument_key FROM claims c JOIN pages h ON h.path = c.home_path "
+        "LEFT JOIN coverage_pairs p ON p.path_a = c.home_path AND p.path_b = c.episode_path "
+        "AND p.hash_b = c.text_sha256 "
+        f"WHERE h.lifecycle NOT IN ({','.join('?' for _ in inactive)}) "
+        "ORDER BY c.home_path, c.episode_path, c.text_sha256",
+        inactive,
+    ).fetchall()
+    grouped: dict[tuple[str, str], dict[tuple[str, str], list[tuple[Any, ...]]]] = {}
+    for episode, home, digest, text, state, verdict, instrument in rows:
+        claim = grouped.setdefault((str(home), str(episode)), {}).setdefault(
+            (str(digest), str(text)), []
+        )
+        if state is not None:
+            claim.append((state, verdict, instrument))
+    items: list[CoverageItem] = []
+    for (home, episode), claims in grouped.items():
+        read = tuple(
+            CoverageClaim(text, digest, _claim_state(pairs, key))
+            for (digest, text), pairs in claims.items()
+        )
+        due = sorted(claim.text_sha256 for claim in read if claim.state in _NOT_ENTAILED)
+        parts = episode_capture.filename_parts(episode)
+        fingerprint = _digest("coverage-item", home, parts[0] if parts else episode, due, key)
+        items.append(CoverageItem(home, episode, read, fingerprint[:24]))
+    return items
+
+
+def coverage_items(vault_root: Path) -> list[CoverageItem] | None:
+    """Every (home, recap) with its claims' states, or None while the projection cannot say.
+
+    The consumer takes the items whose `due` is not empty.
+
+    None when sensing is off, there is no projection, or it is still being
+    rebuilt from empty or from a replaced ledger. Not released per caller: the
+    consumer applies the release rule to the home and the recap.
+    """
+    if not sensing.enabled():
+        return None
+    conn = open_readonly(Path(vault_root))
+    if conn is None:
+        return None
+    question = sensing.QUESTIONS[sensing.RECAP_COVERED_BY]
+    try:
+        if (
+            _get_meta(conn, "seeding") is not None
+            or _get_meta(conn, f"{_prefix(question)}reproject_after") is not None
+        ):
+            return None
+        return _coverage_items(conn, _question_key(active_instruments(), question))
+    except sqlite3.Error:
+        return None
     finally:
         conn.close()
 
@@ -1442,9 +1886,7 @@ def _keep(vault_root: Path):
 
 
 def _current_key() -> str:
-    return _active_key(
-        active_instruments(), sensing.QUESTIONS[sensing.PAIR_RELATION].label_map_version
-    )
+    return _question_key(active_instruments(), sensing.QUESTIONS[sensing.PAIR_RELATION])
 
 
 @dataclass(frozen=True)
