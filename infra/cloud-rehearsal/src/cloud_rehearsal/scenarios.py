@@ -29,6 +29,7 @@ import asyncpg
 import boto3
 from botocore.config import Config
 from cellctl.manifests import (
+    OBJECT_STORE_KEY_SECRET,
     CellManifestSpec,
     namespace_name,
     render_cell_manifests,
@@ -38,7 +39,7 @@ from cellctl.manifests import (
 from . import substrate as substrate_mod
 from .build import BuiltImages
 from .http import Resolver
-from .infra import BACKUP_BUCKET, Stack
+from .infra import BACKUP_BUCKET, STAGING_BUCKET, Stack
 from .mcp_client import (
     BrowserSession,
     HeadlessBrowser,
@@ -298,9 +299,9 @@ class Context:
             config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
 
-    def s3_keys(self, prefix: str) -> list[str]:
+    def s3_keys(self, prefix: str, bucket: str = BACKUP_BUCKET) -> list[str]:
         keys: list[str] = []
-        for page in self.s3().get_paginator("list_objects_v2").paginate(Bucket=BACKUP_BUCKET, Prefix=prefix):
+        for page in self.s3().get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
             keys.extend(item["Key"] for item in page.get("Contents", []))
         return keys
 
@@ -1006,18 +1007,22 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
     # read from the source cell's Secret, as an operator with cluster-admin.
     secret = ctx.kube_json("get", "secret", "cell-credentials", "--namespace", namespace_name(ctx.b.cell_id))["data"]
     decoded = {key: base64.b64decode(value).decode() for key, value in secret.items()}
+    # D9: a new cell's object-store key lives in the Secret the custodian minted, which the custodian
+    # writes only in cell namespaces; the operator copies it into the scratch namespace.
+    object_store_key = ctx.kube_json("get", "secret", OBJECT_STORE_KEY_SECRET, "--namespace", namespace_name(ctx.b.cell_id))
     source_pod = ctx.runtime_pod(ctx.b.cell_id)
     image = source_pod["spec"]["containers"][0]["image"]  # type: ignore[index]
     scratch_bearer = secrets.token_urlsafe(32)
     spec = CellManifestSpec(
         cell_id=ctx.b.cell_id, image=image, replicas=0, read_only=False,
         bearer_current=scratch_bearer, backup_password=decoded["backup-password"],
-        b2_key_id=decoded["b2-key-id"], b2_key_secret=decoded["b2-key-secret"],
         hold_kind="restore", hold_started_at=dt.datetime.now(dt.UTC).isoformat(),
         job_egress_except=("10.42.0.0/16", "10.43.0.0/16"),
     )
     scratch = f"exo-scratch-{ctx.b.cell_id[:8]}"
-    documents = render_cell_manifests(spec) + [
+    scratch_key = {"apiVersion": "v1", "kind": "Secret", "type": object_store_key.get("type", "Opaque"),
+                   "metadata": {"name": OBJECT_STORE_KEY_SECRET}, "data": object_store_key["data"]}
+    documents = render_cell_manifests(spec) + [scratch_key] + [
         render_restore_job(spec, bucket_name=BACKUP_BUCKET, endpoint=ctx.stack.object_store.endpoint(from_host=False), snapshot_id=snapshot)
     ]
     for document in documents:
@@ -1030,7 +1035,8 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
     ctx.report.overlays.append(
         f"step 11 scratch restore: no operator export tool exists yet (task 3.6, deferred by ruling), so the "
         f"rehearsal renders the cell with cellctl's render_cell_manifests and render_restore_job, moves every "
-        f"object into namespace {scratch} without the exomem.io/cloud-cell label, mints a scratch bearer, "
+        f"object into namespace {scratch} without the exomem.io/cloud-cell label, copies the cell's "
+        f"{OBJECT_STORE_KEY_SECRET} Secret there, mints a scratch bearer, "
         "excepts only the cluster's pod and service ranges from Job egress, and applies it as cluster-admin"
     )
     payload = "\n---\n".join(json.dumps(doc) for doc in documents if doc["kind"] != "Job")
@@ -1120,6 +1126,7 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
         if (pv["spec"].get("claimRef") or {}).get("namespace") == namespace or pv["metadata"]["name"] in pv_names
     ]
     objects = ctx.s3_keys(f"cells/{cell_id}/")
+    staged = ctx.s3_keys(f"cells/{cell_id}/", bucket=STAGING_BUCKET)
     keys = await ctx.fetchrow(
         "SELECT b2_key_id IS NULL AS b2_key_nulled, b2_key_wrapped IS NULL AS b2_wrapped_nulled, backup_key_wrapped IS NULL AS backup_key_nulled, desired_state, observed_state FROM exomem_cloud_cells WHERE cell_id = $1",
         cell_id,
@@ -1134,6 +1141,7 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
             "namespace_absent": namespace_gone.returncode != 0 and "NotFound" in namespace_gone.stderr,
             "persistent_volumes_absent": not remaining_pvs,
             "backup_objects_under_prefix": len(objects),
+            "staging_objects_under_prefix": len(staged),
             "keys": keys,
             "tenant_status": (tenant or {}).get("status"),
             "old_access_token_status": after.status_code,
@@ -1145,8 +1153,12 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
         problems.append("the cell namespace still exists")
     if remaining_pvs:
         problems.append(f"PersistentVolumes remain: {remaining_pvs}")
-    if objects:
-        problems.append(f"{len(objects)} backup objects remain under the prefix")
+    # D9: cellctl sweeps the staging prefix but holds no key that deletes backups; they stay under
+    # the lock until the operator's clean-up script hides them after the grace period.
+    if staged:
+        problems.append(f"{len(staged)} staging objects remain under the prefix")
+    if not objects:
+        problems.append("the backup objects under the prefix are gone; cellctl must not be able to delete them")
     if not keys or not (keys["b2_key_nulled"] and keys["b2_wrapped_nulled"] and keys["backup_key_nulled"]):
         problems.append(f"wrapped keys not destroyed: {keys}")
     if after.status_code != 401:

@@ -20,6 +20,10 @@ int64 keeps Helm from printing a large JSON number as 1.073741824e+09.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* cellctl's staging key lists and deletes. Sharing the locked backup bucket would aim a deletion's staging sweep at backups, and the schema cannot compare two values. */ -}}
+{{- if eq .Values.cellData.stagingBucketName .Values.cellData.backupBucketName }}
+{{- fail "cellData.stagingBucketName must differ from cellData.backupBucketName" }}
+{{- end }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -356,12 +360,16 @@ spec:
               value: {{ .Values.cellctl.cellResources.memoryLimit | quote }}
             - name: CELLCTL_B2_BUCKET_NAME
               value: {{ .Values.cellctl.b2BucketName | quote }}
-            - name: CELLCTL_B2_BUCKET_ID
-              value: {{ .Values.cellctl.b2BucketId | quote }}
-            - name: CELLCTL_B2_ACCOUNT_ID
-              value: {{ .Values.cellctl.b2AccountId | quote }}
             - name: CELLCTL_B2_ENDPOINT
               value: {{ .Values.cellctl.b2Endpoint | quote }}
+            - name: CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME
+              value: {{ .Values.cellData.backupBucketName | quote }}
+            - name: CELLCTL_CELL_DATA_BACKUP_BUCKET_ID
+              value: {{ .Values.cellData.backupBucketId | quote }}
+            - name: CELLCTL_CELL_DATA_STAGING_BUCKET_NAME
+              value: {{ .Values.cellData.stagingBucketName | quote }}
+            - name: CELLCTL_CELL_DATA_ENDPOINT
+              value: {{ .Values.cellData.endpoint | quote }}
             - name: CELLCTL_DATABASE_DSN
               valueFrom:
                 secretKeyRef:
@@ -399,15 +407,26 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.cellctl.backupMasterKeySecretName }}
                   key: currentVersion
-            - name: CELLCTL_B2_KEY_MANAGEMENT_KEY_ID
+            # D9: two bucket-restricted keys in the cell-data account, none able to create or delete a key.
+            - name: CELLCTL_CELL_DATA_STAGING_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.cellctl.b2KeyManagementSecretName }}
+                  name: {{ .Values.cellctl.cellDataStagingSecretName }}
                   key: keyId
-            - name: CELLCTL_B2_KEY_MANAGEMENT_APPLICATION_KEY
+            - name: CELLCTL_CELL_DATA_STAGING_APPLICATION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.cellctl.b2KeyManagementSecretName }}
+                  name: {{ .Values.cellctl.cellDataStagingSecretName }}
+                  key: applicationKey
+            - name: CELLCTL_CELL_DATA_BACKUP_LIST_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.cellDataBackupListSecretName }}
+                  key: keyId
+            - name: CELLCTL_CELL_DATA_BACKUP_LIST_APPLICATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.cellDataBackupListSecretName }}
                   key: applicationKey
             - name: CELLCTL_HETZNER_READ_TOKEN
               valueFrom:
@@ -620,7 +639,7 @@ spec:
         {{ if $relocation }}request.resource.resource == 'persistentvolumes' || {{ end -}}
         {{ if .Values.mediaEdge.enabled }}(request.resource.resource == 'configmaps' &&
           request.namespace == {{ .Values.cellctl.namespace | quote }}) || {{ end -}}
-        variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$'){{ if and $local $storage.local.reservations }} ||
+        variables.namespaceName.matches('{{ include "exomem.cellNamespacePattern" . }}'){{ if and $local $storage.local.reservations }} ||
         {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
       message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>{{ if .Values.mediaEdge.enabled }}, or the media edge active set in its own namespace{{ end }}{{ if and $local $storage.local.reservations }}, or an immutable family capability in the reservation namespace{{ end }}.
     {{- if .Values.mediaEdge.enabled }}
@@ -952,7 +971,7 @@ spec:
     - expression: >-
         request.resource.resource != 'persistentvolumes' ||
         (request.operation == 'UPDATE' &&
-          oldObject.spec.?claimRef.?namespace.orValue('').matches('^exo-cell-[a-z2-7]{16}$') &&
+          oldObject.spec.?claimRef.?namespace.orValue('').matches('{{ include "exomem.cellNamespacePattern" . }}') &&
           object.spec.persistentVolumeReclaimPolicy == 'Retain' &&
           object.spec.?claimRef == oldObject.spec.?claimRef &&
           object.spec.?capacity == oldObject.spec.?capacity &&

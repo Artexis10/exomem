@@ -75,7 +75,9 @@ Any override must agree with the chart and destination matrix.
 | `exomem-cloud-gateway-control-plane-key` | `key` | Match the authorized Substrate control-plane key |
 | `exomem-cloud-cell-token-key` | `current`, `currentVersion`; rotation adds both `previous`, `previousVersion` | Key is 32 random bytes encoded as 64 hex characters; both components read the same current entry |
 | `exomem-cloud-backup-master-key` | `keys`, `currentVersion` | `keys` is a JSON version-to-base64-key map; decoded keys are 32 bytes and contain the selected version |
-| `exomem-cloud-b2-key-management` | `keyId`, `applicationKey` | Separate controller credential in the existing account; account-wide key authority; never mount in tenant runtime/backup pods |
+| `exomem-cloud-cell-data-staging` | `keyId`, `applicationKey` | cellctl's key for the cell-data staging bucket; presigns and removes export and import objects; creates no key |
+| `exomem-cloud-cell-data-backup-list` | `keyId`, `applicationKey` | cellctl's list-only key for the locked backup bucket |
+| `exomem-key-custodian-b2` (namespace `exomem-key-custody`) | `keyId`, `applicationKey` | The key custodian's key-creating key in the cell-data account; no other component mounts it |
 | `exomem-cloud-hetzner-read-token` | `token` | Read-only provider authority for deletion observations |
 | `exomem-cloudflare-dns-token` | `token` | DNS-01 authority for the chosen zone; namespaced Issuer limits the requested hostname |
 | `exomem-cloud-volume-encryption` | `encryption-passphrase` | Separately escrowed Cloud volume key, not an instruction to rotate an existing volume key |
@@ -136,7 +138,7 @@ disable certificate verification to make the connection pass.
 
 The values worksheet must resolve these current chart inputs:
 
-- `cellctl.image`, `cellctl.cellImageRepository`, the four `cellctl.b2*` identity/
+- `cellctl.image`, `cellctl.cellImageRepository`, the three `cellctl.b2*` identity/
   endpoint values, and `cellctl.databaseEgressCidrs` with the database's public
   `/32`;
 - `cellctl.nodeSelector` and `cloudGateway.nodeSelector` left at the K3s server

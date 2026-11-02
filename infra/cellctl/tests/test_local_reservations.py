@@ -28,7 +28,6 @@ from cellctl.manifests import (
 )
 from cellctl.reconcile import ClusterConfig
 from cellctl.state import ClusterObservation
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage.topolvm import FamilyRequest, target_reserved
 from cellctl.storage_config import LocalStorage, StorageConfig
@@ -140,7 +139,7 @@ async def test_two_cells_keep_their_requests_across_restart_and_cancel_before_be
     memory = reconcile.LoopMemory()
 
     async def run(minute):
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             config, memory=memory, now=NOW + timedelta(minutes=minute))
 
     def observe(cell_id, **overrides):
@@ -292,7 +291,7 @@ async def test_a_missing_reservation_boundary_retries_only_local_cells(cell_db: 
     cluster.observations[legacy_id] = _served(legacy_id)
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             ClusterConfig(object_storage_bucket="test", storage=STORAGE), now=NOW)
     finally:
         await connection.close()
@@ -359,7 +358,7 @@ async def test_local_import_limits_require_a_fresh_bound_physical_identity(cell_
     controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
         await db.write_observed(controller, cell_id, {"import_limits": {"max_storage_gib": 99}})
-        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             ClusterConfig(object_storage_bucket="test", storage=STORAGE), now=NOW)
         row = (await db.select_all_rows(controller))[0]
         assert row.generation == 1
@@ -399,7 +398,7 @@ async def test_guarded_import_growth_waits_for_the_provider_before_key_creation(
             pvc_capacity_bytes=capacity * GIB, pvc_resize_pending=pending, pod_uses_volume=mounted)
 
     async def run():
-        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             config, now=NOW)
 
     def claim_size():
@@ -484,7 +483,7 @@ async def test_a_rollback_keeps_the_larger_accepted_claim_pending_without_an_ear
     config = ClusterConfig(object_storage_bucket="test", storage=StorageConfig(domain=LOCAL.class_name, local=LOCAL))
 
     async def run():
-        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(), _secrets_config(),
+        await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
             config, now=NOW)
 
     try:

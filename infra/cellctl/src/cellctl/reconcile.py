@@ -13,9 +13,8 @@ import hashlib
 import json
 import logging
 import re
-import traceback
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
@@ -50,6 +49,7 @@ from .decide import (
     relocation_volume,
     storage_receipt,
 )
+from .errors import describe_error as _describe_error
 from .exports import (
     EXPORT_UPLOAD_FAILED,
     ExportRow,
@@ -63,6 +63,7 @@ from .exports import (
 )
 from .exports import HOLD as EXPORT_HOLD
 from .exports import job_name as export_job_name
+from .imports import StagedObjects
 from .manifests import (
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
@@ -132,7 +133,7 @@ from .state import (
     MediaCensus,
     row_hold_kind,
 )
-from .storage.interface import CELL_KEY_CAPABILITIES
+from .storage.interface import cell_object_prefix
 from .storage.topolvm import (
     FamilyRequest,
     LocalVolumeState,
@@ -234,33 +235,6 @@ def _apply_cell_manifests(
     return refused, statefulset_applied
 
 
-def _describe_error(error: BaseException) -> str:
-    """D4: logs are content-private. An error is logged by class, plus status
-    and reason for a Kubernetes ApiException, and the innermost frame. Never
-    its str or a traceback that renders it: an ApiException's str carries the
-    response headers and body, and a cell Secret's apply response carries
-    that cell's credentials."""
-
-    described = type(error).__name__
-    if isinstance(error, ApiException):
-        described += f" status={error.status} reason={error.reason}"
-    frames = traceback.extract_tb(error.__traceback__)
-    if frames:
-        described += f" at {Path(frames[-1].filename).name}:{frames[-1].lineno} in {frames[-1].name}"
-        # The innermost frame is usually inside the Kubernetes client, and the
-        # innermost cellctl one is its request wrapper; the cellctl frames
-        # around it name the call that failed.
-        own = [frame for frame in frames if Path(frame.filename).parent == _PACKAGE_DIR][-3:]
-        if own and own[-1] is not frames[-1]:
-            described += " via " + " < ".join(
-                f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}" for frame in reversed(own)
-            )
-    return described
-
-
-_PACKAGE_DIR = Path(__file__).parent
-
-
 # A lost or half-open database session. It fails every row alike, so it
 # aborts the pass and reaches run_loop's reconnect instead of being logged
 # once per row against a dead connection. TimeoutError is asyncpg's command
@@ -271,7 +245,6 @@ _ROW_SESSION_ERRORS = (asyncpg.InterfaceError, asyncpg.PostgresConnectionError, 
 # API is asked about a deleting row's volume at most this often.
 ORPHAN_SCAN_INTERVAL = timedelta(minutes=10)
 VOLUME_CHECK_INTERVAL = timedelta(minutes=1)
-OBJECT_STORAGE_KEY_CHECK_INTERVAL = timedelta(minutes=10)
 # D4: a refused row is retried on a backoff doubling from this floor to this
 # ceiling, so a transient cause (a deploy-skew 403) clears by itself.
 REFUSAL_BACKOFF_INITIAL = timedelta(minutes=2)
@@ -311,10 +284,11 @@ class LoopMemory:
     # add-cloud-media-store D6: the newest active set generation the edge reported as loaded and
     # drained. A restart forgets it and asks the edge again; it is never assumed.
     media_edge_confirmed_generation: int = 0
-    # B2 keys cannot change after creation, so a key listed with every
-    # capability the backup needs is never listed again by this process.
-    object_storage_keys_verified: set[str] = field(default_factory=set)
-    object_storage_key_checked_at: dict[str, datetime] = field(default_factory=dict)
+    # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
+    # process fills it from every deleted row, so a restart never loses the alert; the receiver
+    # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
+    cleanup_pending: set[str] = field(default_factory=set)
+    cleanup_seeded: bool = False
     # Task 2.8 and D10: each platform alert's state last delivered (absent:
     # nothing yet this process) and when a failed delivery may be tried again,
     # and the stale cells last logged.
@@ -455,15 +429,24 @@ class SecretsConfig:
     cell_token_key_previous_version: int | None
     backup_master_keys: dict[int, bytes]  # version -> key
     backup_master_key_current_version: int
+    # D9: the one key cellctl holds on the cell-data staging bucket, for every export and import.
+    staging_key_id: str = ""
+    staging_application_key: str = ""
 
 
 @dataclass(frozen=True)
 class ClusterConfig:
+    # The founder-account bucket of the cells created before D9: those with a stored key.
     object_storage_bucket: str
     # D8 amendment: restic reaches B2 through its S3-compatible endpoint
     # (e.g. "https://s3.us-west-002.backblazeb2.com" in production, a local
     # MinIO URL in the 3.10 test).
     object_storage_endpoint: str = ""
+    # D9: the cell-data account. A new cell backs up to its locked bucket; every cell's exports
+    # and imports go through its staging bucket. One S3 endpoint serves both buckets.
+    cell_data_backup_bucket: str = ""
+    cell_data_staging_bucket: str = ""
+    cell_data_endpoint: str = ""
     key_retention_sources: tuple[object, ...] = ()
     resources: ResourceSettings = ResourceSettings()
     model_env: dict[str, str] | None = None
@@ -709,15 +692,21 @@ def _augment_deletion_observation(
     observation: ClusterObservation,
     row: CellRow,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     now: datetime | None = None,
     memory: LoopMemory | None = None,
     storage: StorageConfig = DEFAULT_STORAGE,
+    backup_listing=None,
+    staging: Callable[[], StagedObjects] | None = None,
 ) -> ClusterObservation:
     """D10's absence proofs. The K8s Namespace's disappearance already shows
     up as `namespace_exists` on the base observation; the PV, the Hetzner
-    volume, the backup objects and the B2 key need their own checks.
+    volume and the cell's staging objects need their own checks. No proof of
+    the backup objects' absence exists: a new cell's sit under a compliance lock
+    that nothing deletes, and the operator's clean-up empties an old cell's
+    prefix in the old bucket. `backup_listing` only counts a new cell's for the
+    log. `staging` builds the staging client only once the PV proof passes, so
+    a later service never blocks an earlier cleanup step.
 
     D10 amendment: PV absence is confirmed by listing every PersistentVolume
     (cluster-scoped; cellctl already holds `get`/`list` on them) and checking
@@ -750,20 +739,34 @@ def _augment_deletion_observation(
     )
     pv_absent_confirmed = no_pv_claims_namespace and hetzner_volume_absent
 
-    prefix = f"cells/{row.cell_id}/"
-    backup_objects_absent_confirmed = pv_absent_confirmed and len(object_storage.list_object_versions(prefix)) == 0
-
-    b2_key_absent_confirmed = backup_objects_absent_confirmed and (
-        row.b2_key_id is None or object_storage.key_absent(row.b2_key_id)
-    )
+    prefix = cell_object_prefix(row.cell_id)
+    # Exports and imports are staged under the cell's prefix whichever cell it is, and no row tracks
+    # them once the cell is gone: only a listing proves the staging bucket holds none of its data.
+    staging_objects_absent_confirmed = pv_absent_confirmed and staging is not None and staging().absent(prefix)
+    # The locked bucket holds no old cell's backups, so counting its versions says nothing for one.
+    if staging_objects_absent_confirmed and backup_listing is not None and not row.has_stored_object_store_key:
+        _log_locked_backup_versions(backup_listing, row.cell_id, prefix)
 
     return dataclass_replace(
         observation,
         namespace_absent_confirmed=namespace_absent_confirmed,
         pv_absent_confirmed=pv_absent_confirmed,
-        backup_objects_absent_confirmed=backup_objects_absent_confirmed,
-        b2_key_absent_confirmed=b2_key_absent_confirmed,
+        staging_objects_absent_confirmed=staging_objects_absent_confirmed,
     )
+
+
+def _log_locked_backup_versions(backup_listing, cell_id: str, prefix: str) -> None:
+    """A new cell's deletion records how many backup versions stay under the lock. A listing
+    failure changes nothing: the count is for the operator, and the deletion never waits on it."""
+
+    try:
+        remaining = len(backup_listing.list_object_versions(prefix))
+    except Exception as error:  # noqa: BLE001 - bookkeeping only, never a gate
+        logger.warning("cellctl: could not list the backup versions of deleted cell %s: %s",
+                       cell_id, _describe_error(error))
+        return
+    logger.info("cellctl: deleted cell %s keeps %d backup versions until their retention lock lapses",
+                cell_id, remaining)
 
 
 async def _resolve_media_bundle(connection: asyncpg.Connection, current: CellRow, root: bytes) -> dict[str, object]:
@@ -854,168 +857,21 @@ async def _resolve_secret_material(
     }, CONTENT_KEY_VERSION
 
 
-async def _resolve_object_storage_key(
-    connection: asyncpg.Connection,
-    row: CellRow,
-    secrets_config: SecretsConfig,
-    object_storage,
-    *,
-    memory: LoopMemory | None = None,
-    now: datetime | None = None,
-    replace_allowed: bool = True,
-) -> tuple[str, str, int]:
-    """D7: create the per-cell B2 key once, deleting the loser on a race.
-    Outside a hold, a stored key that B2 lists without a capability the
-    backup needs is replaced. Returns the key id, its secret and the
-    wrapping key version."""
+def _stored_object_storage_key(row: CellRow, secrets_config: SecretsConfig) -> tuple[str, str] | None:
+    """An old cell's stored per-cell key id and secret, unwrapped for its Secret, or None for a
+    new cell. cellctl creates, replaces and deletes no key: the key custodian mints a new cell's
+    key into its own Secret (D9), and a stored key stays as it was until the cell is deleted."""
 
-    if row.b2_key_id is not None and row.b2_key_wrapped is not None:
-        memory = memory if memory is not None else LoopMemory()
-        now = now or datetime.now(UTC)
-        if replace_allowed and _object_storage_key_lacks_capability(row, object_storage, memory, now):
-            replaced = await _replace_object_storage_key(connection, row, secrets_config, object_storage)
-            if replaced is not None:
-                return replaced
-        secret = unwrap_secret(
-            secrets_config.backup_master_keys[row.b2_key_version],
-            row.b2_key_wrapped,
-            cell_id=row.cell_id,
-            column="b2_key_wrapped",
-            key_version=row.b2_key_version,
-        ).decode("utf-8")
-        return row.b2_key_id, secret, row.b2_key_version
-
-    created = object_storage.create_prefix_key(row.cell_id)
-    version = secrets_config.backup_master_key_current_version
-    wrapped = wrap_secret(
-        secrets_config.backup_master_keys[version],
-        created.key_secret.encode("utf-8"),
-        cell_id=row.cell_id,
-        column="b2_key_wrapped",
-        key_version=version,
-    )
-    # H5: id, wrapped secret and version all written together.
-    won = await db.try_write_once_group(
-        connection,
-        row.cell_id,
-        {"b2_key_id": created.key_id, "b2_key_wrapped": wrapped, "b2_key_version": version},
-        first_column="b2_key_id",
-    )
-    if not won:
-        object_storage.delete_key(created.key_id)
-        refreshed = await db.select_all_rows(connection)
-        current = next(r for r in refreshed if r.cell_id == row.cell_id)
-        secret = unwrap_secret(
-            secrets_config.backup_master_keys[current.b2_key_version],
-            current.b2_key_wrapped,
-            cell_id=row.cell_id,
-            column="b2_key_wrapped",
-            key_version=current.b2_key_version,
-        ).decode("utf-8")
-        return current.b2_key_id, secret, current.b2_key_version
-
-    return created.key_id, created.key_secret, version
-
-
-def _object_storage_key_lacks_capability(row: CellRow, object_storage, memory: LoopMemory, now: datetime) -> bool:
-    """True only when B2's key listing shows the stored key without a
-    capability in CELL_KEY_CAPABILITIES. A key that is not listed, or a
-    listing that fails, keeps the stored key: B2 is an external API that
-    may lag, and a key that really is wrong still fails its backup
-    visibly as BACKUP_FAILED. A verified key is not listed again; any
-    other outcome is re-checked at most every OBJECT_STORAGE_KEY_CHECK_INTERVAL."""
-
-    key_id = row.b2_key_id
-    if key_id in memory.object_storage_keys_verified:
-        return False
-    checked_at = memory.object_storage_key_checked_at.get(key_id)
-    if checked_at is not None and now - checked_at < OBJECT_STORAGE_KEY_CHECK_INTERVAL:
-        return False
-    memory.object_storage_key_checked_at[key_id] = now
-    try:
-        capabilities = object_storage.key_capabilities(key_id)
-    except Exception as error:  # noqa: BLE001 -- any listing failure keeps the stored key
-        logger.warning(
-            "cellctl could not list object-storage key %s for cell %s; keeping it: %s",
-            key_id,
-            row.cell_id,
-            _describe_error(error),
-        )
-        return False
-    if capabilities is None:
-        logger.warning("cellctl: object-storage key %s for cell %s is not in B2's key listing; keeping it", key_id, row.cell_id)
-        return False
-    if capabilities >= set(CELL_KEY_CAPABILITIES):
-        memory.object_storage_keys_verified.add(key_id)
-        return False
-    return True
-
-
-async def _replace_object_storage_key(
-    connection: asyncpg.Connection,
-    row: CellRow,
-    secrets_config: SecretsConfig,
-    object_storage,
-) -> tuple[str, str, int] | None:
-    """Swap a fresh key in place of the stored one, then delete the old one.
-    On a lost swap the fresh key is deleted and the stored one used. If B2
-    cannot create the fresh key, returns None and the caller keeps the
-    stored one, so a B2 outage never blocks an apply.
-
-    Residual: a crash between the swap and deleting the old key, or a
-    failed delete, leaves the old key in B2. Its secret is no longer stored
-    anywhere once the cell's Secret is re-rendered."""
-
-    try:
-        created = object_storage.create_prefix_key(row.cell_id)
-    except Exception as error:  # noqa: BLE001 -- keep the stored key; retried after the check interval
-        logger.error(
-            "cellctl could not create a replacement object-storage key for cell %s; keeping %s: %s",
-            row.cell_id,
-            row.b2_key_id,
-            _describe_error(error),
-        )
+    if not row.has_stored_object_store_key:
         return None
-    version = secrets_config.backup_master_key_current_version
-    wrapped = wrap_secret(
-        secrets_config.backup_master_keys[version],
-        created.key_secret.encode("utf-8"),
+    secret = unwrap_secret(
+        secrets_config.backup_master_keys[row.b2_key_version],
+        row.b2_key_wrapped,
         cell_id=row.cell_id,
         column="b2_key_wrapped",
-        key_version=version,
-    )
-    won = await db.try_replace_group(
-        connection,
-        row.cell_id,
-        {"b2_key_id": created.key_id, "b2_key_wrapped": wrapped, "b2_key_version": version},
-        match_column="b2_key_id",
-        expected=row.b2_key_id,
-    )
-    if not won:
-        refreshed = await db.select_all_rows(connection)
-        current = next(r for r in refreshed if r.cell_id == row.cell_id)
-        if created.key_id != current.b2_key_id:
-            _delete_object_storage_key(object_storage, created.key_id, row.cell_id)
-        secret = unwrap_secret(
-            secrets_config.backup_master_keys[current.b2_key_version],
-            current.b2_key_wrapped,
-            cell_id=row.cell_id,
-            column="b2_key_wrapped",
-            key_version=current.b2_key_version,
-        ).decode("utf-8")
-        return current.b2_key_id, secret, current.b2_key_version
-
-    logger.warning("cellctl replaced object-storage key %s for cell %s with %s", row.b2_key_id, row.cell_id, created.key_id)
-    if created.key_id != row.b2_key_id:
-        _delete_object_storage_key(object_storage, row.b2_key_id, row.cell_id)
-    return created.key_id, created.key_secret, version
-
-
-def _delete_object_storage_key(object_storage, key_id: str, cell_id: str) -> None:
-    try:
-        object_storage.delete_key(key_id)
-    except Exception as error:  # noqa: BLE001 -- the row no longer names this key; report it
-        logger.error("cellctl could not delete object-storage key %s for cell %s: %s", key_id, cell_id, _describe_error(error))
+        key_version=row.b2_key_version,
+    ).decode("utf-8")
+    return row.b2_key_id, secret
 
 
 def _compute_render_digest(
@@ -1459,7 +1315,6 @@ def _media_edge_settled(
 async def reconcile_once(
     connection: asyncpg.Connection,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     secrets_config: SecretsConfig,
     cluster_config: ClusterConfig,
@@ -1467,8 +1322,10 @@ async def reconcile_once(
     config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG,
     now: datetime | None = None,
     memory: LoopMemory | None = None,
+    backup_listing=None,
 ) -> bool:
-    """One pass. Returns whether the next one is due at the fast cadence:
+    """One pass. `backup_listing` only lists a new cell's locked backups. Returns whether the next one
+    is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
 
@@ -1502,6 +1359,10 @@ async def reconcile_once(
         # must commit before this barrier, so it is included in the inventory.
         await db.write_capacity_snapshot(connection, capacities={}, observed_at=now)
     rows = await db.select_all_rows(connection, media_keys=cluster_config.reads_media_keys)
+    if not memory.cleanup_seeded:
+        memory.cleanup_pending |= {row.cell_id for row in rows
+                                   if row.desired_state == "deleted" and row.observed_state == "deleted"}
+        memory.cleanup_seeded = True
     committed = frozenset(row.cell_id for row in rows if not (
         row.desired_state == "deleted" and row.observed_state == "deleted"
         and row.observed_generation == row.generation))
@@ -1645,7 +1506,6 @@ async def reconcile_once(
             fast |= await _reconcile_row(
                 connection,
                 cluster,
-                object_storage,
                 volume_provider,
                 secrets_config,
                 cluster_config,
@@ -1665,12 +1525,15 @@ async def reconcile_once(
                 storage_room=storage_room,
                 media_active=media_active,
                 local_capacity=local_capacity,
+                backup_listing=backup_listing,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
                 raise
             logger.error("cellctl reconcile failed for cell %s: %s", row.cell_id, _describe_error(error))
             fast = True
+
+    await _cleanup_alerts(cluster, cluster_config, memory, now)
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -1782,6 +1645,21 @@ async def _deliver_alert(
         return
     memory.alert_retry_at.pop(alert, None)
     memory.alert_delivered[alert] = firing
+
+
+async def _cleanup_alerts(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, memory: LoopMemory, now: datetime
+) -> None:
+    """D9: one alert per cell this process deleted, naming only its id. It fires and stays: the
+    key and the cell's backup files (locked for a new cell, in the old bucket for an old one) are the
+    operator's to remove, and cellctl cannot read the provider's key listing to see when that is done."""
+
+    for cell_id in sorted(memory.cleanup_pending):
+        alert = alerts.cleanup_pending_alert(cell_id)
+        await _deliver_alert(cluster, cluster_config, memory, alert, True, now)
+        # Without a delivery Secret the log line is the only notice, as for the other alerts.
+        if memory.alert_delivered.get(alert) or cluster_config.alert_delivery_secret is None:
+            memory.cleanup_pending.discard(cell_id)
 
 
 async def _growth_alert(
@@ -2207,7 +2085,6 @@ def _local_growth(
 async def _reconcile_row(
     connection: asyncpg.Connection,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     secrets_config: SecretsConfig,
     cluster_config: ClusterConfig,
@@ -2228,6 +2105,7 @@ async def _reconcile_row(
     storage_room: StorageRoom | None = None,
     media_active: ActiveSet | None = None,
     local_capacity: LocalCapacityObservation | None = None,
+    backup_listing=None,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -2322,7 +2200,7 @@ async def _reconcile_row(
         jobs = cluster.observe_import_jobs(namespace_name(row.cell_id), item.import_id)
         import_decision = decide_import(row, item, observation, jobs, now=now, config=config)
     exports = await db.read_exports(connection, row.cell_id)
-    await _settle_exports(connection, cluster, row, exports, secrets_config, object_storage, cluster_config, config, now, memory)
+    await _settle_exports(connection, cluster, row, exports, secrets_config, cluster_config, config, now)
     # One export is packed at a time (C6's open index); after it ends, the
     # newest one still owns the hold it has to release.
     export_item = next((export for export in exports if export.observed_state in (None, "packing")), None)
@@ -2400,11 +2278,16 @@ async def _reconcile_row(
 
     if row.desired_state == "deleted":
         observation = _augment_deletion_observation(
-            observation, row, cluster, object_storage, volume_provider, now, memory, storage=cluster_config.storage
+            observation, row, cluster, volume_provider, now, memory, storage=cluster_config.storage,
+            backup_listing=backup_listing, staging=lambda: _staged_objects(cluster_config, secrets_config),
         )
-        # Namespace, volume and private-object absence bound every live content copy before expiry starts.
+        # Namespace, volume and staging absence bound every live content copy before expiry starts. A
+        # cell's backup files are ciphertext that cellctl does not prove absent: a new cell's sit under a lock
+        # nothing deletes, and the operator's clean-up empties an old cell's prefix. The object-version window
+        # in the retention sources already extends its `keys_expire_at` (D2).
         if (observation.namespace_absent_confirmed and observation.pv_absent_confirmed
-                and observation.backup_objects_absent_confirmed and row.last_live_key_destroyed_at is None):
+                and observation.staging_objects_absent_confirmed
+                and row.last_live_key_destroyed_at is None):
             prior = json.loads(row.custody_observation or "{}")
             if prior.get("volume") == "per-cell-key" and not _retained_volumes(row):
                 sources = list(cluster_config.key_retention_sources)
@@ -2480,12 +2363,8 @@ async def _reconcile_row(
                                   "part_urls": None, "urls_expire_at": None})
         try:
             if decision.prepare_import_upload or decision.cleanup_import_transport or decision.import_action == "import":
-                key_id, key_secret, _version = await _resolve_object_storage_key(
-                    connection, row, secrets_config, object_storage, memory=memory, now=now,
-                    replace_allowed=False,
-                )
-                import_storage = ImportStorage(_cell_s3_client(cluster_config, key_id, key_secret),
-                                               cluster_config.object_storage_bucket)
+                import_storage = ImportStorage(_staging_client(cluster_config, secrets_config),
+                                               cluster_config.cell_data_staging_bucket)
             if decision.cleanup_import_transport:
                 await asyncio.wait_for(asyncio.to_thread(import_storage.cleanup, item),
                                        timeout=config.import_cleanup_deadline.total_seconds())
@@ -2518,8 +2397,7 @@ async def _reconcile_row(
     export_storage = None
     if export_decision is not None:
         export_storage = await _export_transport(
-            connection, cluster, row, export_item, export_job, decision, secrets_config, object_storage,
-            cluster_config, memory, now)
+            connection, cluster, row, export_item, export_job, decision, secrets_config, cluster_config)
 
     if decision.storage_growth is not None:
         _note_growth(memory, row, observation, decision)
@@ -2614,17 +2492,9 @@ async def _reconcile_row(
             raise ValueError("the media edge active set does not admit this cell")
         secret_material, backup_key_version = await _resolve_secret_material(
             connection, row, secrets_config, media=media_mode in MEDIA_KEYED)
-        # A hold's Jobs read the key from the Secret, so it is only checked
-        # and replaced outside a hold, including the pass that starts one.
-        key_id, key_secret, b2_key_version = await _resolve_object_storage_key(
-            connection,
-            row,
-            secrets_config,
-            object_storage,
-            memory=memory,
-            now=now,
-            replace_allowed=_active_hold(row, observation) is None,
-        )
+        # An old cell's stored key goes into its Secret; a new cell's Jobs read the custodian's Secret.
+        stored_key = _stored_object_storage_key(row, secrets_config)
+        key_id, key_secret = stored_key if stored_key is not None else ("", "")
         # D4: the digest covers the row's key versions. A new cell's first
         # pass creates them, so the applied digest is computed from the
         # versions this pass resolved; hashing the row as read would change
@@ -2632,7 +2502,7 @@ async def _reconcile_row(
         storage_class = _claim_class(cluster_config, observation, relocating=decision.relocation_volume is not None,
                                      target=row.relocation_target_storage_class)
         render_digest = _compute_render_digest(
-            dataclass_replace(row, backup_key_version=backup_key_version, b2_key_version=b2_key_version,
+            dataclass_replace(row, backup_key_version=backup_key_version,
                               media_key_version=secret_material.get("media_key_version", row.media_key_version)),
             cluster_config,
             secrets_config,
@@ -2705,8 +2575,9 @@ async def _reconcile_row(
             artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
             media_slot_url=cluster_config.media_slot_for_cell(row.cell_id),
             upload_public_key=cluster_config.upload_public_key_for_cell(row.cell_id),
-            object_store_endpoint=cluster_config.object_storage_endpoint,
-            object_store_bucket=cluster_config.object_storage_bucket,
+            # D9: exports and imports are presigned in the staging bucket, so a Job checks its URLs there.
+            object_store_endpoint=cluster_config.cell_data_endpoint,
+            object_store_bucket=cluster_config.cell_data_staging_bucket,
             grant_public_key=cluster_config.grant_public_key,
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             b2_key_id=key_id,
@@ -2841,8 +2712,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_backup_job(
                         spec,
-                        bucket_name=cluster_config.object_storage_bucket,
-                        endpoint=cluster_config.object_storage_endpoint,
+                        **_backup_store(cluster_config, spec),
                         **_backup_source(decision, spec),
                     ),
                     job_refused,
@@ -2853,8 +2723,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_restore_job(
                         spec,
-                        bucket_name=cluster_config.object_storage_bucket,
-                        endpoint=cluster_config.object_storage_endpoint,
+                        **_backup_store(cluster_config, spec),
                         snapshot_id=decision.run_restore_job_snapshot,
                     ),
                     job_refused,
@@ -2870,10 +2739,12 @@ async def _reconcile_row(
 
     if decision.delete_namespace:
         cluster.delete_namespace(namespace_name(row.cell_id))
-    if decision.delete_backup_objects:
-        _delete_all_backup_objects(object_storage, row)
-    if decision.delete_b2_key and row.b2_key_id:
-        object_storage.delete_key(row.b2_key_id)
+    if decision.delete_staging_objects:
+        _staged_objects(cluster_config, secrets_config).remove(cell_object_prefix(row.cell_id))
+    if decision.storage_cleanup_pending:
+        memory.cleanup_pending.add(row.cell_id)
+        logger.warning("cellctl: deleted cell %s: its object-store key and backup files are the operator's to remove",
+                       row.cell_id)
 
     if item is not None and decision.row_updates.get("observed_state") == "deleted":
         await db.write_import(connection, item.import_id, {"observed_state": "discarded", "recipient": None,
@@ -2894,51 +2765,63 @@ async def _reconcile_row(
     return changed or decision.apply_manifests
 
 
-def _cell_s3_client(cluster_config: ClusterConfig, key_id: str, key_secret: str):
-    """The maintained S3 SDK, authenticated as one cell's prefix-restricted key."""
+def _staging_s3_client(cluster_config: ClusterConfig, key_id: str, key_secret: str):
+    """The maintained S3 SDK, authenticated as cellctl's one staging-bucket key (D9). That key
+    reaches no backup and creates no key, so an export or import never touches a backup."""
     import boto3
     from botocore.config import Config
 
     # Path style is pinned, not left to botocore's default: the cell checks the exact path
     # `/<bucket>/<object key>` of every presigned URL this client makes (cloud_grant.Destination).
-    return boto3.client("s3", endpoint_url=cluster_config.object_storage_endpoint,
+    return boto3.client("s3", endpoint_url=cluster_config.cell_data_endpoint,
                         aws_access_key_id=key_id, aws_secret_access_key=key_secret,
                         region_name="us-east-1", config=Config(signature_version="s3v4",
                         s3={"addressing_style": "path"},
                         connect_timeout=10, read_timeout=30, retries={"max_attempts": 2}))
 
 
-async def _export_storage(
-    connection: asyncpg.Connection, row: CellRow, secrets_config: SecretsConfig, object_storage,
-    cluster_config: ClusterConfig, memory: LoopMemory, now: datetime, *, create_key: bool = False,
-) -> ExportStorage | None:
-    """C6 isolation: the transport for one row's exports, signed only with that
-    row's own key. None when the cell never had a key, so nothing of it can be
-    in object storage; only a new export may create the key."""
+def _staging_client(cluster_config: ClusterConfig, secrets_config: SecretsConfig):
+    return _staging_s3_client(cluster_config, secrets_config.staging_key_id, secrets_config.staging_application_key)
 
-    if row.b2_key_id is None and not create_key:
-        return None
-    key_id, key_secret, _version = await _resolve_object_storage_key(
-        connection, row, secrets_config, object_storage, memory=memory, now=now, replace_allowed=False)
-    return ExportStorage(_cell_s3_client(cluster_config, key_id, key_secret), cluster_config.object_storage_bucket)
+
+def _export_storage(secrets_config: SecretsConfig, cluster_config: ClusterConfig) -> ExportStorage:
+    """The transport for every cell's exports, in the staging bucket under the cell's own prefix."""
+
+    return ExportStorage(_staging_client(cluster_config, secrets_config), cluster_config.cell_data_staging_bucket)
+
+
+def _staged_objects(cluster_config: ClusterConfig, secrets_config: SecretsConfig) -> StagedObjects:
+    """A cell's staged exports and imports, read and removed with the staging key."""
+
+    return StagedObjects(_staging_client(cluster_config, secrets_config), cluster_config.cell_data_staging_bucket)
+
+
+def _backup_store(cluster_config: ClusterConfig, spec: CellManifestSpec) -> dict[str, str]:
+    """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
+    founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
+    which only the locked cell-data bucket accepts (D9)."""
+
+    if spec.b2_key_id:
+        return {"bucket_name": cluster_config.object_storage_bucket,
+                "endpoint": cluster_config.object_storage_endpoint}
+    return {"bucket_name": cluster_config.cell_data_backup_bucket, "endpoint": cluster_config.cell_data_endpoint}
 
 
 async def _remove_export(
-    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, storage: ExportStorage | None,
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, storage: ExportStorage,
     updates: dict[str, object],
 ) -> None:
     """Deletes every version of the export's object and aborts its uploads,
     then records `updates` with the upload released. A failure keeps
-    upload_id, so every later pass retries the abort while the cell has a
-    key. On a deleted cell the outcome is recorded anyway; the prefix
-    deletion that runs before its key goes is the final removal."""
+    upload_id, so every later pass retries the abort. On a deleted cell the
+    outcome is recorded anyway; the staging bucket's lifecycle removes a
+    leftover object."""
 
     try:
         if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
                                      cell_id=row.cell_id):
             return
-        if storage is not None:
-            await asyncio.to_thread(storage.remove, item)
+        await asyncio.to_thread(storage.remove, item)
     except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
         logger.error("cellctl: removing export %s of cell %s failed: %s", item.export_id, row.cell_id,
                      _describe_error(error))
@@ -2950,7 +2833,7 @@ async def _remove_export(
 
 async def _settle_exports(
     connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, exports: list[ExportRow], secrets_config: SecretsConfig,
-    object_storage, cluster_config: ClusterConfig, config: ReconcileConfig, now: datetime, memory: LoopMemory,
+    cluster_config: ClusterConfig, config: ReconcileConfig, now: datetime,
 ) -> None:
     """C6 work that needs no hold: expire and remove ready exports, answer link
     requests with a version-pinned link, and retry pending removals."""
@@ -2960,10 +2843,8 @@ async def _settle_exports(
         if step is None:
             continue
         action, updates = step
-        storage = await _export_storage(connection, row, secrets_config, object_storage, cluster_config, memory, now)
+        storage = _export_storage(secrets_config, cluster_config)
         if action == "link":
-            if storage is None:
-                continue
             url = await asyncio.to_thread(storage.link, item, expires_in=int(config.export_link_ttl.total_seconds()))
             await db.write_export(connection, item.export_id, {**updates, "download_url": url}, link_issued=True)
             continue
@@ -2975,16 +2856,14 @@ async def _settle_exports(
 
 async def _export_transport(
     connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, job,
-    decision: Decision, secrets_config: SecretsConfig, object_storage, cluster_config: ClusterConfig,
-    memory: LoopMemory, now: datetime,
+    decision: Decision, secrets_config: SecretsConfig, cluster_config: ClusterConfig,
 ) -> ExportStorage | None:
     """The export decision's object-storage step and C6 write, journalled
     before the hold is written and the StatefulSet applied."""
 
     storage = None
     if decision.export_transport or decision.run_export_job:
-        storage = await _export_storage(connection, row, secrets_config, object_storage, cluster_config, memory, now,
-                                        create_key=decision.export_transport == "create")
+        storage = _export_storage(secrets_config, cluster_config)
     if decision.export_transport == "create":
         decision.export_updates["upload_id"] = await asyncio.to_thread(storage.create, item)
     elif decision.export_transport == "complete":
@@ -3046,12 +2925,6 @@ def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     return {"retention": RETENTION_ARGS}
 
 
-def _delete_all_backup_objects(object_storage, row: CellRow) -> None:
-    prefix = f"cells/{row.cell_id}/"
-    for version in object_storage.list_object_versions(prefix):
-        object_storage.delete_object_version(version)
-
-
 def _touch_heartbeat(path: str) -> None:
     try:
         Path(path).touch()
@@ -3083,7 +2956,6 @@ async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_con
 async def run_loop(
     dsn: str,
     cluster: ClusterGateway,
-    object_storage,
     volume_provider,
     secrets_config: SecretsConfig,
     cluster_config: ClusterConfig,
@@ -3091,6 +2963,7 @@ async def run_loop(
     config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG,
     stop: asyncio.Event | None = None,
     heartbeat_path: str = DEFAULT_HEARTBEAT_PATH,
+    backup_listing=None,
 ) -> None:
     """D4: poll, plus LISTEN on a direct session. The poll comes after
     FAST_POLL_INTERVAL_SECONDS while a pass reports a transition and after
@@ -3147,12 +3020,12 @@ async def run_loop(
                 fast = await reconcile_once(
                     connection,
                     cluster,
-                    object_storage,
                     volume_provider,
                     secrets_config,
                     cluster_config,
                     config=config,
                     memory=memory,
+                    backup_listing=backup_listing,
                 )
                 if not fast:
                     interval = IDLE_POLL_INTERVAL_SECONDS

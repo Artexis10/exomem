@@ -21,7 +21,7 @@ from cellctl.imports import ImportRow, job_name, open_uploads
 from cellctl.manifests import JOB_KIND_LABEL
 from cellctl.storage.topolvm import target_reserved
 
-from .infra import BACKUP_BUCKET, docker_labels
+from .infra import STAGING_BUCKET, docker_labels
 from .native_import import CELL_PROBE, _storage
 from .report import StepFailure
 from .shell import run
@@ -269,9 +269,9 @@ async def check_import_growth(drill: Drill, record: StepRecord) -> None:
         resources = drill.kube_json("get", "jobs,pods", "--namespace", cell.namespace,
                                     "--selector", f"{JOB_KIND_LABEL}=import")["items"]
         storage = _storage(drill.stack.object_store)
-        versions = [entry for page in storage.get_paginator("list_object_versions").paginate(Bucket=BACKUP_BUCKET, Prefix=item.key)
+        versions = [entry for page in storage.get_paginator("list_object_versions").paginate(Bucket=STAGING_BUCKET, Prefix=item.key)
                     for entry in page.get("Versions", []) + page.get("DeleteMarkers", []) if entry["Key"] == item.key]
-        if resources or versions or open_uploads(storage, BACKUP_BUCKET, item.key):
+        if resources or versions or open_uploads(storage, STAGING_BUCKET, item.key):
             raise StepFailure("import Jobs, Pods or encrypted transport remain after done")
         evidence.update(done=True, staged_files=item.staged_files, staged_bytes=item.staged_bytes,
                         ciphertext_sha256=digest, ciphertext_bytes=size, source_and_staged_hashes_match=True,

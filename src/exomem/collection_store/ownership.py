@@ -6,7 +6,7 @@ import copy
 import inspect
 import json
 import sqlite3
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -122,7 +122,7 @@ def _declarations(root, sid, rows, generation):
     return marker, tuple(declarations)
 
 
-def _canonical(root, conn, placement, recorded, *, private=False, restored=None, manager=None):
+def _canonical(root, conn, placement, recorded, *, private=False, restored=None, manager=None, status=None):
     meta = legacy_originals.metadata(conn)
     sid, instance = meta[schema.META_STORE_ID], meta[schema.META_INSTANCE_ID]
     intent = authority.pending_create(conn)
@@ -142,7 +142,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
             fence = manager.client.collection_store_fence()
         else:
             # Status replaces the fence read; its coordinator transaction can contend briefly.
-            status = manager.client.status()
+            status = manager.client.status() if status is None else status
             required = status.collection_store_head
             if required is not None:
                 fence = CollectionStoreFenceState(status.required_collection_store_capability, True,
@@ -296,10 +296,17 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
             return Proof((placement, None), None)
         from .runtime import reader_pool
 
+        status = None
+        if recorded and not private:
+            # A head is published only after its commit, so a snapshot that starts after this read holds it.
+            manager = manager or _manager(root)
+            if manager.client is None:
+                raise unavailable()
+            status = manager.client.status()
         # Ownership declarations use the unchanged metadata wire; payload reads still require the current schema.
         with connection.ownership_reader(path, reader_pool(root, path)) as reader:
             reader.execute("BEGIN")
-            return _canonical(root, reader, placement, recorded, private=private, manager=manager)
+            return _canonical(root, reader, placement, recorded, private=private, manager=manager, status=status)
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, collections.CollectionError,
             connection.CollectionStoreError, held_fs.HeldFsError, RuntimeError):
         raise unavailable() from None
@@ -322,8 +329,11 @@ class ReadScope:
             from .preview import bound_writer, production_bound
 
             writer = bound_writer(self.root)
-            manager = _manager(self.root)
-            with _read_guard(manager, self.root, "collection_ownership_read"):
+            # A reader snapshot needs no boundary: `finish` re-proves the binding, and a torn or changed read
+            # differs there. A bound writer's connection is shared with its transactions, so it keeps the guard.
+            guard = nullcontext() if writer is None else _read_guard(
+                _manager(self.root), self.root, "collection_ownership_read")
+            with guard:
                 self.initial = resolve(self.root, conn=None if writer is None else writer.connection,
                     private=writer is not None and not production_bound(self.root),
                     path=writer.handle.path if writer is not None and not production_bound(self.root) else None)
@@ -337,12 +347,12 @@ class ReadScope:
             return
         from .preview import bound_writer, production_bound
 
-        manager = _manager(self.root)
         try:
             # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
-            # so neither this proof nor the body's WAL snapshot is reused.
-            with state_paths.outside_resolution_scope(), state_paths.resolution_scope(), \
-                    _read_guard(manager, self.root, "collection_ownership_release"):
+            # so neither this proof nor the body's WAL snapshot is reused. The binding changes only under the
+            # transition guards and each component is written atomically, so an equal re-read is an unchanged
+            # binding: the equality check, not exclusion, is the proof, and an unrelated holder never refuses it.
+            with state_paths.outside_resolution_scope(), state_paths.resolution_scope():
                 writer = bound_writer(self.root)
                 private = writer is not None and not production_bound(self.root)
                 current = resolve(self.root, private=private, path=writer.handle.path if private else None)
