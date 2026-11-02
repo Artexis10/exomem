@@ -92,8 +92,8 @@ class StubInstrument:
 
 
 class CoverageStubInstrument:
-    """`table[(unit, claim)] = label` for the labels `entailed`, `partial` and
-    `contradicted`. Every other pair is `absent`.
+    """`table[(unit, claim)] = label` for the labels `entailed` and `partial`.
+    Every other pair is `absent`.
 
     Directional like the real head: `ab` reads the unit as premise and the claim
     as hypothesis, `ba` the reverse. A fixture swapped into text-hash order
@@ -114,8 +114,6 @@ class CoverageStubInstrument:
                 out.append((ENTAIL, WEAK, None))
             elif label == "partial":
                 out.append((WEAK, ENTAIL, None))
-            elif label == "contradicted":
-                out.append((CONTRA, WEAK, None))
             else:
                 out.append((NEUTRAL, NEUTRAL, None))
         return out

@@ -205,19 +205,22 @@ class CoverageLabelMap:
 
     The inputs are slotted: `ab` reads the premise (a page unit) against the
     hypothesis (a recap claim), `ba` the reverse. Rules, in order: the unit
-    contradicts the claim; the unit entails the claim; the claim entails the
-    unit, so the unit covers only part of it (`partial`); otherwise `absent`.
-    The contradiction rule comes first so a contradiction is never read as
-    absence. `absent` means only that the head established none of the three at
-    the reviewed thresholds, never that the page cannot cover the claim.
+    entails the claim (`entailed`); the claim entails the unit, so the unit
+    covers only part of it (`partial`); otherwise `absent`. `absent` means only
+    that the head established neither entailment at the reviewed thresholds,
+    never that the page cannot cover the claim.
     """
 
     version: str
     columns: tuple[str, ...]
-    contradicted_min: float
     entailed_min: float
     partial_min: float
-    labels: tuple[str, ...] = ("entailed", "partial", "absent", "contradicted", "abstain")
+    # No `contradicted` label: a claim is read against every unit of its home
+    # page and most are unrelated to it. The admitted pin reads unrelated pairs
+    # as contradiction (disjoint et/et 0.94, en/et 0.63), so the label would fire
+    # on noise and suppress real compile prompts. Claim-against-page
+    # contradiction stays with `pair.relation` and the agent at compile time.
+    labels: tuple[str, ...] = ("entailed", "partial", "absent", "abstain")
 
     def apply(
         self,
@@ -234,9 +237,6 @@ class CoverageLabelMap:
             return None
         entail = self.columns.index("entailment")
         neutral = self.columns.index("neutral")
-        contra = self.columns.index("contradiction")
-        if vectors[0][contra] >= self.contradicted_min:
-            return Verdict("contradicted", _p(vectors[0][contra]))
         if vectors[0][entail] >= self.entailed_min:
             return Verdict("entailed", _p(vectors[0][entail]))
         if vectors[1][entail] >= self.partial_min:
@@ -260,7 +260,6 @@ LABEL_MAPS: dict[str, RelationLabelMap | CoverageLabelMap] = {
     "coverage-v1": CoverageLabelMap(
         version="coverage-v1",
         columns=_RELATION_V1.columns,
-        contradicted_min=_RELATION_V1.contradicts_min,
         entailed_min=_RELATION_V1.refines_min,
         partial_min=_RELATION_V1.refines_min,
     ),
@@ -839,11 +838,31 @@ class CoverageFixture:
     language_shape: str
     twin_of: str | None = None
 
+    def outcome(self, produced: str) -> str:
+        """`ok`, `known_miss` or `fail` for the label an instrument produced.
+
+        Admission is asymmetric by error cost. A false `entailed` hides a due
+        compile, so a fixture expected `partial` or `absent` that reads
+        `entailed` fails, and so does a twin that receives the label of the pair
+        it twins. An expected `entailed` that reads `partial` or `absent` only
+        prompts a compile that was not due: a known miss, recorded with its
+        vectors and never a refusal. Any other mismatch fails.
+        """
+        if produced == self.expected:
+            return "ok"
+        if produced == self.twin_of:
+            return "fail"
+        # `partial` and `absent` are the coverage-v1 map's own closed labels.
+        if self.expected == "entailed" and produced in ("partial", "absent"):
+            return "known_miss"
+        return "fail"
+
 
 #: Admission evidence for `recap.covered_by`, one set per question registry
 #: entry. Per label: an English pair, a same-language non-English pair, a mixed
 #: English/Estonian pair and a negative twin, so a head that keys on overlap,
-#: on English or on word order cannot pass.
+#: on English or on word order cannot pass. `absent` also holds the opposite-claim
+#: pairs: a contradiction is not coverage, and must never read `entailed`.
 COVERAGE_FIXTURES: dict[str, tuple[CoverageFixture, ...]] = {
     "recap-covered-v1": (
         CoverageFixture(
@@ -900,9 +919,9 @@ COVERAGE_FIXTURES: dict[str, tuple[CoverageFixture, ...]] = {
             "Der Cache reduziert die Latenz.",
             "Der Cache reduziert die Latenz bei wiederholten Lesezugriffen.",
             "partial",
-            "twin of the German contradiction: added detail, same stance",
+            "twin of the German opposite pair: added detail, same stance",
             "de/de",
-            twin_of="contradicted",
+            twin_of="absent",
         ),
         CoverageFixture(
             "Inlet pressure falls before cavitation begins.",
@@ -936,28 +955,28 @@ COVERAGE_FIXTURES: dict[str, tuple[CoverageFixture, ...]] = {
         CoverageFixture(
             "Raising the cache TTL reduces p99 latency.",
             "Raising the cache TTL increases p99 latency.",
-            "contradicted",
-            "genuine contradiction, shared vocabulary",
+            "absent",
+            "an opposite claim is not coverage: contradiction is no coverage-v1 label",
             "en/en",
         ),
         CoverageFixture(
             "Der Cache reduziert die Latenz.",
             "Der Cache erhöht die Latenz.",
-            "contradicted",
-            "same-language German contradiction",
+            "absent",
+            "same-language German opposite claim, not coverage",
             "de/de",
         ),
         CoverageFixture(
             "The cache reduces latency.",
             "Vahemälu suurendab latentsust.",
-            "contradicted",
-            "mixed English/Estonian contradiction",
+            "absent",
+            "mixed English/Estonian opposite claim, not coverage",
             "en/et",
         ),
         CoverageFixture(
             "The backup runs every night at two in the morning.",
             "The backup never runs at night.",
-            "contradicted",
+            "absent",
             "twin of the English entailed pair: negated instead of restated",
             "en/en",
             twin_of="entailed",

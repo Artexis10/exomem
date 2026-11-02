@@ -48,7 +48,11 @@ def test_the_exact_pin_admits_every_coverage_fixture_on_cpu() -> None:
     assert identity.template_version == "nli-coverage-v1"
     green, detail, results = sensing_nli.judge_fixtures(instrument, identity.fixture_set)
     for item, result in zip(sensing.COVERAGE_FIXTURES[identity.fixture_set], results, strict=True):
-        print(result["expected"], result["produced"], result["vectors"], item.language_shape, item.note)
+        print(
+            result["outcome"], result["expected"], result["produced"], result["vectors"],
+            item.language_shape, item.premise, "|", item.hypothesis,
+        )
+    print("known misses:", instrument.known_misses)
     assert green, detail
     assert len(results) == len(sensing.COVERAGE_FIXTURES[identity.fixture_set])
     relation = sensing_nli.admit()

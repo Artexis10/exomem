@@ -234,9 +234,9 @@ def test_the_config_memo_follows_the_config_path(tmp_path: Path, monkeypatch) ->
         (_v(0.97, 0.02, 0.01), _v(0.30, 0.60, 0.10), "entailed"),
         (_v(0.30, 0.60, 0.10), _v(0.98, 0.01, 0.01), "partial"),
         (_v(0.20, 0.70, 0.10), _v(0.30, 0.60, 0.10), "absent"),
-        # A contradiction is never read as absence, even when the claim also
-        # entails the unit: the first rule wins.
-        (_v(0.01, 0.02, 0.97), _v(0.98, 0.01, 0.01), "contradicted"),
+        # The pin reads unrelated pairs as contradiction. Coverage has no such
+        # label: a contradiction fires on noise, so it stays `absent`.
+        (_v(0.01, 0.02, 0.97), _v(0.02, 0.03, 0.95), "absent"),
     ],
 )
 def test_coverage_map_rules_in_order(ab, ba, label) -> None:
@@ -245,10 +245,9 @@ def test_coverage_map_rules_in_order(ab, ba, label) -> None:
 
 
 def test_coverage_thresholds_are_the_relation_ones_not_a_copy() -> None:
-    assert COVERAGE.contradicted_min == MAP.contradicts_min
     assert COVERAGE.entailed_min == MAP.refines_min
     assert COVERAGE.partial_min == MAP.refines_min
-    assert COVERAGE.apply(_v(0, 0.07, 0.93), _v(0, 1, 0)).label == "contradicted"
+    assert COVERAGE.apply(_v(0.95, 0.05, 0.0), _v(0.2, 0.7, 0.1)).label == "entailed"
     assert COVERAGE.apply(_v(0.949999, 0.05, 0.000001), _v(0.2, 0.7, 0.1)).label == "absent"
     assert COVERAGE.apply(None, _v(0.3, 0.3, 0.4)) is None
     assert COVERAGE.apply(None, None, abstain_reason="input_too_long").label == "abstain"
@@ -318,13 +317,53 @@ def test_coverage_fixtures_are_read_in_slot_order_and_a_miss_is_red() -> None:
 
 def test_coverage_fixtures_cover_every_label_in_three_language_shapes_with_a_twin() -> None:
     fixtures = sensing.COVERAGE_FIXTURES["recap-covered-v1"]
-    for label in ("entailed", "partial", "absent", "contradicted"):
+    assert {item.expected for item in fixtures} == {"entailed", "partial", "absent"}
+    for label in ("entailed", "partial", "absent"):
         own = [item for item in fixtures if item.expected == label]
         assert any(item.language_shape == "en/en" and not item.twin_of for item in own)
         assert any(item.language_shape.split("/")[0] != item.language_shape.split("/")[1] for item in own)
         assert any(item.twin_of for item in own)
         assert all(item.expected != item.twin_of for item in own)
     assert len({(i.premise, i.hypothesis) for i in fixtures}) == len(fixtures)
+
+
+def _german_entailed() -> tuple[str, str]:
+    item = next(i for i in sensing.COVERAGE_FIXTURES["recap-covered-v1"] if i.language_shape == "de/de" and i.expected == "entailed")
+    return item.premise, item.hypothesis
+
+
+def test_an_expected_entailed_miss_is_recorded_with_its_vectors_not_refused() -> None:
+    """The pin reads one expected-entailed pair as absent. That only prompts a
+    compile that was not due, so admission stays green and lists the miss."""
+    from exomem import sensing_nli
+
+    table = sx.coverage_table()
+    del table[_german_entailed()]
+    green, detail, results = sensing_nli.judge_fixtures(sx.CoverageStubInstrument(table), "recap-covered-v1")
+    assert green, detail
+    [miss] = [r for r in results if r["outcome"] == "known_miss"]
+    assert (miss["expected"], miss["produced"]) == ("entailed", "absent")
+    assert miss["vectors"] == [sx.NEUTRAL, sx.NEUTRAL]
+    assert "1 known miss" in detail
+
+
+@pytest.mark.parametrize(
+    ("premise", "hypothesis", "read_as"),
+    [
+        # A false `entailed` hides a due compile: expected absent, read entailed.
+        ("Inlet pressure falls before cavitation begins.", "The team adopted weekly planning on Mondays.", "entailed"),
+        # The twin of a partial pair must not receive `partial`, even though an
+        # expected-entailed miss is otherwise admitted.
+        ("The report lists the failed jobs and the cause of each failure.", "The report lists the failed jobs.", "partial"),
+    ],
+)
+def test_a_false_entailed_or_a_twin_taking_its_twins_label_refuses(premise, hypothesis, read_as) -> None:
+    from exomem import sensing_nli
+
+    table = sx.coverage_table()
+    table[(premise, hypothesis)] = read_as
+    green, detail, _ = sensing_nli.judge_fixtures(sx.CoverageStubInstrument(table), "recap-covered-v1")
+    assert not green and "expected" in detail
 
 
 def _stub_admission(monkeypatch, green_sets: set[str]) -> list[str]:

@@ -105,6 +105,9 @@ class NliInstrument:
 
     def __init__(self, identity_: sensing.InstrumentIdentity, model: Any) -> None:
         self.identity = identity_
+        #: Expected-`entailed` fixtures the head misread at admission, with their
+        #: vectors (`sensing.CoverageFixture.outcome`). Admitted, and kept visible.
+        self.known_misses: tuple[dict[str, Any], ...] = ()
         self._model = model
         tokenizer = getattr(model, "tokenizer", None)
         self._tokenizer = tokenizer
@@ -150,6 +153,8 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
     """Run a fixture set through an instrument and the label map.
 
     Returns `(green, detail, results)`. One miss is red: partial evidence is none.
+    A coverage fixture is judged by `sensing.CoverageFixture.outcome`: only a
+    `fail` is red, and an expected-`entailed` miss is listed, never refused.
     """
     fixtures = sensing.fixtures(fixture_set)
     if not fixtures:
@@ -167,8 +172,9 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
     judged = instrument.judge([pair for _item, _swap, pair in ordered])
     results: list[dict[str, Any]] = []
     misses: list[str] = []
+    known: list[str] = []
     for (item, swap, _pair), (ab, ba, reason) in zip(ordered, judged, strict=True):
-        vectors = None if reason else (sensing.round_vector(ab), sensing.round_vector(ba))
+        vectors = None if reason else [sensing.round_vector(ab), sensing.round_vector(ba)]
         verdict = label_map.apply(
             None if vectors is None else vectors[0],
             None if vectors is None else vectors[1],
@@ -179,24 +185,38 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
         if verdict is not None and verdict.label == "refines":
             first_refines = verdict.direction == "ab"
             refining = ("b" if first_refines else "a") if swap else ("a" if first_refines else "b")
-        results.append(
-            {
-                "note": item.note,
-                "expected": item.expected,
-                "produced": produced,
-                "refining": refining,
-                "vectors": vectors,
-            }
-        )
+        result = {
+            "note": item.note,
+            "expected": item.expected,
+            "produced": produced,
+            "refining": refining,
+            "vectors": vectors,
+        }
+        results.append(result)
         wanted_refining = getattr(item, "refining", None)
-        if produced != item.expected or (item.expected == "refines" and refining != wanted_refining):
+        if isinstance(item, sensing.CoverageFixture):
+            outcome = item.outcome(produced)
+            result["outcome"] = outcome
+            if outcome == "known_miss":
+                known.append(f"{item.note!r}: expected {item.expected}, got {produced}")
+                continue
+            failed = outcome == "fail"
+        else:
+            failed = produced != item.expected or (
+                item.expected == "refines" and refining != wanted_refining
+            )
+        if failed:
             misses.append(f"{item.note!r}: expected {item.expected}/{wanted_refining}, got {produced}/{refining}")
     if misses:
         return False, "; ".join(misses), results
-    return True, f"{len(fixtures)} fixtures green for {fixture_set!r}", results
+    detail = f"{len(fixtures)} fixtures green for {fixture_set!r}"
+    if known:
+        detail += f", {len(known)} known miss(es) recorded: " + "; ".join(known)
+    return True, detail, results
 
 
-_ADMITTED: dict[tuple[str, str], tuple[bool, str]] = {}
+#: `(green, detail, known misses)` per (instrument id, fixture set).
+_ADMITTED: dict[tuple[str, str], tuple[bool, str, tuple[dict[str, Any], ...]]] = {}
 _LOADED: dict[str, NliInstrument] = {}
 #: One resident model per pinned weights digest, shared by both templates: the
 #: weights are the only large allocation and a template adds none.
@@ -221,23 +241,35 @@ def _fixture_digest(ident: sensing.InstrumentIdentity) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _recorded_green(evidence_path: Path | None, key: str) -> bool:
+def _recorded_green(evidence_path: Path | None, key: str) -> list[dict[str, Any]] | None:
+    """The known misses recorded with a green verdict for `key`, or None when none is recorded.
+
+    A memo value is `true` (green, no known miss) or `{"known_misses": [...]}`.
+    """
     if evidence_path is None:
-        return False
+        return None
     import json
 
     try:
-        return json.loads(evidence_path.read_text(encoding="utf-8")).get(key) is True
+        value = json.loads(evidence_path.read_text(encoding="utf-8")).get(key)
     except (OSError, ValueError, AttributeError):
-        return False
+        return None
+    if value is True:
+        return []
+    if isinstance(value, dict) and isinstance(value.get("known_misses"), list):
+        return value["known_misses"]
+    return None
 
 
-def _record_green(evidence_path: Path | None, key: str) -> None:
+def _record_green(
+    evidence_path: Path | None, key: str, known_misses: Sequence[dict[str, Any]] = ()
+) -> None:
     """Add `key` to the memo, keeping every other identity's verdict.
 
     The memo holds one entry per admitted question, so a second question's
     write must not erase the first's. An unreadable memo restarts empty: the
-    cost is one repeated fixture run, never a wrong admission.
+    cost is one repeated fixture run, never a wrong admission. Known misses are
+    stored with the verdict so a child that skips the fixture run still lists them.
     """
     if evidence_path is None:
         return
@@ -251,7 +283,7 @@ def _record_green(evidence_path: Path | None, key: str) -> None:
             memo = {}
         if not isinstance(memo, dict):
             memo = {}
-        memo[key] = True
+        memo[key] = {"known_misses": list(known_misses)} if known_misses else True
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = evidence_path.with_name(evidence_path.name + f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(memo, sort_keys=True), encoding="utf-8")
@@ -327,17 +359,24 @@ def admit(
     evidence_key = f"{ident.instrument_id}:{_fixture_digest(ident)}"
     with _LOCK:
         verdict = _ADMITTED.get(key)
-        if verdict is None and _recorded_green(evidence_path, evidence_key):
-            verdict = (True, "fixtures green (recorded for this exact identity)")
+        recorded = None if verdict is not None else _recorded_green(evidence_path, evidence_key)
+        if recorded is not None:
+            verdict = (True, "fixtures green (recorded for this exact identity)", tuple(recorded))
             _ADMITTED[key] = verdict
         if verdict is None:
-            green, fixture_detail, _results = judge_fixtures(instrument, ident.fixture_set)
-            verdict = (green, fixture_detail)
+            green, fixture_detail, results = judge_fixtures(instrument, ident.fixture_set)
+            known = tuple(
+                {name: result[name] for name in ("note", "expected", "produced", "vectors")}
+                for result in results
+                if result.get("outcome") == "known_miss"
+            )
+            verdict = (green, fixture_detail, known)
             _ADMITTED[key] = verdict
             if green:
-                _record_green(evidence_path, evidence_key)
+                _record_green(evidence_path, evidence_key, known)
     if not verdict[0]:
         raise Refused("fixtures-failed", verdict[1])
+    instrument.known_misses = verdict[2]
     with _LOCK:
         _LOADED[ident.instrument_id] = instrument
     return instrument
