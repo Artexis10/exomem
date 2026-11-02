@@ -844,11 +844,14 @@ class WriteIntentJournal:
         digest: str,
         base_guards: Mapping[str, Any],
         reason: str,
+        audience: str,
+        principal: Any,
     ) -> Intent | None:
         """Replace one `conflicted` intent with a new `accepted` one under a new key at the end of the line (design D3, rule 6).
 
         One transaction ends the old intent `discarded`, which releases nothing here but drops its arguments, and
-        inserts the new row with the old row's principal, surface, validation, targets and staged inputs. The new key is
+        inserts the new row under the deciding reader's audience and principal, with the old row's surface,
+        validation, targets and staged inputs. The new key is
         `intent:<id>:retry:1`: an intent is retried once, because the retry replaces it. Returns None when the intent
         is not `conflicted`. The caller releases any vocabulary binding of the old key before it calls this.
         """
@@ -872,13 +875,13 @@ class WriteIntentJournal:
             "intent_id": new_id,
             "vault_id": old.vault_id,
             "replica_id": old.replica_id,
-            "audience": old.audience,
+            "audience": audience,
             "state": "accepted",
             "command": old.command,
             "arguments": argument_text,
             "leaf_arguments": None,
             "surface": old.surface,
-            "principal": _dump(old.principal),
+            "principal": _dump(principal),
             "retry_key": f"intent:{intent_id}:retry:1",
             "digest": digest,
             "window_seconds": INTENT_RETENTION_SECONDS,

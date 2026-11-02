@@ -1,8 +1,9 @@
 """Write-conflict review items (design D5): `review_memory` shows one, `triage_memory` decides it.
 
 A `conflicted` intent waits for an owner decision. Its reference is `exomem://write/<intent_id>`, the one the
-accepted answer gave. The reader sees only intents of its own audience, except the owner, who sees all. A reader
-with no right to an intent gets the answer for an unknown reference.
+accepted answer gave. The reader sees only intents of its own audience, except the owner, who sees all, and only
+those whose planned pages the reader's own client binding could write now: the check the synchronous write makes.
+A reader with no right to an intent gets the answer for an unknown reference.
 """
 
 from __future__ import annotations
@@ -71,14 +72,33 @@ def _reader() -> tuple[str, bool]:
     return audience, audience == OWNER_AUDIENCE
 
 
+def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
+    """Whether this reader's audience and client binding admit every page the intent plans to write.
+
+    It runs the check a synchronous write runs (`connector_boundary.require_write`), for the reader and not the
+    caller who made the intent, so a restricted client of the owner's audience learns nothing of a private page.
+    """
+    from .governance import connector_boundary
+
+    audience, owner = _reader()
+    if not (owner or intent.audience == audience):
+        return False
+    try:
+        for path in intent.planned_paths or ():
+            connector_boundary.require_write(vault_root, path, content=None)
+    except ValueError:
+        return False
+    return True
+
+
 def _intent_for(
-    journal: write_intents.WriteIntentJournal, ref: str
+    vault_root: Path, journal: write_intents.WriteIntentJournal, ref: str
 ) -> tuple[write_intents.Intent, bool]:
     """The intent this reader may see, and whether the reader is the owner."""
-    audience, owner = _reader()
+    _, owner = _reader()
     intent_id = ref.strip()[len(REF_PREFIX) :].lower()
     intent = journal.get(intent_id) if is_write_ref(ref) and intent_id.isalnum() else None
-    if intent is None or not (owner or intent.audience == audience):
+    if intent is None or not _admitted(vault_root, intent):
         raise _unknown(ref)
     return intent, owner
 
@@ -122,7 +142,7 @@ def _terminal_for_reader(vault_root: Path, intent: write_intents.Intent) -> Any:
 def item(vault_root: Path, ref: str) -> dict[str, Any]:
     """The review item of one write intent: cause, evidence, the decisions open to this reader, retained arguments."""
     _, journal = _manager_and_journal(vault_root)
-    intent, owner = _intent_for(journal, ref)
+    intent, owner = _intent_for(vault_root, journal, ref)
     conflict = intent.conflict or {}
     now = intent_accept.planned_hashes(vault_root, intent.planned_paths)
     at_accept = intent.target_hashes or {}
@@ -136,6 +156,7 @@ def item(vault_root: Path, ref: str) -> dict[str, Any]:
         }
         for later in journal.after(intent.seq)
         if not set(later.planned_paths or ()).isdisjoint(intent.planned_paths or ())
+        and _admitted(vault_root, later)
     ]
     view: dict[str, Any] = {
         "ref": f"{REF_PREFIX}{intent.intent_id}",
@@ -190,7 +211,7 @@ def triage(
 ) -> dict[str, Any]:
     """Decide one write conflict: `retry-write` at the end of the line under a new key, or `discard-write`."""
     manager, journal = _manager_and_journal(vault_root)
-    intent, owner = _intent_for(journal, ref)
+    intent, owner = _intent_for(vault_root, journal, ref)
     if action not in ACTIONS:
         raise ValueError(f"INVALID_REVIEW_ACTION: a write conflict takes {' or '.join(ACTIONS)}")
     if rebase and action != ACTION_RETRY:
@@ -207,6 +228,7 @@ def triage(
     if refusal is not None:
         raise ValueError(f"WRITE_DECISION_REFUSED: {refusal}")
     from . import writer_lease
+    from .governance.principal import effective_principal
 
     arguments = dict(intent.arguments or {})
     guards = dict(intent.base_guards or {})
@@ -227,6 +249,8 @@ def triage(
         digest=digest,
         base_guards=guards,
         reason=f"retried as a new write{' on current content' if rebase else ''}",
+        audience=_reader()[0],
+        principal=intent_accept.principal_snapshot(effective_principal()),
     )
     if retried is None:
         raise ValueError("WRITE_DECISION_REFUSED: the write is no longer conflicted")
@@ -255,7 +279,11 @@ def conflict_count(vault_root: Path) -> dict[str, Any]:
     audience, owner = _reader()
     try:
         _, journal = _manager_and_journal(vault_root)
-        count = journal.count_conflicted() if owner else len(journal.conflicted(audience=audience))
+        count = sum(
+            1
+            for row in journal.conflicted(audience=None if owner else audience)
+            if _admitted(vault_root, row)
+        )
     except (ValueError, write_intents.JournalRefusal):
         log.warning(
             "the write journal could not be counted for the attention review", exc_info=True
@@ -281,7 +309,7 @@ def poll(vault_root: Path, ref: str, wait_seconds: float = 0.0) -> dict[str, Any
     current state at once and says so.
     """
     _, journal = _manager_and_journal(vault_root)
-    intent, _ = _intent_for(journal, ref)
+    intent, _ = _intent_for(vault_root, journal, ref)
     from . import writer_lease
 
     wait = _wait_budget(wait_seconds)
@@ -321,7 +349,12 @@ def listing(vault_root: Path, limit: int) -> dict[str, Any]:
     audience, owner = _reader()
     _, journal = _manager_and_journal(vault_root)
     try:
-        rows = journal.open_intents(audience=None if owner else audience, limit=limit + 1)
+        # Admission filters after the read, so the read takes every open row (the journal bound keeps them few).
+        rows = [
+            row
+            for row in journal.open_intents(audience=None if owner else audience)
+            if _admitted(vault_root, row)
+        ]
     except write_intents.JournalRefusal as error:
         raise ValueError(f"WRITE_JOURNAL_UNAVAILABLE: {error}") from error
     writes = [
