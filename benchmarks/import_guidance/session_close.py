@@ -35,14 +35,17 @@ from epistemic.journeys.f27_replay import (
 )
 from membench.trackc.witness_join import parse_stream_json_transcript
 
+from exomem import prominence
+
 from . import checks
 from .recording import Arm, checkout_sha, worker_env
 from .scripted_replies import SCENARIO_DIR
 
 SUITE = "session-close"
 SEED_WORKER = Path(__file__).resolve().parent / "session_seed.py"
-#: The engagement levels the product defines (the `EXOMEM_PROMINENCE` values); a typo would silently read as balanced.
-ENGAGEMENTS = ("off", "light", "balanced", "maximal")
+#: The engagement levels, read from the product so the list lives in one place; a typo would
+#: silently read as balanced.
+ENGAGEMENTS = prominence.CANON
 #: A fresh server answers `RETRIEVAL_INDEX_WARMING` for about ten seconds; the first turn waits for the index.
 WARM_HOLD_SECONDS = 15.0
 TURN_TIMEOUT_SECONDS = 300.0
