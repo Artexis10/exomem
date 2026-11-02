@@ -402,6 +402,28 @@ def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
     return result
 
 
+def _remote_maintenance_preview(handle: Any, job: Any) -> dict[str, Any]:
+    """Prove a remote preview ran as a completed read-only job; return its report."""
+    if (
+        not isinstance(handle, dict)
+        or not isinstance(handle.get("run_id"), str)
+        or handle.get("preview") is not True
+        or handle.get("state") not in {"running", "completed"}
+    ):
+        raise RuntimeError(f"maintain_memory did not start a preview job: {handle!r}")
+    # `_call` unwraps every `result` field, so this receipt is already the preview's report.
+    report = job.get("receipt") if isinstance(job, dict) else None
+    if (
+        not isinstance(job, dict)
+        or job.get("run_id") != handle["run_id"]
+        or job.get("state") != "completed"
+        or not isinstance(report, dict)
+        or not isinstance(report.get("plan_id"), str)
+    ):
+        raise RuntimeError(f"the preview job did not complete with a plan_id: {job!r}")
+    return report
+
+
 def _remote_maintenance_job(handle: Any, job: Any, *, plan_id: str) -> dict[str, Any]:
     """Prove a remote write started as a job from its preview and ended completed with a receipt."""
     if (
@@ -1736,11 +1758,15 @@ async def _stdio_session(
                 )
                 if not evolution:
                     raise RuntimeError("evolution review returned no lifecycle data")
-                reconcile_preview = await _call_maintenance(
+                preview_handle = await _call_maintenance(
                     client,
                     "maintain_memory",
                     {"mode": "reconcile", "dry_run": True},
                     timeout,
+                )
+                reconcile_preview = _remote_maintenance_preview(
+                    preview_handle,
+                    await _await_maintenance_job(client, preview_handle["run_id"], timeout),
                 )
                 plan_id = reconcile_preview["plan_id"]
                 job_handle = await _call_maintenance(

@@ -11000,10 +11000,11 @@ def op_maintain_memory(
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    A remote fix, backfill-ids or reconcile write runs as a maintenance job: preview with
-    dry_run=true, then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
+    A remote fix, backfill-ids or reconcile runs as a maintenance job and returns a run_id.
+    The owner's preview (dry_run=true) is a job: its receipt holds the plan_id. Then repeat
+    with dry_run=false, that plan_id and a why to write.
     maintenance-job reads one job's state and receipt (run_id) or lists them; the receipt's
-    next_cursor, passed as cursor, reads the written paths page by page;
+    next_cursor, passed as cursor, reads the planned or written paths page by page;
     maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
     writes for its run. A remote collections-store-export apply returns
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.

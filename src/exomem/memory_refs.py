@@ -1374,7 +1374,18 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True, plan_id: str | None 
         writes.append(
             vault_module.PlannedWrite(path=path, content=updated, guard=guard, expected_hash=digest)
         )
-    if not dry_run:
+    if dry_run:
+        from . import maintenance_jobs
+
+        maintenance_jobs.record_planned((rel, None) for rel in missing)
+        maintenance_jobs.record_planned(
+            ((issue["path"], f"{issue['kind']}: {issue['value']}") for issue in identity_issues),
+            kind=maintenance_jobs.IDENTITY_ISSUE,
+        )
+        maintenance_jobs.record_planned(
+            ((page["path"], page["reason"]) for page in skipped), kind=maintenance_jobs.SKIPPED_PAGE
+        )
+    else:
         _refuse_duplicates(identity_issues)
     if writes and not dry_run:
         vault_module.batch_atomic_write(writes, vault_root=vault_root)

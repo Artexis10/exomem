@@ -1,8 +1,8 @@
 """A remote `backfill-ids`, `fix` or `reconcile` write runs as a governed maintenance job.
 
-The workflow: the owner previews on `check_memory`, starts the previewed plan on
-`repair_memory` with the preview's `plan_id` and a reason, then reads the job on
-`check_memory` until it ends. These tests drive a real in-process MCP server over a
+The workflow: the owner previews on `check_memory`, which starts a read-only preview job whose
+receipt holds the `plan_id`; the owner starts the previewed plan on `repair_memory` with that
+`plan_id` and a reason, then reads the job on `check_memory` until it ends. These tests drive a real in-process MCP server over a
 copy of the fixture vault, so the admission gate, the writer lease, the job store
 and the runner thread are all real. Only a second writer (a thread holding the
 mutation boundary) and a second process (a killed job owner) are staged.
@@ -32,6 +32,7 @@ from exomem import (
     commands,
     embeddings,
     maintenance_jobs,
+    memory_refs,
     query_data,
     writer_lease,
 )
@@ -68,8 +69,25 @@ async def _call(client, tool, operation):
     return result.structured_content
 
 
+async def _preview_job(client, operation: dict) -> tuple[dict, dict]:
+    """The owner's remote preview: the handle it returns at once, and the job's status once it ended."""
+    handle = await _call(client, "check_memory", operation)
+    return handle, await _until_terminal(client, handle["run_id"])
+
+
+async def _report(client, operation: dict) -> dict:
+    """The report of a preview that completed, as its job's receipt holds it."""
+    _, final = await _preview_job(client, operation)
+    assert final["state"] == "completed"
+    return final["receipt"]["result"]
+
+
 async def _preview(client) -> dict:
-    return await _call(client, "check_memory", {"kind": "backfill-ids"})
+    """A backfill-ids preview's report, with the pages its job lists as planned under `would_update`."""
+    handle, final = await _preview_job(client, {"kind": "backfill-ids"})
+    assert final["state"] == "completed"
+    planned = await _receipt_entries(client, handle["run_id"])
+    return {**final["receipt"]["result"], "would_update": [entry["path"] for entry in planned if entry["kind"] == "planned"]}
 
 
 async def _start(client, plan_id: str, why: str = "give pages their identity") -> dict:
@@ -403,7 +421,8 @@ def test_the_same_start_while_a_job_runs_returns_that_job(server, vault) -> None
 
     assert again["run_id"] == first["run_id"]
     assert final["state"] == "completed"
-    assert len(_jobs(listed)) == 1
+    # The preview job that gave the plan_id is a job too; the write joined one job and made no second.
+    assert [job["run_id"] for job in _jobs(listed) if not job["preview"]] == [first["run_id"]]
 
 
 def test_cancel_before_the_first_chunk_ends_the_job_cancelled_with_nothing_written(server, vault) -> None:
@@ -604,7 +623,7 @@ def _knowledge_base_bytes(vault: Path) -> dict[str, bytes]:
 
 
 async def _fix_preview(client, **arguments) -> dict:
-    return await _call(client, "check_memory", {"kind": "fix", **arguments})
+    return await _report(client, {"kind": "fix", **arguments})
 
 
 async def _fix_start(client, plan_id: str, **arguments) -> dict:
@@ -715,7 +734,7 @@ def _seed_reconcile(vault: Path) -> None:
 
 
 async def _reconcile_preview(client, **arguments) -> dict:
-    return await _call(client, "check_memory", {"kind": "reconcile", "dry_run": True, **arguments})
+    return await _report(client, {"kind": "reconcile", "dry_run": True, **arguments})
 
 
 async def _reconcile_start(client, plan_id: str, **arguments) -> dict:
@@ -891,3 +910,217 @@ def test_a_status_read_that_meets_the_job_ending_never_reports_it_interrupted(
 
     assert read["state"] in {"running", "cancelled"}
     assert final["state"] == "cancelled"
+
+
+# ---------------------------------------------------------------- previews run as read-only jobs
+
+
+@contextmanager
+def _preview_held(monkeypatch) -> Iterator[threading.Event]:
+    """A backfill-ids preview job stays running, waiting in its leaf, until the block ends.
+
+    Yields the event the job sets once it waits there.
+    """
+    reached, proceed = threading.Event(), threading.Event()
+    real_backfill_ids = memory_refs.backfill_ids
+
+    def waiting(*args, **kwargs):
+        reached.set()
+        assert proceed.wait(_DEADLINE_SECONDS)
+        return real_backfill_ids(*args, **kwargs)
+
+    monkeypatch.setattr(memory_refs, "backfill_ids", waiting)
+    try:
+        yield reached
+    finally:
+        proceed.set()
+
+
+def _as_caller(principal, surface: str, **arguments):
+    """One `maintain_memory` call as `principal` on `surface`, straight through the dispatcher."""
+    command = next(item for item in commands.product_commands_for("mcp") if item.name == "maintain_memory")
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface=surface, profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+    with capabilities.active_surface(descriptor), principal_module.request_scope(principal):
+        return writer_lease.invoke_command(command, arguments.pop("vault"), **arguments)
+
+
+def test_a_remote_backfill_preview_is_a_read_only_job_whose_receipt_starts_the_write(server, vault) -> None:
+    expected = memory_refs.backfill_ids(vault, dry_run=True)
+
+    async def scenario(client):
+        handle, final = await _preview_job(client, {"kind": "backfill-ids"})
+        planned = await _receipt_entries(client, handle["run_id"])
+        untouched = _page_ids(vault)
+        started = await _start(client, final["receipt"]["result"]["plan_id"])
+        return handle, final, planned, untouched, await _until_terminal(client, started["run_id"])
+
+    before = _page_ids(vault)
+    handle, final, planned, untouched, written = _session(server, scenario)
+
+    assert (handle["state"], handle["preview"], handle["plan_id"]) == ("running", True, None)
+    assert final["state"] == "completed"
+    assert final["receipt"]["result"]["plan_id"] == expected["plan_id"]
+    assert (final["planned"], final["committed"]) == (len(expected["would_update"]), 0)
+    assert [entry["path"] for entry in planned if entry["kind"] == "planned"] == expected["would_update"]
+    assert untouched == before
+    assert written["state"] == "completed"
+    assert written["committed"] == len(expected["would_update"])
+    assert all(_page_ids(vault)[path] is not None for path in expected["would_update"])
+
+
+def test_a_remote_fix_preview_is_a_read_only_job_whose_receipt_starts_the_write(server, vault) -> None:
+    _seed_fixable(vault)
+    expected = commands.op_audit_fix(vault, dry_run=True)
+
+    async def scenario(client):
+        handle, final = await _preview_job(client, {"kind": "fix"})
+        planned = await _receipt_entries(client, handle["run_id"])
+        untouched = _knowledge_base_bytes(vault)
+        started = await _fix_start(client, final["receipt"]["result"]["plan_id"])
+        return handle, final, planned, untouched, await _until_terminal(client, started["run_id"])
+
+    before = _knowledge_base_bytes(vault)
+    handle, final, planned, untouched, written = _session(server, scenario)
+
+    assert (handle["state"], handle["preview"], handle["plan_id"]) == ("running", True, None)
+    assert final["state"] == "completed"
+    assert final["receipt"]["result"]["plan_id"] == expected["plan_id"]
+    assert {entry["kind"] for entry in planned} == {"planned"}
+    assert {entry["path"] for entry in planned} == {row["path"] for row in expected["fixed"]} >= set(_FIXED_PAGES)
+    assert untouched == before
+    assert written["state"] == "completed"
+    assert written["committed"] >= len(_FIXED_PAGES)
+
+
+def test_a_fix_preview_receipt_lets_the_owner_page_what_the_plan_does_to_a_page(server, vault) -> None:
+    _seed_fixable(vault)
+    linker = "Knowledge Base/Notes/Insights/linker.md"
+
+    async def scenario(client):
+        handle, _ = await _preview_job(client, {"kind": "fix"})
+        return await _receipt_entries(client, handle["run_id"])
+
+    planned = {entry["path"]: entry for entry in _session(server, scenario)}
+
+    assert planned[linker]["kind"] == "planned"
+    assert "wikilink" in planned[linker]["value"]
+
+
+def test_a_backfill_preview_receipt_pages_the_identity_issues_it_found(server, vault) -> None:
+    twins = sorted(path for path in _page_ids(vault) if _page_ids(vault)[path] is None)[:2]
+    shared = None
+    for rel in twins:
+        page = vault / rel
+        updated, _ = memory_refs.add_id_to_markdown(page.read_text(encoding="utf-8"))
+        frontmatter, _, _ = vault_module.parse_frontmatter(updated)
+        shared = shared or frontmatter[ID_FIELD]
+        page.write_text(updated.replace(frontmatter[ID_FIELD], shared), encoding="utf-8")
+
+    async def scenario(client):
+        handle, _ = await _preview_job(client, {"kind": "backfill-ids"})
+        return await _receipt_entries(client, handle["run_id"])
+
+    issues = [entry for entry in _session(server, scenario) if entry["kind"] == "identity_issue"]
+
+    assert [entry["path"] for entry in issues] == twins
+    assert all(entry["value"] == f"duplicate: {shared}" for entry in issues)
+
+
+def test_a_remote_reconcile_preview_is_a_read_only_job_whose_receipt_starts_the_write(server, vault) -> None:
+    _seed_reconcile(vault)
+
+    async def scenario(client):
+        handle, final = await _preview_job(client, {"kind": "reconcile", "dry_run": True})
+        planned = await _receipt_entries(client, handle["run_id"])
+        untouched = ((vault / _ORPHAN_FRAMES).is_dir(), (vault / "Knowledge Base" / "index.md").read_bytes())
+        started = await _reconcile_start(client, final["receipt"]["result"]["plan_id"])
+        return handle, final, planned, untouched, await _until_terminal(client, started["run_id"])
+
+    handle, final, planned, (orphan_kept, index_before), written = _session(server, scenario)
+
+    assert (handle["state"], handle["preview"], handle["plan_id"]) == ("running", True, None)
+    assert final["state"] == "completed"
+    assert [(entry["kind"], entry["path"], entry["value"]) for entry in planned] == [
+        ("planned", _ORPHAN_FRAMES, "frames")
+    ]
+    assert orphan_kept and b"- Sources: 0" in index_before
+    assert written["state"] == "completed"
+    assert written["receipt"]["notes"]["summary"]["plan_id"] == final["receipt"]["result"]["plan_id"]
+    assert not (vault / _ORPHAN_FRAMES).exists()
+
+
+def test_a_preview_by_a_caller_other_than_the_owner_returns_its_report_without_a_job(server, vault) -> None:
+    stranger = principal_module.RequestPrincipal(audience_id="someone-else", surface="mcp")
+
+    async def scenario(client):
+        report = _as_caller(stranger, "mcp", vault=vault, mode="backfill-ids")
+        return report, await _list(client)
+
+    report, listed = _session(server, scenario)
+
+    assert report["plan_id"] and report["would_update"]
+    assert "run_id" not in report
+    assert _jobs(listed) == []
+
+
+def test_a_local_preview_returns_its_report_without_a_job(server, vault) -> None:
+    async def scenario(client):
+        report = _as_caller(principal_module.owner_principal(surface="cli"), "cli", vault=vault, mode="backfill-ids")
+        return report, await _list(client)
+
+    report, listed = _session(server, scenario)
+
+    assert report["plan_id"] and report["would_update"]
+    assert "run_id" not in report
+    assert _jobs(listed) == []
+
+
+def test_a_writer_takes_the_mutation_boundary_while_a_preview_job_runs(server, vault, monkeypatch) -> None:
+    async def scenario(client):
+        with _preview_held(monkeypatch) as in_leaf:
+            handle = await _call(client, "check_memory", {"kind": "backfill-ids"})
+            assert await asyncio.to_thread(in_leaf.wait, _DEADLINE_SECONDS)
+            with writer_lease.get_manager().mutation_guard(vault, request_id="other-writer", operation="semantic edit"):
+                during = await _status(client, handle["run_id"])
+        return during, await _until_terminal(client, handle["run_id"])
+
+    during, final = _session(server, scenario)
+
+    assert during["state"] == "running"
+    assert final["state"] == "completed"
+
+
+def test_an_identical_running_preview_returns_its_handle_and_a_write_start_is_refused(
+    server, vault, monkeypatch
+) -> None:
+    async def scenario(client):
+        with _preview_held(monkeypatch):
+            first = await _call(client, "check_memory", {"kind": "backfill-ids"})
+            again = await _call(client, "check_memory", {"kind": "backfill-ids"})
+            refused = await _start(client, _OTHER_ID)
+            listed = await _list(client)
+        return first, again, refused, listed, await _until_terminal(client, first["run_id"])
+
+    first, again, refused, listed, final = _session(server, scenario)
+
+    assert again["run_id"] == first["run_id"]
+    assert [job["run_id"] for job in _jobs(listed)] == [first["run_id"]]
+    assert refused["error"]["code"] == "MAINTENANCE_JOB_ACTIVE"
+    assert refused["error"]["run_id"] == first["run_id"]
+    assert final["state"] == "completed"
+
+
+def test_a_cancelled_preview_lists_no_planned_pages(server, vault, monkeypatch) -> None:
+    async def scenario(client):
+        with _preview_held(monkeypatch):
+            handle = await _call(client, "check_memory", {"kind": "backfill-ids"})
+            cancel = await _cancel(client, handle["run_id"])
+        return cancel, await _until_terminal(client, handle["run_id"])
+
+    cancel, final = _session(server, scenario)
+
+    assert cancel["cancel_requested"] is True
+    assert final["state"] == "cancelled"
+    assert (final["planned"], final["receipt"]["next_cursor"]) == (0, None)

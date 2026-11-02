@@ -24,6 +24,8 @@ clients can get the same maintenance as the CLI.
 - A remote write-mode `fix`, `backfill-ids` or `reconcile` with the `plan_id`
   from its preview and a `why` starts a maintenance job and returns its handle at
   once. The service runs the job in the background.
+- An owner's remote preview of these modes runs as a read-only job, because a
+  preview of a large vault outlasts a request. Its receipt holds the `plan_id`.
 - Each preview returns a `plan_id` that binds the change set. The job re-plans
   and fails with `STALE_MAINTENANCE_PLAN` before its first write when the
   change set differs.
