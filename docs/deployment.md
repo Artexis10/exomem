@@ -1426,10 +1426,11 @@ call would serve has the generation in that token, the `map` block has `unchange
 items. A token from the `anchors` mode, an older token and a malformed token get the whole map.
 
 `generation.continuity` in a `maps` packet reports the token that the call received. It is `absent`
-without a token. It is `applied` when the token carries a map generation and was minted under the
-role registry and conventions that serve the call, whether or not the map changed since. It is
-`stale` for any other token, including one minted before an edit of the role registry or the
-conventions.
+without a token. It is `applied` when the token carries a map generation and the service minted it
+under the role registry and conventions that serve the call. A change of the map does not change
+this report. It is `stale` for any other token, including one that the service minted before an edit
+of the role registry or the conventions. `map.unchanged` alone decides whether the client keeps its
+held map, and it can be `true` while `generation.continuity` is `stale`.
 
 ## Reranking and languages
 

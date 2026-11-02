@@ -83,7 +83,7 @@ tests prove it.
   `applied` means that activation compared the token's map generation with the
   served map's. `map.unchanged` says whether they matched. A vault write that
   moves the map generation no longer turns the report into `stale`. An edit of
-  the role registry or the conventions alone does: the report is `stale` while
+  the role registry or the conventions alone turns the report into `stale`.
   `map.unchanged` can still be `true`, because the map generation did not move.
 - `generation.continuity_thread` stays `absent`. A `maps` token carries no thread.
 
