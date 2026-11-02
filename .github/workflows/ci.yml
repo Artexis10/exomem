@@ -514,6 +514,9 @@ jobs:
     if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    # The job installs and runs earlier published releases; it needs no write access.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -539,23 +542,15 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
       # Release evidence pins the rollback application (move-structured-collections-to-sqlite
-      # design §10, "Reversal"). The journey requires wheel provenance, so install the published
-      # wheel by its local file URL after checking the pinned SHA-256.
+      # design §10, "Reversal"). The install script checks the wheel against the pinned SHA-256.
       - name: Install the pinned earlier application for the rollback qualification
         if: >-
           steps.scope.outputs.docs_only != 'true' && needs.scope.outputs.full == 'true'
           && env.EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION != ''
         timeout-minutes: 5
         run: |
-          wheel_url="$(curl -fsSL "https://pypi.org/pypi/exomem/$EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION/json" \
-            | python3 -c 'import json, sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["filename"].endswith(".whl")))')"
-          wheel="$RUNNER_TEMP/compatible-wheel/$(basename "$wheel_url")"
-          mkdir -p "$(dirname "$wheel")"
-          curl -fsSL -o "$wheel" "$wheel_url"
-          echo "$EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256  $wheel" | sha256sum -c -
-          uv venv "$RUNNER_TEMP/compatible-application" --python 3.13
-          uv pip install --python "$RUNNER_TEMP/compatible-application/bin/python" \
-            "exomem @ file://$wheel#sha256=$EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256"
+          scripts/ci_install_release.sh "$EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION" \
+            "$RUNNER_TEMP/compatible-application" "$EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256"
           echo "EXOMEM_TEST_COMPATIBLE_PYTHON=$RUNNER_TEMP/compatible-application/bin/python" >> "$GITHUB_ENV"
       # The one run also drives the S1 summary-collection journey
       # (scripts/e2e_s1_summary_journey.py): installed release capability checks,
