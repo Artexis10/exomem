@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from . import capabilities, operation_entries, relation_registry
 from . import curation as curation_module
+from .kbdir import kb_prefix
 from .operation_entries import OutcomeVerb
 
 log = logging.getLogger(__name__)
@@ -380,7 +381,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         return {}
     operation = result.get("operation")
-    if operation not in {"process", "retry"}:
+    if operation not in {"process", "retry", "reprocess"}:
         return {}
 
     def integer(value: Any, *, allow_none: bool = False) -> bool:
@@ -409,7 +410,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         return (
             isinstance(value, str)
             and 0 < len(value) <= 2048
-            and value.startswith("Knowledge Base/")
+            and value.startswith(kb_prefix())
             and "\\" not in value
             and "\x00" not in value
         )
@@ -432,7 +433,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
             "sidecar_path": result["sidecar_path"],
             "job_id": result["job_id"],
         }
-        if operation == "retry":
+        if operation in {"retry", "reprocess"}:
             if not integer(result.get("requeued")):
                 return {}
             projected["requeued"] = result["requeued"]
@@ -467,7 +468,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
                 }
             )
             continue
-        if outcome not in {"processed", "retried"} or state not in {
+        if outcome not in {"processed", "retried", "reprocessed"} or state not in {
             "pending",
             "running",
             "blocked",

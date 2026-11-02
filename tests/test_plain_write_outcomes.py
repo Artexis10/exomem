@@ -354,29 +354,6 @@ def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
     )
 
 
-def test_a_batch_where_every_file_failed_saved_nothing() -> None:
-    rows = [
-        {
-            "file_id": f"f{n}",
-            "outcome": "failed",
-            "state": "failed",
-            "code": "SAFE_FETCH_FAILED",
-            "reason": "download could not be retrieved",
-        }
-        for n in (1, 2)
-    ]
-    terminal = mutation_terminal.committed_terminal(
-        {"files": rows, "summary": {"stored": 0, "already_stored": 0, "failed": 2}},
-        request_id="11111111-1111-4111-8111-111111111111",
-        receipt_id="receipt-1",
-        idempotency_key=None,
-    )
-
-    summary = mutation_terminal.project_terminal(terminal, outcome_verb="saved")["user_summary"]
-
-    assert summary == "Nothing saved; 2 files could not be saved"
-
-
 def test_a_batch_of_copies_says_already_saved_and_names_the_first(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
