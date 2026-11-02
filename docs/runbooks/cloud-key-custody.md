@@ -81,12 +81,25 @@ one day later. It cancels an unfinished upload after 2 days. The deletion does n
 ## Cut over from the old object-store account
 
 Do this once, before you deploy the chart that uses the cell-data account. After the deploy,
-`cellctl` reads and removes export and import objects only in the staging bucket. It holds no credential
-in the old account, so it cannot reach an object in the old bucket.
+`cellctl` presigns, reads and removes export and import objects only in the staging bucket. An export or
+import object left in the old bucket is orphaned.
 
 1. Run this read-only query for exports on the control database. Expect no rows.
    `SELECT export_id, cell_id, observed_state FROM exomem_cloud_exports WHERE observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL OR archive_version_id IS NOT NULL;`
 2. Run this read-only query for imports. Expect no rows.
    `SELECT import_id, cell_id, observed_state FROM exomem_cloud_imports WHERE observed_state IS NULL OR observed_state NOT IN ('done','failed','expired','discarded');`
 3. If a query returns rows, wait until `cellctl` ends them on their deadlines, or end them through the product. Run both queries again.
-4. Deploy the chart when both queries return no rows.
+4. When both queries return no rows, create the custodian's namespace with Helm ownership, so that the
+   secret apply can write into it and the release adopts it.
+   `kubectl create namespace exomem-key-custody`
+   `kubectl label namespace exomem-key-custody app.kubernetes.io/managed-by=Helm`
+   `kubectl annotate namespace exomem-key-custody meta.helm.sh/release-name=exomem-platform meta.helm.sh/release-namespace=exomem-platform`
+5. Set `EXOMEM_ACTIVE_SECRET_REGISTRY` and `EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY` to the
+   `cloud-production-v2` pair under `infra/contracts/active-secret-registries/`. It adds the three
+   cell-data credentials.
+6. Run the secret apply in `docs/runbooks/cloud-platform-deploy.md`. Expect 18 verified destinations.
+7. Set the chart values from the `infra/terraform/cell-data` outputs: `cellData.backupBucketName`,
+   `cellData.backupBucketId`, `cellData.stagingBucketName`, and `cellData.endpoint`, the account's S3
+   endpoint (`s3ApiUrl` from `b2_authorize_account`). Set `keyCustodian.enabled=true`.
+8. Run the Helm upgrade in `docs/runbooks/cloud-platform-deploy.md`. Expect the key custodian pod to be
+   ready on the control-plane node, and each new cell to receive the Secret `cell-object-store-key`.
