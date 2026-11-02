@@ -593,7 +593,7 @@ def test_managed_retrieval_warm_delegates_stale_catalog_to_one_repair_owner(
     )
     monkeypatch.setattr(
         lexstore,
-        "request_repair",
+        "request_lag_repair",
         lambda _root: calls.append("repair"),
     )
     monkeypatch.setattr(
@@ -628,7 +628,7 @@ def test_eager_managed_retrieval_warm_waits_for_the_single_repair_owner(
     )
     monkeypatch.setattr(
         lexstore,
-        "request_repair",
+        "request_lag_repair",
         lambda _root: calls.append("repair"),
     )
     monkeypatch.setattr(
@@ -669,7 +669,7 @@ def test_eager_managed_warm_publishes_the_successful_retry_generation(
         return current
 
     monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_current", proof)
-    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "request_lag_repair", lambda _root: None)
     monkeypatch.setattr(lexstore, "await_repairs_idle", lambda _root: True)
     monkeypatch.setattr(
         "exomem.semantic_contract.warm_corpus_context",

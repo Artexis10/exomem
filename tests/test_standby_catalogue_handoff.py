@@ -953,7 +953,9 @@ def test_a_heal_that_raises_falls_back_to_the_proof_and_the_repair(
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch, fail=True)
     repairs: list[Path] = []
-    monkeypatch.setattr(lexstore, "request_repair", lambda vault_root: repairs.append(vault_root))
+    monkeypatch.setattr(
+        lexstore, "request_lag_repair", lambda vault_root: repairs.append(vault_root)
+    )
 
     assert _promoted_warm(root) is False
 
@@ -968,7 +970,7 @@ def test_a_targeted_retry_in_flight_does_not_skip_the_heal(
     root = older_catalogue
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch)
-    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "request_lag_repair", lambda _root: None)
     key = root.resolve()
     lexstore._REPAIRS_IN_FLIGHT.add(key)
     lexstore._DEFERRED_UPSERTS[key] = {root / next(iter(NOTES))}
@@ -989,7 +991,7 @@ def test_a_full_rebuild_in_flight_skips_the_heal(
     root = older_catalogue
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch)
-    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "request_lag_repair", lambda _root: None)
     key = root.resolve()
     lexstore._FULL_REBUILDS_IN_FLIGHT.add(key)
     try:
@@ -1142,3 +1144,35 @@ def test_an_upgrade_heals_this_releases_catalogue_instead_of_rebuilding_the_old_
     assert readiness.retrieval_admission(root)["admitted"] is True
     assert lexstore.search_bm25(root, "quokkalastsave", k=3, scope="kb")
 
+
+
+def test_a_save_between_the_heal_and_the_proof_is_caught_up_not_rebuilt(
+    earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promoted worker's watcher runs during its warm; a save then leaves one page behind.
+
+    The proof schedules the lag repair that one page needs. The warm used to
+    add a full repair request on top, which cancelled the catch-up.
+    """
+    root = earlier_release_catalogue
+    _promote_over_older_catalogue(root, monkeypatch)
+    saved = root / "Knowledge Base/Notes/Insights/handoff-2.md"
+    real_heal = lexstore.heal_adopted_catalog
+
+    def heal_then_save(vault_root: Path) -> bool:
+        healed = real_heal(vault_root)
+        _editor_save(
+            saved, NOTES["Knowledge Base/Notes/Insights/handoff-2.md"] + "\nquokkasavedinwarm.\n"
+        )
+        freshness.on_files_changed(vault_root, changed=[saved])
+        return healed
+
+    monkeypatch.setattr(lexstore, "heal_adopted_catalog", heal_then_save)
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    assert _promoted_warm(root) is False
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == [], rebuilds
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, "quokkasavedinwarm", k=3, scope="kb")
