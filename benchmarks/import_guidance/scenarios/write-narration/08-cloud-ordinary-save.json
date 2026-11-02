@@ -41,6 +41,24 @@
         }
       },
       {
+        "as": "settings",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "settings"
+          }
+        }
+      },
+      {
+        "as": "writer_status",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "writer-status"
+          }
+        }
+      },
+      {
         "as": "validate",
         "tool": "create_note",
         "arguments": {
@@ -77,6 +95,12 @@
     ]
   },
   "replies": {
+    "bootstrap.settings": {
+      "$shape": "settings"
+    },
+    "bootstrap.writer-status": {
+      "$shape": "writer_status"
+    },
     "bootstrap": {
       "$rules": [
         {
