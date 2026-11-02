@@ -144,7 +144,7 @@ def test_a_moved_corpus_caption_remains_visible_in_writer_timing(warm_corpus: Pa
     handle = call_spans.MCP_CALL_TOKEN.set(token)
     try:
         snapshot = find.writer_resolver_snapshot(warm_corpus)
-        assert snapshot.titles["alpha renamed"] == ["Knowledge Base/Notes/Insights/alpha"]
+        assert snapshot.titles["alpha renamed"] == ("Knowledge Base/Notes/Insights/alpha",)
         rows = call_spans.pop_call_spans(token)
         fields = next(row["fields"] for row in rows if row["name"] == "writer.resolver_snapshot")
         assert fields["disk"] == 1
@@ -212,7 +212,7 @@ def test_a_write_published_during_the_proof_does_not_force_a_disk_build(
 
     snapshot = find.writer_resolver_snapshot(warm_corpus)
 
-    assert snapshot.titles["alpha updated"] == ["Knowledge Base/Notes/Insights/alpha"]
+    assert snapshot.titles["alpha updated"] == ("Knowledge Base/Notes/Insights/alpha",)
 
 
 def test_resolver_entries_decline_when_configuration_changes_during_capture(

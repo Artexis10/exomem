@@ -7888,21 +7888,27 @@ class AmbiguousWikilinkError(WikilinkError):
     """A bare-name wikilink matches more than one file."""
 
 
-def _discard_from_list(mapping: dict[str, list[str]], key: str, value: str) -> None:
-    """Remove `value` from `mapping[key]`'s list; drop the key if it empties.
+def _discard_from_bucket(mapping: dict[str, tuple[str, ...]], key: str, value: str) -> None:
+    """Remove `value` from `mapping[key]`; drop the key if it empties.
 
     Shared by the resolver's stem/title patch paths — keeps a multi-match
     bucket (e.g. two files with the same stem) correct when only one side is
-    edited or deleted.
+    edited or deleted. Replaces the bucket rather than editing it, so a fork
+    that shares the old bucket keeps it.
     """
-    lst = mapping.get(key)
-    if not lst:
+    bucket = mapping.get(key)
+    if not bucket:
         return
-    remaining = [v for v in lst if v != value]
+    remaining = tuple(v for v in bucket if v != value)
     if remaining:
         mapping[key] = remaining
     else:
         mapping.pop(key, None)
+
+
+def _insert_into_bucket(mapping: dict[str, tuple[str, ...]], key: str, *values: str) -> None:
+    """Add `values` to `mapping[key]` in sorted order, replacing the bucket."""
+    mapping[key] = tuple(sorted((*mapping.get(key, ()), *values)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -7947,9 +7953,9 @@ class WikilinkResolver:
     - `full_paths`: vault-relative POSIX without `.md` (e.g.
       `Knowledge Base/Entities/Concepts/Profile`).
     - `kb_stripped`: same with the leading `Knowledge Base/` removed.
-    - `stems`: filename stem (no path) → list of full paths (multi-match if
+    - `stems`: filename stem (no path) → sorted full paths (multi-match if
       the basename collides across folders).
-    - `titles`: frontmatter `title:` lower-cased → list of full paths. This
+    - `titles`: frontmatter `title:` lower-cased → sorted full paths. This
       lets `[[Test Content Manual]]` resolve to a source file whose
       stem is date-prefixed (`2026-05-15-tu-test-manual`) but
       whose title matches.
@@ -7959,13 +7965,11 @@ class WikilinkResolver:
         self.vault_root = vault_root
         self.full_paths: set[str] = set()
         self.kb_stripped: set[str] = set()
-        self.stems: dict[str, list[str]] = {}
-        self.titles: dict[str, list[str]] = {}
-        self.candidates_by_key: dict[str, list[WikilinkCandidate]] = {}
-        # no_ext rel path -> the (lower-cased) frontmatter title it contributed
-        # to `titles`, so an incremental patch can drop the OLD title edge
-        # before re-adding the new one (a title-only edit still needs fixing).
-        self._title_by_rel: dict[str, str] = {}
+        # Every bucket is a tuple and every patch replaces a bucket instead of
+        # editing it, so a copy of these dicts is an independent resolver.
+        self.stems: dict[str, tuple[str, ...]] = {}
+        self.titles: dict[str, tuple[str, ...]] = {}
+        self.candidates_by_key: dict[str, tuple[WikilinkCandidate, ...]] = {}
         self._build()
 
     @classmethod
@@ -7975,14 +7979,9 @@ class WikilinkResolver:
         entries: Iterable[tuple[str, str | None]],
     ) -> WikilinkResolver:
         """Build resolver maps from already-read paths/titles without I/O."""
-        resolver = cls.__new__(cls)
-        resolver.vault_root = Path(vault_root)
-        resolver.full_paths = set()
-        resolver.kb_stripped = set()
-        resolver.stems = {}
-        resolver.titles = {}
-        resolver.candidates_by_key = {}
-        resolver._title_by_rel = {}
+        resolver = cls.from_maps(
+            vault_root, full_paths=(), kb_stripped=(), stems={}, titles={}, candidates_by_key={}
+        )
         normalized = sorted(
             (
                 str(rel_path).replace("\\", "/").lstrip("/"),
@@ -8003,28 +8002,57 @@ class WikilinkResolver:
                 continue
             self._add_entry(rel, self._read_title_lower(md))
 
+    @classmethod
+    def from_maps(
+        cls,
+        vault_root: Path,
+        *,
+        full_paths: Iterable[str],
+        kb_stripped: Iterable[str],
+        stems: Mapping[str, tuple[str, ...]],
+        titles: Mapping[str, tuple[str, ...]],
+        candidates_by_key: Mapping[str, tuple[WikilinkCandidate, ...]],
+    ) -> WikilinkResolver:
+        """A resolver over copies of another resolver's maps, without I/O.
+
+        The buckets are tuples that no patch edits, so copying each map is
+        enough: patching the result never changes the maps it came from.
+        """
+        resolver = cls.__new__(cls)
+        resolver.vault_root = Path(vault_root)
+        resolver.full_paths = set(full_paths)
+        resolver.kb_stripped = set(kb_stripped)
+        resolver.stems = dict(stems)
+        resolver.titles = dict(titles)
+        resolver.candidates_by_key = dict(candidates_by_key)
+        return resolver
+
     def fork(self) -> WikilinkResolver:
         """Return an I/O-free detached copy suitable for write preparation.
 
         Writers may add their pending primary to the copy without polluting the
         graph lane's process-shared resolver when validation later fails.
         """
-        resolver = self.__class__.__new__(self.__class__)
-        resolver.vault_root = self.vault_root
-        resolver.full_paths = set(self.full_paths)
-        resolver.kb_stripped = set(self.kb_stripped)
-        resolver.stems = {key: list(values) for key, values in self.stems.items()}
-        resolver.titles = {key: list(values) for key, values in self.titles.items()}
-        resolver.candidates_by_key = {
-            key: list(values) for key, values in self.candidates_by_key.items()
-        }
-        resolver._title_by_rel = dict(self._title_by_rel)
-        return resolver
+        return self.from_maps(
+            self.vault_root,
+            full_paths=self.full_paths,
+            kb_stripped=self.kb_stripped,
+            stems=self.stems,
+            titles=self.titles,
+            candidates_by_key=self.candidates_by_key,
+        )
 
     def title_key_for_path(self, rel_path: str) -> str | None:
-        """Return the normalized resolver title contributed by one path."""
-        no_ext = str(rel_path).replace("\\", "/").lstrip("/").removesuffix(".md")
-        return self._title_by_rel.get(no_ext)
+        """Return the normalized resolver title contributed by one path.
+
+        When several files share the path key, the last titled one in path
+        order supplies it.
+        """
+        no_ext = _wikilink_path_key(str(rel_path).replace("\\", "/").lstrip("/"))
+        for candidate in reversed(self.candidates_by_key.get(no_ext, ())):
+            if candidate.title_key:
+                return candidate.title_key
+        return None
 
     # ---- shared add/remove primitives -------------------------------------
     # The full build AND the incremental patch both go through these, so a
@@ -8041,20 +8069,17 @@ class WikilinkResolver:
         """
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
-        candidates = self.candidates_by_key.setdefault(no_ext, [])
-        candidates.append(WikilinkCandidate(rel_path, title_lower))
-        candidates.sort(key=lambda candidate: candidate.path)
+        self.candidates_by_key[no_ext] = tuple(
+            sorted(
+                (*self.candidates_by_key.get(no_ext, ()), WikilinkCandidate(rel_path, title_lower)),
+                key=lambda candidate: candidate.path,
+            )
+        )
         self.full_paths.add(no_ext)
         self.kb_stripped.add(no_ext.removeprefix(kb_prefix()))
-        stem = no_ext.rsplit("/", 1)[-1]
-        self.stems.setdefault(stem, []).append(no_ext)
-        self.stems[stem].sort()
+        _insert_into_bucket(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
         if title_lower:
-            self.titles.setdefault(title_lower, []).append(no_ext)
-            self.titles[title_lower].sort()
-        for candidate in candidates:
-            if candidate.title_key:
-                self._title_by_rel[no_ext] = candidate.title_key
+            _insert_into_bucket(self.titles, title_lower, no_ext)
 
     def _remove_entry(self, rel_path: str) -> None:
         """Drop every edge a file contributed (path, stem, title)."""
@@ -8062,7 +8087,7 @@ class WikilinkResolver:
         previous = self.candidates_by_key.get(no_ext, ())
         if not any(candidate.path == rel_path for candidate in previous):
             return
-        remaining = [candidate for candidate in previous if candidate.path != rel_path]
+        remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining
         else:
@@ -8072,18 +8097,14 @@ class WikilinkResolver:
             if stripped not in self.full_paths and kb_prefix() + stripped not in self.full_paths:
                 self.kb_stripped.discard(stripped)
         stem = no_ext.rsplit("/", 1)[-1]
-        _discard_from_list(self.stems, stem, no_ext)
+        _discard_from_bucket(self.stems, stem, no_ext)
         if remaining:
-            self.stems.setdefault(stem, []).extend(no_ext for _ in remaining)
-            self.stems[stem].sort()
+            _insert_into_bucket(self.stems, stem, *(no_ext for _ in remaining))
         for title in {candidate.title_key for candidate in previous if candidate.title_key}:
-            _discard_from_list(self.titles, title, no_ext)
-        self._title_by_rel.pop(no_ext, None)
+            _discard_from_bucket(self.titles, title, no_ext)
         for candidate in remaining:
             if candidate.title_key:
-                self.titles.setdefault(candidate.title_key, []).append(no_ext)
-                self.titles[candidate.title_key].sort()
-                self._title_by_rel[no_ext] = candidate.title_key
+                _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:

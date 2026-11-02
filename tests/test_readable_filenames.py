@@ -391,8 +391,8 @@ def test_a_title_wikilink_resolves_across_both_styles(tmp_path: Path) -> None:
         ],
     )
 
-    assert resolver.titles["old style note"] == ["Knowledge Base/Notes/old-style-slugged-name"]
-    assert resolver.titles["new style note"] == ["Knowledge Base/Notes/New Style Readable Name"]
+    assert resolver.titles["old style note"] == ("Knowledge Base/Notes/old-style-slugged-name",)
+    assert resolver.titles["new style note"] == ("Knowledge Base/Notes/New Style Readable Name",)
     # And each is still reachable by its own stem, so path-keyed links survive too.
     assert "old-style-slugged-name" in resolver.stems
     assert "New Style Readable Name" in resolver.stems
