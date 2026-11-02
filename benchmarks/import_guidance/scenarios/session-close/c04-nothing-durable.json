@@ -9,5 +9,16 @@
     "Thanks. Can you also tell me how many minutes are in 3.5 hours?",
     "That's all for today, thanks."
   ],
-  "answer_key": null
+  "answer_key": {
+    "reference": "Nothing durable happened: the person asked a one-off time-zone conversion for a meeting tomorrow and a unit conversion. No page should change and no recap or other page should be written.",
+    "must_change": [],
+    "must_not_change": [
+      "Entities/People/Tavi Brennock.md",
+      "Entities/People/Corin Haldane.md",
+      "Entities/Organizations/Harbourview Co-op.md"
+    ],
+    "recap": "forbidden",
+    "recap_must_link": [],
+    "new_pages": "none"
+  }
 }

@@ -9,5 +9,19 @@
     "Right. We revisited that at the last meeting: we keep the shared calendar, but the reminders move from email to the group chat, since nobody reads the emails. Everything else about the decision stands.",
     "That's all for today, thanks."
   ],
-  "answer_key": null
+  "answer_key": {
+    "reference": "The book club revised part of its shared-calendar decision at its last meeting: the shared calendar stays, but meeting reminders now go out in the group chat instead of by email, because nobody reads the emails. The decision page 'Use a shared calendar for the book club' should state the new reminder channel, with the rest of the decision kept as it is. The hosting-rotation decision and the club's organization page do not change.",
+    "must_change": [
+      "Entities/Decisions/Use a shared calendar for the book club.md"
+    ],
+    "must_not_change": [
+      "Entities/Decisions/Rotate the book club host monthly.md",
+      "Entities/Organizations/Lantern Street Book Club.md"
+    ],
+    "recap": "optional",
+    "recap_must_link": [
+      "Entities/Decisions/Use a shared calendar for the book club.md"
+    ],
+    "new_pages": "none"
+  }
 }
