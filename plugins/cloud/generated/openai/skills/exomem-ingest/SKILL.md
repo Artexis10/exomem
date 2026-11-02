@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 3c639a96bf01dfe7b9a2b54d0a0e1679af98527f5a5df3ab9d80e7794a620fcb
+  skill_contract: 0aa17cd6c77389dc9a8c2ac717b6f7ed651114261326375566bc782602d94a32
   version: "0.1.0"
 ---
 
@@ -41,6 +41,11 @@ identity after an uncertain commit.
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
 only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
+
+Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
+different Exomem, use the connector they named; if it is unavailable, say so plainly and
+write nothing elsewhere. Never tell the user a write landed in a store other than the
+one `user_summary` names.
 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.

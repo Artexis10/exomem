@@ -14,8 +14,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from exomem import commands as commands_module
 from exomem import cloud_cell, privacy_log, server
+from exomem import commands as commands_module
 from exomem.access_log import AccessLogMiddleware
 from exomem.governance import principal as principal_module
 from exomem.governance.tool import GovernanceError, _require_owner
