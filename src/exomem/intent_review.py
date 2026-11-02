@@ -103,7 +103,9 @@ def _intent_for(
     return intent, owner
 
 
-def _retry_refusal(intent: write_intents.Intent, *, owner: bool, rebase: bool) -> str | None:
+def _retry_refusal(
+    vault_root: Path, intent: write_intents.Intent, *, owner: bool, rebase: bool
+) -> str | None:
     """Why `retry-write` is refused for this reader and intent, or None when it may go ahead."""
     cause = (intent.conflict or {}).get("cause")
     if intent.state != "conflicted":
@@ -112,6 +114,10 @@ def _retry_refusal(intent: write_intents.Intent, *, owner: bool, rebase: bool) -
         return "the caller's authorization is gone; send the write again under a live login, or discard this item"
     if cause == intent_outcomes.CAUSE_OUTCOME_UNKNOWN and not owner:
         return "only the vault owner may retry a write whose outcome is unknown; a retry can write twice"
+    if cause == intent_outcomes.CAUSE_OUTCOME_UNKNOWN and intent_accept.planned_hashes(
+        vault_root, intent.planned_paths
+    ) != (intent.target_hashes or {}):
+        return "a planned page changed since the write was accepted, so the write probably landed; read the page before you decide"
     arguments = intent.arguments or {}
     if rebase and cause not in _BASIS_CAUSES:
         return f"rebase applies to a changed basis, not to cause {cause!r}"
@@ -194,7 +200,7 @@ def item(vault_root: Path, ref: str) -> dict[str, Any]:
         view["order_note"] = (
             "later writes already touched these targets; a retry applies this write after them"
         )
-    refusal = _retry_refusal(intent, owner=owner, rebase=conflict.get("cause") in _BASIS_CAUSES)
+    refusal = _retry_refusal(vault_root, intent, owner=owner, rebase=conflict.get("cause") in _BASIS_CAUSES)
     view["decisions"] = {
         ACTION_DISCARD: {"allowed": True},
         ACTION_RETRY: {
@@ -224,7 +230,7 @@ def triage(
                 f"WRITE_DECISION_REFUSED: only a conflicted write can be discarded; this one is {intent.state}"
             )
         return {"ref": reference, "action": action, "state": "discarded", "reason": reason}
-    refusal = _retry_refusal(intent, owner=owner, rebase=rebase)
+    refusal = _retry_refusal(vault_root, intent, owner=owner, rebase=rebase)
     if refusal is not None:
         raise ValueError(f"WRITE_DECISION_REFUSED: {refusal}")
     from . import writer_lease

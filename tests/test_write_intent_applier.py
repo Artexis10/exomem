@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import multiprocessing
+import os
 import sqlite3
 import threading
 import time
@@ -443,6 +444,30 @@ def test_with_the_journal_off_accepted_writes_still_drain(vault: Path, monkeypat
     monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
     assert intent_applier.ensure_running(manager, vault) is not None
     assert _wait_for(_journal(manager, vault), intent.intent_id, ("committed",)).state == "committed"
+
+
+def test_a_running_applier_purges_expired_rows_and_sweeps_orphaned_inputs(vault: Path) -> None:
+    """Nothing else calls the purge or the sweep, so without the applier the journal and its inputs only grow."""
+    manager = _manager()
+    journal = _journal(manager, vault)
+    intent, _ = journal.accept(
+        audience="owner", command="remember", arguments={}, surface="mcp", principal={}, digest="d",
+        retry_key="expiring", window_seconds=0.2, validation="complete",
+    )
+    journal.finish(intent.intent_id, "committed", terminal={"ok": True})
+    orphan = journal.inputs_root / ("0" * 32)
+    orphan.mkdir(parents=True)
+    old = time.time() - 2 * write_intents.ORPHAN_GRACE_SECONDS
+    os.utime(orphan, (old, old))
+    time.sleep(0.3)
+
+    intent_applier.ensure_running(manager, vault)
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and (journal.get(intent.intent_id) or orphan.exists()):
+        time.sleep(0.05)
+    assert journal.get(intent.intent_id) is None
+    assert not orphan.exists()
 
 
 def test_the_service_lifecycle_starts_and_stops_the_applier_for_its_vault(vault: Path) -> None:

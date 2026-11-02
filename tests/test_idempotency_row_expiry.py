@@ -61,30 +61,3 @@ def test_a_receipt_expires_after_its_own_window(tmp_path: Path) -> None:
     store.run("implicit:alice:a", "digest-a", leaf, expires_after=_IMPLICIT_WINDOW)
 
     assert len(runs) == 2
-
-
-def test_a_journaled_key_keeps_its_receipt_for_the_intent_retention(tmp_path: Path) -> None:
-    # The intent journal keeps a terminal for 24 h. A 600 s implicit window must not drop the
-    # receipt first, or a recovery after the terminal persisted would re-run the write.
-    clock = _Clock()
-    store = _store(tmp_path, clock)
-    runs: list[int] = []
-
-    def leaf() -> dict:
-        runs.append(1)
-        return {"n": len(runs)}
-
-    store.run(
-        "implicit:alice:a",
-        "digest-a",
-        leaf,
-        expires_after=_IMPLICIT_WINDOW,
-        min_retention_seconds=_EXPLICIT_WINDOW,
-    )
-    clock.value += _EXPLICIT_WINDOW - 1
-    store.run("implicit:alice:a", "digest-a", leaf, expires_after=_IMPLICIT_WINDOW)
-    assert len(runs) == 1
-
-    clock.value += 2
-    store.run("implicit:alice:a", "digest-a", leaf, expires_after=_IMPLICIT_WINDOW)
-    assert len(runs) == 2

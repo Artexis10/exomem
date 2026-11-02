@@ -96,3 +96,34 @@ def test_later_intents_list_only_what_the_reader_may_see(
     with request_scope(full):
         later = commands.op_review_memory(vault, mode="item", ref=f"exomem://write/{first}")["later_intents"]
     assert [row["ref"] for row in later] == [f"exomem://write/{visible}", f"exomem://write/{mixed.intent_id}"]
+
+
+def test_retrying_an_unknown_outcome_is_refused_once_a_planned_page_changed_since_accept(vault: Path) -> None:
+    """A changed page means the write probably landed; a second run would write it twice."""
+    from test_write_intent_decisions import _new_page
+
+    from exomem import intent_accept
+    from exomem.governance.principal import owner_principal
+
+    manager = _manager()
+    owner = owner_principal(surface="mcp")
+    unchanged_page, changed_page = _new_page(manager, vault, 81), _new_page(manager, vault, 82)
+    journal = _journal(manager, vault)
+    ids = {}
+    for name, page in (("unchanged", unchanged_page), ("changed", changed_page)):
+        intent, _ = journal.accept(
+            audience=owner.audience_id, command="edit_memory", arguments={"path": page}, surface="mcp",
+            principal=intent_accept.principal_snapshot(owner), digest=name, retry_key=name,
+            window_seconds=600.0, validation="complete", planned_paths=[page],
+            target_hashes=intent_accept.planned_hashes(vault, [page]),
+        )
+        assert journal.begin_apply(intent.intent_id)
+        journal.finish(intent.intent_id, "conflicted", conflict={"cause": "outcome_unknown"})
+        ids[name] = intent.intent_id
+    (vault / changed_page).write_bytes((vault / changed_page).read_bytes() + b"\nLanded.\n")
+    with request_scope(owner):
+        with pytest.raises(ValueError, match="probably landed"):
+            commands.op_triage_memory(vault, f"exomem://write/{ids['changed']}", "retry-write")
+        allowed = commands.op_triage_memory(vault, f"exomem://write/{ids['unchanged']}", "retry-write")
+    assert allowed["retried_as"]["state"] == "accepted"
+    assert journal.get(ids["changed"]).state == "conflicted"

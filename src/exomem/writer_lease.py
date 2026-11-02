@@ -3497,7 +3497,6 @@ class IdempotencyStore:
         operation,  # noqa: ANN001
         *,
         expires_after: float | None = None,
-        min_retention_seconds: float | None = None,
         on_replay=None,  # noqa: ANN001
         operation_guard=None,  # noqa: ANN001
         commit_observed=None,  # noqa: ANN001
@@ -3533,7 +3532,6 @@ class IdempotencyStore:
                     expires_after,
                     commit_evidence=commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
-                    min_retention_seconds=min_retention_seconds,
                 )
             if disposition == "owner":
                 break
@@ -3760,16 +3758,10 @@ class IdempotencyStore:
         *,
         commit_evidence=None,
         legacy_graph_pending_proof=None,
-        min_retention_seconds: float | None = None,
     ) -> tuple[str, Any]:
         now = self.clock()
-        # The row keeps this window for its whole life, so a later caller's shorter window
-        # cannot expire it. A journaled key passes the intent's retention as the floor.
-        row_window = (
-            None
-            if expires_after is None
-            else max(expires_after, min_retention_seconds or 0.0)
-        )
+        # The row keeps this window for its whole life, so a later caller's shorter window cannot expire it.
+        row_window = expires_after
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._prune_expired(conn, now, expires_after, key)

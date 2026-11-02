@@ -571,7 +571,7 @@ class WriteIntentJournal:
             return None
         intent = _decode(row)
         if intent.state in TERMINAL_STATES and intent.terminal_at is not None:
-            if self.clock() - intent.terminal_at > max(intent.window_seconds, INTENT_RETENTION_SECONDS):
+            if self.clock() - intent.terminal_at > intent.window_seconds:
                 return None
         return intent
 
@@ -884,7 +884,7 @@ class WriteIntentJournal:
             "principal": _dump(principal),
             "retry_key": f"intent:{intent_id}:retry:1",
             "digest": digest,
-            "window_seconds": INTENT_RETENTION_SECONDS,
+            "window_seconds": old.window_seconds,
             "request_id": str(uuid.uuid4()),
             "base_guards": _dump(base_guards),
             "validation": old.validation,
@@ -943,15 +943,15 @@ class WriteIntentJournal:
 
     @_unavailable_on_sqlite_error
     def purge_expired(self) -> int:
-        """Delete terminal rows past their retention. Returns the number removed."""
+        """Delete terminal rows once their key's own window has passed since the terminal. Returns the number removed."""
         now = self.clock()
         marks = ", ".join("?" for _ in TERMINAL_STATES)
         conn = self._connect()
         try:
             cursor = conn.execute(
                 f"DELETE FROM intents WHERE state IN ({marks}) AND terminal_at IS NOT NULL "
-                "AND terminal_at <= ? - MAX(window_seconds, ?)",
-                (*TERMINAL_STATES, now, INTENT_RETENTION_SECONDS),
+                "AND terminal_at <= ? - window_seconds",
+                (*TERMINAL_STATES, now),
             )
             return cursor.rowcount
         except sqlite3.Error as error:

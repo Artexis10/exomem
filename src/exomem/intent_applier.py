@@ -55,6 +55,8 @@ LOCK_POLL_SECONDS = 0.25
 CLI_LOCK_GRACE_SECONDS = 2.0
 #: Pause after an attempt that committed nothing, so a held boundary is retried and not spun on.
 RETRY_PAUSE_SECONDS = 0.1
+#: How often a running applier purges terminal rows past their key's window. Nobody else calls `purge_expired`.
+PURGE_INTERVAL_SECONDS = 10 * 60.0
 #: A service stop waits this long for the applier thread; only a leaf that outlasts it leaves a row `applying`.
 STOP_JOIN_SECONDS = 15.0
 
@@ -190,6 +192,7 @@ class Applier:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._on_end = on_end
+        self._next_purge = 0.0
 
     @property
     def alive(self) -> bool:
@@ -215,8 +218,24 @@ class Applier:
 
     # -- loop --------------------------------------------------------------------------------------
 
+    def _maintain(self, *, at_start: bool = False) -> None:
+        """Purge expired terminal rows, at start and once per interval; sweep orphaned staged inputs at start.
+
+        Without this the journal grows without bound: no other code calls either. A failure is logged and never stops the applier.
+        """
+        if not at_start and time.monotonic() < self._next_purge:
+            return
+        self._next_purge = time.monotonic() + PURGE_INTERVAL_SECONDS
+        try:
+            self.journal.purge_expired()
+            if at_start:
+                self.journal.sweep_orphans()
+        except (write_intents.JournalRefusal, OSError):
+            log.warning("write-intent journal maintenance failed; the applier goes on", exc_info=True)
+
     def _run(self) -> None:
         try:
+            self._maintain(at_start=True)
             if self.kind == KIND_SERVICE:
                 self._lock.prefer()
                 self._serve()
@@ -260,6 +279,7 @@ class Applier:
             grace_until = time.monotonic() + CLI_LOCK_GRACE_SECONDS
 
     def _apply_next_or_idle(self, *, idle_seconds: float) -> bool:
+        self._maintain()
         try:
             # This process holds the applier lock, so an `applying` row belongs to an applier that is gone.
             for orphan in self.journal.applying():
