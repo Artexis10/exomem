@@ -712,3 +712,32 @@ def test_ownership_trusts_no_store_chain_that_lacks_the_recorded_head(service, m
             with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
                 read(sibling)
         assert "Independent note." in read(note)["body"]
+
+
+def test_a_proof_after_a_committed_create_routes_the_new_collection(service):
+    """Defect: a proof reuses the parse of the declarations it made before a create, so ownership keeps
+    answering for the earlier namespace and a read of the new collection falls through to its view files."""
+    root = service.root
+    assert ownership.current(root).owner(root, DAILY_PATH) is None
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+         why="second collection")
+    proof = ownership.current(root)
+    assert sorted(entry["collection_id"] for entry in proof.entries) == sorted([CID, DAILY])
+    assert proof.owner(root, DAILY_PATH)["collection_id"] == DAILY
+
+
+def test_a_proof_refuses_a_manifest_whose_text_no_longer_matches_its_hash(service):
+    """Defect: a proof trusts the parse it cached for a manifest, so text edited under its recorded hash still
+    proves ownership."""
+    root = service.root
+    assert ownership.current(root).selected(root, CID) is not None
+    with closing(sqlite3.connect(connection.store_path(root))) as raw:
+        # The store refuses this edit while its triggers stand; a tamperer with file access removes them first.
+        for (trigger,) in raw.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
+                                      "AND tbl_name='collection_manifests'").fetchall():
+            raw.execute(f'DROP TRIGGER "{trigger}"')
+        raw.execute("UPDATE collection_manifests SET manifest_text=manifest_text || ' ' WHERE collection_id=?", (CID,))
+        raw.commit()
+    with pytest.raises(OpError) as refused:
+        ownership.current(root)
+    assert refused.value.code == "COLLECTION_STORE_UNAVAILABLE"

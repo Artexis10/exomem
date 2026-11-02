@@ -6,6 +6,8 @@ import copy
 import inspect
 import json
 import sqlite3
+import threading
+from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -82,6 +84,14 @@ class Proof:
         return owner
 
 
+#: The parse of each unchanged declaration namespace, newest last. A vault holds one live namespace per
+#: fence generation, so sixteen slots also cover a revision in flight and the staging roots that
+#: portability reads; a miss costs one parse.
+_PARSED_MAX = 16
+_PARSED: OrderedDict = OrderedDict()
+_PARSED_LOCK = threading.Lock()
+
+
 def declarations(root, conn, *, generation=1):
     """Validate the complete immutable declaration namespace, also at verified ingestion boundaries."""
     sid = conn.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_STORE_ID,)).fetchone()[0]
@@ -92,19 +102,30 @@ def declarations(root, conn, *, generation=1):
     ).fetchall()
     if any(text is None or tokens.manifest_hash(text) != digest for _cid, _path, _source, _layout, text, digest in rows):
         raise unavailable()
-    # Every call rereads and rechecks the rows, so a re-proof still sees any change; within a
-    # request, the parse of an unchanged namespace is reused. Each caller gets its own marker. The
-    # vocabulary overlay is read once per request too; `finish` re-proves in a fresh scope.
-    key = (str(root), sid, generation, tuple((*row[:4], row[5]) for row in rows))
-    marker, declared = state_paths.request_memo(
-        "ownership_declarations", key, lambda: _declarations(root, sid, rows, generation))
+    # Every call rereads and rechecks the rows, so a re-proof still sees any change; only the parse of
+    # text that matched its hash is reused, across requests. Each caller gets its own marker. A Planning
+    # manifest's parse reads the vocabulary overlay, so a hit also needs the overlay it read to be current.
+    key = (str(root), vault.kb_dirname(), sid, generation, tuple((*row[:4], row[5]) for row in rows))
+    planning_values = PlanningValues(root, server_side=True)
+    with _PARSED_LOCK:
+        cached = _PARSED.get(key)
+        if cached is not None:
+            _PARSED.move_to_end(key)
+    if cached is not None and planning_values.matches(cached[2]):
+        marker, declared, _overlay = cached
+    else:
+        marker, declared = _declarations(root, sid, rows, generation, planning_values)
+        with _PARSED_LOCK:
+            _PARSED[key] = (marker, declared, planning_values.dependency)
+            _PARSED.move_to_end(key)
+            while len(_PARSED) > _PARSED_MAX:
+                _PARSED.popitem(last=False)
     return copy.deepcopy(marker), declared
 
 
-def _declarations(root, sid, rows, generation):
+def _declarations(root, sid, rows, generation, planning_values):
     entries, declarations = [], []
     # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
-    planning_values = PlanningValues(root, server_side=True)
     for cid, path, source, layout, text, _digest in rows:
         manifest = collections.parse_manifest_bytes(root, path, text.encode(), planning_values=planning_values)
         if (manifest.collection_id, manifest.storage.source, manifest.storage.strategy) != (cid, source, layout):
