@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import sensing_fixture as sf
 
-from exomem import dreamer, freshness, sensed_model, sensing_ledger, sensor_worker
+from exomem import dreamer, freshness, runtime_resources, sensed_model, sensing_ledger, sensor_worker
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,7 @@ def test_launches_only_with_every_gate_open(tmp_path: Path, monkeypatch) -> None
     assert len(launcher.children) == 1
 
 
-@pytest.mark.parametrize("reason", ["quiet_mode", "pressure", "standby", "paused", "foreground"])
+@pytest.mark.parametrize("reason", ["pressure", "standby", "paused", "off"])
 def test_a_closed_gate_kills_the_child(tmp_path: Path, monkeypatch, reason: str) -> None:
     sf.enable(monkeypatch)
     now = [1000.0]
@@ -108,6 +108,112 @@ def test_a_closed_gate_kills_the_child(tmp_path: Path, monkeypatch, reason: str)
     assert not sup.alive()
     assert _step(sup, run=False, reason=reason) == f"gate:{reason}"
     assert len(launcher.children) == 1, "no relaunch while the gate stays closed"
+
+
+PEAK = 1362 << 20
+
+
+def _record_peak(vault: Path, launcher: Launcher, sup, *, peak: int = PEAK) -> None:
+    """The newest child ends having reported `peak`, and the supervisor harvests it."""
+    child = launcher.children[-1]
+    child.write({"cpu": 5.0, "judgements": 4, "final": True, "peak_rss_bytes": peak})
+    child.exit(sensor_worker.EXIT_IDLE)
+    sup._harvest()
+
+
+@pytest.mark.parametrize("available", [PEAK, PEAK - 1, None], ids=["equal", "below", "unknown"])
+def test_a_launch_needs_available_memory_above_the_recorded_peak(
+    tmp_path: Path, monkeypatch, available
+) -> None:
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    assert _step(sup) == "launched"
+    _record_peak(vault, launcher, sup)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: available)
+    assert _step(sup) == "memory"
+    assert len(launcher.children) == 1
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK + 1)
+    assert _step(sup) == "launched"
+
+
+@pytest.mark.parametrize("available", [0, None], ids=["none_free", "unknown"])
+def test_with_no_recorded_peak_the_first_child_launches_and_measures_it(
+    tmp_path: Path, monkeypatch, available
+) -> None:
+    sf.enable(monkeypatch)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: available)
+    sup, launcher = _supervisor(tmp_path / "vault", [1000.0])
+    assert sup.peak_rss_bytes() is None
+    assert _step(sup) == "launched"
+    assert len(launcher.children) == 1
+
+
+def test_a_running_child_is_never_killed_for_memory(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    sensor_worker._write_json(
+        sensing_ledger.ledger_path(vault).with_name(sensor_worker.PEAK_FILE),
+        {"peak_rss_bytes": PEAK},
+    )
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK * 2)
+    assert _step(sup) == "launched"
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: 0)
+    assert _step(sup) == "running"
+    assert not launcher.children[0].terminated
+
+
+def test_the_recorded_peak_survives_a_restart_and_a_cut_off_child_cannot_lower_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sf.enable(monkeypatch)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: 1 << 40)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    _step(sup)
+    _record_peak(vault, launcher, sup)
+    assert sup.status()["peak_rss_bytes"] == PEAK
+    restarted, relauncher = _supervisor(vault, [2000.0])
+    assert restarted.peak_rss_bytes() == PEAK, "the next service process reads it back"
+
+    # A child killed mid model load reports a small, non-final peak: that is a
+    # lower bound, so it must not lower what a whole child needed.
+    _step(restarted)
+    relauncher.children[-1].write({"cpu": 1.0, "judgements": 0, "final": False, "peak_rss_bytes": 80 << 20})
+    assert _step(restarted, run=False, reason="standby") == "gate:standby"
+    assert restarted.peak_rss_bytes() == PEAK
+
+    # A refused child never loaded the instrument either.
+    _step(restarted)
+    refused = relauncher.children[-1]
+    refused.write({"cpu": 0.5, "judgements": 0, "final": True, "peak_rss_bytes": 90 << 20})
+    refused.exit(sensor_worker.EXIT_REFUSED)
+    _step(restarted)
+    assert restarted.peak_rss_bytes() == PEAK
+
+    # A whole child's final report replaces it, so a smaller model can lower it.
+    sf.enable(monkeypatch, sf.with_identity(revision="9"))
+    _step(restarted)
+    _record_peak(vault, relauncher, restarted, peak=PEAK // 2)
+    assert restarted.peak_rss_bytes() == PEAK // 2
+
+
+def test_the_child_reports_its_peak_memory_where_the_host_gives_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    spend_path = sensing_ledger.ledger_path(vault).with_name(sensor_worker.SPEND_FILE)
+
+    monkeypatch.setattr(runtime_resources, "peak_rss_bytes", lambda: PEAK)
+    assert sf.sense(vault, sf.StubInstrument(sf.default_table())) == sensor_worker.EXIT_IDLE
+    assert json.loads(spend_path.read_text())["peak_rss_bytes"] == PEAK
+
+    monkeypatch.setattr(runtime_resources, "peak_rss_bytes", lambda: None)
+    assert sf.sense(vault, sf.StubInstrument(sf.default_table())) == sensor_worker.EXIT_IDLE
+    assert "peak_rss_bytes" not in json.loads(spend_path.read_text())
 
 
 def test_turning_sensing_off_kills_the_child(tmp_path: Path, monkeypatch) -> None:
@@ -169,9 +275,8 @@ def test_a_refusal_suspends_relaunch_until_the_instrument_changes(
     assert _step(sup) == "launched"
 
 
-def test_the_dreamer_loop_supervises_and_polls_fast_while_a_child_lives(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_quiet_mode_leaves_the_sensor_child_running(tmp_path: Path, monkeypatch) -> None:
+    """Quiet turns off the GPU and model preload, not the CPU-only child."""
     sf.enable(monkeypatch)
     vault = tmp_path / "vault"
     seen: list[tuple[bool, str]] = []
@@ -183,7 +288,7 @@ def test_the_dreamer_loop_supervises_and_polls_fast_while_a_child_lives(
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     monkeypatch.setenv("EXOMEM_DREAMER", "on")
     dreamer._loop_once(vault, dreamer.Clock())
-    assert seen == [(False, "quiet_mode")]
+    assert seen == [(True, "ready")]
 
 
 def test_the_child_senses_only_what_the_ledger_lacks(tmp_path: Path, monkeypatch) -> None:
@@ -287,7 +392,7 @@ def test_a_living_child_is_re_gated_between_ticks_without_a_tick(
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     monkeypatch.setenv("EXOMEM_DREAMER", "on")
     assert dreamer._wait(vault, dreamer.Clock(), stop, 30.0) is True
-    assert calls[:3] == [(False, "quiet_mode")] * 3
+    assert calls[:3] == [(True, "ready")] * 3
     assert ticks == []
 
 

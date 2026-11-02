@@ -1319,6 +1319,31 @@ def test_dreamer_starts_last_and_only_when_enabled(
         readiness.reset()
 
 
+def test_a_cloud_cell_starts_the_dreamer_when_its_setting_is_on(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import dreamer, dreamer_store, state_paths
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _quiet_starters(monkeypatch, [])
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    try:
+        activation = server_runtime.LocalRuntimeActivation(vault)
+        activation.start()
+        activation._thread.join(5)
+        assert activation.dreamer is not None and dreamer.running()
+        # The worker's only file is its sidecar, under the cell's own state root.
+        dreamer.run_once(vault)
+        sidecar = dreamer_store.sidecar_path(vault)
+        assert sidecar.is_file()
+        assert sidecar.is_relative_to(state_paths.state_store_root())
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()
+
+
 def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

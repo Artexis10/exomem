@@ -376,6 +376,42 @@ def test_a_locked_sidecar_is_not_wiped(tmp_path: Path) -> None:
     assert path.exists()
 
 
+def test_a_busy_vault_in_quiet_mode_still_gets_a_tick_once_the_bound_passes(
+    tmp_path: Path, monkeypatch, recorder
+) -> None:
+    """The live service is pinned to quiet and agents call all day: the worker
+    holds for the idle preference only until the bound, then ticks."""
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    vault = _vault(tmp_path, 2)
+    skew = [0.0]
+    clock = dreamer.Clock(monotonic=lambda: time.monotonic() + skew[0])
+    with foreground_activity.foreground_scope(vault):
+        pass  # a request has just ended: busy, not idle
+
+    dreamer._loop_once(vault, clock)
+    held = dreamer.status()
+    assert (held["ticks"], held["waiting_reason"]) == (0, "foreground")
+
+    skew[0] = dreamer_policy.MAX_DEFER_SECONDS + 1.0
+    dreamer._loop_once(vault, clock)
+    assert dreamer.status()["ticks"] == 1
+    assert recorder.pages, "the tick processed pages although the vault is busy"
+
+
+def test_the_bound_counts_from_the_last_completed_tick(
+    tmp_path: Path, monkeypatch, recorder
+) -> None:
+    vault = _vault(tmp_path, 1)
+    skew = [0.0]
+    clock = dreamer.Clock(monotonic=lambda: time.monotonic() + skew[0])
+    assert dreamer.gather_signals(vault, clock).seconds_since_tick < 5.0, "from the worker's start"
+    skew[0] = 100.0
+    assert dreamer.gather_signals(vault, clock).seconds_since_tick >= 100.0
+    dreamer.run_once(vault, clock=clock)  # whatever its stop reason
+    assert dreamer.gather_signals(vault, clock).seconds_since_tick < 5.0
+
+
 def test_a_stopped_worker_never_comes_back(tmp_path: Path, monkeypatch) -> None:
     """A worker stopped mid-tick past the join timeout finishes that tick and
     exits: a later start runs a new worker, never the old one again."""
