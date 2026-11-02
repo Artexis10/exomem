@@ -7749,9 +7749,13 @@ def _source_of_part(vault_root: Path, path: str) -> str:
     A part is the Source's own text, so reading it is reading the Source: the access decision
     is the Source's, taken by the same read.
     """
-    from . import extraction_parts
+    from . import extraction_parts, memory_refs
     from .vault import parse_frontmatter, read_guarded_text
 
+    # A plain path that is not at a part's path needs no resolution here: the read resolves it
+    # once, as before parts existed. Only a ref, or a path at a part's path, is looked at first.
+    if memory_refs.parse_memory_ref(path) is None and extraction_parts.source_page_for(Path(path)) is None:
+        return path
     try:
         resolved = _resolve_memory_identifier(vault_root, path, serve_stale=True)
     except (ValueError, OSError):
@@ -7786,6 +7790,17 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     body = result.get("body")
     if not (isinstance(body, str) and "content_hash" in result):
         return _refuse_unused_offset(result, offset)
+    # Decide from what the read released before touching the file again, so an ordinary read
+    # takes exactly the one guarded read it took before parts existed.
+    released = result.get("frontmatter")
+    released = released if isinstance(released, dict) else {}
+    if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
+        return _refuse_unused_offset(result, offset)
+    if (
+        extraction_parts.count_of(released) == 1
+        and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS
+    ):
+        return _refuse_unused_offset(result, offset)
     path = str(result["path"])
     page = Path(vault_root) / path
     try:
@@ -7793,11 +7808,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
     frontmatter, stored, _ = parse_frontmatter(raw)
-    if not note_types.Basis(vault_root).selects(str(frontmatter.get("type") or "").casefold(), note_types.raw):
-        return _refuse_unused_offset(result, offset)
     first = _preserve_module().extracted_text(stored)
-    if extraction_parts.count_of(frontmatter) == 1 and len(first) <= extraction_parts.WINDOW_CHARS:
-        return _refuse_unused_offset(result, offset)
     # A read whose hash is not the file's served something other than the stored page (a
     # projected collection summary, or a page that changed meanwhile): it passes through whole.
     if content_hash(raw) != result["content_hash"]:
