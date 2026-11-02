@@ -1,6 +1,7 @@
 """The stopped-cell import boundary, with real age and invented archive bytes."""
 from __future__ import annotations
 
+import functools
 import gzip
 import hashlib
 import io
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import archive_members, cloud_import_envelope, cloud_import_job
+from exomem import archive_members, cloud_grant, cloud_import_envelope, cloud_import_job
 
 pytestmark = pytest.mark.skipif(not shutil.which("age") or not shutil.which("age-keygen"), reason="real age executables required")
 
@@ -74,6 +75,21 @@ def test_protected_import_recovers_receipt_and_never_exposes_zip(vault, tmp_path
     assert blob.exists() and archive_members.read_manifest(vault, receipt["manifest"])
     assert not (vault.parent / ".import-keys" / import_id).exists()
     assert cloud_import_job.run_import(request, vault, lambda: pytest.fail("completed replay fetched ciphertext")) == result
+
+
+def test_enforce_mode_stops_an_import_before_it_fetches_the_ciphertext(vault, tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setattr(cloud_grant, "authorize_operation", functools.partial(cloud_grant.authorize_operation, enforce=True))
+    monkeypatch.setattr(cloud_import_job, "urlopen", lambda *_args, **_kwargs: pytest.fail("the ciphertext was fetched"))
+    import_id = str(uuid.uuid4())
+    request = cloud_import_job.CloudImportRequest(import_id=import_id, cell_id=CELL, kind="adopt", declared_files=2,
+                                                  declared_bytes=999, ciphertext_bytes=10, ciphertext_sha256="0" * 64)
+    message = tmp_path / "termination.json"
+    assert cloud_import_job.main(["import", "--vault", str(vault), "--import-id", import_id,
+                                  "--request", request.model_dump_json(), "--url", "https://storage.example/import",
+                                  "--termination-log", str(message)]) == 1
+    assert json.loads(message.read_text()) == {"ok": False, "error": "IMPORT_REQUEST_INVALID"}
 
 
 @pytest.mark.parametrize("failure", ["substitute", "truncated", "wrong-cell"])
@@ -199,7 +215,9 @@ def test_command_wrong_key_reports_only_a_content_free_error(vault, tmp_path, mo
         "--termination-log", str(message)]) == 1
     assert json.loads(message.read_text()) == {"ok": False, "error": "ARCHIVE_UNDECRYPTABLE"}
     output = capsys.readouterr()
-    assert output.out == output.err == ""
+    # Beside the result, only the containment check's own content-free events reach the pod log.
+    assert output.out == "" and [line for line in output.err.splitlines()
+                                 if "event=cloud_operation_check" not in line] == []
 
 
 def test_commands_keep_identity_private_and_discard_only_the_named_import(vault, tmp_path, monkeypatch, capsys, caplog):
