@@ -7792,14 +7792,18 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
         raw, _guard = read_guarded_text(vault_root, page)
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
-    if content_hash(raw) != result["content_hash"]:
-        raise ValueError("SOURCE_CHANGED: the page changed during the read; read it again")
     frontmatter, stored, _ = parse_frontmatter(raw)
     if not note_types.Basis(vault_root).selects(str(frontmatter.get("type") or "").casefold(), note_types.raw):
         return _refuse_unused_offset(result, offset)
     first = _preserve_module().extracted_text(stored)
     if extraction_parts.count_of(frontmatter) == 1 and len(first) <= extraction_parts.WINDOW_CHARS:
         return _refuse_unused_offset(result, offset)
+    # A read whose hash is not the file's served something other than the stored page (a
+    # projected collection summary, or a page that changed meanwhile): it passes through whole.
+    if content_hash(raw) != result["content_hash"]:
+        if offset:
+            raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
+        return result
     # The served body has normalised line endings; a CRLF page is still the stored page.
     served = body.replace("\r\n", "\n")
     if served != stored.replace("\r\n", "\n") and served != provenance_module.withheld_prose(
