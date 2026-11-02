@@ -17,12 +17,17 @@ Cloud, so a response change reaches Cloud.
   knowledge the session changed (entity facets, decisions, workflow contracts)
   with the ordinary writers. Then it records the recap, links each Decided item
   to its page with `[[...]]`, and sets `about` to the pages it updated.
-- The shipped skill, the engagement reference, the `episode_memory` tool
-  description, the Stop hook episode ask and the `episode_due` advisory all
-  carry this order, in one short line where a byte ceiling applies.
+- The shipped skill, the engagement reference, the Stop hook episode ask and
+  the `episode_due` advisory all carry this order, in one short line where a
+  byte ceiling applies. The Stop hook ask makes its page step conditional on live
+  policy. A recap request alone does not authorize page edits at `off`.
+- The `episode_memory` tool description asks the agent to link each Decided item
+  to its page and points to the response's `compile` block.
 - The `record` response gets a `compile` block. It lists the pages the recap
   names, each with its update time, counts the Decided items that name no page,
-  and leads with one sentence the agent can repeat as is.
+  and leads with one sentence that states that result. Only when live policy
+  permits capture, a separate conditional `next_step` follows. Nothing asks the
+  agent to record the recap again.
 - The block names no page the caller cannot see and never counts one. A
   withheld page looks exactly like an absent one.
 
@@ -34,12 +39,12 @@ Cloud, so a response change reaches Cloud.
   `src/exomem/_hooks/exomem_capture_nudge.py`, `episode_nudge.py`, the tool
   descriptions in `operation_entries.py` and `commands.py` and the scaffold
   skill under `src/exomem/_scaffold/_Schema/`.
-- Generated: the Claude Code plugin copies, the hosted plugin renders, the
-  hosted v5 candidate, `docs/capabilities.md` and the tool surface contract.
-- The Stop hook episode ask rises from 189 to 248 bytes and its MCP block from
-  at most 310 to at most 365 bytes. The ceilings in `tests/test_nudge_diet.py`
+- Generated: the Claude Code plugin copies, the Cloud plugin packages,
+  `docs/capabilities.md` and the tool surface contract.
+- The Stop hook episode ask rises from 189 to 267 bytes and its MCP block from
+  at most 310 to at most 385 bytes. The ceilings in `tests/test_nudge_diet.py`
   rise to match.
-- The MCP `record_episode` description and its `decided` parameter grow by 149
+- The MCP `record_episode` description and its `decided` parameter grow by about 100
   bytes. The tool surface fingerprint changes, so the ChatGPT connector must
   refresh before the new text reaches it. The per-tool and total schema budgets
-  rise by 150 bytes each.
+  rise by 100 bytes each.
