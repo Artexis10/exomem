@@ -15,6 +15,7 @@ from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, 
 from pathlib import Path
 
 from .held_fs import (
+    FILE_ACCESS_MODES,
     Capabilities,
     Chunks,
     FileVersion,
@@ -441,7 +442,7 @@ class PosixHeldFilesystem(HeldFilesystem):
         create: bool = False,
         exclusive: bool = False,
     ) -> HeldResult[HeldFile]:
-        if not _leaf(leaf) or access not in {"read", "write", "mutate", "identity"}:
+        if not _leaf(leaf) or access not in FILE_ACCESS_MODES:
             return HeldResult(error=_invalid())
         if exclusive and not create:
             return HeldResult(error=HeldFsError("INVALID_INPUT", "exclusive requires create"))

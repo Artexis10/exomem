@@ -34,6 +34,7 @@ from ctypes import (
 from pathlib import Path
 
 from .held_fs import (
+    FILE_ACCESS_MODES,
     Capabilities,
     Chunks,
     FileVersion,
@@ -713,7 +714,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
         create: bool = False,
         exclusive: bool = False,
     ) -> HeldResult[HeldFile]:
-        if not _leaf(leaf) or access not in {"read", "write", "mutate", "identity"}:
+        if not _leaf(leaf) or access not in FILE_ACCESS_MODES:
             return HeldResult(error=_invalid())
         if exclusive and not create:
             return HeldResult(error=HeldFsError("INVALID_INPUT", "exclusive requires create"))

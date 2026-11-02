@@ -21,6 +21,8 @@ from typing import Generic, TypeVar
 T = TypeVar("T")
 _MISSING = object()
 PUBLISH_TEMP_PREFIX = ".exomem-held-publish-"
+# nosemgrep: ep-word-set -- the closed `file()` access modes that every backend implements.
+FILE_ACCESS_MODES = frozenset({"read", "write", "mutate", "identity"})
 # The name format that publish_temporary_name creates: the prefix and 32 hexadecimal digits.
 _PUBLISH_TEMP_RE = re.compile(rf"{re.escape(PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}", re.ASCII)
 _CAPABILITY_CACHE: dict[tuple[int, str, int, int], Capabilities] = {}
