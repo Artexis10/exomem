@@ -272,6 +272,7 @@ def build_cluster_config() -> ClusterConfig:
         media_slot_all_cells=media_slot_all_cells,
         upload_cell_ids=tuple(upload_cell_ids),
         upload_public_key=os.environ.get("CELLCTL_UPLOAD_PUBLIC_KEY", ""),
+        grant_public_key=os.environ.get("CELLCTL_GRANT_PUBLIC_KEY", ""),
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
