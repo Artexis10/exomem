@@ -263,6 +263,40 @@ def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
     assert receipts.verify_chain(vault)["valid"] is True
 
 
+def test_a_consistent_copy_without_a_local_anchor_reads_as_unanchored_but_valid(
+    vault: Path, tmp_path: Path, receipt_state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewritten chain passes every internal check, so only its anchor can differ.
+
+    `valid` stays true because a synced vault always holds instances from other
+    machines and recovery gates on it. The audit warns once per such instance.
+    """
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    own = receipts.verify_chain(vault)
+    assert own["unanchored_instances"] == 0
+    assert [item["anchored"] for item in own["instances"].values()] == [True]
+    assert audit.audit(vault, categories=["governance_receipts"]).findings == []
+
+    copy = tmp_path / "copy"
+    shutil.copytree(vault, copy)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "other-machine-state"))
+    report = receipts.verify_chain(copy)
+
+    assert report["valid"] is True
+    assert report["unanchored_instances"] == 1
+    ((instance_id, instance),) = report["instances"].items()
+    assert instance["anchored"] is False
+    (finding,) = audit.audit(copy, categories=["governance_receipts"]).findings
+    assert finding.severity == "warn"
+    assert instance_id in finding.detail and "no local anchor" in finding.detail
+    # Audit findings name vault-relative paths, which a synced copy shares.
+    assert (copy / finding.path).resolve() == Path(instance["path"]).resolve()
+    assert not Path(finding.path).is_absolute()
+
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(receipt_state_root))
+    assert receipts.verify_chain(vault)["unanchored_instances"] == 0
+
+
 def test_staged_evidence_requires_its_destination_authority(vault: Path, tmp_path: Path) -> None:
     """A copied valid chain cannot authorize restore residue under another destination."""
     receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})

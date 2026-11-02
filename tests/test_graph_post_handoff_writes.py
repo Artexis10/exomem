@@ -2196,7 +2196,15 @@ _DECLINE_REASONS = {
     ),
     "indexed_sources_differ": "same, for a caller that cannot carry a residue",
     "resolver_topology_mismatch": "the link topology is not the one published",
-    "projection_moved_during_proof": "the projection changed under the proof",
+    "projection_moved_during_proof": (
+        "the projection changed under a proof that cannot fold it, or the recall "
+        "policy moved"
+    ),
+    "sources_kept_moving": (
+        "pages kept moving through every fold round; the standby re-proves once "
+        "the graph moves again"
+    ),
+    "source_unsafe": "a page is a symlink or a hardlink, or the vault root is unsafe",
     "proof_raised": "the proof itself failed; treat as unproven",
 }
 

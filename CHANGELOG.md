@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.156.0](https://github.com/Artexis10/exomem/compare/v0.155.0...v0.156.0) (2026-11-02)
+
+
+### Features
+
+* **cloud:** report which credential a request used and check grants and destinations ([#2334](https://github.com/Artexis10/exomem/issues/2334)) ([f19d6da](https://github.com/Artexis10/exomem/commit/f19d6da4c16d00499ecb54822b6c1665f3e5b0d3))
+
+
+### Bug Fixes
+
+* **activation:** count a shared name word once in graph corroboration ([#2350](https://github.com/Artexis10/exomem/issues/2350)) ([667e477](https://github.com/Artexis10/exomem/commit/667e47775ebecfda40283a87348df34a99226e9e))
+* **benchmarks:** score both referent false-precision fields and refuse loose role bindings ([#2337](https://github.com/Artexis10/exomem/issues/2337)) ([7c2f5b5](https://github.com/Artexis10/exomem/commit/7c2f5b57f207ab880437a325adfb941241c9814e))
+* **capture:** extract the text of a captured Markdown original ([#2329](https://github.com/Artexis10/exomem/issues/2329)) ([5aa0597](https://github.com/Artexis10/exomem/commit/5aa05974fa1d642654b06cacb79682e1c4690530))
+* **governance:** answer withheld items like missing ones on link, compile and dataset doors ([#2330](https://github.com/Artexis10/exomem/issues/2330)) ([8d9b6c3](https://github.com/Artexis10/exomem/commit/8d9b6c3d049ad85237db5ac3f109c6641e5e982a))
+* **graph:** let the standby's cold proof converge under live writes ([#2343](https://github.com/Artexis10/exomem/issues/2343)) ([cc9e1e0](https://github.com/Artexis10/exomem/commit/cc9e1e0a5c51d1084589467e18e8bf9d6f684a64))
+* **hooks:** evict the oldest checkpoint sessions when the prune catalog is full ([#2341](https://github.com/Artexis10/exomem/issues/2341)) ([813d354](https://github.com/Artexis10/exomem/commit/813d354116fc67aea597b38b7769f603505bc086))
+* **latency-gate:** prepare private arms from a real vault copy ([#2347](https://github.com/Artexis10/exomem/issues/2347)) ([67a19a4](https://github.com/Artexis10/exomem/commit/67a19a4d4cb2627d332279c932b84b5cc15af335))
+* **lexstore:** defer observed rewrites so a full repair publishes under sustained imports ([#2322](https://github.com/Artexis10/exomem/issues/2322)) ([2d3e7d1](https://github.com/Artexis10/exomem/commit/2d3e7d1b0e87770a1ee16cc3201f272f86a7a81b))
+* **recall:** exempt media sidecars from the source penalty in every ranking path ([#2336](https://github.com/Artexis10/exomem/issues/2336)) ([20beb91](https://github.com/Artexis10/exomem/commit/20beb9160c79d054050fa3f8991de3f850db646e))
+* **search:** show images only when their text or picture answers the question ([#2321](https://github.com/Artexis10/exomem/issues/2321)) ([c6d3568](https://github.com/Artexis10/exomem/commit/c6d3568c5ff1592092c18f9b255ccd8d400e6a3d))
+
+
+### Performance
+
+* **collections:** bound each derived-rows hold by batch rows, not by the last pace ([#2324](https://github.com/Artexis10/exomem/issues/2324)) ([7abae22](https://github.com/Artexis10/exomem/commit/7abae22640419669a27d5877408bfcdc40430237))
+* **entity-recurrence:** serve entity_recurrence-only audits from persisted per-page evidence ([#2344](https://github.com/Artexis10/exomem/issues/2344)) ([3320926](https://github.com/Artexis10/exomem/commit/332092646f7fcc9a0e0a8694fd36a316401ff9f7))
+* **mcp:** release MCP results through one terminal filter pass, and read enrollment once per scope ([#2339](https://github.com/Artexis10/exomem/issues/2339)) ([35d3581](https://github.com/Artexis10/exomem/commit/35d35816af5c9b14ff33a3af1540374aed8daee2))
+
+## [0.155.0](https://github.com/Artexis10/exomem/compare/v0.154.0...v0.155.0) (2026-11-01)
+
+
+### Features
+
+* **activation:** let the maps turn slice read the conversation ([#2243](https://github.com/Artexis10/exomem/issues/2243)) ([6c29ea4](https://github.com/Artexis10/exomem/commit/6c29ea4904217cb6eb143b654d576a3670654be9))
+* **cloud-import:** send folders larger than a cell in windows, with window status and tool text ([#2300](https://github.com/Artexis10/exomem/issues/2300)) ([e99c8dc](https://github.com/Artexis10/exomem/commit/e99c8dc375f58acd2b229ab8c65f811b6f6a865c))
+* **cloud:** add the cell-data object-store account and the key watcher ([#2327](https://github.com/Artexis10/exomem/issues/2327)) ([4af12b8](https://github.com/Artexis10/exomem/commit/4af12b8dd5a543087b43d03c621a915d98286999))
+* **import:** make text in any encoding searchable ([#2311](https://github.com/Artexis10/exomem/issues/2311)) ([978b1e9](https://github.com/Artexis10/exomem/commit/978b1e9369e2821ccd6f3e21bf64ead7cb131c54))
+
+
+### Bug Fixes
+
+* **adoption:** find each Unicode twin as its own earlier import on a rerun ([#2314](https://github.com/Artexis10/exomem/issues/2314)) ([6aef463](https://github.com/Artexis10/exomem/commit/6aef46359c428764e72ac105fce5b952af0219d5))
+* **benchmarks:** hold organisation replay sessions until the server's warm-up is over ([#2319](https://github.com/Artexis10/exomem/issues/2319)) ([3a14ee5](https://github.com/Artexis10/exomem/commit/3a14ee5d2da071728704170149c744c328eb8994))
+* **benchmarks:** read wrapped refusals and follow the draft when seeding replay notes ([#2274](https://github.com/Artexis10/exomem/issues/2274)) ([44df21d](https://github.com/Artexis10/exomem/commit/44df21d5302830d3b5eed3726e7636e2cb8a97b9))
+* **capture:** keep a captured Source's title, kind and tags when its text is processed ([#2312](https://github.com/Artexis10/exomem/issues/2312)) ([0e54dd3](https://github.com/Artexis10/exomem/commit/0e54dd33c69c83db642c2f7bf252161748cb50d9))
+* **cloud-import:** let the CLI settle its own stalled window attempts ([#2310](https://github.com/Artexis10/exomem/issues/2310)) ([88687d0](https://github.com/Artexis10/exomem/commit/88687d0cc83cba9471dff63de3f996b9bad750d6))
+* **cloud-plugin:** keep self-hosted credential transport out of Cloud hooks ([#2309](https://github.com/Artexis10/exomem/issues/2309)) ([a702c9c](https://github.com/Artexis10/exomem/commit/a702c9c14b4a5e99e6cc8fde5997ef06d9d3013d))
+* **curation:** apply plans whose steps link to earlier steps or are approved late ([#2246](https://github.com/Artexis10/exomem/issues/2246)) ([8f5f6fd](https://github.com/Artexis10/exomem/commit/8f5f6fd7c3080ff219e5fdfd7e5e8b921293e975))
+* **curation:** refuse at proposal a step whose leaf validation blocks ([#2323](https://github.com/Artexis10/exomem/issues/2323)) ([17624b2](https://github.com/Artexis10/exomem/commit/17624b2dc353f1f0ddbb489669512feb859e184f))
+* **graph:** stop escalating a raced per-path drain to a whole-vault rebuild ([#2301](https://github.com/Artexis10/exomem/issues/2301)) ([f8ca4d8](https://github.com/Artexis10/exomem/commit/f8ca4d8e77a87068dafd67f5875e54262cf8c124))
+* **infra:** restore the HCP bootstrap escrow as Terraform state ([#2335](https://github.com/Artexis10/exomem/issues/2335)) ([739f5a4](https://github.com/Artexis10/exomem/commit/739f5a4452da27d6355a385661989ce16e67ed1c))
+* **lexstore:** count every registry spelling of a page in the census ([#2299](https://github.com/Artexis10/exomem/issues/2299)) ([b50c74b](https://github.com/Artexis10/exomem/commit/b50c74b9a0922c4535d71acb12372a71492710e9))
+* **locks:** keep reads off the reserved-identity gate and name the lock that refused ([#2320](https://github.com/Artexis10/exomem/issues/2320)) ([87fc9a6](https://github.com/Artexis10/exomem/commit/87fc9a68256a057a597fb761a2d1b5a1e45ac9a6))
+* **writes:** retry a write whose navigation changed while it waited, and keep waiter slots for requests ([#2297](https://github.com/Artexis10/exomem/issues/2297)) ([161fac7](https://github.com/Artexis10/exomem/commit/161fac78d794351a3f7548a5ad17a30d20007cf5))
+* **writes:** retry the writer resolver corpus proof once when a write lands during it ([#2307](https://github.com/Artexis10/exomem/issues/2307)) ([1b0df3e](https://github.com/Artexis10/exomem/commit/1b0df3e2996a3d6e7e44981fa380aaab40d0d2fc))
+
+
+### Performance
+
+* **collections:** shorten replica publication steps without weakening fencing ([#2232](https://github.com/Artexis10/exomem/issues/2232)) ([22162fe](https://github.com/Artexis10/exomem/commit/22162fe6d466a814d5f0daaa6624b6eed8557503))
+* **drain:** take the mutation boundary once per phase and re-prove only batches that still hold a moved page ([#2298](https://github.com/Artexis10/exomem/issues/2298)) ([af60383](https://github.com/Artexis10/exomem/commit/af603838d3fad44e08ea6576b1f416f868851377))
+* **query:** bound a descending page's private copy to the request's window ([#2306](https://github.com/Artexis10/exomem/issues/2306)) ([2904188](https://github.com/Artexis10/exomem/commit/2904188de7ac914d06d6a44c5ef1cc0300d8ca07))
+* **recall:** rank carries from kept page terms and key statistics on page bytes ([#2237](https://github.com/Artexis10/exomem/issues/2237)) ([d0f73f7](https://github.com/Artexis10/exomem/commit/d0f73f75d7b28c4c6b9547d0de38a4d71cabcb01))
+
 ## [0.154.0](https://github.com/Artexis10/exomem/compare/v0.153.1...v0.154.0) (2026-11-01)
 
 

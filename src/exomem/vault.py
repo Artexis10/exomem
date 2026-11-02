@@ -1173,6 +1173,19 @@ class BatchWriteError(ValueError):
         return type(self), (self.code, self.summary, self.committed)
 
 
+#: The codes a `PathGuardError` carries, a closed set this module raises. A
+#: caller that branches on a code compares against these names. The raise
+#: sites below still spell the same strings out.
+PATH_GUARD_CHANGED = "PATH_GUARD_CHANGED"
+PATH_GUARD_CONTENT = "PATH_GUARD_CONTENT"
+PATH_GUARD_INVALID = "PATH_GUARD_INVALID"
+PATH_GUARD_IO = "PATH_GUARD_IO"
+PATH_GUARD_LIMIT = "PATH_GUARD_LIMIT"
+PATH_GUARD_ROOT = "PATH_GUARD_ROOT"
+PATH_GUARD_TARGET = "PATH_GUARD_TARGET"
+PATH_GUARD_UNSAFE = "PATH_GUARD_UNSAFE"
+
+
 @dataclass
 class PathGuardError(ValueError):
     code: str
@@ -6491,6 +6504,18 @@ def _write_target_withheld(vault_root: Path, resolved: Path, vault_resolved: Pat
     return egress.write_target_withheld(vault_root, rel)
 
 
+def missing_path_reason(path: str) -> str:
+    """The NOT_FOUND text for a vault path that does not exist.
+
+    It names the path as the caller typed it, normalised as `resolve_under_vault`
+    normalises it, never the resolved spelling: the two differ only for a file
+    that exists, so a door that refuses a withheld file with this text answers
+    exactly as for an absent one.
+    """
+    requested = str(path).strip().replace("\\", "/").lstrip("/")
+    return f"path does not exist: {requested}"
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -6577,10 +6602,7 @@ def resolve_under_vault(
         not candidate.exists()
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
     ):
-        raise VaultPathError(
-            code="NOT_FOUND",
-            reason=f"path does not exist: {rel}",
-        )
+        raise VaultPathError(code="NOT_FOUND", reason=missing_path_reason(rel))
     if must_be_file and candidate.exists() and not candidate.is_file():
         raise VaultPathError(
             code="NOT_A_FILE",
@@ -6940,7 +6962,7 @@ def yaml_flow_list(values: Iterable[Any]) -> str:
 def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
     """Return the scanner protocol's "dir", "md", or None for one entry."""
     try:
-        relative = child.relative_to(vault_root).as_posix()
+        relative = relative_posix(child, vault_root)
     except ValueError:
         return None
     if reserved_paths.classify_logical(relative).blocked:
@@ -6971,6 +6993,20 @@ def walk_vault_md_admits(
     from .find_corpus import walk_entry_admits
 
     return walk_entry_admits(vault_root, path, listings, _walk_vault_md_entry)
+
+
+def relative_posix(path: Path, anchor: Path) -> str:
+    """`path.relative_to(anchor).as_posix()`, cheaply for a path a walk built under `anchor`.
+
+    `relative_to` builds every parent of `path` to test containment, which dominates
+    a whole-vault walk. A walk's child spells its anchor exactly, so slicing the
+    string gives the same answer; any other path takes `relative_to` itself.
+    """
+    text, base = str(path), str(anchor)
+    if base and not base.endswith(os.sep) and text.startswith(base + os.sep):
+        relative = text[len(base) + 1 :]
+        return relative if os.sep == "/" else relative.replace(os.sep, "/")
+    return path.relative_to(anchor).as_posix()
 
 
 def walk_vault_md(vault_root: Path):
@@ -8175,6 +8211,11 @@ def normalize_wikilink(
     return canonical, warning
 
 
+def wikilink_page_key(page: str) -> str:
+    """A link's page part as resolution keys it: no `.md`, no edge blanks or slashes."""
+    return page.removesuffix(".md").strip().strip("/")
+
+
 def _normalize_wikilink(
     target: str,
     vault_root: Path,
@@ -8188,7 +8229,7 @@ def _normalize_wikilink(
     """Normalize a link and retain the physical owner for internal consumers."""
 
     cleaned, anchor = split_wikilink_target(target)
-    cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    cleaned = wikilink_page_key(cleaned)
     if not cleaned:
         if strict:
             raise UnresolvedWikilinkError(f"empty wikilink target: {target!r}")

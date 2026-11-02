@@ -71,7 +71,9 @@ def worker(root, socket_path, standby=False):
                 pass
 
             def adopt_published_snapshot(self, **_kwargs):
-                return epistemic_graph.SnapshotAdoption(True, reason="adopted")
+                return epistemic_graph.SnapshotAdoption(
+                    True, reason="adopted", proved_token="fixture-checkpoint"
+                )
 
         epistemic_graph.EpistemicGraphIndex = _AdoptedIndex
         service_standby.snapshot_token = lambda _root: "fixture-checkpoint"

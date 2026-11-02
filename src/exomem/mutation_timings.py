@@ -57,6 +57,11 @@ class MutationTimings:
     def error(self, name: str, exc: BaseException) -> None:
         self.stages.setdefault(name, {})["error"] = type(exc).__name__
 
+    def absorb(self, prefix: str, other: MutationTimings) -> None:
+        """Keep the stages of a nested collector under `prefix.`."""
+        for name, entry in other.stages.items():
+            self.stages[f"{prefix}.{name}"] = dict(entry)
+
     def emit_call_spans(self) -> None:
         """Attribute the collected stages to the in-flight MCP call.
 

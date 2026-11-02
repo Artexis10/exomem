@@ -4509,6 +4509,21 @@ def test_coordination_status_is_a_read_only_public_command() -> None:
         assert command.read_only
 
 
+def test_coordination_status_shows_lock_contention_to_the_owner_only(vault: Path) -> None:
+    """Refusal counts and the last holder's operation say when and how the owner writes."""
+    from exomem import commands
+    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+
+    with library_scope():
+        owner = commands.op_coordination_status(vault)
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        guest = commands.op_coordination_status(vault)
+
+    assert "contention" in owner["mutation_boundary"]
+    assert "contention" not in guest["mutation_boundary"]
+    assert guest["mutation_boundary"]["state"] == owner["mutation_boundary"]["state"]
+
+
 def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: Path) -> None:
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
     vault = tmp_path / "private-vault"
@@ -4602,6 +4617,19 @@ def test_idle_release_config_defaults_to_60_seconds() -> None:
         }
     )
     assert config.idle_release_seconds == 60.0
+
+
+def test_single_host_keeps_an_idle_lease_unless_an_idle_period_is_set() -> None:
+    single_host = {
+        "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+        "EXOMEM_WRITER_LEASE_URL": "http://127.0.0.1:8766",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+    }
+    assert LeaseConfig.from_env(single_host).idle_release_seconds == 0.0
+    assert LeaseConfig.from_env(
+        {**single_host, "EXOMEM_WRITER_LEASE_IDLE_SECONDS": "60"}
+    ).idle_release_seconds == 60.0
 
 
 def test_idle_release_config_zero_disables_and_is_valid() -> None:

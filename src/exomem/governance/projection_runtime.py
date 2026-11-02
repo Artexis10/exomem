@@ -1185,8 +1185,10 @@ def _projected_rank_multiplier(
     """
 
     multiplier = 1.0
-    if prefer_compiled and not fields.get("media_type"):
-        multiplier *= find_policy.type_multiplier(fields.get("type"), config, type_basis)
+    if prefer_compiled:
+        multiplier *= find_policy.page_type_factor(
+            fields.get("type"), fields.get("media_type"), config, type_basis
+        )
     if prefer_active:
         multiplier *= find_policy.status_multiplier(
             status_basis.classify(fields.get("status")).require(), config

@@ -2002,6 +2002,10 @@ class LeaseConfig:
                     "WRITER_LEASE_CONFIG: EXOMEM_WRITER_LEASE_IDLE_SECONDS must be 0 (disabled) "
                     "or >= EXOMEM_WRITER_LEASE_TTL"
                 )
+        elif topology == "single-host":
+            # No other replica can reach a literal loopback coordinator, so an idle
+            # release hands authority to nobody and the next read pays a takeover.
+            idle_release_seconds = 0.0
         else:
             # The default tracks the TTL so raising EXOMEM_WRITER_LEASE_TTL
             # alone can never trip the idle>=ttl validation and brick startup.
@@ -8141,7 +8145,7 @@ def _invocation_provenance(
     """Give each dispatched command one record of what it served, for its own guard passes only.
 
     Outermost, so a store-routed call fills the same record from the store's thread. Under the
-    MCP surface this joins the record that the surface opened for its second pass.
+    MCP surface this joins the record that the surface opened.
     """
     @wraps(function)
     def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
@@ -8244,10 +8248,11 @@ def _restricted_refusal_floor(
     A missing page refuses before any page is read, while a withheld one is
     read and decided first. Padding every refusal that a restricted caller
     receives to one floor removes that difference. A success returns at once,
-    notices included. The restriction is asked only after a refusal, so a
-    success never pays for the question. Behind an MCP or REST surface the
-    surface waits, after its own handling of the refusal; elsewhere this
-    thread waits.
+    notices included, unless the command asked for the floor through
+    `projection_timing.floor_restricted_outcome`. The restriction is asked
+    only after a refusal, so a success never pays for the question. Behind an
+    MCP or REST surface the surface waits, after its own handling of the
+    refusal; elsewhere this thread waits.
     """
 
     @wraps(function)
@@ -8258,16 +8263,29 @@ def _restricted_refusal_floor(
             or not isinstance(injected[0], (str, os.PathLike))
         ):
             return function(command, *injected, **kwargs)
-        from .governance import policy
+        from .commands import invocation_is_read_only
+        from .governance import policy, projection_timing
+        from .governance.egress import SelectorCoverageError
 
         started_at = time.perf_counter()
-        # A direct read changes no governance, so it decides under one policy load.
-        with policy.request_policy_snapshot():
+        try:
+            read_only = invocation_is_read_only(command, kwargs)
+        except SelectorCoverageError:
+            read_only = False  # the dispatcher sends it down the writer path too
+        # A read changes no governance, so it decides under one policy load. A
+        # write must see the policy it finds, so it opens no snapshot.
+        with (
+            policy.request_policy_snapshot() if read_only else nullcontext(),
+            projection_timing.floored_outcome_scope() as outcome,
+        ):
             try:
-                return function(command, *injected, **kwargs)
+                result = function(command, *injected, **kwargs)
             except Exception as error:
                 _complete_restricted_refusal(Path(injected[0]), started_at, error)
                 raise
+        if outcome.requested:
+            _hold_to_refusal_floor(started_at)
+        return result
 
     return wrapped
 
@@ -8275,7 +8293,7 @@ def _restricted_refusal_floor(
 def _complete_restricted_refusal(
     vault_root: Path, started_at: float, error: BaseException
 ) -> None:
-    from .governance import egress, projection_timing
+    from .governance import egress
 
     try:
         restricted = egress.caller_restricted(vault_root)
@@ -8292,6 +8310,13 @@ def _complete_restricted_refusal(
         seen.add(id(chained))
         traceback.clear_frames(chained.__traceback__)
         chained = chained.__cause__ or chained.__context__
+    _hold_to_refusal_floor(started_at)
+
+
+def _hold_to_refusal_floor(started_at: float) -> None:
+    """Complete no sooner than the floor after `started_at`, on the surface if one waits."""
+    from .governance import projection_timing
+
     padding_started = time.perf_counter()
     work_ms = (padding_started - started_at) * 1000.0
     deferred = projection_timing.defer_refusal_floor(started_at)
@@ -8461,7 +8486,7 @@ def invoke_command(
         kwargs = normalize_edit_surface_arguments(kwargs)
 
     # Terminal egress filter (design D1). THIS is the one dispatcher shared by
-    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
+    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` serves MCP
     # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.
