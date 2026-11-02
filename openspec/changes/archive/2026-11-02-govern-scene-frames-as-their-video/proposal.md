@@ -6,9 +6,9 @@ A scene-frame page holds text taken from its video, such as a description of the
 
 - A scene-frame page belongs to its own scopes and to its video's. A decision takes the most restrictive of an item's scopes, so the added scopes can only narrow who reads a frame, and a page that claims a parent gains nothing.
 - A page takes its video's scopes only when its path shape and its `parent_media` field agree.
-- A projected catalog row of a frame holds the video's scopes as of the frame's publication. A later change to the video's membership reaches the frame's row only when the frame is published again.
+- A projected catalog row of a frame holds the video's scopes as of the frame's publication. A later change to the video's membership reaches the frame's row only when the frame is published again. A row published before this change keeps only the frame's own scopes until the frame is published again or the owner refreshes the projection.
 
 ## Impact
 
-- Code: `src/exomem/governance/membership.py`.
+- Code: `src/exomem/governance/membership.py`, `src/exomem/governance/lifecycle.py` (recovery treats an unresolved item as governed, as deletion does).
 - Specs: `governance-kernel`.

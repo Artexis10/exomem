@@ -1169,7 +1169,7 @@ batch without publishing a new active catalog or overwriting that file.
 
 ### Requirement: A scene frame is also governed by its video
 
-A scene-frame page SHALL belong to its own scopes and to the scopes of its video's Source page. A page SHALL take its video's scopes only when its `parent_media` field names the parent and the page sits in that parent's canonical `<parent-media>.frames/` directory. When the video's Source page cannot be read, the frame's membership SHALL be unresolved and fail closed. Live evaluation SHALL read the video's current membership. A governed projection catalog row of a frame SHALL hold the video's scopes as of the frame's publication.
+A scene-frame page SHALL belong to its own scopes and to the scopes of its video's Source page. A page SHALL take its video's scopes only when its `parent_media` field names the parent and the page sits in that parent's canonical `<parent-media>.frames/` directory. When the video's Source page cannot be read, the frame's membership SHALL be unresolved and fail closed. Live evaluation SHALL read the video's current membership. A governed projection catalog row of a frame published after this rule SHALL hold the video's scopes as of the frame's publication. A row published before this rule SHALL keep only the frame's own scopes until the frame is published again or the owner refreshes the projection.
 
 #### Scenario: A frame belongs to the scopes of its video
 - **WHEN** a governance scope selects a video's Source page by its stable identifier
