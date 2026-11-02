@@ -5,13 +5,23 @@ noun for what it hands the agent) off the interactive path. This module decides
 WHEN it may work and HOW MUCH, and nothing else: `decide` maps one snapshot of
 cheap probes to a `Decision`, with no I/O, no clock of its own and no state.
 
-The rule is strict priority. Upkeep is the least important work in the
-service: a person mid-conversation, a write burst, graph convergence and a
-derived-index backlog all outrank it, and nothing online ever waits for it. So
-there is deliberately no max-wait. The graph drain needs one because readers
-wait on graph convergence; a dreamer starved by continuous use simply runs at
-night, and the worker reports the blocking signal and `waiting_since` so the
-starvation is visible rather than silent.
+The rule. Upkeep is the least important work in the service, so a live
+foreground request, graph convergence and a derived-index backlog always
+outrank it, and nothing online ever waits for it. A tick may not start while a
+request is live, whatever the compute mode: quiet mode keeps the GPU and model
+preload off, and leaves this deterministic CPU work running. Two preferences,
+a service idle for `IDLE_SECONDS` and a vault settled for `settle_seconds`,
+choose a good moment to start. On a vault that is never idle they may hold a
+tick at most `MAX_DEFER_SECONDS` since the last completed tick, so upkeep
+cannot go stale without bound. A tick that starts under a busy vault stays
+safe because it yields per page: it stops before the next page on the first
+foreground request or vault change. The worker reports the blocking signal and
+`waiting_since`, so a hold is visible rather than silent.
+
+The sensor child has its own gate (`sensor_gate`): the operator's posture and
+host pressure only. It runs in its own process at the lowest priority, with
+its own CPU and memory budgets, so the tick's idle and graph holds do not
+apply to it.
 
 Every number states what it prevents. Constants live here with no environment
 knob: a tunable nobody reviews is a control nobody can reason about.
@@ -30,6 +40,12 @@ DEFAULT_SETTING = "off"
 #: Seconds since the last foreground request before a tick may start. Prevents
 #: competing with a person mid-conversation.
 IDLE_SECONDS = 60.0
+
+#: The longest the idle and settle preferences may hold a tick, counted from the
+#: last completed tick (the worker's start before the first). Prevents upkeep
+#: from going stale without bound on a vault that is never idle; a live request
+#: and every hard gate still hold it, and the tick yields to a request per page.
+MAX_DEFER_SECONDS = 60.0
 
 #: The floor of the quiet window after any vault change. The window is the
 #: longer of this and the last whole-vault graph pass, so graph repair always
@@ -89,6 +105,9 @@ class TickSignals:
     hour_cpu_used: float
     consecutive_failures: int
     seconds_since_failure: float | None
+    #: Seconds since the last completed tick, or since the worker started before
+    #: the first one; the worker supplies it. None reads as "no bound reached".
+    seconds_since_tick: float | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +182,8 @@ def decide(signals: TickSignals) -> Decision:
 
     Checked in a fixed order so the reported reason is stable: operator
     posture first, then host posture, then the foreground, then the vault and
-    the graph, then the dreamer's own budgets.
+    the graph, then the dreamer's own budgets. Only the idle and settle
+    preferences yield to `MAX_DEFER_SECONDS`; every other gate stays hard.
     """
     if signals.setting not in {"on", "paused"}:
         return _wait("off")
@@ -171,17 +191,21 @@ def decide(signals: TickSignals) -> Decision:
         return _wait("paused")
     if signals.standby:
         return _wait("standby")
-    if signals.compute_mode == "quiet":
-        return _wait("quiet_mode")
     if signals.pressure is True:
         return _wait("pressure")
-    if signals.idle_seconds < IDLE_SECONDS:
-        return _wait("foreground", IDLE_SECONDS - signals.idle_seconds)
+    if signals.idle_seconds <= 0.0:
+        # A request is live: the one hold no bound waives.
+        return _wait("foreground", IDLE_SECONDS)
     if not signals.freshness_live:
         return _wait("freshness_unavailable")
-    settle = settle_seconds(signals.last_whole_vault_pass)
-    if signals.vault_quiet_seconds < settle:
-        return _wait("settling", settle - signals.vault_quiet_seconds)
+    # None reads as "not reached" (the earlier, stricter rule).
+    left = MAX_DEFER_SECONDS - (signals.seconds_since_tick or 0.0)
+    if left > 0.0:
+        if signals.idle_seconds < IDLE_SECONDS:
+            return _wait("foreground", min(IDLE_SECONDS - signals.idle_seconds, left))
+        settle = settle_seconds(signals.last_whole_vault_pass)
+        if signals.vault_quiet_seconds < settle:
+            return _wait("settling", min(settle - signals.vault_quiet_seconds, left))
     if signals.graph_debt:
         return _wait("graph_debt")
     if signals.full_upsert_backlog > 0:
@@ -194,3 +218,23 @@ def decide(signals: TickSignals) -> Decision:
         if since is None or since < backoff:
             return _wait("backoff", backoff - (since or 0.0))
     return Decision(True, "ready", PAGES_PER_TICK, 0.0)
+
+
+def sensor_gate(signals: TickSignals) -> Decision:
+    """Whether the sensor child may run now, and why not when it may not.
+
+    The operator's posture and host pressure only. The child is a separate
+    CPU-only process at the lowest priority with its own CPU, judgement and
+    memory budgets, so quiet mode, the foreground, a settling vault, graph debt,
+    an index backlog and the tick's own CPU budget do not stop it. A pressure
+    probe that was not gathered (None) reads as no pressure.
+    """
+    if signals.setting not in {"on", "paused"}:
+        return _wait("off")
+    if signals.setting == "paused":
+        return _wait("paused")
+    if signals.standby:
+        return _wait("standby")
+    if signals.pressure is True:
+        return _wait("pressure")
+    return Decision(True, "ready", 0, 0.0)
