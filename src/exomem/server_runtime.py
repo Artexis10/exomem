@@ -1097,8 +1097,8 @@ def _start_dreamer(vault_root: Path) -> Any | None:
     """Start the default-off upkeep worker, or nothing.
 
     The local service and a cloud cell start it the same way, when the setting
-    (`EXOMEM_DREAMER`) is on. The worker reads and writes only its own sidecar
-    under the process's state root, so a cell's worker stays inside that cell.
+    (`EXOMEM_DREAMER`) is on. The worker writes only its own sidecar under the
+    process's state root, so a cell's worker stays inside that cell.
     """
     from . import dreamer
 
