@@ -68,6 +68,8 @@ def build_secrets_config() -> SecretsConfig:
         cell_token_key_previous_version=int(previous_version_raw) if previous_version_raw else None,
         backup_master_keys=_versioned_keys_env("CELLCTL_BACKUP_MASTER_KEYS"),
         backup_master_key_current_version=int(os.environ["CELLCTL_BACKUP_MASTER_KEY_CURRENT_VERSION"]),
+        staging_key_id=os.environ["CELLCTL_CELL_DATA_STAGING_KEY_ID"],
+        staging_application_key=os.environ["CELLCTL_CELL_DATA_STAGING_APPLICATION_KEY"],
     )
 
 
@@ -253,6 +255,9 @@ def build_cluster_config() -> ClusterConfig:
     return ClusterConfig(
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
+        cell_data_backup_bucket=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME"],
+        cell_data_staging_bucket=os.environ["CELLCTL_CELL_DATA_STAGING_BUCKET_NAME"],
+        cell_data_endpoint=os.environ["CELLCTL_CELL_DATA_ENDPOINT"],
         key_retention_sources=_retention_sources(),
         resources=ResourceSettings(
             cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
@@ -304,12 +309,14 @@ def run() -> None:
 
     cluster_config = build_cluster_config()
     cluster = ClusterClient(k8s.ApiClient(), storage_config=cluster_config.storage)
-    object_storage = B2ObjectStorage(
+    # D9: cellctl holds no key that creates, lists or deletes an application key, and no bucket-wide
+    # founder credential; a pre-switch cell's stored prefix key stays until it migrates. The cell-data
+    # key only lists the locked backup bucket.
+    backup_listing = B2ObjectStorage(
         B2Config(
-            key_management_key_id=os.environ["CELLCTL_B2_KEY_MANAGEMENT_KEY_ID"],
-            key_management_application_key=os.environ["CELLCTL_B2_KEY_MANAGEMENT_APPLICATION_KEY"],
-            bucket_id=os.environ["CELLCTL_B2_BUCKET_ID"],
-            account_id=os.environ["CELLCTL_B2_ACCOUNT_ID"],
+            key_id=os.environ["CELLCTL_CELL_DATA_BACKUP_LIST_KEY_ID"],
+            application_key=os.environ["CELLCTL_CELL_DATA_BACKUP_LIST_APPLICATION_KEY"],
+            bucket_id=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_ID"],
         )
     )
     volume_provider = HetznerVolumeProvider(read_only_token=os.environ["CELLCTL_HETZNER_READ_TOKEN"])
@@ -318,12 +325,12 @@ def run() -> None:
         run_loop(
             os.environ["CELLCTL_DATABASE_DSN"],
             cluster,
-            object_storage,
             volume_provider,
             build_secrets_config(),
             cluster_config,
             config=build_reconcile_config(),
             heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
+            backup_listing=backup_listing,
         )
     )
 

@@ -156,6 +156,41 @@ class ActivationCensus:
         object.__setattr__(census, "paths_by_id", self.paths_by_id)
         return census
 
+    def _with_delta(
+        self, upserts: Iterable[ActivationCandidate], removed: Iterable[str]
+    ) -> ActivationCensus | None:
+        """Apply a page delta, validating only the upserted candidates.
+
+        Returns None for a subclass or a foreign candidate type, so the caller
+        falls back to a full census build.
+        """
+        if type(self) is not ActivationCensus:
+            return None
+        upserts = tuple(upserts)
+        if any(type(item) is not ActivationCandidate for item in (*upserts, *self.candidates)):
+            return None
+        by_path = dict(self.by_path)
+        for path in removed:
+            by_path.pop(path, None)
+        for index, candidate in enumerate(upserts):
+            _validate_candidate(candidate, index=index)
+            by_path[candidate.rel_path] = candidate
+        # `__post_init__` sorts by path and lists ids in that order; so do we.
+        candidates = tuple(by_path[path] for path in sorted(by_path))
+        id_paths: dict[str, list[str]] = {}
+        for candidate in candidates:
+            if candidate.normalized_id is not None:
+                id_paths.setdefault(candidate.normalized_id, []).append(candidate.rel_path)
+        census = object.__new__(ActivationCensus)
+        object.__setattr__(census, "candidates", candidates)
+        object.__setattr__(census, "by_path", MappingProxyType(by_path))
+        object.__setattr__(
+            census,
+            "paths_by_id",
+            MappingProxyType({key: tuple(paths) for key, paths in sorted(id_paths.items())}),
+        )
+        return census
+
     def unique_path_for_id(self, normalized_id: str) -> str | None:
         paths = self.paths_by_id.get(normalized_id, ())
         return paths[0] if len(paths) == 1 else None

@@ -19,7 +19,7 @@ from botocore.config import Config
 from cellctl.imports import ImportRow
 from cellctl.manifests import JOB_KIND_LABEL, namespace_name
 
-from .infra import BACKUP_BUCKET, ObjectStore, docker_labels
+from .infra import BACKUP_BUCKET, STAGING_BUCKET, ObjectStore, docker_labels
 from .report import StepFailure, guarded
 from .shell import run, wait_for
 from .substrate import MCP_URL, PUBLIC_BASE_URL
@@ -100,9 +100,10 @@ def _storage(store: ObjectStore):
 def enable_versioning(store: ObjectStore) -> None:
     client = _storage(store)
     wait_for(lambda: client.list_buckets() is not None, timeout=60, description="verified TLS storage")
-    client.put_bucket_versioning(Bucket=BACKUP_BUCKET, VersioningConfiguration={"Status": "Enabled"})
-    if client.get_bucket_versioning(Bucket=BACKUP_BUCKET).get("Status") != "Enabled":
-        raise StepFailure("the rehearsal storage did not enable versioning")
+    for bucket in (BACKUP_BUCKET, STAGING_BUCKET):
+        client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+        if client.get_bucket_versioning(Bucket=bucket).get("Status") != "Enabled":
+            raise StepFailure("the rehearsal storage did not enable versioning")
 
 
 @dataclass
@@ -283,9 +284,9 @@ async def _import_folder(ctx: Context, image: str) -> dict:
         raise StepFailure("temporary identities, staging or native checkpoint material remain")
     resources = ctx.kube_json("get", "jobs,pods", "--namespace", namespace, "--selector", f"{JOB_KIND_LABEL}=import")["items"]
     storage = _storage(ctx.stack.object_store)
-    versions = [entry for page in storage.get_paginator("list_object_versions").paginate(Bucket=BACKUP_BUCKET, Prefix=item.key)
+    versions = [entry for page in storage.get_paginator("list_object_versions").paginate(Bucket=STAGING_BUCKET, Prefix=item.key)
                 for entry in page.get("Versions", []) + page.get("DeleteMarkers", [])]
-    uploads = [entry for page in storage.get_paginator("list_multipart_uploads").paginate(Bucket=BACKUP_BUCKET, Prefix=item.key)
+    uploads = [entry for page in storage.get_paginator("list_multipart_uploads").paginate(Bucket=STAGING_BUCKET, Prefix=item.key)
                for entry in page.get("Uploads", [])]
     if resources or versions or uploads:
         raise StepFailure("import phase resources or encrypted transport remain after C5 completion")

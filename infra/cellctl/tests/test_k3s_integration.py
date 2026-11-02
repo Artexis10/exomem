@@ -26,11 +26,13 @@ report:
   disposable storage CA added to its certificate bundle.
 - Object storage: a real MinIO container (Chainguard's build) stands in for
   B2's S3-compatible endpoint per the D8 amendment, so the backup/restore
-  Jobs' restic calls are genuinely live. B2's own application-key management
-  (create/delete/list, prefix restriction) stays on the already-tested
-  in-process FakeB2, configured to hand out MinIO's one root credential as
-  every "created" key's id/secret -- MinIO plays the network protocol, not
-  B2's per-key security model, which stays covered by test_storage_fakes.py.
+  Jobs' restic calls are genuinely live. MinIO's one root credential plays
+  cellctl's staging key and, in the cell's `cell-object-store-key` Secret
+  (written under the real key custodian service account, not by cellctl),
+  the cell's backup key -- MinIO plays the network protocol, not B2's
+  per-key security model. The custodian's own B2 key calls are covered by
+  test_custodian.py; cellctl's one B2 call, the locked bucket's listing, is
+  not made here.
 - Hetzner volumes: the already-tested in-process FakeHetznerVolumeProvider
   (no real Hetzner account is ever contacted).
 - StorageClass: the platform chart's rendered `exomem-cloud-encrypted`
@@ -90,12 +92,14 @@ from cellctl.manifests import (
     JOB_KIND_BACKUP,
     JOB_KIND_LABEL,
     JOB_KIND_RESTORE,
+    OBJECT_STORE_KEY_ID_FIELD,
+    OBJECT_STORE_KEY_SECRET,
+    OBJECT_STORE_KEY_SECRET_FIELD,
     ROW_GENERATION_ANNOTATION,
     hold_job_name,
     namespace_name,
 )
 from cellctl.reconcile import ClusterConfig, SecretsConfig, reconcile_once
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .conftest import CellDatabase
@@ -124,6 +128,8 @@ MINIO_IMAGE = "chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2
 MINIO_ACCESS_KEY = "cellctltest"
 MINIO_SECRET_KEY = "cellctltestsecret1"
 BUCKET_NAME = "exomem-cloud-backups"
+# The identity the platform chart gives the key custodian (templates/key-custodian.yaml).
+CUSTODIAN_USERNAME = "system:serviceaccount:exomem-key-custody:key-custodian"
 
 # Short but real deadlines so the live test exercises the actual D6/D8 timeout
 # branches without waiting on the 30/15-minute readiness and backup production defaults.
@@ -602,20 +608,23 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
                     cell_id, tenant_id))
     asyncio.run(sql("INSERT INTO exomem_cloud_settings(key,value) VALUES('cell_image',$1) "
                     "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", json.dumps(image)))
+    # MinIO's one root credential plays the cell-data staging key cellctl holds for exports and imports.
     secrets = SecretsConfig(cell_token_key_current=b"k3s-integration-test-current-key-32b!",
                             cell_token_key_previous=None, cell_token_key_version=1,
                             cell_token_key_previous_version=None, backup_master_keys={1: b"0" * 32},
-                            backup_master_key_current_version=1)
+                            backup_master_key_current_version=1,
+                            staging_key_id=MINIO_ACCESS_KEY, staging_application_key=MINIO_SECRET_KEY)
     cluster_config = ClusterConfig(object_storage_bucket=BUCKET_NAME,
                                     object_storage_endpoint=import_storage["endpoint"],
+                                    cell_data_backup_bucket=BUCKET_NAME, cell_data_staging_bucket=BUCKET_NAME,
+                                    cell_data_endpoint=import_storage["endpoint"],
                                     capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5))
-    fake_b2 = FakeB2(fixed_credentials=(MINIO_ACCESS_KEY, MINIO_SECRET_KEY))
     volumes = FakeHetznerVolumeProvider()
 
     async def step():
         connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
         try:
-            await reconcile_once(connection, cluster, fake_b2, volumes, secrets, cluster_config,
+            await reconcile_once(connection, cluster, volumes, secrets, cluster_config,
                                  config=LIVE_CONFIG)
         finally:
             await connection.close()
@@ -893,20 +902,23 @@ def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
                     cell_id, tenant_id))
     asyncio.run(sql("INSERT INTO exomem_cloud_settings(key,value) VALUES('cell_image',$1) "
                     "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", json.dumps(image)))
+    # MinIO's one root credential plays the cell-data staging key cellctl holds for exports and imports.
     secrets = SecretsConfig(cell_token_key_current=b"k3s-integration-test-current-key-32b!",
                             cell_token_key_previous=None, cell_token_key_version=1,
                             cell_token_key_previous_version=None, backup_master_keys={1: b"0" * 32},
-                            backup_master_key_current_version=1)
+                            backup_master_key_current_version=1,
+                            staging_key_id=MINIO_ACCESS_KEY, staging_application_key=MINIO_SECRET_KEY)
     cluster_config = ClusterConfig(object_storage_bucket=BUCKET_NAME,
                                     object_storage_endpoint=import_storage["endpoint"],
+                                    cell_data_backup_bucket=BUCKET_NAME, cell_data_staging_bucket=BUCKET_NAME,
+                                    cell_data_endpoint=import_storage["endpoint"],
                                     capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5))
-    fake_b2 = FakeB2(fixed_credentials=(MINIO_ACCESS_KEY, MINIO_SECRET_KEY))
     volumes = FakeHetznerVolumeProvider()
 
     async def step():
         connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
         try:
-            await reconcile_once(connection, cluster, fake_b2, volumes, secrets, cluster_config, config=LIVE_CONFIG)
+            await reconcile_once(connection, cluster, volumes, secrets, cluster_config, config=LIVE_CONFIG)
         finally:
             await connection.close()
 
@@ -1092,6 +1104,26 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
 
     _wait_for(_policy_type_checked, timeout=30, description="ValidatingAdmissionPolicy exomem-cellctl-scope to type-check")
 
+    # D9: the key custodian's identity, RBAC and admission policy are applied as the chart renders them.
+    # Only its Deployment and NetworkPolicies are left out: there is no custodian image to run here, and
+    # these cases act through its service account by impersonation. The default private-range egress
+    # exclusions stay, because the custodian template refuses to render without them.
+    custodian_documents = [
+        document for document in _render_platform("templates/key-custodian.yaml",
+                                                  settings=("--set", "keyCustodian.enabled=true"))
+        if document["kind"] not in {"Deployment", "NetworkPolicy"}
+    ]
+    assert {"Namespace", "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy",
+            "ValidatingAdmissionPolicyBinding"} == {document["kind"] for document in custodian_documents}
+    _kubectl(k3s.name, ["apply", "--filename=-"], documents=custodian_documents)
+    _wait_for(lambda: "typeChecking" in json.loads(_kubectl(
+        k3s.name, ["get", "validatingadmissionpolicy", "exomem-key-custodian-scope", "--output=json"]
+    ).stdout).get("status", {}), timeout=30, description="ValidatingAdmissionPolicy exomem-key-custodian-scope to type-check")
+    custodian_status = json.loads(_kubectl(
+        k3s.name, ["get", "validatingadmissionpolicy", "exomem-key-custodian-scope", "--output=json"]
+    ).stdout)["status"]["typeChecking"]
+    assert custodian_status.get("expressionWarnings", []) == [], custodian_status
+
     # === the real cellctl ServiceAccount is the cluster client for every
     # functional scenario below (ruling: rerun under the real SA's token,
     # not an admin kubeconfig). Built from an issued TokenRequest, i.e. "a
@@ -1150,24 +1182,27 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         cell_token_key_previous_version=None,
         backup_master_keys={1: b"0" * 32},
         backup_master_key_current_version=1,
+        staging_key_id=MINIO_ACCESS_KEY,
+        staging_application_key=MINIO_SECRET_KEY,
     )
     cluster_config = ClusterConfig(
         object_storage_bucket=BUCKET_NAME,
         object_storage_endpoint=f"http://{k3s.minio_ip}:443",
+        cell_data_backup_bucket=BUCKET_NAME,
+        cell_data_staging_bucket=BUCKET_NAME,
+        cell_data_endpoint=f"http://{k3s.minio_ip}:443",
         # K3s here has no Hetzner CSI driver, so its CSINode carries no
         # allocatable count: D9's fallback is how a rehearsal publishes slots.
         capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5),
     )
-    # D8: B2's own key-management stays faked; every "created" per-cell key
-    # hands out MinIO's one root credential so restic can actually
-    # authenticate against the live S3 double.
-    fake_b2 = FakeB2(fixed_credentials=(MINIO_ACCESS_KEY, MINIO_SECRET_KEY))
+    # D9: the cell's backup key is the Secret the key custodian's identity creates below, holding
+    # MinIO's one root credential.
     fake_hetzner = FakeHetznerVolumeProvider()
 
     async def _pass() -> None:
         connection = await asyncpg.connect(app_dsn)
         try:
-            await reconcile_once(connection, cluster, fake_b2, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG)
+            await reconcile_once(connection, cluster, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG)
         finally:
             await connection.close()
 
@@ -1225,6 +1260,18 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         return row["observed_state"] == "running" and row["ready"]
 
     _wait_for(_converged, timeout=180, interval=3, description="cell to converge to observed_state=running, ready=true")
+
+    # D9: the key custodian, never cellctl, writes a cell's object-store key. This is the Secret the
+    # custodian's identity writes for a new cell, in the one shape admission allows; its stringData
+    # reaches admission as data, which is what the policy checks. Every backup and restore below
+    # reads it, so a refusal here fails the whole scenario at its source.
+    print("[3.10] scenario: the key custodian's identity writes the cell's object-store key Secret")
+    _kubectl(k3s.name, ["create", "--filename=-", f"--as={CUSTODIAN_USERNAME}"], documents=[{
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": namespace},
+        "type": "Opaque",
+        "stringData": {OBJECT_STORE_KEY_ID_FIELD: MINIO_ACCESS_KEY, OBJECT_STORE_KEY_SECRET_FIELD: MINIO_SECRET_KEY},
+    }])
 
     pvcs = json.loads(_kubectl(k3s.name, ["get", "pvc", "--namespace", namespace, "--output=json"]).stdout)["items"]
     assert len(pvcs) == 1
@@ -1701,6 +1748,14 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         },
         "type": "kubernetes.io/service-account-token",
     }
+    # D9: the Secret that holds a cell's backup key is the custodian's alone to write.
+    forged_writes["the key custodian's Secret, cell-object-store-key"] = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": namespace},
+        "type": "Opaque",
+        "stringData": {OBJECT_STORE_KEY_ID_FIELD: "forged", OBJECT_STORE_KEY_SECRET_FIELD: "forged"},
+    }
     quota = _live("resourcequota", "cell-quota")
     quota["spec"]["hard"]["pods"] = "50"
     forged_writes["a quota with 50 pods"] = quota
@@ -1806,6 +1861,61 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     )
     assert denied_delete.returncode != 0
     assert "exomem-cellctl-scope" in denied_delete.stderr, denied_delete.stderr
+
+    # === D9 key custody: with a stolen cellctl token, a cell's object-store key can be neither
+    # overwritten nor read back; with the custodian's token, nothing but that one Secret is writable. ===
+
+    def _can_i(identity: str, *words: str) -> str:
+        return _kubectl(k3s.name, ["auth", "can-i", *words, f"--as={identity}"], check=False).stdout.strip()
+
+    print("[3.10] scenario: cellctl can neither patch nor read the cell's object-store key")
+    # Server-side apply sends the PATCH without a prior GET, so the write reaches admission
+    # even though RBAC already denies cellctl reading this Secret.
+    forged_key = {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": namespace},
+        "stringData": {OBJECT_STORE_KEY_ID_FIELD: "forged"},
+    }
+    patched = _kubectl(
+        k3s.name,
+        ["apply", "--server-side", "--force-conflicts", "--field-manager=forged-cellctl", "--dry-run=server",
+         "--filename=-", f"--as={cellctl_username}"],
+        documents=[forged_key], check=False,
+    )
+    assert patched.returncode != 0
+    assert "exomem-cellctl-scope" in patched.stderr, patched.stderr
+    assert _can_i(cellctl_username, "get", f"secrets/{OBJECT_STORE_KEY_SECRET}", "--namespace", namespace) == "no"
+    assert _can_i(cellctl_username, "list", "secrets", "--namespace", namespace) == "no"
+
+    print("[3.10] scenario: the key custodian can read its own Secret name and write nothing but that Secret")
+    assert _can_i(CUSTODIAN_USERNAME, "get", f"secrets/{OBJECT_STORE_KEY_SECRET}", "--namespace", namespace) == "yes"
+    for verb, resource in (("get", "secrets/cell-credentials"), ("list", "secrets"), ("patch", "secrets"),
+                           ("update", "secrets"), ("delete", "secrets"), ("create", "configmaps"),
+                           ("create", "pods"), ("create", "namespaces")):
+        assert _can_i(CUSTODIAN_USERNAME, verb, resource, "--namespace", namespace) == "no", (verb, resource)
+
+    def _custodian_secret(name: str, secret_namespace: str, data: dict[str, str] | None = None) -> dict[str, Any]:
+        return {
+            "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": name, "namespace": secret_namespace},
+            "stringData": data or {OBJECT_STORE_KEY_ID_FIELD: "forged", OBJECT_STORE_KEY_SECRET_FIELD: "forged"},
+        }
+
+    # RBAC lets the custodian create any Secret anywhere; admission is what narrows that to one name in cells.
+    for described, document in {
+        "the cell's cell-credentials Secret": _custodian_secret("cell-credentials", namespace),
+        "another Secret name in a cell namespace": _custodian_secret("unrelated-key", namespace),
+        "cell-object-store-key outside a cell namespace": _custodian_secret(OBJECT_STORE_KEY_SECRET, "exomem-cloud"),
+        "cell-object-store-key with an extra field": _custodian_secret(OBJECT_STORE_KEY_SECRET, namespace, {
+            OBJECT_STORE_KEY_ID_FIELD: "forged", OBJECT_STORE_KEY_SECRET_FIELD: "forged", "extra": "forged"}),
+    }.items():
+        print(f"[3.10] scenario: admission denies the key custodian writing {described}")
+        denied_custodian = _kubectl(
+            k3s.name, ["create", "--dry-run=server", "--filename=-", f"--as={CUSTODIAN_USERNAME}"],
+            documents=[document], check=False,
+        )
+        assert denied_custodian.returncode != 0, described
+        assert "exomem-key-custodian-scope" in denied_custodian.stderr, (described, denied_custodian.stderr)
 
     # === scenario: live NetworkPolicy enforcement (not just admission). ===
 

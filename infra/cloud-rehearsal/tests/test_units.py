@@ -595,7 +595,7 @@ def test_abort_only_renders_the_shipped_break_glass_binding(monkeypatch, tmp_pat
     monkeypatch.setattr(platform, "render_chart", render)
     config = platform.PlatformConfig("controller", "gateway", "cell", "0-1", "https://example.test", "/mcp", "source",
                                      operator_restore_abort=requested)
-    stack = SimpleNamespace(postgres=SimpleNamespace(ip="192.0.2.3"), workdir=tmp_path,
+    stack = SimpleNamespace(postgres=SimpleNamespace(ip="192.0.2.3"), workdir=tmp_path, k3s=SimpleNamespace(ip="192.0.2.5"),
                             object_store=SimpleNamespace(endpoint=lambda **_kwargs: "https://192.0.2.4"))
     rendered = platform._render(stack, config).rendered
     assert rendered[1:] == ([binding] if requested else [])
@@ -614,7 +614,7 @@ def test_the_chart_value_for_the_transfer_tools_follows_the_setting_the_large_im
     monkeypatch.setattr(platform, "render_chart", render)
     monkeypatch.setattr(platform, "TRANSFER_TOOLS_ENABLED", True)
     config = platform.PlatformConfig("controller", "gateway", "cell", "0-1", "https://example.test", "/mcp", "source")
-    stack = SimpleNamespace(postgres=SimpleNamespace(ip="192.0.2.3"), workdir=tmp_path,
+    stack = SimpleNamespace(postgres=SimpleNamespace(ip="192.0.2.3"), workdir=tmp_path, k3s=SimpleNamespace(ip="192.0.2.5"),
                             object_store=SimpleNamespace(endpoint=lambda **_kwargs: "https://192.0.2.4"))
     platform._render(stack, config)
     assert values["cloudGateway"]["transferTools"] == {"enabled": True}

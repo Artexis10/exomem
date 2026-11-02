@@ -11,7 +11,6 @@ import pytest
 from cellctl import main, reconcile
 from cellctl.manifests import ResourceSettings, render_network_policies, render_statefulset
 from cellctl.state import CellRow
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_manifests import _spec
@@ -30,6 +29,9 @@ CELL_ID = "aaaaaaaaaaaaaaaa"
 def test_artifact_transport_settings_load_without_discovery(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_URL", BROKER_URL)
     monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_CELL_IDS", '["aaaaaaaaaaaaaaaa"]')
     config = main.build_cluster_config()
@@ -40,6 +42,9 @@ def test_artifact_transport_settings_load_without_discovery(monkeypatch) -> None
 def _broker_environment(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_URL", BROKER_URL)
 
 
@@ -134,7 +139,7 @@ async def test_reconcile_adds_transport_only_to_the_selected_cell(cell_db) -> No
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         for cell_id in (CELL_ID, "bbbbbbbbbbbbbbbb"):
             namespace = "exo-cell-" + cell_id
@@ -179,10 +184,10 @@ async def test_a_cell_created_after_the_fleet_switch_gets_the_broker_without_bei
     cluster = FakeClusterGateway()
     try:
         await _seed_cell(cell_db, CELL_ID, CELL_ID)
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         await _seed_cell(cell_db, OTHER_CELL_ID, OTHER_CELL_ID)
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, 0, 1, tzinfo=UTC))
         for cell_id in (CELL_ID, OTHER_CELL_ID):
             namespace = "exo-cell-" + cell_id

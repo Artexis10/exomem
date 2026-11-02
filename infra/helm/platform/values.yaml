@@ -180,9 +180,11 @@ cellctl:
   cellImageRepository: ""
   namespace: exomem-cloud
   replicas: 1
+  # The founder-account bucket of the cells created before D9 (those with a stored
+  # per-cell key). Each new cell backs up to cellData.backupBucketName instead. No template reads
+  # b2BucketId: it records the ID for the operator's `--bucket-id` in an old cell's clean-up.
   b2BucketName: ""
   b2BucketId: ""
-  b2AccountId: ""
   # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
   # B2's native API (e.g. https://s3.us-west-002.backblazeb2.com).
   b2Endpoint: ""
@@ -204,7 +206,11 @@ cellctl:
   databaseDsnSecretKey: dsn
   cellTokenKeySecretName: exomem-cloud-cell-token-key
   backupMasterKeySecretName: exomem-cloud-backup-master-key
-  b2KeyManagementSecretName: exomem-cloud-b2-key-management
+  # D9: cellctl holds no key-creating credential and no bucket-wide founder credential. Its two object-store
+  # keys are bucket-restricted: the staging key serves every export and import, and the backup-list key
+  # only counts a deleted new cell's backup versions. Each Secret holds the keys keyId and applicationKey.
+  cellDataStagingSecretName: exomem-cloud-cell-data-staging
+  cellDataBackupListSecretName: exomem-cloud-cell-data-backup-list
   hetznerReadTokenSecretName: exomem-cloud-hetzner-read-token
   # D5: cellctl's own egress, scoped to the control database on 5432 --
   # explicit addresses, refreshed deliberately, matching gateway's own
@@ -229,6 +235,30 @@ cellctl:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: 500m, memory: 512Mi}
+
+# contain-cloud-controller-compromise D9: the cell-data object-store account. A new cell backs up
+# to its locked backup bucket; every cell's exports and imports use the staging bucket. Both
+# buckets share one S3 endpoint (for example https://s3.us-west-004.backblazeb2.com). The names and
+# ids are the outputs of the cell-data Terraform root.
+cellData:
+  backupBucketName: ""
+  backupBucketId: ""
+  stagingBucketName: ""
+  endpoint: ""
+
+# D9: the key custodian, the one workload that creates object-store keys. It runs the cellctl image
+# from its own namespace and credential, so a compromise of cellctl reaches no key-creating
+# credential. Off until the cell-data account exists; with it off, a new cell has no backup key.
+keyCustodian:
+  enabled: false
+  namespace: exomem-key-custody
+  # Holds the keys keyId and applicationKey of the custodian's own account-scoped B2 key.
+  secretName: exomem-key-custodian-b2
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 192Mi}
 
 # D9: capacity is observed from the cluster (CSINode allocatable + live
 # VolumeAttachments), never a chart constant or a Hetzner server id. The old

@@ -35,6 +35,8 @@ K3S_POD_CIDR = "10.42.0.0/16"
 K3S_SERVICE_CIDR = "10.43.0.0/16"
 S3_PORT = 443  # The double serves HTTP or HTTPS on this port, selected by serve_tls.
 BACKUP_BUCKET = "exomem-cloud-backups"
+# The chart refuses one bucket for both roles, so the double holds a second one for exports and imports.
+STAGING_BUCKET = "exomem-cloud-staging"
 PG_ROLES = ("substrate_owner", "substrate_app", "exomem_gateway", "exomem_cellctl")
 PG_DATABASE = "substrate"
 
@@ -249,9 +251,9 @@ def _start_object_store(stack: Stack, *, serve_tls: bool | None = None) -> Objec
         arguments = ["--port", f":{S3_PORT}", "--cert", "/certificates/cert.pem", "--key", "/certificates/key.pem",
                      "posix", "--versioning-dir", "/data/versions", "/data/buckets"]
     # The image runs as this user for TLS; initialize writable, owned volume paths.
-    bucket = f"/data/buckets/{BACKUP_BUCKET}" if serve_tls else f"/data/{BACKUP_BUCKET}"
+    buckets = [f"/data/buckets/{name}" if serve_tls else f"/data/{name}" for name in (BACKUP_BUCKET, STAGING_BUCKET)]
     run(["docker", "run", "--rm", *docker_labels(stack.run_id), "--mount", data_mount,
-         images.BUSYBOX, "sh", "-ec", 'mkdir -p /data/versions "$1"; chmod -R 777 /data', "_", bucket])
+         images.BUSYBOX, "sh", "-ec", 'mkdir -p /data/versions "$@"; chmod -R 777 /data', "_", *buckets])
     stack.containers.append(name)
     run(
         [
