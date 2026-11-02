@@ -3109,7 +3109,9 @@ def _commit_existing(
             _write_metric("exomem_write_revalidate_ms", operation_label),
             mutation_timing_span(timings, "commit.revalidate"),
         ):
-            preflight = _revalidate_existing_preflight(root, preflight, status_basis=status_basis)
+            preflight = _revalidate_existing_preflight(
+                root, preflight, status_basis=status_basis, timings=timings
+            )
         if preflight.contract_result.should_block:
             raise SemanticWriteError(
                 "SEMANTIC_CONTRACT_BLOCKED",
