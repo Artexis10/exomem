@@ -126,8 +126,9 @@ def _proof_key() -> Ed25519PublicKey | None:
     """The key that verifies the gateway's proofs: the proof key, else the upload key.
 
     The upload key is the fallback so that a cellctl that predates the proof key still verifies on its
-    upload cells. When both are set and differ, only the proof key verifies: trying both would accept a
-    proof signed by a key that the operator replaced.
+    upload cells; task 7.1 of contain-cloud-controller-compromise removes it with the bearer. When both are
+    set and differ, only the proof key verifies: trying both would accept a proof signed by a key that the
+    operator replaced.
     """
     pem = os.environ.get(PROOF_PUBLIC_KEY_ENV, "").strip()
     return load_public_key(pem, PROOF_PUBLIC_KEY_ENV, "CLOUD_PROOF_KEY_INVALID") if pem else _upload_key()
