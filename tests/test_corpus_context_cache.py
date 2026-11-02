@@ -728,8 +728,20 @@ def test_a_cold_build_that_writes_outrun_still_spares_the_next_reader(
         return real_census(*args, **kwargs)
 
     monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", census_beside_a_writer)
+    real_with_census = semantic_contract._build_corpus_context_with_census
+    returned_census: list[object] = []
+
+    def recorded_with_census(*args, **kwargs):
+        context, census = real_with_census(*args, **kwargs)
+        returned_census.append(census)
+        return context, census
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_with_census", recorded_with_census)
     semantic_contract.warm_corpus_context(vault)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_with_census", real_with_census)
     monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", real_census)
+    # No single walk describes the kept context, so the builder names no census.
+    assert returned_census == [None]
     # One more write that no event reports, as from another process.
     other_rel = "Knowledge Base/Notes/Insights/two.md"
     (vault / other_rel).write_text(_page(title="Unreported write"), encoding="utf-8")
