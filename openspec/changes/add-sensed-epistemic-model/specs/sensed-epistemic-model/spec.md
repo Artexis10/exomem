@@ -91,21 +91,23 @@ When the active instrument changes (a new pin, a new runtime version, or a retir
 
 Model inference SHALL run only in a disposable child process supervised from the dreamer's loop. The dreamer thread and request threads SHALL NOT load or run a model.
 
-- **Launch.** The supervisor SHALL launch a child only when all of these hold: sensing is `on` (`EXOMEM_SENSING`, else the per-machine config key `sensing`, default `off`, effective only while the dreamer runs); the dreamer's own gate would run a tick; the sense queue is not empty; and the worker's hourly budgets have room.
-- **Termination.** It SHALL terminate the child when any gate closes, and SHALL kill it in quiet mode, under auto-quiet pressure and in standby, so its memory returns to the host.
+- **Launch.** The supervisor SHALL launch a child only when all of these hold: sensing is `on` (`EXOMEM_SENSING`, else the per-machine config key `sensing`, default `off`, effective only while the dreamer runs); the child's own gate is open (setting on, not in standby, no auto-quiet pressure); the sense queue is not empty; the worker's hourly budgets have room; and the host's available memory is above the peak resident memory the last child recorded. With no peak on record the first child launches and records one.
+- **Termination.** The child SHALL have its own gate: the setting, standby and auto-quiet pressure. The supervisor SHALL terminate the child when that gate closes, so its memory returns to the host. Quiet mode, a foreground request, a settling vault, graph debt, an index backlog and the dreamer's own CPU budget SHALL NOT stop it. The supervisor SHALL NOT kill a running child for memory.
 - **Budgets and priority.** The worker SHALL spend at most 300 CPU-seconds and 600 judgements per rolling hour, including model load. It SHALL run at the lowest OS priority on CPU until co-tenant GPU pressure detection ships, and SHALL exit after 60 seconds without work.
 - **Isolation.** The child SHALL read only the sense queue and the ledger, SHALL append only to the ledger, and SHALL NOT read or write the vault, take the writer lease, or schedule index work.
 - **Refusal.** A child that cannot admit its instrument SHALL exit with a named refusal. The supervisor SHALL NOT relaunch it until the setting or pin changes.
 
-#### Scenario: Quiet mode returns the memory
+#### Scenario: Quiet mode and requests do not stop the child
 
-- **WHEN** a sensor child is running and the compute mode becomes `quiet`
-- **THEN** the child process is terminated within one supervisor poll and is not relaunched while quiet holds
+- **WHEN** a sensor child is running and the compute mode becomes `quiet`, or a foreground request arrives
+- **THEN** the child keeps running
+- **AND** the supervisor terminates it within one poll only when the setting turns off or pauses, the service enters standby, or auto-quiet pressure starts
 
-#### Scenario: A foreground request closes the gate
+#### Scenario: A launch waits for memory
 
-- **WHEN** a foreground request arrives while the child senses
-- **THEN** the supervisor terminates the child and relaunches only after the dreamer's idle gate reopens
+- **WHEN** the last child recorded a peak resident memory and the host's available memory is not above it
+- **THEN** the supervisor does not launch a child and reports the action `memory`
+- **AND** it launches once available memory is above the peak
 
 #### Scenario: The budget holds across launches
 

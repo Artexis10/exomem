@@ -27,12 +27,13 @@
 ## 4. Sensor worker (slice 1)
 
 - [x] 4.1 Add `sensor_worker.py` (supervisor, child loop, spend accounting) and the `sensor_worker_child.py` entry point: vault lock, lowest priority, CPU only, one thread, 60-second idle exit.
-  - The supervisor inherits `dreamer_policy.decide` and adds 300 CPU-s and 600 judgements per rolling hour.
-  - It terminates the child when any gate closes and kills it in quiet mode, under pressure and in standby.
+  - The supervisor follows `dreamer_policy.sensor_gate` and adds 300 CPU-s and 600 judgements per rolling hour.
+  - It terminates the child when that gate closes (setting, standby, pressure) and launches only while available memory is above the last recorded peak.
   - It charges an unreported death the whole allotment.
   - It suspends relaunch after a named refusal until the setting or pin changes.
 - [x] 4.2 Drive the supervisor from the dreamer loop, re-evaluating at least every 2 seconds while a child lives. Keep `tests/test_dreamer_no_side_effects.py` green: the dreamer thread imports no model runtime.
-- [x] 4.3 Tests with a fake launcher and a real no-weights child cover: launch only with every gate open; kill on quiet, pressure, standby, foreground and setting off; budgets across launches; the refusal backoff; and the child's exit when its parent dies.
+- [x] 4.3 Tests with a fake launcher and a real no-weights child cover: launch only with every gate open; kill on pressure, standby, pause and setting off, and keep running through quiet and foreground; launch only above the recorded memory peak; budgets across launches; the refusal backoff; and the child's exit when its parent dies.
+  - Tasks 4.1 and 4.3 were amended by `run-upkeep-on-a-busy-vault`: the child has its own gate, and launch needs available memory.
 
 ## 5. The `pair.relation` instrument on the admitted NLI pin (slice 1)
 

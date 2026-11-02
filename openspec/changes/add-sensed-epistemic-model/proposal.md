@@ -71,5 +71,5 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
 - **Runtime:**
   - Sensing is default-off, and gated by `EXOMEM_SENSING` or the config key `sensing` (only with the dreamer on).
   - It soft-fails to byte-identical silence when the `nli` extra, the pin or its fixtures are unavailable.
-  - The instrument's cost is bounded per hour, and quiet mode kills the worker.
+  - The instrument's cost is bounded per hour, and the worker's own gate stops it for the setting, standby and pressure.
 - **Pure substrate:** instruments measure and never decide. Their readings are measurement records. The dreamer's projections are deterministic. Only the agent authors canon, through existing governed writers.

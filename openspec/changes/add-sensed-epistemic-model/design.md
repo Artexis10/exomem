@@ -163,10 +163,11 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
 - **Supervision.** The dreamer loop drives the supervisor once per poll. While a child is alive, the loop re-reads the gate every 2 seconds between ticks, without running a tick, so the dreamer's own schedule and CPU budget are unchanged.
 - **Launch.** The supervisor launches a child only when all of these hold:
   - the sensing setting is `on`;
-  - the dreamer's gate would run a tick (`dreamer_policy.decide`: setting, standby, quiet mode, pressure, foreground idle, freshness, settle, graph debt, index backlog, the dreamer's own budget and backoff);
+  - the child's own gate is open (`dreamer_policy.sensor_gate`: setting, standby and auto-quiet pressure);
   - the sense queue is not empty;
-  - the worker's own hourly budgets have room.
-- **Termination.** The supervisor terminates the child when any gate closes, with a 5-second grace before a kill. Quiet mode, auto-quiet pressure and standby kill it, so its RAM returns to the host.
+  - the worker's own hourly budgets have room;
+  - the host's available memory is above the peak resident memory the last child recorded (the action `memory`). With no peak on record the first child launches and records one.
+- **Termination.** The supervisor terminates the child when its own gate closes, with a 5-second grace before a kill. The setting off or paused, auto-quiet pressure and standby stop it, so its RAM returns to the host. Quiet mode, foreground activity and the dreamer's tick holds do not, and a running child is never killed for memory. `run-upkeep-on-a-busy-vault` amended this.
 - **Budgets.**
   - 300 CPU-seconds per rolling hour (about 8% of one core), counting model load.
   - 600 judgements per rolling hour.
@@ -289,7 +290,7 @@ What slice 1 serves (review of slice 1, 2026-09-28):
 
 ## Slices
 
-1. Ledger and reading record; invalidation and migration; the sensor worker with gates, budgets and the quiet kill; `pair.relation` on the admitted NLI pin; the proposers; contradiction components and refinement/supersession chains; the status line on read and activation; egress twins, replay reproducibility and fixtures. Close close-memory-loop 8.4.
+1. Ledger and reading record; invalidation and migration; the sensor worker with its gate, budgets and memory admission; `pair.relation` on the admitted NLI pin; the proposers; contradiction components and refinement/supersession chains; the status line on read and activation; egress twins, replay reproducibility and fixtures. Close close-memory-loop 8.4.
 2. `mention.same_referent` on an instruct model chosen by a fixture spike; the generative template runtime (R1); local GPU placement after co-tenant pressure detection ships (R5).
 3. Tensions through the upkeep block as sensed families (R2), with reading-id citation in the relation writer; the audit's NLI enrichment moves onto the ledger.
 4. `recap.covered_by`; supersession direction, relation typing, `term.same_meaning`; convergence and emerging-connection projections.
