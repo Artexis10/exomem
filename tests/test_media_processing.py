@@ -2320,6 +2320,9 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
     )
 
     assert result["terminal"] is True
+    assert result["user_summary"] == (
+        f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved"
+    )
     assert result["media_results"][0]["outcome"] == "processed"
     assert result["media_results"][1:] == [
         {
