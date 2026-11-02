@@ -618,7 +618,7 @@ _REMAINING = {
         _row("activation", "read_review", ("categories", "limit", "state")),
         _row("item", "read_review", ("ref", "limit"), ("ref",)),
         _row("audit", "read_review", ("categories", "detail", "legacy_sample_limit")),
-        _row("dispositions", "read_review", ()),
+        _row("dispositions", "read_review", ("window_days",)),
         _row("provenance", "read_review", ("tag", "key", "value", "path", "limit")),
         _row("evolution", "read_review", ("query", "path", "limit")),
         _row("compilation", "read_review", ("sources", "suggested_title"), ("sources",)),

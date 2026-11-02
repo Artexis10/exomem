@@ -42,7 +42,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
 # The `offset` window cursor on read_memory lets an agent read a long Source's extracted text in
 # windows, so the budget rises 150 B.
-TOTAL_BUDGET = 165_400
+# The `window_days` field on the dispositions kind of read_review sizes the effect window, so the budget rises 150 B.
+TOTAL_BUDGET = 165_550
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {

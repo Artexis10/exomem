@@ -821,12 +821,13 @@ def test_the_effect_block_counts_what_each_family_surfaced_and_what_became_of_it
     effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
 
     assert effect["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
-    assert set(effect["sources"]) == {"surfaced", "dismissed", "snoozed", "cleared", "open"}
+    assert set(effect["sources"]) == {"surfaced", "dismissed", "snoozed", "cleared", "acted", "open"}
     assert effect["families"][FAMILY] == {
         "surfaced": 3,
         "dismissed": 1,
         "snoozed": 0,
         "cleared": 1,
+        "acted": "unknown",
         "open": 1,
     }
     assert effect["families"]["relation_debt"]["cleared"] == "unknown"
@@ -940,6 +941,7 @@ def test_an_unreadable_dreamer_sidecar_leaves_every_upkeep_family_unknown(
             "dismissed": 0,
             "snoozed": 0,
             "cleared": "unknown",
+            "acted": "unknown",
             "open": "unknown",
             "unknown_reason": state,
         }

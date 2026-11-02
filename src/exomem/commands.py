@@ -9540,6 +9540,7 @@ def op_review_memory(
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
     family: str | None = None,
+    window_days: int | None = None,
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
@@ -9577,7 +9578,12 @@ def op_review_memory(
             consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
+        window_days: Dispositions effect window in days, 1 to 90; default 7.
     """
+    if window_days is not None and mode != "dispositions":
+        raise ValueError(
+            "INVALID_REVIEW_ARGUMENTS: window_days is only supported by dispositions mode"
+        )
     if mode == "vocabulary":
         question_submission = _review_question_submission(path, query, family)
         unrelated = any(
@@ -9683,7 +9689,7 @@ def op_review_memory(
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "dispositions":
-        return _dispositions_view(vault_root)
+        return _dispositions_view(vault_root, window_days)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10057,15 +10063,22 @@ def _set_family_disposition(
     return {"ref": review_state_module.family_ref(family), **recorded}
 
 
-def _dispositions_view(vault_root: Path) -> dict:
+def _dispositions_view(vault_root: Path, window_days: int | None = None) -> dict:
     """Every family with a non-default disposition, and what it has cost.
 
     The manual dismissal count rides along because a disposition without one is
     half the story: "you quieted this family, and you had put down N of its
     items by hand before you did" is what makes the decision legible later.
+    `window_days` sets the effect window; a value out of range is refused before
+    anything is read.
     """
     from .governance import egress
 
+    window = (
+        review_state_module.effect_window()
+        if window_days is None
+        else review_state_module.effect_window(window_days)
+    )
     store = review_state_module.ReviewStateStore(vault_root)
     payload = store.load()
     dispositions = payload.get("dispositions") or {}
@@ -10104,7 +10117,7 @@ def _dispositions_view(vault_root: Path) -> dict:
 
     return {
         "dispositions": rows,
-        "effect": refusal if refusal is not None else _effect_block(vault_root, payload),
+        "effect": refusal if refusal is not None else _effect_block(vault_root, payload, window),
         "registered_families": sorted(review_state_module.registered_families()),
         "reason_codes": list(review_state_module.REASON_CODES),
         "note": (
@@ -10130,20 +10143,29 @@ def _dispositions_view(vault_root: Path) -> dict:
     }
 
 
-def _effect_block(vault_root: Path, payload: dict) -> dict:
-    """Per-family effect over the last week, from records that already exist.
+def _effect_block(
+    vault_root: Path,
+    payload: dict,
+    effect_window: tuple[Any, Any, dict[str, Any]],
+) -> dict:
+    """Per-family effect over the chosen window, from records that already exist.
 
     The current set comes from the stored due-state projection and the
     dreamer's sidecar, never from an audit: a family neither holds reports
     `cleared` and `open` as unknown. When the sidecar cannot be read, every
     upkeep family is listed with the counts it holds as unknown, and the block
     says why: an absent family would read as one that surfaced nothing.
+
+    The sensed compile family reads its current and acted sets from the sensing
+    projection when sensing is on, and adds a coverage line. No other family can
+    tell a change from a re-read, so each reports `acted` as unknown.
     """
     import datetime as dt
 
-    from . import dreamer_families, dreamer_store, due_state
+    from . import dreamer_families, dreamer_store, due_state, sensed_model, sensing
 
-    since, until, window = review_state_module.effect_window()
+    since, until, window = effect_window
+    sensed_family = dreamer_families.SENSED_COMPILE_FAMILY
     current: dict[str, set[str]] = {}
     projection = due_state.load(vault_root)
     for category, pages in ((projection or {}).get("categories") or {}).items():
@@ -10175,6 +10197,24 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
                 current.setdefault(family, set())
                 stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
                 extra.append((family, cid, fingerprint, stamp))
+    acted: dict[str, frozenset[str]] = {}
+    coverage: dict[str, Any] = {}
+    if sensing.enabled():
+        compiled = sensed_model.compile_rows(vault_root)
+        acted_ids = None if compiled is None else sensed_model.compile_acted(vault_root)
+        summary = sensed_model.coverage_summary(vault_root, window["since"], window["through"])
+        if compiled is None or acted_ids is None or summary is None:
+            unknown[sensed_family] = "projection_unavailable"
+            coverage[sensed_family] = {
+                "claims": review_state_module.UNKNOWN,
+                "unlinked_decided": review_state_module.UNKNOWN,
+                "evidence_complete": False,
+                "unknown_reason": "projection_unavailable",
+            }
+        else:
+            current[sensed_family] = {row.id for row in compiled.rows}
+            acted[sensed_family] = acted_ids
+            coverage[sensed_family] = summary
     counts = review_state_module.effect_counts(
         payload,
         since=since,
@@ -10182,13 +10222,15 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
         current={family: frozenset(ids) for family, ids in current.items()},
         extra_surfaced=extra,
         unknown=unknown,
+        acted=acted,
     )
     return {
         "dreamer_sidecar": sidecar,
         "window": window,
         "sources": {
             "surfaced": (
-                "identities first stamped on the first-surfaced ledger in the window; "
+                "a lower bound: identities first stamped on the first-surfaced ledger in "
+                "the window, so an item shown where nothing is recorded is not counted; "
                 "for upkeep families, first deliveries recorded in the dreamer's sidecar"
             ),
             "dismissed": "manual dismiss decisions updated in the window, counted by item",
@@ -10196,9 +10238,29 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             "cleared": (
                 "surfaced in the window, no decision recorded, and no longer in the "
                 "family's current set (the stored due-state projection, or the "
-                "dreamer's open candidates); unknown where only an audit could list it"
+                "dreamer's open candidates), and not acted; unknown where only an audit "
+                "could list it"
+            ),
+            "acted": (
+                "only for upkeep_sensed_compile, and unknown for every other family: as "
+                "cleared, with the home and recap still present, every claim once read "
+                "absent or partial now entailed, and by a unit written after those "
+                "readings. A re-read of an unchanged unit under a new pin or label map "
+                "never counts, and an item whose home changed and awaits its re-read is "
+                "cleared until it is read"
             ),
             "open": "surfaced in the window, no decision recorded, still in the current set",
+            **(
+                {
+                    "coverage": (
+                        "recaps captured in the window, each claim counted once by what the "
+                        "home's units read it as; unlinked_decided counts the Decided lines "
+                        "of those recaps that name no single page"
+                    )
+                }
+                if coverage
+                else {}
+            ),
         },
         "note": (
             "The window is whole UTC days, today included: events count from `since` "
@@ -10210,6 +10272,7 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             "family is listed with what it holds as unknown and an unknown_reason. "
             "Rows written before families were stamped are unattributed."
         ),
+        **({"coverage": coverage} if coverage else {}),
         **counts,
     }
 
