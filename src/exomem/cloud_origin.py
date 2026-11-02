@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -26,7 +25,7 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import cloud_cell
+from . import cloud_cell, cloud_containment
 
 # Version 1 of the protocol; the Substrate gateway signs the same names and formats.
 PUBLIC_KEY_ENV = "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY"
@@ -94,23 +93,27 @@ class RequestOrigin:
 _current: ContextVar[RequestOrigin | None] = ContextVar("exomem_cloud_origin", default=None)
 
 
-@lru_cache(maxsize=4)
-def _load_key(pem: str) -> Ed25519PublicKey:
+@lru_cache(maxsize=8)
+def load_public_key(
+    pem: str, env_name: str = PUBLIC_KEY_ENV, code: str = "CLOUD_UPLOAD_KEY_INVALID",
+) -> Ed25519PublicKey:
+    """The Ed25519 verifying key a variable holds, for every signed object a cell checks.
+
+    `code` names the variable's own error, so a bad grant key does not read as a bad upload key.
+    """
     try:
         key = serialization.load_pem_public_key(pem.encode("ascii"))
     except (ValueError, TypeError, UnicodeError):
         key = None
     if not isinstance(key, Ed25519PublicKey):
         # Never echo key material; name only the variable.
-        raise cloud_cell.CloudConfigError(
-            "CLOUD_UPLOAD_KEY_INVALID", f"{PUBLIC_KEY_ENV} must be an Ed25519 public key"
-        )
+        raise cloud_cell.CloudConfigError(code, f"{env_name} must be an Ed25519 public key")
     return key
 
 
 def _public_key() -> Ed25519PublicKey | None:
     pem = os.environ.get(PUBLIC_KEY_ENV, "").strip()
-    return _load_key(pem) if pem else None
+    return load_public_key(pem) if pem else None
 
 
 def enabled() -> bool:
@@ -124,16 +127,19 @@ def validate_configuration() -> None:
         _public_key()
 
 
-def _canonical_uuid(value: object) -> bool:
-    try:
-        return isinstance(value, str) and str(uuid.UUID(value)) == value
-    except ValueError:
-        return False
+def signed_claims(
+    token: object, *, key: Ed25519PublicKey | None, cell_id: str | None, audience: str,
+    fields: frozenset[str], lifetime: int,
+) -> dict | None:
+    """The claims of an Ed25519 JWT that this cell may act on, or None.
 
-
-def _claims(token: object, *, audience: str, fields: frozenset[str], lifetime: int) -> dict | None:
-    key = _public_key()
-    if key is None or not isinstance(token, str) or not token or len(token) > MAX_TOKEN_CHARS:
+    Every signed object the cell verifies passes the same checks: the `JWT`
+    type, the key, the audience, exactly these fields, integer `iat` and `exp`
+    within `lifetime`, and the cell's own `cell_id`. A caller adds the checks
+    that belong to its own object. A Job has no bearer, so the caller names
+    the cell ID instead of this function reading the serving credentials.
+    """
+    if key is None or cell_id is None or not isinstance(token, str) or not token or len(token) > MAX_TOKEN_CHARS:
         return None
     try:
         if jwt.get_unverified_header(token).get("typ") != "JWT":
@@ -142,14 +148,28 @@ def _claims(token: object, *, audience: str, fields: frozenset[str], lifetime: i
             token, key, algorithms=["EdDSA"], audience=audience,
             options={"require": sorted(fields)}, leeway=_LEEWAY_SECONDS,
         )
-        cell = cloud_cell.CloudCellCredentials.from_env().cell_id
-    except (jwt.PyJWTError, cloud_cell.CloudConfigError, ValueError, TypeError):
+    except (jwt.PyJWTError, ValueError, TypeError):
         return None
-    if (set(claims) != fields or claims["v"] != 1 or claims["aud"] != audience
+    if (set(claims) != fields or claims["aud"] != audience
             or type(claims["iat"]) is not int or type(claims["exp"]) is not int
             or not 0 < claims["exp"] - claims["iat"] <= lifetime
-            or claims["cell_id"] != cell or claims["iss"] != claims["resource"]
-            or not all(_canonical_uuid(claims[name]) for name in ("tenant_id", "grant_id", "family_id"))
+            or claims["cell_id"] != cell_id):
+        return None
+    return claims
+
+
+def _serving_cell_id() -> str | None:
+    try:
+        return cloud_cell.CloudCellCredentials.from_env().cell_id
+    except cloud_cell.CloudConfigError:
+        return None
+
+
+def _claims(token: object, *, audience: str, fields: frozenset[str], lifetime: int) -> dict | None:
+    claims = signed_claims(token, key=_public_key(), cell_id=_serving_cell_id(), audience=audience,
+                           fields=fields, lifetime=lifetime)
+    if (claims is None or claims["v"] != 1 or claims["iss"] != claims["resource"]
+            or not all(cloud_cell.canonical_app_id(claims[name]) for name in ("tenant_id", "grant_id", "family_id"))
             or not all(isinstance(claims[name], str) and claims[name] for name in ("client_id", "resource"))):
         return None
     return claims
@@ -259,18 +279,51 @@ def envelope_nonce(value: object) -> str | None:
 
 
 class CloudOriginMiddleware:
-    """Bind each HTTP request's verified gateway origin for the request's duration."""
+    """Bind each HTTP request's verified gateway origin for the request's duration.
 
-    def __init__(self, app) -> None:
+    An MCP request also reports which credential it used (contain-cloud-controller-compromise D1).
+    Report mode serves it as before; `enforce` refuses one without a valid gateway proof.
+    """
+
+    def __init__(self, app, *, path: str = "/mcp", enforce: bool = cloud_containment.ENFORCE) -> None:
         self.app = app
+        self.path = path.rstrip("/") or "/"
+        self.enforce = enforce
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or not enabled():
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         from starlette.datastructures import Headers
 
+        headers = Headers(scope=scope)
+        path = scope.get("path", "")
+        configured = enabled()
         # The upload and download receivers verify their own request-bound proofs.
-        request_origin = None if scope.get("path") in ("/upload", "/download") else verify_request(Headers(scope=scope))
+        request_origin = None if not configured or path in ("/upload", "/download") else verify_request(headers)
+        if (path.rstrip("/") or "/") == self.path and not await self._admits(scope, headers, configured, request_origin):
+            from starlette.responses import JSONResponse
+
+            await JSONResponse(
+                {"code": "CLOUD_PROOF_REQUIRED", "reason": "this request carries no valid gateway proof"},
+                status_code=401,
+            )(scope, receive, send)
+            return
         with bound(request_origin):
             await self.app(scope, receive, send)
+
+    async def _admits(self, scope, headers, configured: bool, request_origin: RequestOrigin | None) -> bool:
+        """Report the credential this MCP request used; False only when the proof gate refuses it."""
+        from .server_auth import CloudCellAccessToken
+
+        if not configured:
+            proof = cloud_containment.Proof.UNCONFIGURED
+        elif request_origin is not None:
+            proof = cloud_containment.Proof.VALID
+        else:
+            proof = cloud_containment.Proof.INVALID if ORIGIN_HEADER in headers else cloud_containment.Proof.ABSENT
+        # The server's own authentication runs outside this middleware; the user it set is its verdict on the bearer.
+        bearer_valid = type(getattr(scope.get("user"), "access_token", None)) is CloudCellAccessToken
+        verdict = cloud_containment.judge_request(
+            bearer_valid=bearer_valid, proof=proof, cell_id=_serving_cell_id(), enforce=self.enforce)
+        return verdict is not cloud_containment.Verdict.REFUSED

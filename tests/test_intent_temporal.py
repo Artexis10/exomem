@@ -63,18 +63,21 @@ def test_is_temporal_query_false(query: str) -> None:
 @pytest.mark.parametrize(
     "query,expected",
     [
-        # exact: quotes, wikilink, or leading interrogative
+        # exact: syntax only (a quoted phrase or a wikilink)
         ('"exact phrase match"', "exact"),
         ("see [[Envelope]]", "exact"),
-        ("who is Lovelace", "exact"),
-        ("what is the engine boundary", "exact"),
-        ("which protocol drifts", "exact"),
-        # temporal markers (and exact does NOT pre-empt a non-interrogative temporal)
+        ('what is the "engine boundary"', "exact"),
+        # a question word does not make a lookup exact
+        ("who is Lovelace", "conceptual"),
+        ("what is the engine boundary", "conceptual"),
+        ("which protocol drifts", "conceptual"),
+        ("whose retro was it", "conceptual"),
+        # temporal markers
         ("the latest curriculum", "temporal"),
         ("notes from yesterday", "temporal"),
         ("the 2025 retro", "temporal"),
         # relationship markers
-        ("what links to the envelope concept", "exact"),  # leading 'what' wins
+        ("what links to the envelope concept", "relationship"),
         ("pages that cite the envelope", "relationship"),
         ("how does this connect to insulin", "relationship"),
         ("related work on metabolism", "relationship"),

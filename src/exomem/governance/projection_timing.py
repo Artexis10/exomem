@@ -808,14 +808,51 @@ def defer_refusal_floor(started_at: float) -> bool:
     return True
 
 
+@dataclass(slots=True)
+class _FlooredOutcome:
+    """Whether the running command asked for its success to complete at the floor."""
+
+    requested: bool = False
+
+
+_FLOORED_OUTCOME: ContextVar[_FlooredOutcome | None] = ContextVar(
+    "exomem_floored_outcome", default=None
+)
+
+
+@contextmanager
+def floored_outcome_scope() -> Iterator[_FlooredOutcome]:
+    """Let the command that runs inside ask for `floor_restricted_outcome`."""
+
+    outcome = _FlooredOutcome()
+    token = _FLOORED_OUTCOME.set(outcome)
+    try:
+        yield outcome
+    finally:
+        _FLOORED_OUTCOME.reset(token)
+
+
+def floor_restricted_outcome() -> None:
+    """Complete this success as the dispatcher completes a restricted refusal.
+
+    For a door that answers a withheld item and a missing one with the same
+    success but must read the withheld item to decide. Outside a dispatcher
+    that applies the floor, it does nothing.
+    """
+
+    outcome = _FLOORED_OUTCOME.get()
+    if outcome is not None:
+        outcome.requested = True
+
+
 @asynccontextmanager
 async def surface_refusal_floor() -> AsyncIterator[None]:
     """Hold the response of a request whose restricted direct read refused.
 
     A request surface wraps everything it does for one request in this scope.
-    When a restricted read refuses inside it, the response, an error or a
-    result, leaves no sooner than the floor after the dispatcher started the
-    read. The surface's own handling of the refusal, its logging included,
+    When a restricted read refuses inside it, or a command asks with
+    `floor_restricted_outcome`, the response, an error or a result, leaves no
+    sooner than the floor after the dispatcher started the read. The surface's own handling of the refusal, its logging included,
     happens inside the floor. The wait is an `await`; only its last
     `_LOOP_WAKE_MARGIN_S` holds a worker thread.
     """
@@ -876,6 +913,8 @@ __all__ = [
     "evaluate_wire_differential",
     "evaluate_wire_route",
     "fixed_public_completion",
+    "floor_restricted_outcome",
+    "floored_outcome_scope",
     "model_runtime_profile_from_environment",
     "pad_to_refusal_floor",
     "request_class_for_command",

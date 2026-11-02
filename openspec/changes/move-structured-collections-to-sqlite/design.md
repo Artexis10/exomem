@@ -1284,7 +1284,7 @@ Automatic stamping creates no native mutation. Reverse export restores exact ori
 
 #### A3. Cross-host freshness uses a coordinator-recorded store head
 
-Earlier, §1 checked freshness against the synced replica only. Idle release after 60 s (`writer_lease.py:1726-1731`) makes handoffs routine, so a new holder could write on a replica that sync had not yet caught up, forking the store. The rule "local head appears in replica" was also undefined: `txn_id` integers collide across forks, and the hash chain is per collection.
+Earlier, §1 checked freshness against the synced replica only. Idle release after 60 s (`writer_lease.py:1726-1731`) makes handoffs routine under the multi-host topology (single-host holders keep the lease while idle by default), so a new holder could write on a replica that sync had not yet caught up, forking the store. The rule "local head appears in replica" was also undefined: `txn_id` integers collide across forks, and the hash chain is per collection.
 
 **Store-wide chained head.** Each transaction also advances a store-wide chain:
 - `txns.store_head_hash = sha256("exomem-store-head:v1\0" + prev_store_head_hash + "\0" + commit_seq + "\0" + event_hash)`;

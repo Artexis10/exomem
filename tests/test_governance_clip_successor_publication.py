@@ -720,7 +720,7 @@ def test_catalog_projection_fields_distinguish_parent_media_from_frame_children(
             resolved_relative=path,
         )
         assert parsed is not None
-        return catalog_publication._search_fields(parsed)
+        return catalog_publication.search_fields(parsed)
 
     video_fields = fields("Knowledge Base/demo.mp4.md", video_source)
     frame_fields = fields(

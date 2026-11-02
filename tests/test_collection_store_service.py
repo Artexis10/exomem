@@ -47,7 +47,6 @@ from test_typed_history_generations import previous_release
 from exomem import __main__ as cli
 from exomem import (
     capabilities,
-    command_surface,
     commands,
     record_governance,
     records,
@@ -332,38 +331,6 @@ def test_nested_archive_declarations_retain_file_source_ownership(tmp_path):
 def test_the_service_startup_gate_admits_the_mixed_vault(service):
     """Defect: the installed service refuses to start on a vault whose marker routes C to the store."""
     state_migration.require_vault_state_ready(service.root)
-
-
-@pytest.mark.parametrize("include_history,rollovers", [(False, 1), (True, 1), (False, 2)])
-def test_query_reopens_after_the_store_handle_changes_before_mcp_egress(
-        service, monkeypatch, include_history, rollovers):
-    """Idle handoff must reread a query instead of hiding an unchanged collection."""
-    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
-    bound = command_surface.bind_vault(command.leaf, service.root, command=command)
-    server_runtime = runtime._SERVERS[service.root].runtime
-    invoke = writer_lease.invoke_command
-    calls = 0
-
-    def handoff_after_read(*args, **kwargs):
-        nonlocal calls
-        result = invoke(*args, **kwargs)
-        calls += 1
-        if calls <= rollovers:
-            assert server_runtime.retire_idle_handle()
-        return result
-
-    monkeypatch.setattr(writer_lease, "invoke_command", handoff_after_read)
-    with request_scope(OWNER):
-        result = bound(action="query", collection=CID, include_agent_history=include_history)
-
-    assert calls == 2
-    if rollovers == 2:
-        assert result["error"]["code"] == "COLLECTION_STORE_BUSY"
-        assert "rows" not in result
-    else:
-        assert [row["title"] for row in result["rows"]] == ["Canonical"]
-        if include_history:
-            assert result["agent_history"]["events"]
 
 
 def test_a_busy_consistency_read_does_not_cost_a_publication_interval(tmp_path, monkeypatch, caplog):
@@ -760,9 +727,12 @@ def test_vault_rollback_survives_restart_and_keeps_file_collections_usable(servi
     root = service.root
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 1)
     write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(60)), SOURCE)
-    imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
-    monkeypatch.setattr(capability, "RELEASED", frozenset())
-    service.stop()
+    with monkeypatch.context() as pending:
+        # One import tick may finish a small import; this service must leave it pending.
+        pending.setattr(runtime.StoreServer, "_import_tick", lambda self: runtime.IMPORT_IDLE_SECONDS)
+        imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+        monkeypatch.setattr(capability, "RELEASED", frozenset())
+        service.stop()
     marker = authority.read_marker(root)
     monkeypatch.setenv(OPERATOR, "operator")
     assert cli._collections_main(["rollback", "--vault", str(root)]) == 0, capsys.readouterr().err
@@ -1345,9 +1315,12 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 5)
     monkeypatch.setattr(capability, "RELEASED", ON)
     write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(60)), SOURCE)
-    job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
-    monkeypatch.setattr(capability, "RELEASED", frozenset())  # this service stops advancing it
-    service.stop()
+    with monkeypatch.context() as pending:
+        # One import tick may finish a small import; this service must leave it running.
+        pending.setattr(runtime.StoreServer, "_import_tick", lambda self: runtime.IMPORT_IDLE_SECONDS)
+        job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+        monkeypatch.setattr(capability, "RELEASED", frozenset())  # this service stops advancing it
+        service.stop()
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         state, progress = reader.execute("SELECT state,progress_json FROM import_jobs").fetchone()
     assert state == "running" and json.loads(progress)["imported"] < 60
@@ -1948,15 +1921,15 @@ def test_a_keyed_write_waiting_its_turn_leaves_the_store_thread_free(service, mo
     assert titles(service.root, CID) == ["Canonical", "Waited"]
 
 
-@pytest.mark.parametrize("held", ["at_routing", "after_routing"])
-def test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread(service, monkeypatch, held):
-    """Routing proves ownership under the boundary, so a hold met there reached the caller as
-    MUTATION_BUSY. A hold met after routing was waited out on the store thread. Both now wait on
-    the request thread, and the write commits once."""
+def test_a_keyed_write_waits_out_a_held_boundary_on_the_store_thread_and_commits_once(service, monkeypatch):
+    """Routing reads ownership without the boundary, so an unrelated hold does not refuse it. The write
+    first meets the hold on the store thread, waits it out there, and commits once after it is released."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from exomem import mutation_lock
 
     appends = counted_appends(monkeypatch)
-    holding, refusals = threading.Event(), []
+    holding, release, refusals = threading.Event(), threading.Event(), []
     refused = mutation_lock.VaultMutationCoordinator._refused
 
     def noted(coordinator, wait_start):
@@ -1968,44 +1941,36 @@ def test_a_keyed_write_waits_out_a_held_boundary_on_its_request_thread(service, 
     def hold():
         with service.manager.consistency_guard(service.root, operation="test hold"):
             holding.set()
-            time.sleep(1.0)
+            assert release.wait(20)
 
     holder = threading.Thread(target=hold)
-    if held == "at_routing":
-        holder.start()
-        assert holding.wait(5)
-    else:
-        route = runtime.route
-
-        def route_then_hold(*args):
-            server = route(*args)
-            if server is not None and not holding.is_set():
-                holder.start()
-                assert holding.wait(5)
-            return server
-
-        monkeypatch.setattr(runtime, "route", route_then_hold)
+    holder.start()
+    assert holding.wait(5)
     try:
-        # A short guard bound, so the write meets the hold several times; the service stops with the default.
-        with monkeypatch.context() as short:
+        assert runtime.route("record_memory", service.root, {"collection": CID, "action": "append"}) is not None
+        assert not refusals, "routing met the held boundary"
+        # A short guard bound, so the write refuses at the hold and waits; the service stops with the default.
+        with monkeypatch.context() as short, ThreadPoolExecutor(1) as pool:
             short.setattr(service.manager, "_mutation_timeout_seconds", 0.2)
-            result = call(service.root, "record_memory", action="append", collection=CID,
-                          item={"title": "Waited"}, item_key=LATER, why="held boundary",
-                          idempotency_key="held-boundary")
+            write = pool.submit(call, service.root, "record_memory", action="append", collection=CID,
+                                item={"title": "Waited"}, item_key=LATER, why="held boundary",
+                                idempotency_key="held-boundary")
+            _until(lambda: refusals)
+            assert not write.done()
+            release.set()
+            result = write.result(timeout=20)
     finally:
+        release.set()
         holder.join(10)
     assert result["outcome"] == "committed"
-    assert refusals, "the write never met the held boundary"
     assert appends == [LATER]
     assert titles(service.root, CID) == ["Canonical", "Waited"]
 
 
-@pytest.mark.parametrize("held", ["at_routing", "after_routing"])
 def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counted_once(
-        service, monkeypatch, tmp_path, held):
+        service, monkeypatch, tmp_path):
     """The request thread waits out the boundary's busy and finally refuses; the caller sees one
-    MUTATION_BUSY, so the journal gets one row and the counter one count. Routing refuses before
-    `invoke` runs, and a hold met after routing is refused inside it: each path owes its own row."""
+    MUTATION_BUSY, so the journal gets one row and the counter one count."""
     monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
     holding, release = threading.Event(), threading.Event()
@@ -2016,20 +1981,16 @@ def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counte
             assert release.wait(10)
 
     holder = threading.Thread(target=hold)
-    if held == "at_routing":
-        holder.start()
-        assert holding.wait(5)
-    else:
-        route = runtime.route
+    route = runtime.route
 
-        def route_then_hold(*args):
-            server = route(*args)
-            if server is not None and not holding.is_set():
-                holder.start()
-                assert holding.wait(5)
-            return server
+    def route_then_hold(*args):
+        server = route(*args)
+        if server is not None and not holding.is_set():
+            holder.start()
+            assert holding.wait(5)
+        return server
 
-        monkeypatch.setattr(runtime, "route", route_then_hold)
+    monkeypatch.setattr(runtime, "route", route_then_hold)
     busy_before = busy_total()
     try:
         with monkeypatch.context() as short, pytest.raises(OpError) as refused:

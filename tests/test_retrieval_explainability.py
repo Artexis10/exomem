@@ -10,6 +10,7 @@ import pytest
 
 from exomem import (
     bm25,
+    clip_index,
     commands,
     embeddings,
     epistemic_graph,
@@ -991,8 +992,8 @@ def test_available_clip_lane_is_metric_labelled_without_optional_artifacts(
         def has_vectors(self):
             return True
 
-        def search(self, _query_vector, *, k: int, allowed_paths=None):
-            return [(rel.removesuffix(".md"), None, 0.654321987)]
+        def search_above_chance(self, _query_vector, *, k: int, allowed_paths=None, alpha, min_population):
+            return clip_index.ClipSearch([(rel.removesuffix(".md"), None, 0.654321987)], 0, "off")
 
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)

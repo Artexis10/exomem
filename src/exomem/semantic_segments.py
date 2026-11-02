@@ -318,14 +318,11 @@ def _frame_ocr_tokens(sidecar: Path) -> set[str] | None:
     engine = m.group(1).strip()
     if engine in _REAL_ENGINE_BAD or engine.startswith("failed:"):
         return None
-    idx = content.find("## Extracted text")
-    if idx == -1:
-        return set()
-    body = content[idx + len("## Extracted text") :]
-    nxt = body.find("\n## ")
-    if nxt != -1:
-        body = body[:nxt]
-    body = body.replace("(no text detected)", "")
+    from . import preserve
+    from .extract import NO_TEXT_DETECTED
+
+    # The kept text only: the words OCR withheld, and the line that marks them, are not the frame's text.
+    body = preserve.extracted_text(content).replace(NO_TEXT_DETECTED, "")
     return set(re.findall(r"[a-z0-9]+", body.lower()))
 
 

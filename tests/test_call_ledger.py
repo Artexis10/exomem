@@ -1096,12 +1096,11 @@ def test_activation_observation_uses_the_final_postfilter(
 ):
     from dataclasses import replace
 
-    from exomem import commands, writer_lease
+    from exomem import commands
     from exomem.governance import egress
 
     command = next(item for item in commands.COMMANDS if item.name == "activate_context")
     command = replace(command, leaf=lambda _vault, **_kwargs: {"abstained": False})
-    monkeypatch.setattr(writer_lease, "invoke_command", lambda *_a, **_k: {"abstained": False})
     final = {"abstained": True, "abstention": {"reason": "withheld"}}
     monkeypatch.setattr(egress, "postfilter", lambda *_a, **_k: final)
     wrapper = command_surface.bind_vault(command.leaf, vault, command=command)

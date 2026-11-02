@@ -273,6 +273,10 @@ Expect the new pack to read pages whose script its unicharset names.
 
 A script that OSD names differently from every script model has no route, and its pages read with `EXOMEM_OCR_DEFAULT_LANGS`. Korean is one: OSD reports `Korean`, and the script model is `Hangul`.
 
+## OCR word confidence
+
+Tesseract reports a confidence from 0 to 100 for each word. OCR leaves a word under `EXOMEM_OCR_WORD_CONFIDENCE_FLOOR` (default `70`) out of `## Extracted text` and search. The sidecar keeps the word under a `## Low-confidence OCR` section after the `exomem:sidecar-low-confidence-ocr` marker, and records the page's `ocr_confidence`. A value that is not a number selects the default. The floor applies when OCR reads an image, so a completed sidecar keeps its section until an explicit reprocess reads the image again. To keep every word searchable, set the variable to `0`; each image that OCR reads from then on keeps all its words. A page where every word is under the floor has an empty `## Extracted text`; that page still counts as extracted and does not retry.
+
 ## Build-time gate
 
 The Cloud stage runs `scripts/check-media-samples.py` with the network off.

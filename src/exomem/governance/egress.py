@@ -58,10 +58,22 @@ from .. import (
     state_paths,
     vault,
 )
-from ..collection_store.preview import bound_writer, canonical_read, projection_decision
+from ..collection_store.preview import (
+    Batch,
+    bound_writer,
+    canonical_read,
+    note_checked_hash,
+    projection_decision,
+)
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
-from ..published_admission import Admission, AdmittedPredicate, admission_of
+from ..published_admission import (
+    Admission,
+    AdmittedPredicate,
+    admission_of,
+    announce,
+    request_decisions,
+)
 from . import (
     artifact_census,
     authorization_custody,
@@ -523,7 +535,11 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
                     ),
                 },
             )
-        if collector.outcomes:
+        # A restricted caller's boundary that touched nothing still takes a
+        # receipt, so a broken store refuses its probe of a missing item as it
+        # refuses a probe of a withheld one. Nothing can be withheld from any
+        # other caller, so it keeps the receipt-free path.
+        if collector.outcomes or caller_restricted(collector.vault_root):
             receipts.append_event(
                 collector.vault_root,
                 event_type="disclosure",
@@ -2133,7 +2149,18 @@ def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None
     return writer is None and ownership.file_only(vault_root)
 
 
-@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
+#: How a command's store-owned pages share one store request (`collection_store.preview.Batch`). A call that
+#: leaves `tombstones` out means the set the command read once, not the live set at that call.
+_PINNED_TOMBSTONES = {"tombstones": lambda vault_root: lifecycle.tombstoned_paths(vault_root)}
+#: `expected_content_hash` is checked against the page's own bytes, and a page copy belongs to the one page it copies.
+_DECIDE_PATH_BATCH = Batch(
+    pinned=_PINNED_TOMBSTONES,
+    expects_hash="expected_content_hash",
+    alone=lambda kwargs: kwargs.get("artifact_copy") is not None,
+)
+
+
+@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -2203,6 +2230,7 @@ def _decide_path(
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
+        note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
     canonical = projection_decision(
@@ -2835,6 +2863,8 @@ def annotate_hits(
     )
     if tombstoned:
         hits = [hit for hit in hits if _hit_path(hit) not in tombstoned]
+    # The pool is decided below and again by the terminal filter: the store decides its pages together.
+    announce(path for hit in hits if (path := _hit_path(hit)))
 
     # (1) Open fast path — no governance configured. The pool can still hold
     #     more than `limit` (a restricted caller, a tombstone): cut it here.
@@ -4774,7 +4804,7 @@ def guard_view_response(
     The view is computed over the caller's own view, so this is the second line. No item is taken
     from the response: the items are the ones this request's compile served this caller for the
     response's ref, generation and page (`context_views.pinned_items`), and a response that no
-    compile in this request served gets none. So both passes serve the text the generation was
+    compile in this request served gets none. So every pass serves the text the generation was
     computed from. Then every path the items name is decided under the authorization that stands
     now, and an item that names a withheld or invalid one is dropped. The same three states as every other consumer: no
     governance and nothing withheld -> no decision; `blocked` or an unresolved-but-expected
@@ -5835,9 +5865,9 @@ def postfilter(
     """The terminal egress filter: always-on scrubber + withheld cross-check.
 
     Called from `writer_lease.invoke_command` — the ONE dispatcher shared by
-    MCP, REST, hosted, and CLI, which is why `bind_vault` (MCP-only) is a
-    second pass rather than the primary site: the `EXOMEM_RETRIEVE_INJECT`
-    hook reaches memory over REST-then-CLI, both of which skip `bind_vault`.
+    MCP, REST, hosted, and CLI, which is why `bind_vault` (MCP-only) is not
+    the site: the `EXOMEM_RETRIEVE_INJECT` hook reaches memory over
+    REST-then-CLI, both of which skip `bind_vault`.
 
     `request_kwargs` are the arguments the command was called with. A derived
     view is decided under the `purpose` they declare, the one its compile used.
@@ -5951,49 +5981,32 @@ def _rewrite_error_attribute(error: BaseException, name: str, value: Any) -> Non
             pass
 
 
-#: Parameters that carry a vault reference BY CONTRACT. The exemption is seeded
-#: from these alone, never from every kwarg.
-#:
-#: Walking all kwargs looks harmless — each value is caller-supplied, which is
-#: the whole safety argument — but it hands the caller a de-anonymisation
-#: channel: put a known path in any free-text field (`why`, `intent`, `title`,
-#: `query`) and a redacted collision list stops rendering it as `[withheld]`,
-#: revealing WHICH slot that path occupies. A list-shaped field turns that from
-#: one probe per candidate into one probe per thousand. Restricting the seed to
-#: reference-typed parameters keeps the justification ("the caller named this AS
-#: a reference") and removes the channel.
-_REFERENCE_KWARGS = frozenset(
-    {
-        "path",
-        "paths",
-        "id",
-        "ids",
-        "ref",
-        "refs",
-        "old_path",
-        "new_path",
-        "source_path",
-        "target_path",
-        "manifest_path",
-        "collection",
-        "only_paths",
-        "selector_paths",
-    }
-)
-
-
-def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[str]:
+def _caller_supplied_references(
+    command_name: str, kwargs: Mapping[str, Any] | None
+) -> frozenset[str]:
     """Canonical keys for every reference the CALLER put in the request.
 
-    See `postfilter_error` for why these must survive filtering verbatim, and
-    `_REFERENCE_KWARGS` for why only reference-typed parameters seed the set.
+    See `postfilter_error` for why these must survive filtering verbatim. Only
+    the paths and refs inside the arguments that the dispatched command declares
+    as path roles (`reserved_paths.path_roles_for_command`) seed the set, never
+    every kwarg and never a free-text field of a declared argument.
+
+    Walking all kwargs looks harmless — each value is caller-supplied, which is
+    the whole safety argument — but it hands the caller a de-anonymisation
+    channel: put a known path in any free-text field (`why`, `intent`, `title`,
+    `query`) and a redacted collision list stops rendering it as `[withheld]`,
+    revealing WHICH slot that path occupies. A list-shaped field turns that from
+    one probe per candidate into one probe per thousand. Seeding from the
+    command's own reference arguments keeps the justification ("the caller named
+    this AS a reference") and removes the channel.
     """
     if not kwargs:
         return frozenset()
     out: set[str] = set()
-
-    def _walk(value: Any) -> None:
-        if isinstance(value, str):
+    for role in reserved_paths.path_roles_for_command(command_name):
+        if role.argument not in kwargs:
+            continue
+        for value in reserved_paths.reference_values(role, kwargs[role.argument]):
             canonical = _canonical_reference(value)
             if canonical is not None:
                 out.add(canonical[0])
@@ -6002,14 +6015,6 @@ def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[s
                 stripped = _kb_stripped(canonical[0])
                 if stripped:
                     out.add(stripped)
-        elif isinstance(value, Mapping):
-            for item in value.values():
-                _walk(item)
-        elif isinstance(value, (list, tuple, set, frozenset)):
-            for item in value:
-                _walk(item)
-
-    _walk({k: v for k, v in kwargs.items() if k in _REFERENCE_KWARGS})
     return frozenset(out)
 
 
@@ -6055,13 +6060,12 @@ def postfilter_error(
     Mutates in place and returns the same object, so the caller re-raises with
     its original type, error code and traceback intact.
     """
-    del command_name  # an error is free text; there is no per-command shape
     vault_root = Path(vault_root)
     gate = _ArtifactReferenceGate(
         vault_root,
         principal=None,
         purpose=None,
-        exempt=_caller_supplied_references(request_kwargs),
+        exempt=_caller_supplied_references(command_name, request_kwargs),
     )
     blocked = False
 
@@ -6938,7 +6942,16 @@ def release_level_for_path_only(
 _CURRENT_PATH_FINGERPRINT = object()
 
 
-@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
+def _path_only_stands_alone(kwargs: Mapping[str, Any]) -> bool:
+    """A receipt records its effect when the read runs, and a captured fingerprint is one page's."""
+    return (kwargs.get("receipt_decision") is not None
+            or kwargs.get("content_fingerprint", _CURRENT_PATH_FINGERPRINT) is not _CURRENT_PATH_FINGERPRINT)
+
+
+@canonical_read(
+    projection=True, unavailable=lambda: DISCLOSURE_MIN,
+    batch=Batch(pinned=_PINNED_TOMBSTONES, alone=_path_only_stands_alone),
+)
 def _release_level_for_path_only_snapshot(
     vault_root: Path,
     rel_path: str,
@@ -7532,6 +7545,21 @@ def restricted_release_filter(
     """
     if bound_writer(vault_root) is not None:
         return release_walk_filter(vault_root, principal=principal, purpose=purpose)
+    who = _file_mode_restricted_caller(vault_root, principal)
+    if who is None:
+        return None
+    return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+def _file_mode_restricted_caller(
+    vault_root: Path, principal: RequestPrincipal | None
+) -> RequestPrincipal | None:
+    """The file-mode caller that something could be withheld from, or `None`.
+
+    The principal, its RAW authority and the connector ceiling decide it; the
+    policy cannot, because `release_walk_filter` returns a filter for every
+    caller that this names.
+    """
     who = principal if principal is not None else current_principal()
     if who is None:
         who = effective_principal()
@@ -7539,7 +7567,7 @@ def restricted_release_filter(
             return None
     if raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who):
         return None
-    return release_walk_filter(vault_root, principal=who, purpose=purpose)
+    return who
 
 
 def caller_restricted(
@@ -7553,8 +7581,17 @@ def caller_restricted(
     The question every count, cut or diagnostic computed before admission
     asks. Policy state (`gate_state`) is a different question: RAW withholds
     a protected page from a guest on an ungoverned vault too.
+
+    It is `restricted_release_filter(...) is not None` without building the
+    filter: a bound preview filters every caller, and in file mode the caller
+    decides it. So it loads no policy and reads no collection ownership, and
+    a receipt can ask it after the read scope has finished.
     """
-    return restricted_release_filter(vault_root, principal=principal, purpose=purpose) is not None
+    del purpose  # every purpose gets a filter or none alike
+    return (
+        bound_writer(vault_root) is not None
+        or _file_mode_restricted_caller(vault_root, principal) is not None
+    )
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;
@@ -8314,7 +8351,7 @@ def filter_withheld_entries(
             server = store_runtime.projection_route(vault_root, metadata_evidence.contributors[0][2])
             if server is None:
                 canonical_governance.OperationAuthorization.refuse()
-            # The MCP second pass gets fresh canonical authority, without waking publication work.
+            # A pass outside the store thread gets fresh canonical authority, without waking publication work.
             return server.call(lambda: filter_withheld_entries(
                 vault_root, payload, principal=principal, purpose=purpose,
                 _artifact_scan_demand=_artifact_scan_demand,
@@ -8711,6 +8748,38 @@ def filter_withheld_entries(
             return kept
         return node
 
+    def _pages_named(node, directory=None, location=()):
+        """The candidates the walk below asks about, found the way it finds them.
+
+        A page this misses is decided on a request of its own, and one it adds is decided for nothing:
+        a drift between the two costs requests and never a verdict.
+        """
+        if isinstance(node, Mapping):
+            here = _directory_of(node)
+            here = directory if here is None else here
+            for key, value in node.items():
+                child_location = (*location, key)
+                if _path_like(key) is not None:
+                    yield from _candidate_paths({"path": key}, here, ())
+                if _is_identifier_key(key) or isinstance(value, Mapping):
+                    yield from _candidate_paths(value, here, child_location)
+                yield from _pages_named(value, here, child_location)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for index, entry in enumerate(node):
+                child_location = (*location, index)
+                yield from _candidate_paths(entry, directory, child_location)
+                yield from _pages_named(entry, directory, child_location)
+
+    from ..collection_store import ownership
+
+    if (request_decisions() is not None and operation is None and not fail_closed
+            and not ownership.file_only(vault_root)):
+        # The store decides the pages of one pass together; a vault with no store has none to announce.
+        root_candidates = _candidate_paths(payload, None, ()) if isinstance(payload, Mapping) else ()
+        announce(
+            resolved for candidate in (*root_candidates, *_pages_named(payload))
+            if (resolved := _resolve_vault_item(candidate)) is not None
+        )
     filtered = _walk(payload)
     if (
         isinstance(payload, Mapping)

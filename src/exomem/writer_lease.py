@@ -2002,6 +2002,10 @@ class LeaseConfig:
                     "WRITER_LEASE_CONFIG: EXOMEM_WRITER_LEASE_IDLE_SECONDS must be 0 (disabled) "
                     "or >= EXOMEM_WRITER_LEASE_TTL"
                 )
+        elif topology == "single-host":
+            # No other replica can reach a literal loopback coordinator, so an idle
+            # release hands authority to nobody and the next read pays a takeover.
+            idle_release_seconds = 0.0
         else:
             # The default tracks the TTL so raising EXOMEM_WRITER_LEASE_TTL
             # alone can never trip the idle>=ttl validation and brick startup.
@@ -6866,7 +6870,11 @@ class LeaseManager:
                     idempotency_key=effective_public_idempotency_key,
                 ),
             )
-        projected = project_terminal(result, response_detail)
+        from .command_surface import outcome_verb_of
+
+        projected = project_terminal(
+            result, response_detail, outcome_verb=outcome_verb_of(command, kwargs)
+        )
         from .governance import scrubber as governance_scrubber
 
         return governance_scrubber._trusted_issuance_projection(
@@ -7191,8 +7199,9 @@ class LeaseManager:
 
         The store thread makes each attempt once and hands back a refusal raised before anything
         committed (`_run_store_attempt`), so it never parks while this write waits its turn.
-        Routing proves ownership under the boundary and changes nothing, so its busy is waited out too.
-        `routed` is the first routing's store server, or the busy refusal it raised.
+        Routing reads ownership without the boundary (`ReadScope.proof`), so it never refuses as busy;
+        the guard is first met on the store thread, where the queue wait absorbs it.
+        `routed` is the first routing's store server.
         """
         from .collection_store import runtime as store_runtime
 
@@ -7202,7 +7211,7 @@ class LeaseManager:
         wait = _ContentionWait(
             self._capture_queue, _capture_wait_seconds(self._mutation_timeout_seconds)
         )
-        routing = received = False
+        received = False
         current: _StoreAttempt | None = None
         refusal_journal: list[Callable[[], None]] = []
 
@@ -7219,21 +7228,13 @@ class LeaseManager:
             return func(command, *injected, **call_kwargs)
 
         def attempt() -> Any:
-            nonlocal routing, received, current
+            nonlocal received, current
             current = _StoreAttempt(
                 holds_ticket=wait.ticket is not None,
                 resubmission=received,
                 deadline=wait.deadline,
             )
-            routing = True
-            if wait.absorbed:
-                with mutation_lock.absorbing_busy():
-                    server = store_runtime.route(command.name, injected[0], kwargs)
-            elif isinstance(routed, OpError):
-                raise routed
-            else:
-                server = routed
-            routing = False
+            server = store_runtime.route(command.name, injected[0], kwargs) if wait.absorbed else routed
             token = _ACTIVE_STORE_ATTEMPT.set(current)
             try:
                 if server is None:
@@ -7251,13 +7252,6 @@ class LeaseManager:
                 received = received or current.received
 
         def absorbable(error: OpError) -> bool:
-            if routing:
-                if error.code != "MUTATION_BUSY":
-                    return False
-                # Routing refuses before `invoke` runs, so this seam journals the refusal the caller finally sees.
-                refusal_journal[:] = [lambda: _record_store_queue_refusal(
-                    command, call_kwargs, injected[0], error, wait.waited_ms() / 1000)]
-                return True
             if current is None or error is not current.handed_off:
                 return False
             # The journal row, if any, of the refusal the caller would see now.
@@ -8133,7 +8127,7 @@ def _invocation_provenance(
     """Give each dispatched command one record of what it served, for its own guard passes only.
 
     Outermost, so a store-routed call fills the same record from the store's thread. Under the
-    MCP surface this joins the record that the surface opened for its second pass.
+    MCP surface this joins the record that the surface opened.
     """
     @wraps(function)
     def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
@@ -8236,10 +8230,11 @@ def _restricted_refusal_floor(
     A missing page refuses before any page is read, while a withheld one is
     read and decided first. Padding every refusal that a restricted caller
     receives to one floor removes that difference. A success returns at once,
-    notices included. The restriction is asked only after a refusal, so a
-    success never pays for the question. Behind an MCP or REST surface the
-    surface waits, after its own handling of the refusal; elsewhere this
-    thread waits.
+    notices included, unless the command asked for the floor through
+    `projection_timing.floor_restricted_outcome`. The restriction is asked
+    only after a refusal, so a success never pays for the question. Behind an
+    MCP or REST surface the surface waits, after its own handling of the
+    refusal; elsewhere this thread waits.
     """
 
     @wraps(function)
@@ -8250,16 +8245,29 @@ def _restricted_refusal_floor(
             or not isinstance(injected[0], (str, os.PathLike))
         ):
             return function(command, *injected, **kwargs)
-        from .governance import policy
+        from .commands import invocation_is_read_only
+        from .governance import policy, projection_timing
+        from .governance.egress import SelectorCoverageError
 
         started_at = time.perf_counter()
-        # A direct read changes no governance, so it decides under one policy load.
-        with policy.request_policy_snapshot():
+        try:
+            read_only = invocation_is_read_only(command, kwargs)
+        except SelectorCoverageError:
+            read_only = False  # the dispatcher sends it down the writer path too
+        # A read changes no governance, so it decides under one policy load. A
+        # write must see the policy it finds, so it opens no snapshot.
+        with (
+            policy.request_policy_snapshot() if read_only else nullcontext(),
+            projection_timing.floored_outcome_scope() as outcome,
+        ):
             try:
-                return function(command, *injected, **kwargs)
+                result = function(command, *injected, **kwargs)
             except Exception as error:
                 _complete_restricted_refusal(Path(injected[0]), started_at, error)
                 raise
+        if outcome.requested:
+            _hold_to_refusal_floor(started_at)
+        return result
 
     return wrapped
 
@@ -8267,7 +8275,7 @@ def _restricted_refusal_floor(
 def _complete_restricted_refusal(
     vault_root: Path, started_at: float, error: BaseException
 ) -> None:
-    from .governance import egress, projection_timing
+    from .governance import egress
 
     try:
         restricted = egress.caller_restricted(vault_root)
@@ -8284,6 +8292,13 @@ def _complete_restricted_refusal(
         seen.add(id(chained))
         traceback.clear_frames(chained.__traceback__)
         chained = chained.__cause__ or chained.__context__
+    _hold_to_refusal_floor(started_at)
+
+
+def _hold_to_refusal_floor(started_at: float) -> None:
+    """Complete no sooner than the floor after `started_at`, on the surface if one waits."""
+    from .governance import projection_timing
+
     padding_started = time.perf_counter()
     work_ms = (padding_started - started_at) * 1000.0
     deferred = projection_timing.defer_refusal_floor(started_at)
@@ -8368,14 +8383,7 @@ def _collection_store_thread(func):
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
                 if not (read_only or import_status) and _writes_absorb_contention():
-                    try:
-                        with mutation_lock.absorbing_busy():
-                            routed = store_runtime.route(command.name, injected[0], kwargs)
-                    except OpError as error:
-                        # Routing proves ownership under the boundary and changes nothing.
-                        if error.code != "MUTATION_BUSY":
-                            raise
-                        routed = error
+                    routed = store_runtime.route(command.name, injected[0], kwargs)
                     if routed is not None:
                         return get_manager()._attempt_store_write(func, command, injected, kwargs, routed)
                     return func(command, *injected, **kwargs)
@@ -8453,7 +8461,7 @@ def invoke_command(
         kwargs = normalize_edit_surface_arguments(kwargs)
 
     # Terminal egress filter (design D1). THIS is the one dispatcher shared by
-    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
+    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` serves MCP
     # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.
@@ -8623,18 +8631,27 @@ def invoke_command(
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
+    from . import published_admission
     from .collection_store import ownership
+    from .collection_store import preview as store_preview
 
+    # The command's store-owned pages are decided on one store request per decision shape, dropped
+    # with the command; a refused request withholds them together for the rest of it.
     with ownership.read_scope(injected[0]) as ownership_scope, \
-            disclosure_boundary(injected[0], command.name) as collector:
+            disclosure_boundary(injected[0], command.name) as collector, \
+            published_admission.deciding():
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
             # Fixed phase labels carry timing only, never caller or vault data.
             with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
-            with call_spans.span("command.terminal_filter"):
+            # The terminal filter decides the store-owned pages in a scope of its own, so it asks the
+            # store live rather than replaying the body's verdict; the one place that scope can
+            # withhold the pages is here, so this is also where the owner is told it did.
+            with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
                 result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                result = store_preview.note_withheld_pages(command.name, result, injected[0])
         except BaseException as error:
             try:
                 with call_spans.span("command.terminal_filter"):

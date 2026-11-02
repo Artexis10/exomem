@@ -36,10 +36,11 @@ def legacy_rows(store):
     return rows
 
 
+@pytest.mark.parametrize("string_columns", [frozenset({"title"}), frozenset()], ids=["declared", "undeclared"])
 @pytest.mark.parametrize("op,value", OPERATOR_CASES)
-def test_sql_operator_answers_match_file_oracle(store, legacy_rows, op, value):
+def test_sql_operator_answers_match_file_oracle(store, legacy_rows, op, value, string_columns):
     """Affinity, ASCII NOCASE and string membership must not replace legacy rules."""
-    args = {"filters": [{"column": "title", "op": op, "value": value}]}
+    args = {"filters": [{"column": "title", "op": op, "value": value}], "string_columns": string_columns}
     expected = query_data.evaluate_rows(legacy_rows, path="source", format="markdown-items",
                                        columns_available=["title", "count"], **args)
     with runtime.read_session(store.root, store.handle.path) as session:
@@ -68,13 +69,17 @@ def test_sql_reductions_and_envelopes_match_file_oracle(store, legacy_rows, aggr
     assert actual.as_dict() == expected.as_dict()
 
 
-def test_unicode_numeric_and_membership_have_independent_expected_answers(store, legacy_rows):
+@pytest.mark.parametrize("string_columns,equal", [
+    (frozenset({"title"}), ["1"]),  # a declared string compares as its whole value
+    (frozenset(), ["<1,0 mg", "1"]),  # an undeclared column keeps the tolerant numeric reading
+], ids=["declared", "undeclared"])
+def test_unicode_numeric_and_membership_have_independent_expected_answers(store, legacy_rows, string_columns, equal):
     """A shared primitive changed wrongly must not make both parity arms pass."""
-    expected = {"eq": ["<1,0 mg", "1"], "in": ["1"], "startswith": ["Éclair", "éCOLE"]}
+    expected = {"eq": equal, "in": ["1"], "startswith": ["Éclair", "éCOLE"]}
     for op, value in (("eq", 1), ("in", ["1"]), ("startswith", "Éc")):
         with runtime.read_session(store.root, store.handle.path) as session:
             admitted = session.admit(CID)
-            plan = legacy.normalize(columns_available=admitted.fields,
+            plan = legacy.normalize(columns_available=admitted.fields, string_columns=string_columns,
                                     filters=[{"column": "title", "op": op, "value": value}])
             result = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
             assert [row["title"] for row in result.rows] == expected[op]

@@ -24,6 +24,7 @@ from typing import Any
 from . import cloud_cell, held_fs, media_brakes, reserved_paths
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
+from .ocr_facts import OcrFacts
 from .vault import parse_frontmatter
 
 PENDING = "pending"
@@ -163,6 +164,15 @@ def _validated_result_payload(kind: str, payload: object) -> dict[str, object] |
                 result["asr"] = AsrFacts.from_payload(asr).as_payload()
             except ValueError:
                 return None
+        ocr = payload.get("ocr")
+        if ocr is not None:
+            try:
+                facts = OcrFacts.from_payload(ocr)
+            except ValueError:
+                return None
+            if _bounded_text(facts.low_confidence_text, _MAX_RESULT_TEXT_BYTES) is None:
+                return None
+            result["ocr"] = facts.as_payload()
         replaces = payload.get("replaces")
         if replaces is not None:
             if not _is_sha256(replaces):

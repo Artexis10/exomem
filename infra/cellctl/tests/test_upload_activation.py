@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from cellctl import main, reconcile
 from cellctl.manifests import render_statefulset
-from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .test_artifact_transport import BROKER_URL, CELL_ID, OTHER_CELL_ID, _digest
@@ -39,6 +38,9 @@ def _uploads(public_key: str, cell_ids=(CELL_ID, OTHER_CELL_ID), **overrides) ->
 def test_upload_settings_are_off_when_the_environment_omits_them(monkeypatch) -> None:
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     config = main.build_cluster_config()
     assert config.upload_cell_ids == ()
     assert config.upload_public_key == ""
@@ -48,6 +50,9 @@ def test_upload_settings_load_from_the_environment(monkeypatch) -> None:
     public_key = _public_pem()
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_UPLOAD_CELL_IDS", f'["{CELL_ID}","{OTHER_CELL_ID}"]')
     monkeypatch.setenv("CELLCTL_UPLOAD_PUBLIC_KEY", public_key)
     config = main.build_cluster_config()
@@ -122,7 +127,7 @@ async def test_reconcile_gives_only_the_listed_cells_the_public_key(cell_db) -> 
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     cluster = FakeClusterGateway()
     try:
-        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
         for cell_id in cell_ids:
             pod = cluster.applied[("exo-cell-" + cell_id, "StatefulSet", "cell")]["spec"]["template"]["spec"]

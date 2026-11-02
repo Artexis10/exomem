@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import sys
 import threading
 import time
 import weakref
@@ -1092,6 +1093,21 @@ def notify_view_change(root, path, *, destination=None, directory=False):
         server._condition.notify_all()
 
 
+#: Frames that only carry a call to the store: this module, its read facade and ownership proof, the
+#: admission scope and the wrappers around them. The site is the first caller outside them.
+_CALL_PLUMBING = frozenset({
+    __name__, f"{__package__}.preview", f"{__package__}.ownership", "exomem.published_admission",
+    "functools", "contextlib",
+})
+
+
+def _call_site(frame):
+    """The nearest caller outside the plumbing as ``module:function:line``, without the package prefixes."""
+    from ..stack_sites import caller_site
+
+    return caller_site(frame, skip_modules=_CALL_PLUMBING).removeprefix("exomem.").removeprefix("governance.")
+
+
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
@@ -1175,7 +1191,27 @@ class StoreServer:
         completion deadline and returns a later acceptance deadline, or None to refuse.
         ``on_refusal(error, waited_seconds)`` hears a write refusal this queue makes
         itself, just before the caller gets it: a timeout in the queue, or accepted work
-        still running. A refusal the work or ``extend`` raises reaches the caller from there."""
+        still running. A refusal the work or ``extend`` raises reaches the caller from there.
+
+        One ``store.call@<site>`` span covers admission, queue and serve, so a slow site
+        survives the ledger's span cap. ``pages`` is how many pages the work decides
+        (``work.pages``, 1 when it does not say), ``refused`` is 1 when the call raised and
+        ``wake`` is 1 when it asked to wake maintenance."""
+        fields = {"pages": getattr(work, "pages", 1), "refused": 0, "wake": int(bool(wake_maintenance))}
+        # The frame walk is paid only on the MCP path, where the span records.
+        on_path = call_spans.MCP_CALL_TOKEN.get() is not None
+        name = f"store.call@{_call_site(sys._getframe(1))}"[:call_spans.NAME_MAX_CHARS] if on_path else "store.call"
+        with call_spans.span(name, fields):
+            try:
+                return self._call(
+                    work, wake_maintenance=wake_maintenance, read_only=read_only,
+                    extend=extend, on_refusal=on_refusal,
+                )
+            except BaseException:
+                fields["refused"] = 1
+                raise
+
+    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal):
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
@@ -1258,8 +1294,6 @@ class StoreServer:
 
     def _queue_refusal_state(self):
         """Observe the worker at refusal, without paths, source text or frame locals."""
-        import sys
-
         from ..stack_sites import package_frames
 
         state = {"alive": self.thread.is_alive(), "queued_requests": len(self._requests),
@@ -1442,9 +1476,10 @@ class StoreServer:
                     # does: a caller that gets MUTATION_ACKNOWLEDGEMENT_PENDING returns while this
                     # still runs. Governance policy stays pinned through the release, which a read's
                     # snapshot allows. Path resolution and the connector ceiling are pinned for the
-                    # body only: the terminal egress filter re-reads them live. The MCP second pass
-                    # runs outside both scopes, so it stays live too. A write opens neither: it can
-                    # wait for the mutation boundary and must then decide on the policy and ceiling
+                    # body only: the terminal egress filter re-reads them live, and decides the store-owned
+                    # pages in a decision scope of its own (`published_admission.deciding(own=True)`), so it
+                    # asks the store again rather than replaying the body's verdict. A write opens neither:
+                    # it can wait for the mutation boundary and must then decide on the policy and ceiling
                     # it finds, not on the ones it read before the wait.
                     scope.enter_context(state_paths.resolution_scope())
                     scope.enter_context(policy.request_policy_snapshot())
@@ -1534,8 +1569,8 @@ class StoreServer:
         return IMPORT_IDLE_SECONDS if result["status"] == "pending" else IMPORT_RETRY_SECONDS
 
     def _import_tick(self):
-        """Advance running import jobs by one batch; returns the seconds until the next tick."""
-        from . import capability, importer
+        """Advance running import jobs for one step budget; returns the seconds until the next tick."""
+        from . import capability, derived_rows, importer
         from .preview import preview_store
 
         if self.runtime is None or not capability.records_summary_enabled(self.root):
@@ -1546,8 +1581,11 @@ class StoreServer:
                 if reader.execute("SELECT 1 FROM import_jobs WHERE state='running' LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
             with preview_store(self.root, self.runtime):
-                done = importer.run_jobs(self.root, max_batches=1, deadline=time.monotonic()
-                                         + self.manager._mutation_timeout_seconds / 2)
+                # Batches run until the step budget is spent, each in its own transaction, so a derived
+                # import keeps its pace with small batches even when foreground demand spaces ticks out.
+                # It does not stop for a waiting request, as the views slice does: under steady demand
+                # that would leave one batch per tick. A request waits at most the budget and one batch.
+                done = importer.run_jobs(self.root, deadline=time.monotonic() + derived_rows.STEP_SECONDS)
         except Exception:  # noqa: BLE001 - a refused tick leaves its jobs for a later one
             logger.warning("import jobs could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS

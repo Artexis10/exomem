@@ -13,7 +13,7 @@
   dependencies built on the host. The report records which one ran.
 - **cellctl image**: the repository ships no cellctl image yet, so the
   rehearsal assembles one from the pinned Python base and a host-resolved
-  install of `infra/cellctl`, plus `cellctl_entry.py`.
+  install of `infra/cellctl`, plus `cellctl_entry.py` and `custodian_entry.py`.
 
 Nothing here runs a network step inside `docker build` except the two
 upstream Dockerfiles themselves.
@@ -43,6 +43,7 @@ CELLCTL_REPOSITORY = "rehearsal.local/exomem-cellctl"
 PYTHON_IMAGE = "python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
 CELLCTL_ROOT = images.REPO_ROOT / "infra/cellctl"
 ENTRY_MODULE = Path(__file__).with_name("cellctl_entry.py")
+CUSTODIAN_ENTRY_MODULE = Path(__file__).with_name("custodian_entry.py")
 
 BROKEN_SHIM = """#!/bin/sh
 # Forced canary failure: cell-init runs for real, the server never starts.
@@ -221,6 +222,7 @@ def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
         timeout=900,
     )
     shutil.copy(ENTRY_MODULE, extra / "rehearsal_cellctl.py")
+    shutil.copy(CUSTODIAN_ENTRY_MODULE, extra / "rehearsal_custodian.py")
     site = "/opt/cellctl/lib/python3.12/site-packages"
     if mode == "dockerfile":
         base = f"{CELLCTL_REPOSITORY}:{run_id}-base"

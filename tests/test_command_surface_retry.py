@@ -1936,16 +1936,14 @@ def test_identical_retry_without_replay_identity_contends_normally(
     ("read_only", "code", "committed"),
     [(False, "MUTATION_ACKNOWLEDGEMENT_PENDING", None), (True, "COLLECTION_STORE_BUSY", False)],
 )
-@pytest.mark.parametrize("refusing_pass", [1, 2])
 def test_store_filter_refusal_after_a_write_leaf_reports_an_unknown_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     read_only: bool,
     code: str,
     committed: bool | None,
-    refusing_pass: int,
 ) -> None:
-    """A deadline refusal in either result filter never reports that a completed write committed nothing.
+    """A deadline refusal in the result filter never reports that a completed write committed nothing.
 
     The same-identity retry then replays the stored terminal without running the leaf again.
     """
@@ -1973,7 +1971,7 @@ def test_store_filter_refusal_after_a_write_leaf_reports_an_unknown_outcome(
     def filter_misses_its_deadline(*args, **kwargs):
         nonlocal seen
         seen += 1
-        if seen != refusing_pass:
+        if seen != 1:
             return filter_passes(*args, **kwargs)
         raise connection.busy("the collection store did not finish this read within its completion deadline")
 
@@ -2016,14 +2014,14 @@ def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monke
     postfilter = egress.postfilter
     passes = 0
 
-    def stale_second_pass(*args, **kwargs):
+    def stale_terminal_pass(*args, **kwargs):
         nonlocal passes
         passes += 1
-        if passes == 2:
+        if passes == 1:
             raise _StaleQueryHistoryProjection("COLLECTION_NOT_FOUND", "collection was not found")
         return postfilter(*args, **kwargs)
 
-    monkeypatch.setattr(egress, "postfilter", stale_second_pass)
+    monkeypatch.setattr(egress, "postfilter", stale_terminal_pass)
     bound = command_surface.bind_vault(leaf, vault, command=command)
     result = bound(value=7)
     assert written.read_text() == "done" and runs == 1

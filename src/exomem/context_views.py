@@ -11,7 +11,7 @@ change, so no entry the caller cannot see moves a byte the caller receives.
 map through `activation_packet` and `map_within`. A compile records what it
 served in its own invocation (`served_items`), and each pass of the terminal
 guard serves that record again (`pinned_items`), never the items it is handed.
-So both passes serve the text that the generation was computed from.
+So every pass serves the text that the generation was computed from.
 
 A caller that may not read the domain registry gets nothing from it: no topic,
 no topic key and no domain map. Every topic ref then reads as an unknown one.
@@ -1056,7 +1056,8 @@ def _select(
     # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
     items = [_map_item(view, owner.rows[position]) for position in selected]
     empty = not owner.world.rows
-    generation = _digest(json.dumps([items, available, overflow, empty, view.stale, view.graph], sort_keys=True))
+    # The stale flag rides beside the generation, so a stale serve and a fresh one of the same map share it.
+    generation = _digest(json.dumps([items, available, overflow, empty, view.graph], sort_keys=True))
     read = {key: value for key, value in states.items() if key not in owner.states} if available else {}
     compiled = _ActivationMap(
         replace(view, generation=generation, state_available=available), owner.world, selected, overflow, empty
@@ -1834,8 +1835,8 @@ def pinned_items(vault_root: Path, response: Mapping[str, Any], caller: CallerVi
 
     The terminal guard serves these in place of the items it is given, and reads none of those. A
     response is named by its ref, its generation and its continuation (the page's position), for
-    this caller. So both guard passes serve the text the generation was computed from, and a release
-    strip in the first pass cannot change what the second pass serves. A response that this invocation
+    this caller. So every guard pass serves the text the generation was computed from, and a release
+    strip in one pass cannot change what a later pass serves. A response that this invocation
     never compiled for this caller, under the admissions that stand now, gets no item.
     """
     served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)
