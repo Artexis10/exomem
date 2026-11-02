@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -30,6 +31,10 @@ def _download(url: str, target: Path) -> None:
             with urllib.request.urlopen(url, timeout=60) as response:
                 target.write_bytes(response.read())
             return
+        except urllib.error.HTTPError as error:
+            # A missing release or tag is final; only server and rate-limit errors are transient.
+            if attempt == 3 or (error.code < 500 and error.code != 429):
+                raise
         except OSError:
             if attempt == 3:
                 raise
@@ -37,6 +42,7 @@ def _download(url: str, target: Path) -> None:
 
 
 def main(version: str, venv: str, sha: str, env_name: str) -> None:
+    github_env = os.environ["GITHUB_ENV"]
     repository = os.environ.get("GITHUB_REPOSITORY", "Artexis10/exomem")
     # The journey re-reads the wheel that the provenance record names, so the wheel stays in place.
     base = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
@@ -44,10 +50,13 @@ def main(version: str, venv: str, sha: str, env_name: str) -> None:
 
     release = work / "release.json"
     _download(f"https://pypi.org/pypi/exomem/{version}/json", release)
-    wheel_url = next(
-        entry["url"] for entry in json.loads(release.read_text())["urls"]
+    wheels = [
+        entry["url"] for entry in json.loads(release.read_bytes())["urls"]
         if entry["filename"].endswith(".whl")
-    )
+    ]
+    if not wheels:
+        sys.exit(f"exomem {version} has no published wheel")
+    wheel_url = wheels[0]
     wheel = work / wheel_url.rsplit("/", 1)[-1]
     _download(wheel_url, wheel)
     actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
@@ -75,8 +84,8 @@ def main(version: str, venv: str, sha: str, env_name: str) -> None:
         ["uv", "pip", "install", "--python", str(python), "--require-hashes", "-r", str(locked)],
         check=True,
     )
-    with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as github_env:
-        github_env.write(f"{env_name}={python}\n")
+    with open(github_env, "a", encoding="utf-8") as exported:
+        exported.write(f"{env_name}={python}\n")
 
 
 if __name__ == "__main__":
