@@ -52,6 +52,7 @@ def test_ci_checks_and_never_rewrites_the_root_lockfile() -> None:
             workflow.read_text(encoding="utf-8").splitlines(), start=1
         ):
             if re.search(r"\buv run\b", line):
-                assert "uv run --frozen" in line, (
+                # `uv run --no-project` reads no project lock, so it cannot rewrite uv.lock.
+                assert "uv run --frozen" in line or "uv run --no-project" in line, (
                     f"{workflow.relative_to(ROOT)}:{line_number} may rewrite uv.lock"
                 )
