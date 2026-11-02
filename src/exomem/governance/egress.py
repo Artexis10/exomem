@@ -7786,15 +7786,26 @@ def page_filter_over(
         # A page that left is no page to the check below, which would keep it.
         if rel in held:
             return False, False
-        if not lifecycle.is_tombstoned_in(tombstones, rel):
+        tombstoned = lifecycle.is_tombstoned_in(tombstones, rel)
+        if offered is None:
+            # A path `keep` admits is kept whether or not it is a file, so only a refused, live path
+            # needs the stat that tells a non-page reference (kept) from a page; a ranking decides
+            # every catalogue page, and that stat was most of its cost.
+            if keep(rel):
+                return True, False
+            if tombstoned:
+                return False, False
+            try:
+                return not (root / rel).is_file(), False
+            except OSError:
+                return False, False
+        if not tombstoned:
             try:
                 if not (root / rel).is_file():
                     return True, False
             except OSError:
                 return False, False
-        if offered is not None:
-            return offered.decide(rel, publish)
-        return keep(rel), False
+        return offered.decide(rel, publish)
 
     if offered is None:
         return lambda rel_path: decide(rel_path)[0]
