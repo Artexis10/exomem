@@ -16,10 +16,13 @@
 ## 3. Verification
 
 - [x] 3.1 Scoped tests: one withheld-against-missing pair per door, the receipt-store fault for an absent path and a zero-hit search, an unanchored copy, and the non-owner metadata views.
-- [ ] 3.2 The governance audit rig's twin-world, receipt and timing phases show no oracle on these doors.
-- [ ] 3.3 Full suite.
-- [ ] 3.4 Author-independent review of the diff, and a recheck of each correction.
+- [x] 3.2 The governance audit rig's twin-world, receipt and timing phases show no oracle on these doors.
+  On the final branch commit: no door differs across 121 doors and three restricted callers; with a failing receipt store, granted, withheld, absent and open-search calls refuse alike; withheld and absent medians (n=200) are 55.2 ms on every floored door and on inbound-links.
+- [x] 3.3 Full suite.
+  CI ran the full corpus on the merged head of #2330, and every check passed.
+- [x] 3.4 Author-independent review of the diff, and a recheck of each correction.
+  An independent review requested changes twice (5, then 1 blocking finding) and approved the third round with none; see #2330.
 
 ## 4. Closure
 
-- [ ] 4.1 After merge, sync these deltas into the canonical specs and archive the change with `openspec archive`.
+- [x] 4.1 After merge, sync these deltas into the canonical specs and archive the change with `openspec archive`.
