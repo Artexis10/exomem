@@ -200,18 +200,25 @@ def test_the_block_is_absent_where_the_owner_has_asked_for_less(
 def test_a_name_that_two_pages_of_one_batch_link_is_listed_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One `episode_memory` resume commits two notes; the batch carries one block for both."""
+    """One `episode_memory` resume commits two notes; the batch carries one block for both.
+
+    The notes share a link with a page that already exists, so each is proposed with its relation
+    review. A proposal refuses a review the page does not yet need, and a page needs one only once
+    another page that shares its link exists.
+    """
     monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
     vault, call = _served(tmp_path, monkeypatch)
+    _as(monkeypatch, "session-seed")
+    _note(call, "Earlier harbour note", "Kestrel")
     _as(monkeypatch, "session-a")
     key = "ep-" + "c0" * 16
 
     def episode(**arguments) -> dict:
         return call("episode_memory", {"episode": key, **arguments})
 
-    def prepare(candidate: str, slug: str, names: tuple[str, ...], *, reviewed: bool) -> str:
-        """Prepare one note leaf; a later page that shares a link needs its relation review."""
-        review = {"relation_disposition": "reviewed_none", "relation_review_reason": NO_RELATION} if reviewed else {}
+    def prepare(candidate: str, slug: str, names: tuple[str, ...]) -> str:
+        """Prepare one note leaf with the relation review that its shared link requires."""
+        review = {"relation_disposition": "reviewed_none", "relation_review_reason": NO_RELATION}
         leaf = {"leaf_key": "write", "effect_revision": 1, "kind": "create-note", "args": {
             "title": slug.replace("-", " ").title(), "slug": slug, "content": _body(slug, *names), **review,
         }}
@@ -227,8 +234,8 @@ def test_a_name_that_two_pages_of_one_batch_link_is_listed_once(
         action="record", subject="Harbour review", summary="Reviewed two harbour notes.",
         worked_on=["Reviewed the harbour"], decided=["The Kestrel numbers hold", "The pier numbers hold"], open=[],
     )
-    first = prepare("first", "first-episode-note", ("Kestrel", "Salt Ledger"), reviewed=False)
-    second = prepare("second", "second-episode-note", ("Kestrel", "Quiet Ferry"), reviewed=True)
+    first = prepare("first", "first-episode-note", ("Kestrel", "Salt Ledger"))
+    second = prepare("second", "second-episode-note", ("Kestrel", "Quiet Ferry"))
     state = episode(action="candidates")
 
     resumed = episode(
