@@ -172,11 +172,12 @@ second.
    does not authorize page edits.
 2. Record one bounded recap with `record_episode(operation={'kind': 'record'})`: a
    one-line subject and summary, what was worked on, decided and left open, and at
-   most three verbatim user statements worth keeping. Link each Decided item to the
-   page it belongs to with `[[...]]`, and set `about` to the pages you updated. A
-   short link form works: link with the page's file name when its title is long,
-   because each Decided item holds 200 characters and a full-title link can fill
-   most of them.
+   most three verbatim user statements worth keeping. Link each Decided item to its
+   existing page with `[[...]]`, and set `about` to the pages you updated. Link no
+   page that does not exist: a recap cannot be edited, so that link stays dangling
+   and the audit reports it. A short link form works: link with the page's file name
+   when its title is long, because each Decided item holds 200 characters and a
+   full-title link can fill most of them.
 
 The recap is raw material about the conversation, not a compiled conclusion, and it
 is what the next session on any client sees first in `recent_context`. Its response
