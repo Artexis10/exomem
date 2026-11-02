@@ -34,11 +34,10 @@ env:
   # configuration built below from the shipped file of KATA_HYPERVISOR plus KATA_CONFIG_EDITS.
   ARMS: "runc,kata-blk,kata-blk-tuned"
   # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line).
-  KATA_HYPERVISOR: "qemu"
-  KATA_CONFIG_EDITS: |
-    default_memory = 512
+  KATA_HYPERVISOR: "clh"
+  KATA_CONFIG_EDITS: ""
   # "1" also boots a cell with and without psi=1 on the guest kernel command line and prints the PSI files.
-  PSI_PROBE: "1"
+  PSI_PROBE: "0"
 
 jobs:
   measure:
