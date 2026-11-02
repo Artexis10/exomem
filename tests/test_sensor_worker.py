@@ -12,7 +12,14 @@ from pathlib import Path
 import pytest
 import sensing_fixture as sf
 
-from exomem import dreamer, freshness, runtime_resources, sensed_model, sensing_ledger, sensor_worker
+from exomem import (
+    dreamer,
+    freshness,
+    runtime_resources,
+    sensed_model,
+    sensing_ledger,
+    sensor_worker,
+)
 
 
 @pytest.fixture(autouse=True)
