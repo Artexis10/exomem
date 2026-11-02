@@ -847,6 +847,11 @@ class Lab:
                          f"{probed.stderr.strip()[-300:]}")
                 self.diag(f"compat-{runtime}", {"rc": probed.returncode, "stdout": probed.stdout,
                                                 "stderr": probed.stderr[-2000:]})
+                if probed.returncode != 0 and docker_runtime(runtime) == "kata":
+                    # The shim logs to the journal why its hypervisor stopped; the Docker error does not say.
+                    journal = sh(["sudo", "journalctl", "-t", "kata", "--since", "-3min", "-o", "cat", "--no-pager"],
+                                 check=False, timeout=60)
+                    self.diag(f"compat-{runtime}-shim-journal", {"tail": journal.stdout[-6000:]})
         finally:
             self.docker("volume", "rm", "-f", volume, check=False)
             for path in list(self.blocks):
@@ -1409,7 +1414,10 @@ class Lab:
                     # Each arm takes each position in the order once over a full cycle of repeats.
                     shift = (rep - 1) % len(self.arms)
                     for arm in self.arms[shift:] + self.arms[:shift]:
-                        self.session(arm, rep)
+                        try:
+                            self.session(arm, rep)
+                        except Exception as error:  # noqa: BLE001 - an arm that cannot start must not end the other arms' run
+                            self.fail(arm, rep, "session", f"{type(error).__name__}: {error}"[:600])
             if "trace" in self.args.phases:
                 self.trace_session()
         finally:

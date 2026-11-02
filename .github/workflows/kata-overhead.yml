@@ -24,7 +24,7 @@ env:
   KATA_ASSET: "kata-go-static-4.3.1-amd64.tar.zst"
   # The image a cell runs in production (published, anonymous pull).
   CLOUD_IMAGE: ghcr.io/artexis10/exomem:0.154.0-cloud
-  REPEATS: "1"
+  REPEATS: "3"
   SEED_NOTES: "200"
   # "--compat-only" probes the runtimes and stops; empty runs the whole measurement.
   EXTRA_ARGS: ""
@@ -32,13 +32,12 @@ env:
   PHASES: "measure"
   # kata-blk: the shipped QEMU configuration (plus the block-device key). kata-blk-tuned: the same arm with the
   # configuration built below from the shipped file of KATA_HYPERVISOR plus KATA_CONFIG_EDITS.
-  ARMS: "runc,kata-blk-tuned,kata-blk-tuned2"
+  ARMS: "runc,kata-blk,kata-blk-tuned,kata-blk-tuned2"
   # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line)
   # in the configuration of arm kata-blk-tuned.
   KATA_HYPERVISOR: "qemu"
   KATA_CONFIG_EDITS: |
     reclaim_guest_freed_memory = true
-    virtio_fs_cache_size = 1024
   # An optional second tuned arm (kata-blk-tuned2); leave KATA_HYPERVISOR_2 empty for none.
   KATA_HYPERVISOR_2: "clh"
   KATA_CONFIG_EDITS_2: |
