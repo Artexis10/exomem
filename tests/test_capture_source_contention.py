@@ -248,7 +248,7 @@ def test_a_file_lost_to_a_busy_boundary_is_not_reported_as_saved(
         "MUTATION_BUSY",
     )
     assert result["user_summary"] == (
-        f"Saved 1 of 2 files -> {first['stored_path']}; 1 file could not be saved"
+        f"Saved 1 of 2 files -> {first['stored_path']}; 1 file could not be saved (personal Exomem)"
     )
 
 

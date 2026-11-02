@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: ea2aa6f8b5fc2d350c0ae3caec5270b835cd6c0102ba4478454290cf9155362a
+  skill_contract: b4852bb90e6324a13e717027949aaaa9c6dd208d3aacc1b276d18a827d1cf2fa
   version: "0.2.0"
 ---
 
@@ -41,6 +41,11 @@ identity after an uncertain commit.
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
 only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
+
+Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
+different Exomem, use the connector they named; if it is unavailable, say so plainly and
+write nothing elsewhere. Never tell the user a write landed in a store other than the
+one `user_summary` names.
 
 ## Workflow
 0. To organize by topic, or when maps show few topics, do not edit pages one by one. Read the topic-carrier items from `read_review(operation={'kind': 'vocabulary'})` and follow "Topic carriers" in [vocabulary](references/vocabulary.md): one carrier save files every page of a project key, folder or tag. When no existing domain names the pages' shared subject, register one with `change_schema(operation={'kind': 'save', 'subject': 'domains'})` and declare it; within this step that needs no separate approval. Then show the person the review list.

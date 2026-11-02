@@ -2321,7 +2321,7 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
 
     assert result["terminal"] is True
     assert result["user_summary"] == (
-        f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved"
+        f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved (personal Exomem)"
     )
     assert result["media_results"][0]["outcome"] == "processed"
     assert result["media_results"][1:] == [
@@ -2389,7 +2389,7 @@ def test_a_reprocess_batch_that_lost_two_files_says_so(
 
     assert result["terminal"] is True
     assert result["user_summary"] == (
-        f"Updated 1 of 3 files -> {relative[0]}; 2 files could not be updated"
+        f"Updated 1 of 3 files -> {relative[0]}; 2 files could not be updated (personal Exomem)"
     )
     assert [row["outcome"] for row in result["media_results"]] == ["reprocessed", "failed", "failed"]
 
@@ -2408,7 +2408,9 @@ def test_a_media_batch_in_a_renamed_knowledge_base_folder_still_says_which_files
 
     result = _selected_media_batch(vault, monkeypatch, "process", "", vanished.name, relative)
 
-    assert result["user_summary"] == f"Saved 1 of 2 files -> {relative[0]}; 1 file could not be saved"
+    assert result["user_summary"] == (
+        f"Saved 1 of 2 files -> {relative[0]}; 1 file could not be saved (personal Exomem)"
+    )
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,169 @@
+{
+  "id": "09-personal-named-save",
+  "title": "An ordinary save to the personal Exomem, which is the connected one and the one the person named",
+  "suite": "write-narration",
+  "prompt": "Please save a note to my personal Exomem called 'Bike service': the chain was replaced in March and the next service is due in September. Tell me once it's saved.",
+  "served_tools": [
+    "bootstrap",
+    "create_note"
+  ],
+  "builtin_tools": [],
+  "record": {
+    "steps": [
+      {
+        "settle_graph": true
+      },
+      {
+        "as": "bootstrap",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "compact"
+          }
+        }
+      },
+      {
+        "as": "bootstrap_session",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "session",
+            "skill_contract": {
+              "$product": "skill_contract"
+            }
+          }
+        },
+        "expect": {
+          "profile": "session"
+        }
+      },
+      {
+        "as": "settings",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "settings"
+          }
+        }
+      },
+      {
+        "as": "writer_status",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "writer-status"
+          }
+        }
+      },
+      {
+        "as": "validate",
+        "tool": "create_note",
+        "arguments": {
+          "title": "Bike service",
+          "slug": "bike-service",
+          "content": "## Observations\n\n- [finding] The bike chain was replaced in March and the next service is due in September. ^one\n\n## Connections\n\n- [[Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout]]\n",
+          "validate_only": true
+        },
+        "expect": {
+          "mutated": false,
+          "relation_review_hash": null
+        }
+      },
+      {
+        "as": "committed",
+        "tool": "create_note",
+        "arguments_from": "validate",
+        "arguments": {
+          "draft_id": {
+            "$ref": "validate.draft_id"
+          },
+          "draft_hash": {
+            "$ref": "validate.draft_hash"
+          },
+          "draft_token": {
+            "$ref": "validate.draft_token"
+          }
+        },
+        "expect": {
+          "status": "committed",
+          "graph_sync": "completed"
+        }
+      }
+    ]
+  },
+  "replies": {
+    "bootstrap.settings": {
+      "$shape": "settings"
+    },
+    "bootstrap.writer-status": {
+      "$shape": "writer_status"
+    },
+    "bootstrap": {
+      "$rules": [
+        {
+          "when": {
+            "operation": {
+              "profile": "session"
+            }
+          },
+          "reply": {
+            "$shape": "bootstrap_session"
+          }
+        },
+        {
+          "reply": {
+            "$shape": "bootstrap"
+          }
+        }
+      ]
+    },
+    "create_note": {
+      "$rules": [
+        {
+          "when": {
+            "validate_only": true
+          },
+          "reply": {
+            "$shape": "validate"
+          }
+        },
+        {
+          "reply": {
+            "$shape": "committed"
+          }
+        }
+      ]
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "judge_view": "answer",
+  "reference": "The only Exomem connected to the agent is the person's personal Exomem, which is the store the person named.",
+  "outcome_facts": {
+    "tool": "create_note",
+    "saved": "The agent made a save call and it succeeded: the note 'Bike service' is stored in the person's personal Exomem.",
+    "not_saved": "The agent made no save call that committed, so nothing was saved."
+  },
+  "checks": [
+    {
+      "type": "write_committed",
+      "tool": "create_note",
+      "expect": true
+    }
+  ],
+  "criteria": [
+    {
+      "id": "R1",
+      "expect": true,
+      "text": "The answer states the true outcome that the reference gives. If the reference says the note was saved, the answer says it was saved. If the reference says nothing was saved, the answer says nothing was saved. If the answer names a store, it names the store that the reference gives."
+    },
+    {
+      "id": "R7",
+      "expect": true,
+      "text": "The answer does not refuse the save and does not ask the person to choose, name or confirm a store before saving. (A deterministic check separately requires that the agent made a committed save call.)"
+    }
+  ]
+}

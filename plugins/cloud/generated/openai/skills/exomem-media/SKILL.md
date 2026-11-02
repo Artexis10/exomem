@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: ea2aa6f8b5fc2d350c0ae3caec5270b835cd6c0102ba4478454290cf9155362a
+  skill_contract: b4852bb90e6324a13e717027949aaaa9c6dd208d3aacc1b276d18a827d1cf2fa
   version: "0.1.0"
 ---
 
@@ -41,6 +41,11 @@ identity after an uncertain commit.
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
 only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
+
+Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
+different Exomem, use the connector they named; if it is unavailable, say so plainly and
+write nothing elsewhere. Never tell the user a write landed in a store other than the
+one `user_summary` names.
 
 ## Workflow
 1. Search with media-aware filters or artifact terms using `search_memory`.

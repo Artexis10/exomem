@@ -101,11 +101,9 @@ def preload_local_dotenv_policy() -> None:
     own later one. Never from inside a vault, for the same reason: a `.env`
     a remote writer planted there must not configure even resource policy.
     """
-    if os.environ.get("EXOMEM_HOSTED_CELL", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return
     from . import cloud_cell
 
-    if cloud_cell.cloud_mode_enabled():
+    if cloud_cell.hosted_mode_enabled() or cloud_cell.cloud_mode_enabled():
         return
     from .dotenv_guard import working_directory_dotenv
 
@@ -194,13 +192,7 @@ def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
     from . import cloud_cell
 
-    hosted = str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    default = cloud_cell.cloud_mode_enabled(values) and not hosted
+    default = cloud_cell.cloud_mode_enabled(values) and not cloud_cell.hosted_mode_enabled(values)
     raw = values.get(ONNX_SHARE_WEIGHTS_ENV)
     if raw is None or not str(raw).strip():
         return default
