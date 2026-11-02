@@ -173,11 +173,11 @@ def _record_timing(coordinator: VaultMutationCoordinator, timing: MutationTiming
 
 def _windows_library(ctypes_module: Any, name: str) -> Any:
     """Keep Windows-only ctypes attributes out of non-Windows type stubs."""
-    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+    return ctypes_module.WinDLL(name, use_last_error=True)
 
 
 def _windows_last_error(ctypes_module: Any) -> int:
-    return int(getattr(ctypes_module, "get_last_error")())
+    return int(ctypes_module.get_last_error())
 
 
 def _log_mutation_lock_event(

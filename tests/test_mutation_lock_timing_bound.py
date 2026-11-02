@@ -30,7 +30,9 @@ def test_hold_cost_does_not_grow_with_the_coordinators_a_context_has_seen(tmp_pa
 
     def busy_context() -> float:
         for index in range(COORDINATORS):
-            with VaultMutationCoordinator(state_root, tmp_path / f"vault-{index}").hold(operation="once"):
+            with VaultMutationCoordinator(state_root, tmp_path / f"vault-{index}").hold(
+                operation="once"
+            ):
                 pass
         return _per_hold_seconds(state_root, tmp_path / "hot")
 
