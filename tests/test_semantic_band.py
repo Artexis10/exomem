@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from exomem import ranking_config, working_set_resolve
+from exomem import chance_band, ranking_config, working_set_resolve
 
 ALPHA = 0.01
 MIN_POPULATION = 50
@@ -22,7 +22,7 @@ def _unit(rows: np.ndarray) -> np.ndarray:
 
 
 def _band(similarities) -> frozenset[int] | None:
-    return working_set_resolve.semantic_band(similarities, alpha=ALPHA, min_population=MIN_POPULATION)
+    return chance_band.semantic_band(similarities, alpha=ALPHA, min_population=MIN_POPULATION)
 
 
 def test_the_policy_is_alpha_and_a_minimum_population_not_a_cosine() -> None:
