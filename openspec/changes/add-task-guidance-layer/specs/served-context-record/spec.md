@@ -11,7 +11,8 @@ Exomem SHALL keep one SQLite table, the served-context record, in the vault stat
 - the guidance refs, each with its `why`;
 - the declared activity keys that resolved, and the count of unknown keys;
 - the declared entity refs that resolved, and the count of unknown entity refs, when `conversation.entities` exists;
-- the slice state and the guidance state.
+- the slice state and the guidance state;
+- the upkeep items that the response surfaced, each as its reading id and fingerprint, when the response carries any.
 
 A row SHALL hold refs, registry keys, counts and closed states only, never vault text or conversation text. An unknown activity key or entity ref SHALL be recorded as a count only. The table SHALL be append-only: no path SHALL update a row, and only the retention sweep SHALL delete one. Opens and cites SHALL NOT be copied into the record; they stay in heat under the same session key.
 
