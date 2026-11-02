@@ -7897,7 +7897,7 @@
     }
   },
   "record_episode": {
-    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. Select one operation.kind.",
+    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. Update the pages this session changed first; the record response's compile block lists the pages the recap names. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -7932,7 +7932,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "Max 5 items, 200 characters each."
+                  "description": "Max 5 items, 200 characters each. Link each to its page as [[Page]]."
                 },
                 "open": {
                   "items": {
