@@ -92,7 +92,6 @@ async def test_limit_publication_does_not_bump_generation_or_rewrite_unchanged_l
     import asyncpg
 
     from cellctl import db, reconcile
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import (
         FakeClusterGateway,
@@ -114,7 +113,7 @@ async def test_limit_publication_does_not_bump_generation_or_rewrite_unchanged_l
     monkeypatch.setattr(db, "write_observed", record)
     try:
         for _ in range(3):
-            await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+            await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(),
                 _secrets_config(), _cluster_config(), now=NOW)
             cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
         row = (await db.select_all_rows(controller))[0]
@@ -137,7 +136,6 @@ async def test_local_claims_clear_stale_limits_using_the_actual_storage_class(
     import asyncpg
 
     from cellctl import db, reconcile
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import FakeClusterGateway, _secrets_config, _seed_cell
 
@@ -151,7 +149,7 @@ async def test_local_claims_clear_stale_limits_using_the_actual_storage_class(
     try:
         await controller.execute("UPDATE exomem_cloud_cells SET import_limits=$2 WHERE cell_id=$1",
                                  CELL, json.dumps({"max_storage_gib": 99}))
-        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=NOW)
         row = (await db.select_all_rows(controller))[0]
         assert row.generation == 1
@@ -168,7 +166,6 @@ async def test_legacy_local_import_with_unpublished_limits_preserves_storage_siz
 
     from cellctl import db, reconcile
     from cellctl.manifests import namespace_name
-    from cellctl.storage.fake_b2 import FakeB2
     from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
     from tests.test_reconcile import (
         FakeClusterGateway,
@@ -185,7 +182,7 @@ async def test_legacy_local_import_with_unpublished_limits_preserves_storage_siz
     cluster.observe_import_jobs = lambda namespace, import_id: {}
     config = reconcile.ClusterConfig(object_storage_bucket="b", storage=StorageConfig(domain=local.class_name, local=local))
     async def run():
-        await reconcile.reconcile_once(controller, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+        await reconcile.reconcile_once(controller, cluster, FakeHetznerVolumeProvider(),
                                        _secrets_config(), config, now=NOW)
     try:
         await controller.execute("UPDATE exomem_cloud_cells SET last_backup_at=$2,grown_storage_gib=14 WHERE cell_id=$1", CELL, NOW)

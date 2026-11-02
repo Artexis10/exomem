@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from cellctl.exports import job_name
 from cellctl.manifests import namespace_name
 
-from .infra import BACKUP_BUCKET, docker_labels
+from .infra import STAGING_BUCKET, docker_labels
 from .report import StepFailure
 from .shell import run
 from .substrate import PUBLIC_BASE_URL
@@ -241,14 +241,14 @@ async def run_export(ctx: Context, verifier_image: str, *, timeout_seconds: floa
         versions = [
             v
             for page in storage.get_paginator("list_object_versions").paginate(
-                Bucket=BACKUP_BUCKET, Prefix=prefix
+                Bucket=STAGING_BUCKET, Prefix=prefix
             )
             for v in page.get("Versions", []) + page.get("DeleteMarkers", [])
         ]
         uploads = [
             u
             for page in storage.get_paginator("list_multipart_uploads").paginate(
-                Bucket=BACKUP_BUCKET, Prefix=prefix
+                Bucket=STAGING_BUCKET, Prefix=prefix
             )
             for u in page.get("Uploads", [])
         ]

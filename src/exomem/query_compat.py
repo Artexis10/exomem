@@ -90,7 +90,9 @@ def coerce_num(value: Any) -> float | None:
         return None
 
 
-def match(row: dict, filt: dict) -> bool:
+def match(row: dict, filt: dict, *, as_string: bool = False) -> bool:
+    """Decide one legacy filter. `as_string` is for a column its manifest declares a string: its values
+    compare as the strings they are, never by a leading number."""
     column, op, value = filt["column"], filt.get("op", DEFAULT_OP), filt.get("value")
     actual = get_field(row, column)
     if op == "exists":
@@ -109,7 +111,7 @@ def match(row: dict, filt: dict) -> bool:
         if op == "icontains":
             return right.lower() in left.lower()
         return left.lower().startswith(right.lower())
-    left_number, right_number = coerce_num(actual), coerce_num(value)
+    left_number, right_number = (None, None) if as_string else (coerce_num(actual), coerce_num(value))
     if op in ("eq", "ne"):
         if left_number is not None and right_number is not None:
             equal = left_number == right_number

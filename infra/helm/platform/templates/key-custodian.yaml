@@ -1,0 +1,266 @@
+{{- if .Values.keyCustodian.enabled }}
+{{- /*
+contain-cloud-controller-compromise D9: the key custodian is the one workload that creates
+object-store keys. It watches cell namespaces and, for each one without the Secret
+cell-object-store-key, mints a key limited to that cell's prefix in the locked backup bucket
+and writes it into the Secret. cellctl cannot create that Secret (its admission policy names
+the only Secrets it may write) and cannot read it back (its ClusterRole has no get on secrets),
+so a compromise of cellctl reaches no key-creating credential. Until D3 is in force, cellctl can
+still render a Job that reads cell-object-store-key through secretKeyRef, so it reaches a cell's
+key by that route; D3 removes the route.
+
+It runs the cellctl image with another command, in its own namespace, service account and
+credential. A separate image would add a publish and attestation pipeline without reducing
+what the process can do.
+*/ -}}
+{{- include "exomem.requirePrivateRangesDenied" (dict "root" . "feature" "keyCustodian") }}
+{{- $custodian := .Values.keyCustodian }}
+{{- $name := "key-custodian" }}
+{{- /* namespaces.yaml already refuses an empty edge.apiServerCidrs; the schema pins the image and the bucket id when the custodian is on. */ -}}
+{{- $apiServerCidrs := .Values.edge.apiServerCidrs }}
+{{- /* The custodian touches this file every sweep, watch event and namespace attempt; the liveness probe reads its age. */ -}}
+{{- $heartbeat := "/tmp/key-custodian-heartbeat" }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $custodian.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: exomem-cloud
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+  annotations:
+    helm.sh/resource-policy: keep
+---
+# Default-deny, like every platform namespace: the policy below allows the custodian's own traffic.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ $custodian.namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $custodian.namespace }}
+automountServiceAccountToken: true
+---
+# The custodian lists and watches namespaces to find the cells it serves. It reads the one Secret
+# name it writes, to see whether a cell already has its key, and it creates Secrets. The admission
+# policy below confines that create to cell-object-store-key in cell namespaces. No other verb or
+# resource is granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["cell-object-store-key"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $custodian.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $custodian.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/part-of: exomem-cloud
+spec:
+  replicas: 1
+  strategy:
+    # A second custodian racing the first could mint two keys for one cell.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/part-of: exomem-cloud
+    spec:
+      serviceAccountName: {{ $name }}
+      # The custodian calls the Kubernetes API with this token.
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      {{- with $custodian.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $name }}
+          image: {{ .Values.cellctl.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "cellctl.custodian"]
+          env:
+            - name: KEY_CUSTODIAN_LOG_LEVEL
+              value: INFO
+            - name: KEY_CUSTODIAN_HEARTBEAT_PATH
+              value: {{ $heartbeat }}
+            - name: KEY_CUSTODIAN_BACKUP_BUCKET_ID
+              value: {{ .Values.cellData.backupBucketId | quote }}
+            - name: KEY_CUSTODIAN_B2_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $custodian.secretName }}
+                  key: keyId
+            - name: KEY_CUSTODIAN_B2_APPLICATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $custodian.secretName }}
+                  key: applicationKey
+          # The process touches the heartbeat at each sweep, watch event and namespace attempt, failed
+          # ones included, so a provider or API outage that fails every namespace in turn is retried
+          # and never restarted. A heartbeat older than three minutes means a call hung past its timeout.
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -I
+                - -S
+                - -c
+                - "import os,sys,time; p='{{ $heartbeat }}'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)"
+            periodSeconds: 30
+            failureThreshold: 3
+            initialDelaySeconds: 30
+          resources:
+            {{- $custodian.resources | toYaml | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+---
+# No ingress. Egress reaches only cluster DNS, the API server at its own address on 6443 (kube-router
+# evaluates egress after DNAT, so the Service IP does not match), and public HTTPS for the
+# provider. cells.jobEgressExcept keeps every private range out of that last rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $custodian.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        {{- range $apiServerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- .Values.cells.jobEgressExcept | toYaml | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# What RBAC grants the custodian, admission narrows to the one object it exists to write: a
+# create of the Secret cell-object-store-key, Opaque and holding only keyId and applicationKey,
+# in a cell namespace. Everything else the custodian's identity attempts is denied, including
+# a widened RBAC rule.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-key-custodian-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # "*/*" covers every resource and subresource of every API group.
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*/*"]
+        scope: "*"
+  matchConditions:
+    - name: key-custodian-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ $custodian.namespace }}:{{ $name }}'
+  validations:
+    - expression: >-
+        {{- /* The API server omits subResource and namespace when empty, so read them as optional. */}}
+        request.operation == 'CREATE' && request.resource.group == '' &&
+        request.resource.resource == 'secrets' && request.?subResource.orValue('') == ''
+      message: the key custodian may only create a Secret.
+    - expression: >-
+        request.?namespace.orValue('').matches('{{ include "exomem.cellNamespacePattern" . }}') &&
+        object.metadata.name == 'cell-object-store-key'
+      message: the key custodian may create only the Secret cell-object-store-key, in a cell namespace.
+    - expression: >-
+        (!has(object.type) || object.type == 'Opaque') && !has(object.stringData) &&
+        has(object.data) && object.data.size() == 2 &&
+        'keyId' in object.data && 'applicationKey' in object.data
+      message: the Secret cell-object-store-key is Opaque and holds exactly keyId and applicationKey.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-key-custodian-scope
+spec:
+  policyName: exomem-key-custodian-scope
+  validationActions: [Deny]
+{{- end }}

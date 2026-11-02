@@ -805,3 +805,72 @@ def test_curation_proposal_refuses_a_registry_that_changed_during_preparation(
     assert getattr(refused.value, "code", None) == "CURATION_REGISTRY_CHANGED", refused.value
     runs = curation.CurationStore(vault).root
     assert not runs.exists() or not any(runs.iterdir())
+
+
+
+def _make_the_target_ineligible(vault: Path, state_dir: Path) -> None:
+    target = vault / f"{_TARGET_REL}.md"
+    target.write_text(
+        target.read_text(encoding="utf-8").replace("status: active", "status: archived", 1),
+        encoding="utf-8",
+    )
+    writer_lease._bump_commit_generation(state_dir, vault)
+
+
+def _an_unrelated_page_in_a_governed_commit(vault: Path, state_dir: Path) -> None:
+    unrelated = vault / "Knowledge Base/Notes/Insights/unrelated-arrival.md"
+    unrelated.write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n# Unrelated arrival\n\nNothing links here.\n",
+        encoding="utf-8",
+    )
+    writer_lease._bump_commit_generation(state_dir, vault)
+
+
+@pytest.mark.usefixtures("corpus_cache_on")
+@pytest.mark.parametrize(
+    ("link", "intervening_change", "refused"),
+    [
+        (_TARGET_REL, _delete_target_in_a_governed_commit, True),
+        (_TARGET_REL, _make_the_target_ineligible, True),
+        (_TARGET_REL, _an_unrelated_page_in_a_governed_commit, False),
+    ],
+    ids=["target deleted", "target made ineligible", "unrelated page"],
+)
+def test_a_commit_after_a_governed_commit_judges_the_pages_that_commit_left(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, link: str, intervening_change, refused: bool
+) -> None:
+    """The revalidation derives only what the intervening commit reached. A link
+    it broke must still cost the draft its qualifying relation; a page it did
+    not touch must not."""
+    kwargs = {
+        "content": (
+            "# Judged against the left corpus\n\n"
+            "## Observations\n\n"
+            "- [operating constraint] Keep the fusion stage bounded #reliability\n\n"
+            "## Relations\n\n"
+            f"- supports [[{link}]]\n"
+        ),
+        "title": "Judged against the left corpus",
+        "slug": "judged-against-the-left-corpus",
+        "suggestions": False,
+    }
+    assert op_remember(vault, validate_only=True, **kwargs)["relation_disposition"] == (
+        "qualifying_relation"
+    )
+    manager = _standalone_manager(vault.parent / "state")
+    real_commit = semantic_writes.commit_creation
+
+    def commit_after_the_change(*args, **kw):
+        intervening_change(vault, manager.config.state_dir)
+        return real_commit(*args, **kw)
+
+    monkeypatch.setattr(semantic_writes, "commit_creation", commit_after_the_change)
+    page = vault / "Knowledge Base/Notes/Insights/judged-against-the-left-corpus.md"
+
+    if refused:
+        with pytest.raises(ValueError, match="RELATION_DISPOSITION_MISSING"):
+            _invoke_remember(vault, manager, **kwargs)
+        assert not page.exists()
+    else:
+        _invoke_remember(vault, manager, **kwargs)
+        assert page.is_file()

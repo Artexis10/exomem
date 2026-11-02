@@ -8211,6 +8211,11 @@ def normalize_wikilink(
     return canonical, warning
 
 
+def wikilink_page_key(page: str) -> str:
+    """A link's page part as resolution keys it: no `.md`, no edge blanks or slashes."""
+    return page.removesuffix(".md").strip().strip("/")
+
+
 def _normalize_wikilink(
     target: str,
     vault_root: Path,
@@ -8224,7 +8229,7 @@ def _normalize_wikilink(
     """Normalize a link and retain the physical owner for internal consumers."""
 
     cleaned, anchor = split_wikilink_target(target)
-    cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    cleaned = wikilink_page_key(cleaned)
     if not cleaned:
         if strict:
             raise UnresolvedWikilinkError(f"empty wikilink target: {target!r}")

@@ -560,8 +560,12 @@ def evaluate_rows(
     date_to: str | None = None,
     date_column: str | None = None,
     provenance: dict[str, Any] | None = None,
+    string_columns: frozenset[str] = frozenset(),
 ) -> QueryDataResult:
-    """Apply the dataset query contract to already-loaded adapter rows."""
+    """Apply the dataset query contract to already-loaded adapter rows.
+
+    `string_columns` names the columns a manifest declares strings; their filters compare as strings.
+    """
     cols = list(columns_available or _infer_columns(rows))
     warnings = list(warnings or ())
     total_rows = len(rows)
@@ -582,7 +586,8 @@ def evaluate_rows(
     if date_col and date_to:
         flt.append({"column": date_col, "op": "lte", "value": date_to})
 
-    matched = [(i, r) for i, r in enumerate(rows) if all(_match(r, f) for f in flt)]
+    matched = [(i, r) for i, r in enumerate(rows)
+               if all(_match(r, f, as_string=f["column"] in string_columns) for f in flt)]
     total_matched = len(matched)
     provenance = dict(provenance) if provenance else None
     if provenance is not None and not aggregate:

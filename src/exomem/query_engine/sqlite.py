@@ -98,7 +98,8 @@ def _matched(admitted, query):
         if raw is None:
             return 0
         row = json.loads(raw)
-        result = int(all(compat.match(row, predicate) for predicate in predicates))
+        result = int(all(compat.match(row, predicate, as_string=predicate["column"] in query.string_columns)
+                         for predicate in predicates))
         session.check()
         return result
 

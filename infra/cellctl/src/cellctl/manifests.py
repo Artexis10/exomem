@@ -31,6 +31,14 @@ from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 RENDER_VERSION = 3
 
 NAMESPACE_PREFIX = "exo-cell-"
+# The one pattern of a cell namespace: the prefix and a base32 cell id. The key custodian and
+# the cellctl admission policy read the same shape.
+CELL_NAMESPACE_RE = re.compile(re.escape(NAMESPACE_PREFIX) + r"[a-z2-7]{16}")
+# contain-cloud-controller-compromise D9: the key custodian writes this Secret in a new
+# cell's namespace, and the backup and restore Jobs read it. cellctl never writes it.
+OBJECT_STORE_KEY_SECRET = "cell-object-store-key"
+OBJECT_STORE_KEY_ID_FIELD = "keyId"
+OBJECT_STORE_KEY_SECRET_FIELD = "applicationKey"
 GATEWAY_NAMESPACE = "exomem-cloud"
 GATEWAY_POD_LABEL = "app.kubernetes.io/name"
 GATEWAY_POD_LABEL_VALUE = "exomem-cloud-gateway"
@@ -118,6 +126,13 @@ ROW_GENERATION_ANNOTATION = "exomem.io/row-generation"
 
 def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
+
+
+def cell_id_from_namespace(namespace: str | None) -> str | None:
+    """The cell id of a cell namespace, or None for any other namespace."""
+    if namespace and CELL_NAMESPACE_RE.fullmatch(namespace):
+        return namespace[len(NAMESPACE_PREFIX):]
+    return None
 
 
 def _check_literal_service_url(endpoint: str, port: int, name: str) -> None:
@@ -235,6 +250,8 @@ class CellManifestSpec:
     bearer_previous: str | None = None
     backup_password: str = ""
     volume_passphrase: str = ""
+    # An old cell's own stored key, rendered into its Secret. A new cell has none: its Jobs
+    # read the key the custodian wrote (OBJECT_STORE_KEY_SECRET).
     b2_key_id: str = ""
     b2_key_secret: str = ""
 
@@ -595,9 +612,9 @@ def render_secret(spec: CellManifestSpec) -> dict:
         "cell-token": _b64(spec.bearer_current),
         "backup-password": _b64(spec.backup_password),
         "encryption-passphrase": _b64(spec.volume_passphrase),
-        "b2-key-id": _b64(spec.b2_key_id),
-        "b2-key-secret": _b64(spec.b2_key_secret),
     }
+    if spec.b2_key_id:
+        data.update({"b2-key-id": _b64(spec.b2_key_id), "b2-key-secret": _b64(spec.b2_key_secret)})
     if spec.bearer_previous:
         data["cell-token-previous"] = _b64(spec.bearer_previous)
     if spec.local_volume and spec.backed_up:
@@ -1157,19 +1174,25 @@ def _restic_repo(spec: CellManifestSpec, bucket_name: str, endpoint: str) -> str
 
 
 def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
+    # The key id and secret double as the S3 access key id and secret against B2's
+    # S3-compatible endpoint. An old cell reads its own stored key from its Secret; a new
+    # cell reads the key the custodian minted for it.
+    if spec.b2_key_id:
+        key_secret, key_id_field, key_secret_field = spec.secret_name, "b2-key-id", "b2-key-secret"
+    else:
+        key_secret, key_id_field, key_secret_field = (
+            OBJECT_STORE_KEY_SECRET, OBJECT_STORE_KEY_ID_FIELD, OBJECT_STORE_KEY_SECRET_FIELD)
     return [
         # The repository carries chart values (endpoint, bucket); it reaches
         # restic through its environment, never through the `sh -c` string.
         {"name": "RESTIC_REPOSITORY", "value": repo},
         {
-            # The per-cell B2 application key id/secret double as the S3
-            # access key id/secret against B2's S3-compatible endpoint.
             "name": "AWS_ACCESS_KEY_ID",
-            "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "b2-key-id"}},
+            "valueFrom": {"secretKeyRef": {"name": key_secret, "key": key_id_field}},
         },
         {
             "name": "AWS_SECRET_ACCESS_KEY",
-            "valueFrom": {"secretKeyRef": {"name": spec.secret_name, "key": "b2-key-secret"}},
+            "valueFrom": {"secretKeyRef": {"name": key_secret, "key": key_secret_field}},
         },
         {
             "name": "RESTIC_PASSWORD",
