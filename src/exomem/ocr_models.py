@@ -37,6 +37,11 @@ log = logging.getLogger(__name__)
 
 DEFAULT_LANGS_ENV = "EXOMEM_OCR_DEFAULT_LANGS"
 INVENTORY_ENV = "EXOMEM_OCR_INVENTORY"
+WORD_FLOOR_ENV = "EXOMEM_OCR_WORD_CONFIDENCE_FLOOR"
+# Tesseract reports a word's confidence on a 0-100 scale. A floor of 70 raised token precision
+# by 0.25 (95% CI 0.11 to 0.42) for a recall loss of 0.03 on 16 images with reference
+# transcriptions (measured 2026-11-01); 0 keeps every word.
+DEFAULT_WORD_FLOOR = 70.0
 
 # traineddata layout (tessdatamanager.h): an int32 entry count, then one int64
 # offset per component, -1 when absent. These indexes are TessdataType values.
@@ -263,8 +268,105 @@ def _detect_script(cmd: str, image: Path) -> str | None:
     return None
 
 
-def _read(cmd: str, image: Path, lang: str | None, psm: str, workdir: Path) -> tuple[float, str]:
-    """Read once; return (mean word confidence, text)."""
+@dataclass(frozen=True)
+class OcrWord:
+    #: Tesseract's own confidence for the word, 0-100.
+    confidence: float
+    text: str
+
+
+@dataclass(frozen=True)
+class OcrReading:
+    """One pass of Tesseract: its own text, and each word it read with its confidence."""
+
+    #: Tesseract's text output, in its own line layout and spacing.
+    text: str
+    #: Every word of `text` in reading order.
+    words: tuple[OcrWord, ...]
+
+    @property
+    def confidence(self) -> float | None:
+        """Mean word confidence; None when Tesseract read no word, so nothing was measured."""
+        if not self.words:
+            return None
+        return sum(word.confidence for word in self.words) / len(self.words)
+
+    def split(self, floor: float) -> tuple[str, str]:
+        """`(kept, dropped)`: the text with the words under `floor` removed, and those words alone.
+
+        Each word is removed from Tesseract's own text line, so the words that stay keep the
+        spacing Tesseract measured, CJK included. A reading whose words cannot all be placed
+        in that text, or a floor of 0, keeps the whole text: nothing is withheld that is not
+        proven to be a low-confidence word.
+        """
+        if floor <= 0 or not self.words:
+            return self.text, ""
+        spans = self._spans()
+        if spans is None:
+            log.warning("OCR words do not align with Tesseract's text; keeping the whole text")
+            return self.text, ""
+        under = [span for word, span in zip(self.words, spans, strict=True) if word.confidence < floor]
+        if not under:
+            return self.text, ""
+        over = [span for word, span in zip(self.words, spans, strict=True) if word.confidence >= floor]
+        return _without_spans(self.text, under), _without_spans(self.text, over)
+
+    def _spans(self) -> list[tuple[int, int]] | None:
+        """Where each word sits in `text`, in reading order; None unless the words are all of it."""
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        for word in self.words:
+            while cursor < len(self.text) and self.text[cursor].isspace():
+                cursor += 1
+            if not self.text.startswith(word.text, cursor):
+                return None
+            spans.append((cursor, cursor + len(word.text)))
+            cursor += len(word.text)
+        return spans if not self.text[cursor:].strip() else None
+
+
+def _without_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """`text` with the spans removed, each with the spaces after it; a line left empty goes.
+
+    `spans` are ascending and each lies inside one line.
+    """
+    lines: list[str] = []
+    offset = 0
+    pending = 0
+    for line in text.split("\n"):
+        end = offset + len(line)
+        pieces: list[str] = []
+        cursor = offset
+        while pending < len(spans) and spans[pending][0] < end:
+            start, stop = spans[pending]
+            pending += 1
+            pieces.append(text[cursor:start])
+            cursor = stop
+            while cursor < end and text[cursor] in " \t":
+                cursor += 1
+        pieces.append(text[cursor:end])
+        remaining = "".join(pieces).rstrip()
+        if remaining or not line.strip():
+            lines.append(remaining)
+        offset = end + 1
+    # A paragraph that lost every line leaves two blank lines side by side.
+    collapsed: list[str] = []
+    for line in lines:
+        if line or (collapsed and collapsed[-1]):
+            collapsed.append(line)
+    return "\n".join(collapsed).strip()
+
+
+def word_floor() -> float:
+    """The confidence under which a word is withheld from search (`WORD_FLOOR_ENV`)."""
+    try:
+        return float(os.environ.get(WORD_FLOOR_ENV, DEFAULT_WORD_FLOOR))
+    except ValueError:
+        return DEFAULT_WORD_FLOOR
+
+
+def _read(cmd: str, image: Path, lang: str | None, psm: str, workdir: Path) -> OcrReading:
+    """Read once: Tesseract's text and the confidence of each word in it."""
     base = workdir / f"pass-{psm}"
     # Space only at the gaps Tesseract measured; by default it spaces apart each CJK word.
     args = [str(image), str(base), "--psm", psm, "-c", "preserve_interword_spaces=1"]
@@ -272,19 +374,20 @@ def _read(cmd: str, image: Path, lang: str | None, psm: str, workdir: Path) -> t
         args[2:2] = ["-l", lang]
     _run(cmd, [*args, "txt", "tsv"])
     text = base.with_suffix(".txt").read_text(encoding="utf-8", errors="replace").strip()
-    confidences: list[float] = []
+    words: list[OcrWord] = []
     with base.with_suffix(".tsv").open(encoding="utf-8", errors="replace", newline="") as tsv:
         for row in csv.DictReader(tsv, delimiter="\t", quoting=csv.QUOTE_NONE):
             try:
                 confidence = float(row.get("conf") or -1)
             except ValueError:
                 continue
-            if confidence >= 0 and (row.get("text") or "").strip():
-                confidences.append(confidence)
-    return (sum(confidences) / len(confidences) if confidences else 0.0), text
+            word = (row.get("text") or "").strip()
+            if confidence >= 0 and word:
+                words.append(OcrWord(confidence, word))
+    return OcrReading(text, tuple(words))
 
 
-def read_image(cmd: str, image: Path) -> str:
+def read_image(cmd: str, image: Path) -> OcrReading:
     """OCR one image file: detect its script, then read with that script's models.
 
     A script with vertical models gets a horizontal and a vertical pass, and the
@@ -298,5 +401,6 @@ def read_image(cmd: str, image: Path) -> str:
     else:
         plans = passes_for(models, _detect_script(cmd, image))
     with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
-        results = [_read(cmd, image, lang, psm, Path(tmp)) for lang, psm in plans]
-    return max(results, key=lambda result: result[0])[1]
+        readings = [_read(cmd, image, lang, psm, Path(tmp)) for lang, psm in plans]
+    # A pass that read no word has no confidence and ranks as 0.0, as it always did.
+    return max(readings, key=lambda reading: reading.confidence or 0.0)

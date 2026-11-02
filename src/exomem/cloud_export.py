@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from . import vault_portability
+from . import cloud_containment, cloud_grant, vault_portability
 from .cloud_import_job import _check_cell
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 
@@ -178,6 +178,15 @@ def verify_remote_export(url: str, *, cell_id: str, archive_bytes: int, archive_
             sync(fs.loop, fs._session.close)
 
 
+def _authorize(args: argparse.Namespace, cell_id: str, urls: list[str]) -> None:
+    """Report, or in enforce mode check, the grant and the destination before any byte moves."""
+    try:
+        cloud_grant.authorize_operation(operation=cloud_grant.Operation.EXPORT, operation_id=args.export_id,
+                                        cell_id=cell_id, urls=urls, grant=args.grant)
+    except cloud_grant.OperationRefused:
+        raise ExportRefused(EXPORT_FAILED) from None
+
+
 def _portability_code(error: vault_portability.PortabilityError) -> str:
     # The portability module's own fixed codes, mapped onto C6's.
     if error.code == "SOURCE_CHANGED_DURING_EXPORT":
@@ -221,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export-id", required=True)
     parser.add_argument("--part-url", dest="part_urls", action="append", default=[])
     parser.add_argument("--part-bytes", type=int, default=64 * 1024 * 1024)
+    parser.add_argument("--grant")
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--archive-bytes", type=int)
     parser.add_argument("--archive-sha256")
@@ -230,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--staging", type=Path, default=Path("/data/scratch/export"))
     parser.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
     args = parser.parse_args(argv)
+    cloud_containment.log_to_stderr()
     usage: dict[str, int] = {}
     try:
         # Measured first, so a failure report still carries the volume's use. A
@@ -239,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_url = os.environ.get("EXOMEM_EXPORT_VERIFY_URL", "")
             if not verify_url.startswith("https://") or not args.archive_bytes or not args.archive_sha256:
                 raise ExportRefused(EXPORT_FAILED)
+            _authorize(args, cell_id, [verify_url])
             result = verify_remote_export(verify_url, cell_id=cell_id, archive_bytes=args.archive_bytes,
                                           archive_sha256=args.archive_sha256, max_bytes=args.max_bytes)
             result["version"] = args.archive_version_id
@@ -251,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         if (str(uuid.UUID(args.export_id)) != args.export_id or args.part_bytes <= 0 or args.max_bytes <= 0
                 or not args.part_urls or not all(url.startswith("https://") for url in args.part_urls)):
             raise ExportRefused(EXPORT_FAILED)
+        _authorize(args, cell_id, args.part_urls)
         result = {**run_export(args.vault, args.staging, export_id=args.export_id, cell_id=cell_id,
                                part_urls=args.part_urls, part_bytes=args.part_bytes,
                                max_bytes=args.max_bytes), **usage}

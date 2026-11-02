@@ -49,7 +49,7 @@ import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
 from .asr_facts import (
@@ -68,6 +68,10 @@ from .media_types import (
 from .media_types import (
     media_type_for as _registry_media_type_for,
 )
+from .ocr_facts import OcrFacts
+
+if TYPE_CHECKING:
+    from .ocr_models import OcrReading
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +105,10 @@ WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
 _PDF_OCR_MIN_CHARS = 16
 
 
+#: What `## Extracted text` holds when an extraction found no text at all.
+NO_TEXT_DETECTED = "(no text detected)"
+
+
 @dataclass
 class ExtractResult:
     text: str
@@ -118,6 +126,22 @@ class ExtractResult:
     # What the speech engine decided (language, speech seconds, policy). None for every
     # other media type and for an engine that reports nothing.
     asr: AsrFacts | None = None
+    # What image OCR measured and kept out of `text`: the mean word confidence and the words
+    # under the floor. None for every other media type, and for PDF pages, which keep whole text.
+    ocr: OcrFacts | None = None
+
+    @property
+    def sidecar_text(self) -> str:
+        """What the sidecar's `## Extracted text` holds for this result.
+
+        An empty extraction takes a placeholder, so that it is not read as unfinished. When OCR read
+        words and every one fell under the floor, the section that holds them is the record, and the
+        text stays empty.
+        """
+        text = self.text.strip()
+        if text or (self.ocr is not None and self.ocr.low_confidence_text):
+            return text
+        return NO_TEXT_DETECTED
 
 
 class ExtractionUnavailable(Exception):
@@ -1287,7 +1311,7 @@ def _save_png_for_ocr(image, target: Path) -> None:
     image.save(target, format="PNG")
 
 
-def _ocr_png(source: Path) -> str:
+def _ocr_png(source: Path) -> OcrReading:
     """OCR a PNG through the script-first router (`ocr_models`)."""
     from . import ocr_models
 
@@ -1295,13 +1319,13 @@ def _ocr_png(source: Path) -> str:
     if cmd is None:
         raise ExtractionUnavailable("Tesseract binary not found")
     try:
-        return ocr_models.read_image(cmd, source).strip()
+        return ocr_models.read_image(cmd, source)
     except ocr_models.OcrUnavailable as e:
         raise ExtractionUnavailable(str(e)) from e
 
 
 def _ocr_image(path: Path) -> ExtractResult:
-    from . import image_codecs
+    from . import image_codecs, ocr_models
 
     with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
         source = Path(tmp) / "page.png"
@@ -1313,14 +1337,21 @@ def _ocr_image(path: Path) -> ExtractResult:
             _save_png_for_ocr(img, source)
         # The decoded image is closed before Tesseract starts: each process has its own
         # VmData limit, so holding both would let one job take two budgets of the cell.
-        text = _ocr_png(source)
+        reading = _ocr_png(source)
+    # Words under the confidence floor stay in the sidecar, outside the text every search reads.
+    text, low_confidence_text = reading.split(ocr_models.word_floor())
     # OPTIONAL frozen-model caption (EXOMEM_VISION_CAPTION, default OFF) prepended so
     # a photo with no on-image text is still findable. Soft-fails to OCR-only.
     text, engine = _maybe_caption(text, path)
     # OPTIONAL CLIP zero-shot tags (EXOMEM_IMAGE_TAGS, default OFF) appended so the image
     # is findable by what it depicts ("invoice", "whiteboard"). Soft-fails to no tags.
     text, engine = _maybe_image_tags(text, path, engine)
-    return ExtractResult(text=text, media_type="image", engine=engine)
+    return ExtractResult(
+        text=text,
+        media_type="image",
+        engine=engine,
+        ocr=OcrFacts(confidence=reading.confidence, low_confidence_text=low_confidence_text),
+    )
 
 
 # ---------------- optional: vision captioning (EXOMEM_VISION_CAPTION, default OFF) ----
@@ -1752,7 +1783,7 @@ def _ocr_pdf_page(page) -> str:
             fitz.TOOLS.store_shrink(100)
             # The raster is released before Tesseract starts: each process has its own
             # VmData limit, so holding both would let one job take two budgets of the cell.
-            return _ocr_png(source)
+            return _ocr_png(source).text
     except MemoryError:
         raise  # a hard-limit failure is a memory stop, never a missing page
     except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort
