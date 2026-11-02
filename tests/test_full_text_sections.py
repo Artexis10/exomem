@@ -184,14 +184,15 @@ def test_moving_a_source_moves_its_parts_with_it(vault, monkeypatch) -> None:
     assert [hit.path for hit in hits] == [new_page.relative_to(vault).as_posix()]
 
 
-def _adopted_parted_source(vault, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+def _adopted_parted_source(vault, monkeypatch: pytest.MonkeyPatch, beside_planted: str = "") -> tuple[str, str]:
     """A text file dropped into a project folder and extracted by the worker into several parts.
 
-    Outside Sources/ and Evidence/, so its page may be edited, trashed and moved alone.
+    Outside Sources/ and Evidence/, so its page may be edited, trashed and moved alone, and its
+    origin carriers are withheld from other audiences.
     """
     monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
     text = "\n\n".join(
-        f"paragraph {number} " + "alpha beta gamma " * 20 + (PLANTED if number == 55 else "")
+        f"paragraph {number} " + "alpha beta gamma " * 20 + (f"{PLANTED} {beside_planted}" if number == 55 else "")
         for number in range(60)
     ).strip()
     binary = vault / "Knowledge Base" / "Projects" / "demo" / "report.txt"
@@ -232,6 +233,22 @@ def test_moving_a_page_without_its_original_moves_its_parts(vault, monkeypatch) 
     assert [hit.path for hit in find_module.find(vault, query=PLANTED)] == [new_rel]
 
 
+def test_a_later_part_withholds_an_origin_carrier_from_its_passage_and_window(vault, monkeypatch) -> None:
+    from test_episode_recovery import _write_source_rule
+
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    page_rel, _text = _adopted_parted_source(vault, monkeypatch, beside_planted="<!-- exomem-origin:v1 SECRETNOTE -->")
+    [hit] = find_module.find(vault, query=PLANTED)
+    _write_source_rule(vault, ceiling=0)  # a configured policy makes client-a a restricted audience
+
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        window = commands.op_read_memory(vault, path=page_rel, offset=hit.passage["offset"])
+
+    assert hit.matched_part > 1 and PLANTED in hit.passage["text"] and PLANTED in window["body"]
+    assert "SECRETNOTE" not in hit.passage["text"] and "SECRETNOTE" not in window["body"]
+
+
 def test_reconcile_removes_a_leftover_part_keeps_a_hand_made_file_and_rebuilds_a_missing_part(
     vault, monkeypatch
 ) -> None:
@@ -242,11 +259,13 @@ def test_reconcile_removes_a_leftover_part_keeps_a_hand_made_file_and_rebuilds_a
     count = extraction_parts.count_of(parse_frontmatter(page.read_text(encoding="utf-8"))[0])
     last = (folder / f"part-{count:02d}.md").read_text(encoding="utf-8")
     leftover = folder / f"part-{count + 1:02d}.md"  # as a longer, earlier extraction wrote it
-    leftover.write_text(last.replace(f"part: {count}\n", f"part: {count + 1}\n"), encoding="utf-8")
+    leftover.write_text(last.replace(f"part: {count}\n", f"part: {count + 1}\n") + "plumquorx\n", encoding="utf-8")
     hand_made = folder / f"part-{count + 2:02d}.md"
     hand_made.write_text("my own notes\n", encoding="utf-8")
     (folder / "part-03.md").unlink()
+    find_module.clear_cache()
 
+    assert find_module.find(vault, query="plumquorx") == []  # a leftover is no text of its Source
     report = reconcile.reconcile(vault).as_dict()
 
     assert (report["part_orphans_removed"], report["parts_rebuilt"], report["parts_missing"]) == (1, 1, [])
