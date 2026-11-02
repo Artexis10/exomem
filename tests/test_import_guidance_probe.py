@@ -405,3 +405,8 @@ def test_the_fake_exomem_records_no_import_for_a_command_that_is_not_the_import(
         timeout=20,
     )
     assert done.returncode == 0 and not log.exists()
+
+
+def test_filing_when_the_import_command_never_ran_fails() -> None:
+    """Catches a pass for an agent that filed by hand without ever starting the CLI."""
+    assert checks.filed_before_shell_exit({}, evidence(start(10))).verdict == checks.FAIL

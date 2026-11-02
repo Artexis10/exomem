@@ -11,6 +11,10 @@ are unverified.
 A scenario file writes `{"$status": {...}}`, `{"$transfer_status": {...}}` or `{"$import_handoff": {...}}` where it
 needs one of these replies, and `expand` builds it when the scenario loads. `exomem` is imported only when a reply is
 built, so a scenario with no such reply starts the server without it.
+
+The builders call private helpers of `import_windows` (`_Reading`, `_drain` and the like) on purpose: the product
+exposes no public way to build one section of a status, and a copy of its rules here would drift. A rename there
+fails this probe's parity test.
 """
 
 from __future__ import annotations
@@ -99,7 +103,8 @@ def _budget(spec: dict, windows: list) -> dict:
     occupancy = (
         iw._Reading(reason=pinned["unknown"])
         if isinstance(pinned, dict)
-        else iw._Reading(media_store.Occupancy(0, 0, 0, pinned))
+        else iw._Reading(media_store.Occupancy(evictable_bytes=0, pending_offloads=0, pending_offload_bytes=0,
+                                                pinned_bytes=pinned))
     )
     unfiled = iw._read(lambda: iw._unfiled(iw._Reading(windows), iw._Reading(bounds)))
     allowance = spec.get(

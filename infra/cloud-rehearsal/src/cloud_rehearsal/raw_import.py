@@ -67,10 +67,13 @@ if TYPE_CHECKING:
     from .scenarios import Context, Tenant
 
 # The corpus the verdict is about, and the different one that the existing vault already holds.
-MAIN_COLLECTION = {"profile": "standard", "seed": 7}
+MAIN_COLLECTION = {"profile": "raw-standard", "seed": 7}
 EARLIER_COLLECTION = {"profile": "small", "seed": 8}
 MAIN_LABEL, EARLIER_LABEL = "Collection", "Earlier collection"
 MEDIA_DEADLINE_S = 300.0
+# The scorer reads the cell's vault through its own local server. With engines on, that server would extract
+# media that the cell left pending and the scorer would credit the text to Cloud, so it runs none.
+SCORER_ENV = {"EXOMEM_MEDIA_ENGINES": ""}
 LOCAL_MEDIA_DEADLINE_S = 900.0  # about 100 attachments with OCR on one runner core
 LISTED_ITEMS = 100  # a group's report names this many items per state; the counts cover all of them
 SCORE_TIMEOUT_S = 3600
@@ -117,6 +120,8 @@ def item_states(key: Mapping[str, Any], per_item: Mapping[str, Any] | None) -> d
     junk_pages = (per_item or {}).get("junk_pages", {})
     links = (per_item or {}).get("links_kept", {})
     embeds = (per_item or {}).get("embeds_kept", {})
+    raw_meets = (per_item or {}).get("raw_meets_key", {})
+    raw = [i for i in key["items"] if i["kind"] == "raw"]
 
     def landed(item: Mapping[str, Any]) -> bool | None:
         return pages[item["path"]] >= 1 if item["path"] in pages else None
@@ -133,6 +138,8 @@ def item_states(key: Mapping[str, Any], per_item: Mapping[str, Any] | None) -> d
         # A duplicate is an item that came out as more than one page; an item that did not land is not one.
         "no_duplicate_pages": {i["path"]: filed_at_most_once(i) for i in notes + atts},
         "junk_kept_out": {i["path"]: (junk_pages[i["path"]] == 0 if i["path"] in junk_pages else None) for i in junk},
+        # A raw item is kept when it was filed, or refused where the key allows a refusal.
+        "raw_meets_key": {i["path"]: raw_meets.get(i["path"]) for i in raw},
         "links": {edge: links.get(edge) for edge in sorted(ends["links"])},
         "embeds": {edge: embeds.get(edge) for edge in sorted(ends["embeds"])},
     }
@@ -252,6 +259,18 @@ def check_existing_pages(before: Snapshot, after: Snapshot) -> list[str]:
     return problems
 
 
+def baseline_gaps(earlier: Mapping[str, Any], earlier_landed: int) -> list[str]:
+    """Why the earlier collection cannot stand as the baseline that the page check protects."""
+    gaps = []
+    if earlier["stopped_at"]:
+        gaps.append(f"earlier collection: the journey stopped at {earlier['stopped_at']}")
+    if earlier["jobs_idle"] is not True:
+        gaps.append("earlier collection: media jobs were not idle before the snapshot")
+    if not earlier_landed:
+        gaps.append("earlier collection: none of its key notes landed, so no page is protected")
+    return gaps
+
+
 def target_verdict(groups: Mapping[str, Mapping[str, Any]], page_problems: Sequence[str] | None = (),
                    gaps: Sequence[str] = ()) -> str:
     """`fail` on any loss or any damaged pre-existing page; `incomplete` on any unknown, any gap, or when a
@@ -352,12 +371,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def vault_snapshot(vault: Path) -> Snapshot:
+def vault_snapshot(vault: Path, scan: Mapping[str, Any]) -> Snapshot:
+    """`scan` is `score.scan_vault(vault)`, which the caller also reads."""
     kb = vault / "Knowledge Base"
     files = frozenset(path.relative_to(vault).as_posix() for path in kb.rglob("*") if path.is_file()) if kb.is_dir() else frozenset()
     sourced: dict[str, str] = {}
     identities: dict[str, tuple[str, str, str]] = {}
-    for rel, page in score.scan_vault(vault)["pages"].items():
+    for rel, page in scan["pages"].items():
         front = page["front"]
         if isinstance(front.get("imported_from"), str):
             sourced[rel] = sha256_file(vault / rel)
@@ -372,10 +392,14 @@ def run_scorer(plan: RawImportPlan, script: str, *arguments: str) -> None:
     run([str(plan.python), str(BENCH / script), *arguments], timeout=SCORE_TIMEOUT_S)
 
 
-def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path) -> dict[str, Any] | None:
-    """Run `score.py` on a finished vault. `None` when it did not finish: the arm is then unknown, not zero."""
+def score_vault(plan: RawImportPlan, key: Path, log: Path, out: Path, originals: Path | None = None) -> dict[str, Any] | None:
+    """Run `score.py` on a finished vault. `None` when it did not finish: the arm is then unknown, not zero.
+
+    A Cloud copy holds no placed copy of the collection (the import consumes its stage), so `originals` names the
+    generated collection that the scorer compares text originals with."""
     try:
-        run_scorer(plan, "score.py", "--key", str(key), "--drive-log", str(log), "--out", str(out), "--python", str(plan.python))
+        run_scorer(plan, "score.py", "--key", str(key), "--drive-log", str(log), "--out", str(out), "--python", str(plan.python),
+                   *(["--originals", str(originals)] if originals else []))
     except CommandFailed as error:
         out.with_suffix(".failure.txt").write_text(f"{error}\n{error.stdout[-2000:]}\n{error.stderr[-2000:]}")
         return None
@@ -395,7 +419,7 @@ def local_arm(plan: RawImportPlan, collection: Path, key: Path) -> dict[str, Any
         run_scorer(plan, "drive.py", "--collection", str(collection), "--workdir", str(work), "--profile", "personal",
                    "--python", str(plan.python), "--server-root", str(images.REPO_ROOT), "--log", str(log),
                    "--label", "raw-import local arm",
-                   "--media-deadline", str(LOCAL_MEDIA_DEADLINE_S))
+                   "--media-deadline", str(LOCAL_MEDIA_DEADLINE_S), "--media-wait", "jobs")
         drive_log = json.loads(log.read_text(encoding="utf-8"))
         stopped = [journey["stopped_at"] for journey in drive_log["journeys"] if journey.get("stopped_at")]
         out["stopped_at"] = ", ".join(stopped) or None
@@ -430,18 +454,19 @@ async def copy_vault(ctx: Context, tenant: Tenant, destination: Path) -> dict[st
     for attempt in range(3):  # the pod may be replaced between attempts, so each one looks it up again
         pod = ctx.runtime_pod(tenant.cell_id)
         if pod is None:
-            code = -1
+            code, stderr = -1, "no runtime pod"
             await asyncio.sleep(5 * (attempt + 1))
             continue
         command = ["docker", "exec", ctx.stack.k3s.container, "kubectl", "exec", "--namespace", namespace_name(tenant.cell_id),
                    pod["metadata"]["name"], "--container", "exomem", "--", "python3", "-c", VAULT_SCRIPT]
         with archive.open("wb") as sink:
-            code = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False, timeout=SCORE_TIMEOUT_S).returncode
+            done = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False, timeout=SCORE_TIMEOUT_S)
+        code, stderr = done.returncode, done.stderr.decode(errors="replace")[-500:]
         if code == 0:
             break
         await asyncio.sleep(5 * (attempt + 1))
     else:
-        raise StepFailure(f"the vault copy of tenant {tenant.label} kept failing (last exit code {code})")
+        raise StepFailure(f"the vault copy of tenant {tenant.label} kept failing (last exit code {code}): {stderr}")
     destination.mkdir()
     with tarfile.open(archive, mode="r:gz") as tar:
         tar.extractall(destination, filter="data")
@@ -484,7 +509,7 @@ async def adopt(ctx: Context, plan: RawImportPlan, tenant: Tenant, session: Any,
                             initialize_kb=initialize_kb)
     rules_state: dict[str, Any] = {"folder_kind_rules": "not-probed", "collection_label": "not-tried"}
     summary = await journey.run(collection_label="try", rules_state=rules_state, probe_rules=True, include_rules=[])
-    media = await drive.wait_for_media(session, "first", MEDIA_DEADLINE_S, drive.hosted_media_status)
+    media = await drive.wait_for_media(session, "first", MEDIA_DEADLINE_S, drive.hosted_media_status, jobs_only=True)
     return {"stage_path": stage_path, "import": import_summary(row), "cli": cli_coverage(collection, row),
             "journey": summary, "rules_state": rules_state, "media": media,
             "stopped_at": summary.get("stopped_at"), "jobs_idle": jobs_idle(media),
@@ -506,7 +531,7 @@ def write_drive_log(plan: RawImportPlan, name: str, session: Any, adopted: Mappi
         "format": drive.LOG_FORMAT, "profile": "cloud", "label": f"raw-import cloud arm {name}",
         "server": drive.git_head(images.REPO_ROOT), "python": str(plan.python),
         "paths": {"vault": str(vault), "state": str(state), "collection_name": prefix},
-        "server_root": str(images.REPO_ROOT), "env_extra": drive.PROFILE_ENV["cloud-like"],
+        "server_root": str(images.REPO_ROOT), "env_extra": SCORER_ENV,
         "search_mode_note": "EXOMEM_DISABLE_EMBEDDINGS=1: search_memory runs its lexical lane only",
         "tool_calls_total": len(calls), "calls": calls, "total_wall_s": adopted["seconds"],
         "journeys": [adopted["journey"]], "media": {"after_first_run": adopted["media"], "after_rerun": adopted["media"]},
@@ -519,16 +544,19 @@ def write_drive_log(plan: RawImportPlan, name: str, session: Any, adopted: Mappi
 
 
 async def score_cloud_vault(ctx: Context, plan: RawImportPlan, tenant: Tenant, session: Any, adopted: Mapping[str, Any],
-                            key: Path, name: str, vault: Path) -> dict[str, Any]:
-    """Copy the vault out, tell the scorer where the product wrote each original, and score it."""
+                            key: Path, name: str, vault: Path, *, originals: Path) -> dict[str, Any]:
+    """Copy the vault out, tell the scorer where the product wrote each original, and score it.
+
+    The snapshot is taken before `score.py` runs, because the scorer's own server may still rewrite pages."""
     copied = await copy_vault(ctx, tenant, vault)
     key_paths = [item["path"] for item in json.loads(key.read_text(encoding="utf-8"))["items"]]
     scan = score.scan_vault(vault)
+    snapshot = vault_snapshot(vault, scan)
     values = [page["front"]["imported_from"] for page in scan["pages"].values() if isinstance(page["front"].get("imported_from"), str)]
     prefix = imported_from_prefix(values, key_paths)
     log = write_drive_log(plan, name, session, adopted, vault, plan.root / f"cloud-{name}-state", prefix or adopted["stage_path"])
-    metrics = await asyncio.to_thread(score_vault, plan, key, log, plan.root / f"cloud-{name}.metrics.json")
-    return {"vault_copy": copied, "imported_from_prefix": prefix, "metrics": metrics}
+    metrics = await asyncio.to_thread(score_vault, plan, key, log, plan.root / f"cloud-{name}.metrics.json", originals)
+    return {"vault_copy": copied, "imported_from_prefix": prefix, "metrics": metrics, "snapshot": snapshot}
 
 
 def arm_report(metrics: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -559,6 +587,9 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
     earlier_key = json.loads(earlier_key_path.read_text(encoding="utf-8"))
     out["key"] = {"profile": key["profile"], "seed": key["seed"], "fixture_tree_sha256": key["fixture_tree_sha256"],
                   "summary": key["summary"]}
+    out["scoring"] = {"scorer_engines_for_cloud_copies": SCORER_ENV["EXOMEM_MEDIA_ENGINES"] or "none",
+                      "scorer_engines_for_the_local_arm": "all (personal profile)",
+                      "note": "media recall rows compare unlike engine sets; the item groups and the verdict do not use them"}
     record = StepRecord(0, "raw_import")
     from .scenarios import first_session
 
@@ -577,7 +608,8 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         # Target 1: tenant A's fresh vault.
         session = await connect(ctx.a)
         adopted = await adopt(ctx, plan, ctx.a, session, collection, "new", MAIN_LABEL, initialize_kb=True)
-        scored = await score_cloud_vault(ctx, plan, ctx.a, session, adopted, key_path, "new", plan.root / "cloud-new-vault")
+        scored = await score_cloud_vault(ctx, plan, ctx.a, session, adopted, key_path, "new", plan.root / "cloud-new-vault",
+                                           originals=collection)
         cloud_metrics = scored["metrics"] or {}
         groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
         gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], jobs_idle=adopted["jobs_idle"]), *local_gaps]
@@ -589,26 +621,22 @@ async def run_raw_import(ctx: Context, plan: RawImportPlan) -> None:
         earlier_adopted = await adopt(ctx, plan, ctx.b, session, earlier, "earlier", EARLIER_LABEL, initialize_kb=True)
         before_vault = plan.root / "cloud-earlier-vault"
         await copy_vault(ctx, ctx.b, before_vault)
-        before = vault_snapshot(before_vault)
-        earlier_values = [score.scan_vault(before_vault)["pages"][page]["front"]["imported_from"] for page in before.sourced]
+        before_scan = score.scan_vault(before_vault)
+        before = vault_snapshot(before_vault, before_scan)
+        earlier_values = [before_scan["pages"][page]["front"]["imported_from"] for page in before.sourced]
         earlier_notes = [item["path"] for item in earlier_key["items"] if item["kind"] == "note"]
         earlier_landed = sum(imported_from_matches(earlier_values, earlier_notes).values())
-        baseline_gaps = []
-        if earlier_adopted["stopped_at"]:
-            baseline_gaps.append(f"earlier collection: the journey stopped at {earlier_adopted['stopped_at']}")
-        if earlier_adopted["jobs_idle"] is not True:
-            baseline_gaps.append("earlier collection: media jobs were not idle before the snapshot")
-        if not earlier_landed:
-            baseline_gaps.append("earlier collection: none of its key notes landed, so no page is protected")
+        earlier_gaps = baseline_gaps(earlier_adopted, earlier_landed)
         session.calls.clear()
         adopted = await adopt(ctx, plan, ctx.b, session, collection, "existing", MAIN_LABEL, initialize_kb=False)
-        scored = await score_cloud_vault(ctx, plan, ctx.b, session, adopted, key_path, "existing", plan.root / "cloud-existing-vault")
-        after = vault_snapshot(plan.root / "cloud-existing-vault")
+        scored = await score_cloud_vault(ctx, plan, ctx.b, session, adopted, key_path, "existing", plan.root / "cloud-existing-vault",
+                                           originals=collection)
+        after = scored["snapshot"]
         page_problems = check_existing_pages(before, after) if before.sourced else None
         cloud_metrics = scored["metrics"] or {}
         groups = compare_arms(key, cloud_metrics.get("per_item"), (local_metrics or {}).get("per_item"))
         gaps = [*arm_gaps("cloud", scored["metrics"], key, stopped_at=adopted["stopped_at"], jobs_idle=adopted["jobs_idle"]),
-                *local_gaps, *baseline_gaps]
+                *local_gaps, *earlier_gaps]
         verdicts["existing"] = target_verdict(groups, page_problems, gaps)
         out["targets"]["existing"] = {
             **target_report(adopted, scored, groups, verdicts["existing"], gaps),
