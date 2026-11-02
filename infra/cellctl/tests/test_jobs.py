@@ -180,7 +180,7 @@ def test_restore_and_backup_are_scoped_to_vault_and_host_leaving_the_volume_root
     assert {"name": "RESTIC_REPOSITORY", "value": repo} in restore_container["env"]
     backup = render_backup_job(spec, bucket_name="exomem-cloud-backups", endpoint=ENDPOINT)
     script = backup["spec"]["template"]["spec"]["containers"][0]["command"][2]
-    assert "restic backup --json /data/vault /data/host > /tmp/backup.json || exit 1" in script.split(" && ")
+    assert "restic backup --json --host aaaaaaaaaaaaaaaa /data/vault /data/host > /tmp/backup.json || exit 1" in script.split(" && ")
 
 
 def test_the_repository_never_reaches_the_job_shell() -> None:
