@@ -2188,6 +2188,11 @@ def live_catalog_compatible(vault_root: Path) -> bool:
     return get_store(vault_root).live_catalog_compatible()
 
 
+def live_catalog_release_current(vault_root: Path) -> bool | None:
+    """Whether the running release built the live catalogue, or None when unknown."""
+    return get_store(vault_root).live_catalog_release_current()
+
+
 def assess_live_catalog(
     vault_root: Path, *, require_live_projection: bool = True
 ) -> CatalogAssessment:
@@ -6071,6 +6076,11 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _catalog_release_current(self, conn: sqlite3.Connection) -> bool:
+        """Whether the running release built the rows behind `conn` (see `_stamp_whole_build`)."""
+        row = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        return row is not None and row[0] == __version__
+
     def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
         """Record the schema and the release that derived every page row (caller owns the txn).
 
@@ -8366,8 +8376,7 @@ class LexicalStore:
             return "schema"
         if self._meta_catalog_identity(conn) != identity:
             return "identity"
-        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
-        if release is None or release[0] != __version__:
+        if not self._catalog_release_current(conn):
             return "release"
         # A whole-corpus build reads nothing from the live file; a copy would
         # carry its damage into every later repair, so check the copy once.
@@ -8594,6 +8603,26 @@ class LexicalStore:
             # so a standby waits on the serving worker rather than building a
             # whole catalogue beside one it merely found busy.
             return classify_sqlite_error(error) == "transient"
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def live_catalog_release_current(self) -> bool | None:
+        """Whether the running release built the live catalogue, or None when unknown.
+
+        Read-only and O(1), like `live_catalog_compatible`. False means another
+        release's whole build derived every row, so `_seed_from_live` would not
+        reuse them; None (no maintained store, no file, a failed read) decides
+        nothing.
+        """
+        if backend() == "python" or self._failed or not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            return self._catalog_release_current(conn)
+        except sqlite3.Error:
+            return None
         finally:
             if conn is not None:
                 conn.close()

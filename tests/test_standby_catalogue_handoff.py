@@ -1062,3 +1062,83 @@ def test_the_registry_is_reseeded_after_the_build_before_the_graph_proof(
     service_standby.warm(root)
 
     assert order == ["rebaseline", "build", "rebaseline", "graph_proof"], order
+
+
+# -- a release change without a schema bump --
+
+
+@pytest.fixture
+def earlier_release_catalogue(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A current-schema catalogue that the serving worker of an earlier release built.
+
+    Its checkpoints carry that worker's registry instance; `freshness.clear()`
+    makes this process the new one, as an upgrade does.
+    """
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    for relative, text in NOTES.items():
+        path = vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    freshness.clear()
+    lexstore.clear_stores()
+    lexstore.ensure_fresh(vault)
+    connection = sqlite3.connect(lexstore.lexical_path(vault))
+    try:
+        connection.execute(
+            "UPDATE meta SET value = 'an-earlier-release' WHERE key = 'catalog_release'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    lexstore.clear_stores()
+    freshness.clear()
+    service_standby.reset_for_tests()
+    readiness.reset()
+    try:
+        yield vault
+    finally:
+        lexstore.discard_detached_catalogs()
+        lexstore.await_repairs_idle(vault)
+        service_standby.reset_for_tests()
+        readiness.reset()
+        lexstore.clear_stores()
+        freshness.clear()
+
+
+def _editor_save(path: Path, text: str) -> None:
+    """What an editor's atomic save does: write a sibling, then rename it over the page."""
+    sibling = path.with_name(f".{path.name}.saving")
+    sibling.write_text(text, encoding="utf-8")
+    os.replace(sibling, path)
+
+
+def test_an_upgrade_heals_this_releases_catalogue_instead_of_rebuilding_the_old_one(
+    earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old worker's last save is unpublished at shutdown; ingress waits on retrieval.
+
+    Proving the earlier release's catalogue current left the promoted worker
+    a lag repair whose catch-up declined the foreign registry stamp, so a
+    whole rebuild ran while ingress stayed paused.
+    """
+    root = earlier_release_catalogue
+    saved = root / "Knowledge Base/Notes/Insights/handoff-1.md"
+
+    _promote_over_older_catalogue(
+        root,
+        monkeypatch,
+        between=lambda _root: _editor_save(
+            saved, NOTES["Knowledge Base/Notes/Insights/handoff-1.md"] + "\nquokkalastsave.\n"
+        ),
+    )
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    admitted_now = _promoted_warm(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == [], rebuilds
+    assert admitted_now is True
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, "quokkalastsave", k=3, scope="kb")
+
