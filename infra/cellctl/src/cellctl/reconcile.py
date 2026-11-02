@@ -2575,8 +2575,9 @@ async def _reconcile_row(
             artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
             media_slot_url=cluster_config.media_slot_for_cell(row.cell_id),
             upload_public_key=cluster_config.upload_public_key_for_cell(row.cell_id),
-            object_store_endpoint=cluster_config.object_storage_endpoint,
-            object_store_bucket=cluster_config.object_storage_bucket,
+            # D9: exports and imports are presigned in the staging bucket, so a Job checks its URLs there.
+            object_store_endpoint=cluster_config.cell_data_endpoint,
+            object_store_bucket=cluster_config.cell_data_staging_bucket,
             grant_public_key=cluster_config.grant_public_key,
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             b2_key_id=key_id,
