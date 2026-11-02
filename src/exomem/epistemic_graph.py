@@ -1935,6 +1935,9 @@ class _ProofPage(NamedTuple):
     snapshot_hash: str
     title: str
     guard: vault_module.PathGuard
+    #: What a folding recheck holds the page to: the generation guard minted with
+    #: `guard` where it binds the bytes read, else `guard` itself.
+    fold_guard: vault_module.PathGuard
 
 
 @dataclass
@@ -3310,6 +3313,20 @@ class EpistemicGraphIndex:
         declines on the first page that differs from its row, before it spends
         a recheck on it.
 
+        A folding recheck holds each page to the generation its read captured,
+        where `vault.read_bounded_guarded_bytes_with_generation` minted one, and
+        costs lstat calls instead of a re-read of every page's bytes, so fewer
+        writes land inside a round. A page whose identity and
+        `vault.stat_generation` (size, mtime_ns, ctime_ns) are unchanged held the
+        bytes the proof hashed: `st_ctime_ns` is the inode change time, which
+        every write moves and no POSIX call can set. Where
+        `vault.STAT_GENERATION_TRUSTED` is false (Windows, where ctime is the
+        creation time and a write leaves it), and for a page written within
+        `vault.GENERATION_RACY_WINDOW_NS` of its read, the recheck still compares
+        content. The converged round is the same recheck, so the generation rule
+        ends the proof too. `seal_out` carries the content guards, so a caller's
+        later strict seal still compares bytes.
+
         The invariant a True answer establishes: the snapshot S that `conn`'s
         read transaction sees, plus the residue R, equals the admitted pages as
         the last recheck found them, under one recall policy identity. Every
@@ -3354,7 +3371,7 @@ class EpistemicGraphIndex:
             while True:
                 for rel in to_read:
                     try:
-                        page = self._read_proof_page(rel)
+                        page = self._read_proof_page(rel, fold=fold)
                     except (FileNotFoundError, vault_module.PathGuardError) as error:
                         if not fold:
                             raise
@@ -3393,7 +3410,10 @@ class EpistemicGraphIndex:
                 if not fold:
                     break
                 movement = _SealMovement()
-                sealed = self._snapshot_source_seal_matches_disk(seal, movement_out=movement)
+                sealed = self._snapshot_source_seal_matches_disk(
+                    replace(seal, guards=tuple(page.fold_guard for page in pages.values())),
+                    movement_out=movement,
+                )
                 # A page whose read raced is not in `pages`, and its guard is
                 # not in the seal, so a clean recheck alone does not cover it.
                 if sealed and pages.keys() == resolver_membership | indexed_membership:
@@ -3493,11 +3513,13 @@ class EpistemicGraphIndex:
             log.debug("cold snapshot proof raised", exc_info=True)
             return declined("proof_raised")
 
-    def _read_proof_page(self, rel: str) -> _ProofPage | None:
+    def _read_proof_page(self, rel: str, *, fold: bool) -> _ProofPage | None:
         """Read, hash and guard one admitted page for the cold proof; None when it does not parse.
 
         Raises FileNotFoundError for a page removed since the membership walk,
-        and `vault.PathGuardError` for one the guarded read refused.
+        and `vault.PathGuardError` for one the guarded read refused. A folding
+        proof also takes the page's generation guard where one binds the bytes
+        read; see `_snapshot_sources_match_disk`.
         """
         path = self.vault_root / rel
         # Admission and opening are separate operations.  A direct editor can
@@ -3507,11 +3529,19 @@ class EpistemicGraphIndex:
         # replacement outside that exact descriptor snapshot is refused without
         # opening its bytes.
         limit = int(path.lstat().st_size)
-        raw, source_guard = vault_module.read_bounded_guarded_bytes(
-            self.vault_root,
-            rel,
-            limit=limit,
-        )
+        generation_guard: vault_module.PathGuard | None = None
+        if fold:
+            raw, source_guard, generation_guard = (
+                vault_module.read_bounded_guarded_bytes_with_generation(
+                    self.vault_root, rel, limit=limit
+                )
+            )
+        else:
+            raw, source_guard = vault_module.read_bounded_guarded_bytes(
+                self.vault_root,
+                rel,
+                limit=limit,
+            )
         page = find_module._parse_page(
             path,
             0.0,
@@ -3521,7 +3551,9 @@ class EpistemicGraphIndex:
         )
         if page is None:
             return None
-        return _ProofPage(page.snapshot_hash, page.title, source_guard)
+        return _ProofPage(
+            page.snapshot_hash, page.title, source_guard, generation_guard or source_guard
+        )
 
     def _snapshot_source_seal_matches_disk(
         self,
@@ -3532,8 +3564,11 @@ class EpistemicGraphIndex:
     ) -> bool:
         """Replay byte/membership checks without page parsing or topology work.
 
-        This is O(source bytes + paths); it preserves the direct-edit proof,
-        including same-sized content changes with restored timestamps.
+        A content guard re-reads its page, so a seal of them is O(source bytes +
+        paths); a generation guard (`_ProofPage.fold_guard`) costs lstat calls.
+        Both preserve the direct-edit proof, including a same-sized content
+        change with a restored mtime: the content guard by its hash, the
+        generation guard by its ctime.
 
         Strict by default: the first guard that moved raises
         `vault.PathGuardError`, and the answer is False when either membership
@@ -3543,11 +3578,18 @@ class EpistemicGraphIndex:
         identity moved, and the answer is False when anything moved.
         """
         movement = _SealMovement() if movement_out is None else movement_out
+        # A collecting round proves each shared ancestor once, as
+        # `vault.recheck_path_guards` does. A strict seal re-reads every page,
+        # so ancestor `lstat` calls are a small part of its cost; it keeps
+        # proving each guard's ancestry whole.
+        verified: set[vault_module.PathIdentity] | None = (
+            None if movement_out is None else set()
+        )
         for guard in seal.guards:
             if interrupt is not None:
                 interrupt()
             try:
-                guard.recheck(self.vault_root)
+                guard.recheck(self.vault_root, verified)
             except vault_module.PathGuardError as error:
                 if movement_out is None:
                     raise
@@ -5700,17 +5742,13 @@ class EpistemicGraphIndex:
     ) -> frozenset[str] | None:
         """Capture on-disk membership of the vault-wide recall resolver."""
         try:
-            return frozenset(
-                rel
-                for path in recall_policy.iter_recall_markdown(
-                    self.vault_root,
-                    _interruptible_source_paths(
-                        foreground_priority.yielding_in_bulk(
-                            vault_module.walk_vault_md(self.vault_root)
-                        ), interrupt,
-                    ),
-                )
-                if (rel := _vault_rel(self.vault_root, path)) is not None
+            return recall_policy.admitted_relative_paths(
+                self.vault_root,
+                _interruptible_source_paths(
+                    foreground_priority.yielding_in_bulk(
+                        vault_module.walk_vault_md(self.vault_root)
+                    ), interrupt,
+                ),
             )
         except _RepublicationDeferred:
             raise
@@ -5723,17 +5761,13 @@ class EpistemicGraphIndex:
         """Capture the exact admitted KB paths represented by graph file rows."""
         kb = self.vault_root / kb_dirname()
         try:
-            return frozenset(
-                rel
-                for path in recall_policy.iter_recall_markdown(
-                    self.vault_root,
-                    _interruptible_source_paths(
-                        foreground_priority.yielding_in_bulk(
-                            find_module._walk_md(kb) if kb.is_dir() else ()
-                        ), interrupt,
-                    ),
-                )
-                if (rel := _vault_rel(self.vault_root, path)) is not None
+            return recall_policy.admitted_relative_paths(
+                self.vault_root,
+                _interruptible_source_paths(
+                    foreground_priority.yielding_in_bulk(
+                        find_module._walk_md(kb) if kb.is_dir() else ()
+                    ), interrupt,
+                ),
             )
         except _RepublicationDeferred:
             raise

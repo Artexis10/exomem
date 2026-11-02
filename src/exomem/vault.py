@@ -1532,6 +1532,12 @@ def stat_generation(info: os.stat_result) -> tuple[int, int, int]:
 #: callers must keep hashing content.
 STAT_GENERATION_TRUSTED = os.name != "nt"
 
+#: How long both of a leaf's timestamps must have stood still before a read for its
+#: generation to bind the bytes read. Timestamps advance in clock ticks, so a write in
+#: the same tick as the previous one leaves the generation unchanged; git applies the
+#: same rule to its index. Every racy-clean check in the package uses this window.
+GENERATION_RACY_WINDOW_NS = 2_000_000_000
+
 
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
     return (
@@ -4330,6 +4336,62 @@ def read_bounded_guarded_bytes(
         raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
     guard.recheck(Path(vault_root))
     return data, guard
+
+
+def read_bounded_guarded_bytes_with_generation(
+    vault_root: Path, target: str, *, limit: int
+) -> tuple[bytes, PathGuard, PathGuard | None]:
+    """`read_bounded_guarded_bytes`, plus a generation guard bound to the same bytes.
+
+    The generation guard rechecks the leaf's ancestry, identity and `stat_generation`
+    with lstat calls and reads no bytes. Where `STAT_GENERATION_TRUSTED` holds, a match
+    proves the bytes held still: `st_ctime_ns` is the inode change time, which every
+    write moves and no POSIX call can set (`os.utime` puts mtime back and moves ctime).
+    The generation is taken before the read and confirmed after it against the
+    descriptor's identity, so a write during the read cannot hide behind it.
+
+    The third value is None, and the caller keeps the content guard, where a generation
+    does not prove the bytes: on Windows, where ctime is the creation time; when the
+    leaf moved during the read; and when a timestamp was inside
+    `GENERATION_RACY_WINDOW_NS` of the read. A filesystem that does not move ctime on
+    a write (some FUSE or network mounts), or a Windows volume mounted on Linux, whose
+    change time a Windows program can set, defeats the generation, as it does
+    `record_item_cache`. So do a writer through a shared mmap, which moves no timestamp
+    until it syncs, and one write call that runs longer than the racy window.
+    """
+    root = Path(vault_root)
+    if not STAT_GENERATION_TRUSTED:
+        data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+        return data, guard, None
+    _safe_guard_target(target)
+    leaf = os.path.join(os.fspath(root), target)
+    # Taken before the read: a later write cannot then hide inside the racy window.
+    started = time.time_ns()
+    try:
+        before = os.lstat(leaf)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
+    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+    try:
+        after = os.lstat(leaf)
+    except OSError:
+        return data, guard, None
+    generation = stat_generation(before)
+    identity = guard.leaf_identity
+    if (
+        identity is None
+        or not _same_identity(identity, before)
+        or not _same_identity(identity, after)
+        or stat_generation(after) != generation
+        or before.st_size != len(data)
+        or started - max(before.st_mtime_ns, before.st_ctime_ns) <= GENERATION_RACY_WINDOW_NS
+    ):
+        return data, guard, None
+    bound = PathGuard(target, guard.ancestors, guard.missing_parents, identity, "generation", None)
+    object.__setattr__(bound, "expected_generation", generation)
+    return data, guard, bound
 
 
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:

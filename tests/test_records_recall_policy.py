@@ -167,3 +167,30 @@ def test_a_collection_manifest_is_parsed_once_per_content(
     manifest.write_text(_manifest().replace("semantic_profile: records", "semantic_profile: notes"), encoding="utf-8")
     assert not recall_policy.is_recall_candidate(tmp_path, manifest)
     assert parses == ["parse", "parse"]
+
+
+def test_a_pass_refuses_a_deeper_folder_reached_through_an_ancestor_swapped_after_its_proof(
+    tmp_path: Path,
+) -> None:
+    # Catches a pass that reuses one folder's ancestor proof for a deeper folder and admits pages from outside the vault.
+    vault = tmp_path / "vault"
+    topic = vault / "Knowledge Base" / "Notes" / "Topic"
+    topic.mkdir(parents=True)
+    first = topic / "first.md"
+    first.write_text("ordinary page", encoding="utf-8")
+    outside = tmp_path / "outside"
+    (outside / "Deeper").mkdir(parents=True)
+    (outside / "Deeper" / "page.md").write_text("not a vault page", encoding="utf-8")
+
+    def walked():
+        yield first
+        topic.rename(tmp_path / "moved-away")
+        try:
+            topic.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks/reparse points are unavailable")
+        yield topic / "Deeper" / "page.md"
+
+    assert recall_policy.admitted_relative_paths(vault, walked()) == frozenset(
+        {"Knowledge Base/Notes/Topic/first.md"}
+    )
