@@ -13,6 +13,10 @@
 - [x] 2.4 Replace the capture visibility invariant with "a capture page's membership equals its path's membership" in `require_write` and `verify_capture_namespaces`.
 - [x] 2.5 Wire the move source and destination (`move_file.py`) and the delete source (`delete_file.py`) through the gate; confirm the batch path and every existing `require_create` caller reach it.
 
+- [ ] 2.6 Skip a restricted writer's side effects outside its write ceiling (activity log and index entries, `ingested_into` back-references, link rewrites); replace the log and index ride-along and the visible-linker move refusal; warn when a back-reference is skipped.
+- [ ] 2.7 Write curation runs and episode journals under `_Governance/curation/` for a restricted writer; keep policy documents and the activation manifest refused.
+- [ ] 2.8 Let the vocabulary authority decide a restricted caller's vocabulary mutation before the write gate, and admit a granted change to the registry storage it names.
+
 ## 3. Source and recap destination
 
 - [x] 3.1 Place a restricted writer's Source capture under its inbox in `add.admit_source_destination`; refuse when it has no inbox.
@@ -26,5 +30,6 @@
 - [x] 4.4 Add the episode case: an unfenced recap is never served to a fenced connector; a fenced connector's recap lands in its inbox and only it and the owner receive it.
 - [x] 4.5 Add one configuration refusal case: an exclusivity breach and a residual scope missing from the default denied set.
 - [x] 4.6 Document the residual scope, inbox scopes and `writable_scope_ids` in the scaffold skill, in generic wording.
+- [ ] 4.9 Prove 2.6 to 2.8: a fenced client cites a readable Source it may not write; inbox creation leaves the log and top index unchanged; a fenced episode prepares, records and resumes; a session's vocabulary change is refused with a request id, then admitted after the owner's grant.
 - [ ] 4.7 Run the scoped governance suites, the governance overhead gate, `openspec validate --all --strict`, the privacy gate and the full suite.
 - [ ] 4.8 Re-run the 2026-11-01 audit rig with a residual scope and writable scopes; record that derived notes, owner recaps and write probes no longer reach another context.

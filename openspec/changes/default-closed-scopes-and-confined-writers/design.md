@@ -34,6 +34,12 @@ Governance decides each page from the scopes that select it. A page that no scop
 
 **D9. Caches stay page-local.** Completion depends only on the selected scopes, the registry binding, the policy fingerprint and whether the path is a directory. Page-local admission verdicts stay valid, and the write gate adds no cache.
 
+**D10. Side effects outside the ceiling are skipped.** A door's own effects on other pages (activity log and index entries, a cited Source's `ingested_into` back-reference, link rewrites in linking pages) are written for a restricted writer only inside its write ceiling, and skipped elsewhere. Riding them along was rejected: it writes outside the confinement, puts an inbox title into a page with wider readership, and makes a shared Source change when a fenced client cites it. Refusing them was rejected: a fenced client could not cite a Source it may read, which is the purpose of a combined vault. Read egress already strips provenance entries per reader, so a skip loses only owner bookkeeping: a fenced citation does not count toward the owner's compile coverage, and the owner's audit reports a link left dangling.
+
+**D11. Workflow state under the governance tree is written.** Curation runs and episode journals live under `_Governance/curation/`. A door writes them for a restricted writer, because no audience is served the governance tree (`policy.is_governance_path`), the run store is create-only, and runs are keyed to their audience. Without them a fenced client's episode `prepare` and `resume` fail and `record` leaves a recap without its journal. Policy documents and the activation manifest stay refused.
+
+**D12. A vocabulary grant is write authority for its registry change.** The vocabulary authority already needs an owner decision for each change. For a vocabulary mutation it decides before the write gate: an ungranted change receives its refusal with a request id, and a granted change is admitted to the registry storage it names. No other write gains authority from it. Making non-owner sessions unable to change vocabulary under a governed policy was rejected, because it would silently remove a shipped owner-approved workflow.
+
 ## Risks / Trade-offs
 
 - [Fenced connectors lose write-down into open pages and unscoped inbox creation on upgrade] → Deliberate; the scaffold skill documents inbox scopes and `writable_scope_ids`.
