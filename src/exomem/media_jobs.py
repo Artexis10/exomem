@@ -86,8 +86,14 @@ _COMPUTE_RUNTIME_ACTION = (
     "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
 )
 _RESULT_SCHEMA_VERSION = 1
-_MAX_RESULT_PAYLOAD_BYTES = 768 * 1024
-_MAX_RESULT_TEXT_BYTES = 752 * 1024
+#: The most extracted text one result carries; the worker keeps the start of a longer text with
+#: a truncation line. The parent splits a result into pages (`extraction_parts`). No upload limit
+#: bounds this: a compressed document or an adopted original can expand to more text than its
+#: size. It is below what one result row can hold without strain.
+MAX_EXTRACTED_TEXT_BYTES = 128 * 1024 * 1024
+#: JSON escaping can double the text, and the rest of the payload (speakers, ASR facts) is small.
+_MAX_RESULT_PAYLOAD_BYTES = 2 * MAX_EXTRACTED_TEXT_BYTES + 256 * 1024
+_MAX_RESULT_TEXT_BYTES = MAX_EXTRACTED_TEXT_BYTES
 _MAX_RESULT_ERROR_BYTES = 4096
 _RESULT_KINDS = frozenset({"extraction", "failure", "pending"})
 # Typed blocked reasons (the `blocked_reason` column), a closed set this module

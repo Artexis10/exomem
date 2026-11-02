@@ -100,6 +100,8 @@ def op_viewer_map(
         truncation. Graph keys identify the current snapshot; memory_ref carries
         a persistent identity when known. Path keys do not promise rename stability.
     """
+    from . import extraction_parts
+
     started = time.monotonic()
     seconds = _limit("EXOMEM_VIEWER_MAP_BUDGET_SECONDS", _SECONDS)
     budget = request_budget.RequestBudget(seconds=seconds, entry=started)
@@ -192,6 +194,9 @@ def op_viewer_map(
                 if expired("inspection_pages"):
                     break
                 if not view.allowed(str(path)):
+                    continue
+                if extraction_parts.source_page_for(Path(str(path))) is not None:
+                    # A hidden part is the text of its Source, not a page of the map.
                     continue
                 # Only an extra admitted page can exhaust semantic coverage.
                 if inspected_pages == page_limit:

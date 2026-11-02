@@ -201,7 +201,8 @@ def test_a_prior_extraction_page_keeps_the_withheld_words_and_stays_out_of_searc
     )
 
     prior = prior_extraction.render(
-        sidecar, artifact_name="label.png", sidecar_link="Evidence/label.png", ordinal=1, date_iso="2026-11-01"
+        sidecar, artifact_name="label.png", sidecar_link="Evidence/label.png", ordinal=1, date_iso="2026-11-01",
+        text=preserve.extracted_text(sidecar),
     )
 
     assert preserve.extracted_text(prior) == "steady"

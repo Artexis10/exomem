@@ -790,6 +790,8 @@ _HIT_FIELDS: frozenset[str] = frozenset(
         "clip_match_at",
         "scene_frame",
         "scene_match_at",
+        "matched_part",
+        "passage",
         "transcript_match_at",
         "outside_kb",
         "status",

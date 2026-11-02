@@ -229,12 +229,12 @@ def collapse_frame_children(
     metadata_paths: AbstractSet[str] | None = None,
     frame_sources: dict[str, str] | None = None,
 ) -> list[str]:
-    """Remap scene-frame sidecar candidates onto their parent video sidecar."""
+    """Remap scene-frame candidates onto their parent video sidecar, and part pages onto their Source."""
     if not ranking:
         return ranking
     out: list[str] = []
     seen: set[str] = set()
-    from . import recall_policy
+    from . import extraction_parts, recall_policy
 
     def admitted(rel: str) -> bool:
         return (
@@ -253,9 +253,10 @@ def collapse_frame_children(
             if metadata_paths is None and parent_hints is not None and parent_hints.get(rel) is None and rel in parent_hints
             else page_of(rel)
         )
-        parent = page.parent_media if page is not None else None
-        if parent:
-            parent_sidecar = parent + ".md"
+        parent_sidecar = page.emitted_parent if page is not None else None
+        if page is not None and page.part_of is not None and not extraction_parts.listed(vault_root / rel):
+            continue  # a part left over from a longer extraction is no text of its Source
+        if parent_sidecar:
             if (
                 admitted(parent_sidecar)
                 and (
@@ -273,6 +274,10 @@ def collapse_frame_children(
                         v = m.pop(rel)
                         m.setdefault(parent_sidecar, v)
                 rel = parent_sidecar
+            elif page.part_of is not None:
+                # A part is its Source's text, never a memory of its own: with no
+                # admitted Source, no part is reported.
+                continue
         if rel in seen:
             continue
         seen.add(rel)

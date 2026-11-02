@@ -152,7 +152,9 @@ def _admit_publication(vault_root: Path, rel: str, content: bytes | None) -> Non
         raise MoveFileError("WRITE_REFUSED", "target is unavailable") from None
 
 
-def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool = False) -> None:
+def _held_rename(
+    vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool = False, kind: str = "file"
+) -> None:
     try:
         # `old_rel` is always a source this call's caller has already resolved
         # to an existing on-disk spelling (including a macOS-origin NFD name
@@ -164,7 +166,7 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool
             vault_root,
             old_rel,
             new_rel,
-            source_kind="file",
+            source_kind=kind,
             physical=True,
             rollback=rollback,
         )
@@ -271,6 +273,26 @@ def _repoint_artifact(old_binary: str, new_binary: str):
             return text
         try:
             return splice_markdown_frontmatter(text, changes)
+        except FrontmatterSpliceError as error:
+            raise MoveFileError(error.code, error.reason) from error
+
+    return transform
+
+
+def _repoint_parts(new_page: str):
+    """A content transform that points a moved page's `next_part` at its moved folder of parts."""
+
+    def transform(text: str) -> str:
+        from . import extraction_parts
+        from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+        frontmatter, _body, block = parse_frontmatter(text, strict=True)
+        page = Path(new_page)
+        moved = extraction_parts.part_path(page, 2).relative_to(page.parent).as_posix()
+        if block is None or frontmatter.get("next_part") in (None, moved):
+            return text
+        try:
+            return splice_markdown_frontmatter(text, {"next_part": moved})
         except FrontmatterSpliceError as error:
             raise MoveFileError(error.code, error.reason) from error
 
@@ -568,6 +590,9 @@ def _move_file_local(
     # the semantic write machinery below is written for — and the bytes are
     # renamed alongside it inside the same transaction.
     paired_binary: tuple[str, str] | None = None
+    paired_parts: tuple[str, str] | None = None
+    moved_parts: list[Path] = []
+    reconcile_parts = False
     recovering_from_trash = trash_metadata.is_trash_path(old_rel) and not trash_metadata.is_trash_path(new_rel)
     # Recovery owns retirement of a Trash reference companion; it is not a page relocation.
     pair = None if recovering_from_trash else _paired_artifact(vault_root, old_rel)
@@ -604,6 +629,25 @@ def _move_file_local(
         content_transform = _compose_transforms(
             content_transform, _repoint_artifact(*paired_binary)
         )
+    if not recovering_from_trash and old_rel.lower().endswith(".md"):
+        # The hidden pages that hold the rest of a long extraction move with their page, paired
+        # with an original or not.
+        from . import extraction_parts
+
+        old_folder = extraction_parts.folder_for(Path(old_rel))
+        if (vault_root / old_folder).is_dir():
+            moved_parts = sorted(
+                old_folder / entry.name
+                for entry in (vault_root / old_folder).iterdir()
+                if extraction_parts.part_number(entry) is not None
+            )
+            paired_parts = (old_folder.as_posix(), extraction_parts.folder_for(Path(new_rel)).as_posix())
+            if (vault_root / paired_parts[1]).exists():
+                raise MoveFileError(
+                    code="DEST_EXISTS",
+                    reason=f"destination already exists: {paired_parts[1]}. This op refuses to overwrite.",
+                )
+            content_transform = _compose_transforms(content_transform, _repoint_parts(new_rel))
 
     try:
         reserved_paths.inspect_generic_path(vault_root, new_rel)
@@ -1056,6 +1100,14 @@ def _move_file_local(
                         except MoveFileError:
                             _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
+                    if paired_parts is not None:
+                        try:
+                            _held_rename(vault_root, *paired_parts, kind="directory")
+                        except MoveFileError:
+                            if paired_binary is not None:
+                                _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
+                            _held_rename(vault_root, new_rel, old_rel, rollback=True)
+                            raise
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     raise
@@ -1086,6 +1138,8 @@ def _move_file_local(
                         new_rel,
                     )
                     try:
+                        if paired_parts is not None:
+                            _held_rename(vault_root, paired_parts[1], paired_parts[0], rollback=True, kind="directory")
                         if paired_binary is not None:
                             _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                         _held_rename(vault_root, new_rel, old_rel, rollback=True)
@@ -1257,6 +1311,14 @@ def _move_file_local(
                 if isinstance(report, index_sync.IndexSyncReport)
                 else index_sync.unverified_upsert_report(vault_root, [new_abs])
             )
+    if moved_parts:
+        new_parts = [vault_root / paired_parts[1] / old_part.name for old_part in moved_parts]
+        try:
+            index_sync.upsert_after_write(vault_root, new_parts)
+            index_sync.delete_after_remove(vault_root, [old_part.as_posix() for old_part in moved_parts])
+        except Exception:  # noqa: BLE001 — move remains authoritative; reconcile repairs the index
+            log.exception("index update failed for the moved parts of %s", new_rel)
+            reconcile_parts = True
     try:
         raw_delete_report = index_sync.delete_after_remove(vault_root, [old_rel])
     except Exception:  # noqa: BLE001 — move remains authoritative
@@ -1271,7 +1333,8 @@ def _move_file_local(
             else index_sync.observed_delete_report([old_rel], degraded=False)
         )
     reconcile_required = bool(
-        watcher_failures
+        reconcile_parts
+        or watcher_failures
         or delete_report.reconcile_required
         or any(report.reconcile_required for report in upsert_reports)
     )

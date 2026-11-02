@@ -317,6 +317,18 @@ def _recover_from_trash_local(
                 f"the way first."
             ),
         )
+    if trash_kind == "file" and trash_rel.lower().endswith(".md"):
+        from . import extraction_parts
+
+        parts_destination = extraction_parts.folder_for(Path(restore_rel))
+        if extraction_parts.folder_for(trash_abs).is_dir() and (vault_root / parts_destination).exists():
+            raise RecoverError(
+                code="DEST_EXISTS",
+                reason=(
+                    f"the part pages of {restore_rel!r} would land on {parts_destination.as_posix()!r}, "
+                    "which already exists. Choose a different restore_path, or move it out of the way first."
+                ),
+            )
 
     initial_restore_state = tuple(
         sorted((path, hashlib.sha256(data).hexdigest()) for path, data in restored)
@@ -724,6 +736,20 @@ def _recover_from_trash_local(
         if restore_abs.is_dir()
         else ([restore_abs] if restore_abs.suffix.lower() == ".md" else [])
     )
+    if trash_kind == "file" and restore_abs.suffix.lower() == ".md":
+        # The part pages of a long extraction went to Trash beside their page and come back with it.
+        from . import extraction_parts
+
+        try:
+            carried = extraction_parts.carry(vault_root, trash_rel, restore_rel)
+        except OSError:
+            log.warning("the part pages of %s stayed in Trash", trash_rel, exc_info=True)
+            warnings.append(
+                "recovered the page; its part pages stayed in "
+                f"{extraction_parts.folder_for(Path(trash_rel)).as_posix()}"
+            )
+        else:
+            restored_markdown += [vault_root / after for _before, after in carried]
     if restored_markdown:
         from . import file_watcher, index_sync
 

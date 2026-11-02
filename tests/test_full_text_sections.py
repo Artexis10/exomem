@@ -1,0 +1,386 @@
+"""A large extracted document stays searchable and readable end to end as one document.
+
+Real preserve, real text extraction through the job runtime, real find and real
+read_memory. Nothing is replaced: the original is plain UTF-8 text, which needs no engine.
+"""
+
+import os
+import random
+
+import pytest
+
+from exomem import (
+    audit,
+    commands,
+    delete_file,
+    extract,
+    extraction_parts,
+    media_processing,
+    media_worker,
+    preserve,
+    reconcile,
+    vault_portability,
+)
+from exomem import find as find_module
+from exomem.vault import parse_frontmatter
+
+PLANTED = "zorblax quillfeather"
+
+
+def _document(size: int) -> str:
+    """Paragraphs of invented words, `size` characters in all, with `PLANTED` in the last 4 KB."""
+    rng = random.Random(7)
+    vocabulary = [f"w{rng.randrange(10**6):06d}" for _ in range(500)]
+    paragraphs: list[str] = []
+    total = 0
+    while total < size:
+        paragraph = " ".join(rng.choice(vocabulary) for _ in range(rng.randrange(40, 120)))
+        paragraphs.append(paragraph)
+        total += len(paragraph) + 2
+    text = "\n\n".join(paragraphs)[:size].rstrip()
+    near_end = len(text) - 2000
+    return text[:near_end] + f" {PLANTED} " + text[near_end:]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state"))
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+
+def _extract(vault, filename: str, text: str):
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="docs", filename=filename, data=text.encode("utf-8")
+    )
+    binary = vault / stub.path
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    worker._drain_parent_results()
+    return stub
+
+
+def test_a_five_mebibyte_document_is_one_findable_document_read_in_windows(vault) -> None:
+    text = _document(5 * 1024 * 1024)
+    stub = _extract(vault, "big-report.txt", text)
+
+    hits = find_module.find(vault, query=PLANTED)
+
+    assert [hit.path for hit in hits] == [stub.sidecar_path]
+    hit = hits[0]
+    assert hit.matched_part is not None and hit.matched_part > 1
+    assert PLANTED in hit.passage["text"]
+
+    found = commands.op_read_memory(vault, path=stub.sidecar_path, offset=hit.passage["offset"])
+    assert PLANTED in found["body"]
+    assert found["window"]["part"] == hit.matched_part
+
+    walked: list[str] = []
+    offset: int | None = 0
+    while offset is not None:
+        window = commands.op_read_memory(vault, path=stub.sidecar_path, offset=offset)
+        assert window["window"]["offset"] == offset
+        assert len(window["body"]) <= 48 * 1024
+        assert window["body_truncated"] and "content_hash" not in window  # a window cannot guard a write
+        walked.append(window["body"])
+        offset = window["window"]["next_offset"]
+    assert "".join(walked) == text
+
+    listing = commands.op_browse_memory(vault, path=os.path.dirname(stub.path), mode="list")
+    assert sorted(entry["name"] for entry in listing["entries"]) == [
+        os.path.basename(stub.path),
+        os.path.basename(stub.sidecar_path),
+    ]
+
+
+def _small_parted_source(vault, monkeypatch: pytest.MonkeyPatch, filename: str = "note.txt"):
+    """A Source whose text needs several parts at a 4 KB page, written the way the worker writes it."""
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
+    stub = preserve.preserve_bytes(
+        vault, scope="Test", category="docs", filename=filename, data=b"original bytes"
+    )
+    text = "\n\n".join(
+        f"paragraph {number} " + "alpha beta gamma " * 20 + (PLANTED if number == 55 else "")
+        for number in range(60)
+    ).strip()
+    preserve.update_sidecar_extraction(vault, vault / stub.sidecar_path, text=text, engine="text")
+    return stub, text
+
+
+def test_reading_a_part_page_returns_its_source_as_one_document(vault, monkeypatch) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    part = extraction_parts.part_path(page, 3).relative_to(vault).as_posix()
+
+    from_part = commands.op_read_memory(vault, path=part, offset=0)
+    from_source = commands.op_read_memory(vault, path=stub.sidecar_path, offset=0)
+
+    assert from_part["path"] == stub.sidecar_path
+    assert from_part["frontmatter"]["exomem_id"] == from_source["frontmatter"]["exomem_id"]
+    assert from_part["body"] == from_source["body"]
+
+
+@pytest.mark.parametrize("past_end", [True, False], ids=["past-the-end", "not-a-number"])
+def test_an_offset_outside_the_text_is_refused(vault, monkeypatch, past_end) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+
+    with pytest.raises(ValueError, match="INVALID_OFFSET"):
+        commands.op_read_memory(vault, path=stub.sidecar_path, offset=len(text) if past_end else True)
+
+
+def test_a_walk_after_an_edit_reads_the_text_as_it_is_now(vault, monkeypatch) -> None:
+    page_rel, _text = _adopted_parted_source(vault, monkeypatch)
+    page = vault / page_rel
+    commands.op_edit(
+        vault, page_rel, "shorten the first paragraph",
+        old_string="paragraph 0 " + "alpha beta gamma " * 20, new_string="paragraph 0 ",
+    )
+    walked: list[str] = []
+    offset: int | None = 0
+    while offset is not None and len(walked) < 100:
+        read = commands.op_read_memory(vault, path=page_rel, offset=offset)
+        assert read["window"]["next_offset"] is None or read["window"]["next_offset"] > offset
+        walked.append(read["body"])
+        offset = read["window"]["next_offset"]
+
+    assert "".join(walked) == extraction_parts.whole_text(vault, page, page.read_text(encoding="utf-8"))
+
+
+def test_a_whitespace_run_longer_than_a_page_splits_into_pages_at_least_half_full(monkeypatch) -> None:
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
+    text = "a" * 3000 + " " * 20_000 + "\n\n\n" + "b" * 9000
+
+    pieces = extraction_parts.split(text)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.encode("utf-8")) <= 4000 for piece in pieces)
+    assert all(len(piece) >= 2000 for piece in pieces[1:-1])
+
+
+def test_a_shorter_extraction_leaves_no_stale_part(vault, monkeypatch) -> None:
+    stub, _text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    assert extraction_parts.folder_for(page).is_dir()
+
+    preserve.update_sidecar_extraction(vault, page, text="a short replacement", engine="text")
+
+    assert not extraction_parts.folder_for(page).exists()
+    assert "extraction_parts" not in page.read_text(encoding="utf-8")
+    assert find_module.find(vault, query=PLANTED) == []
+
+
+def test_moving_a_source_moves_its_parts_with_it(vault, monkeypatch) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+    old_page = vault / stub.sidecar_path
+
+    commands.op_move_file(vault, old_path=stub.path, new_path=stub.path.replace("docs", "moved"))
+
+    new_page = vault / stub.sidecar_path.replace("docs", "moved")
+    assert not extraction_parts.folder_for(old_page).exists()
+    assert extraction_parts.whole_text(vault, new_page, new_page.read_text(encoding="utf-8")) == text
+    hits = find_module.find(vault, query=PLANTED)
+    assert [hit.path for hit in hits] == [new_page.relative_to(vault).as_posix()]
+
+
+def _adopted_parted_source(vault, monkeypatch: pytest.MonkeyPatch, beside_planted: str = "") -> tuple[str, str]:
+    """A text file dropped into a project folder and extracted by the worker into several parts.
+
+    Outside Sources/ and Evidence/, so its page may be edited, trashed and moved alone, and its
+    origin carriers are withheld from other audiences.
+    """
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
+    text = "\n\n".join(
+        f"paragraph {number} " + "alpha beta gamma " * 20 + (f"{PLANTED} {beside_planted}" if number == 55 else "")
+        for number in range(60)
+    ).strip()
+    binary = vault / "Knowledge Base" / "Projects" / "demo" / "report.txt"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(text, encoding="utf-8")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    worker._drain_parent_results()
+    page = binary.with_name("report.txt.md")
+    assert extraction_parts.count_of(parse_frontmatter(page.read_text(encoding="utf-8"))[0]) > 2
+    return page.relative_to(vault).as_posix(), text
+
+
+def test_trashing_a_source_takes_its_parts_and_recovery_brings_them_back(vault, monkeypatch) -> None:
+    page_rel, text = _adopted_parted_source(vault, monkeypatch)
+    page = vault / page_rel
+
+    trashed = delete_file.delete_file(vault, path=page_rel, confirm=True)
+
+    assert not extraction_parts.folder_for(page).exists()
+    assert find_module.find(vault, query=PLANTED) == []
+    commands.op_recover_from_trash(vault, trash_path=trashed.trash_path)
+    assert extraction_parts.whole_text(vault, page, page.read_text(encoding="utf-8")) == text
+    assert [hit.path for hit in find_module.find(vault, query=PLANTED)] == [page_rel]
+
+
+def test_moving_a_page_without_its_original_moves_its_parts(vault, monkeypatch) -> None:
+    page_rel, text = _adopted_parted_source(vault, monkeypatch)
+    (vault / page_rel.removesuffix(".md")).unlink()  # the page no longer pairs with an original
+    new_rel = page_rel.replace("report.txt.md", "renamed.md")
+
+    commands.op_move_file(vault, old_path=page_rel, new_path=new_rel)
+
+    new_page = vault / new_rel
+    assert not extraction_parts.folder_for(vault / page_rel).exists()
+    assert extraction_parts.whole_text(vault, new_page, new_page.read_text(encoding="utf-8")) == text
+    assert [hit.path for hit in find_module.find(vault, query=PLANTED)] == [new_rel]
+
+
+def test_a_later_part_withholds_an_origin_carrier_from_its_passage_and_window(vault, monkeypatch) -> None:
+    from test_episode_recovery import _write_source_rule
+
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    page_rel, _text = _adopted_parted_source(vault, monkeypatch, beside_planted="<!-- exomem-origin:v1 SECRETNOTE -->")
+    [hit] = find_module.find(vault, query=PLANTED)
+    _write_source_rule(vault, ceiling=0)  # a configured policy makes client-a a restricted audience
+
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        window = commands.op_read_memory(vault, path=page_rel, offset=hit.passage["offset"])
+
+    assert hit.matched_part > 1 and PLANTED in hit.passage["text"] and PLANTED in window["body"]
+    assert "SECRETNOTE" not in hit.passage["text"] and "SECRETNOTE" not in window["body"]
+
+
+def test_reconcile_removes_a_leftover_part_keeps_a_hand_made_file_and_rebuilds_a_missing_part(
+    vault, monkeypatch
+) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    (vault / stub.path).write_text(text, encoding="utf-8")  # the original now holds the text itself
+    folder = extraction_parts.folder_for(page)
+    count = extraction_parts.count_of(parse_frontmatter(page.read_text(encoding="utf-8"))[0])
+    last = (folder / f"part-{count:02d}.md").read_text(encoding="utf-8")
+    leftover = folder / f"part-{count + 1:02d}.md"  # as a longer, earlier extraction wrote it
+    leftover.write_text(last.replace(f"part: {count}\n", f"part: {count + 1}\n") + "plumquorx\n", encoding="utf-8")
+    hand_made = folder / f"part-{count + 2:02d}.md"
+    hand_made.write_text("my own notes\n", encoding="utf-8")
+    (folder / "part-03.md").unlink()
+    find_module.clear_cache()
+
+    assert find_module.find(vault, query="plumquorx") == []  # a leftover is no text of its Source
+    report = reconcile.reconcile(vault).as_dict()
+
+    assert (report["part_orphans_removed"], report["parts_rebuilt"], report["parts_missing"]) == (1, 1, [])
+    assert report["parts_unowned"] == [hand_made.relative_to(vault).as_posix()]
+    assert not leftover.exists() and hand_made.exists()
+    assert extraction_parts.whole_text(vault, page, page.read_text(encoding="utf-8")) == text
+
+
+def test_reconcile_rebuilds_a_parts_folder_that_is_gone(vault, monkeypatch) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    (vault / stub.path).write_text(text, encoding="utf-8")  # the original now holds the text itself
+    folder = extraction_parts.folder_for(page)
+    for part in folder.iterdir():
+        part.unlink()
+    folder.rmdir()
+
+    report = reconcile.reconcile(vault).as_dict()
+
+    assert (report["parts_rebuilt"], report["parts_missing"]) == (1, [])
+    assert extraction_parts.whole_text(vault, page, page.read_text(encoding="utf-8")) == text
+
+
+def test_reconcile_reports_a_missing_part_of_a_recording_without_running_its_engine(vault, monkeypatch) -> None:
+    stub, _text = _small_parted_source(vault, monkeypatch, filename="call.mp3")
+    page = vault / stub.sidecar_path
+    extraction_parts.part_path(page, 3).unlink()
+    engine_runs: list[object] = []
+    monkeypatch.setattr(extract, "extract_text", lambda path, **_options: engine_runs.append(path))
+
+    report = reconcile.reconcile(vault).as_dict()
+
+    assert engine_runs == []
+    assert report["parts_missing"] == [stub.sidecar_path]
+    with pytest.raises(ValueError, match="PART_MISSING"):
+        offset: int | None = 0
+        while offset is not None:
+            offset = commands.op_read_memory(vault, path=stub.sidecar_path, offset=offset)["window"]["next_offset"]
+
+
+def test_a_part_belongs_to_the_scopes_of_its_source(vault, monkeypatch) -> None:
+    from exomem import find_corpus, memory_refs
+    from exomem.governance import membership, policy
+
+    stub, _text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    identity = parse_frontmatter(page.read_text(encoding="utf-8"))[0]["exomem_id"]
+    scope_file = vault / "Knowledge Base" / "_Governance" / "scopes" / "client.yaml"
+    scope_file.parent.mkdir(parents=True)
+    scope_file.write_text(
+        f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nrefs: ["{memory_refs.memory_ref(identity)}"]\n',
+        encoding="utf-8",
+    )
+    part = extraction_parts.part_path(page, 3)
+
+    scopes = membership.evaluate(find_corpus.parse_page(part, part.stat().st_mtime, vault), policy.load(vault))
+
+    assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+
+
+def test_a_page_at_a_part_path_that_is_not_a_part_is_governed_as_itself(vault) -> None:
+    from exomem import find_corpus
+    from exomem.governance import membership, policy
+
+    kb = vault / "Knowledge Base" / "Notes"
+    kb.mkdir(parents=True, exist_ok=True)
+    (kb / "garden-plan.md").write_text("---\ntype: insight\n---\nBeds and paths.\n", encoding="utf-8")
+    planted = kb / ".garden-plan.parts" / "part-02.md"
+    planted.parent.mkdir()
+    planted.write_text("---\ntype: insight\ntags: [secret]\n---\nSalary review, confidential.\n", encoding="utf-8")
+    scope_file = vault / "Knowledge Base" / "_Governance" / "scopes" / "secret.yaml"
+    scope_file.parent.mkdir(parents=True)
+    scope_file.write_text('governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\ntags: ["secret"]\n', encoding="utf-8")
+    rel = planted.relative_to(vault).as_posix()
+
+    scopes = membership.evaluate(find_corpus.parse_page(planted, planted.stat().st_mtime, vault), policy.load(vault))
+
+    assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAW"})
+    # Never served as its neighbour note: an unlisted dot-folder page is not a readable memory.
+    with pytest.raises(ValueError, match="NOT_FOUND"):
+        commands.op_read_memory(vault, path=rel)
+
+
+def test_a_source_page_with_crlf_line_endings_still_reads_in_windows(vault, monkeypatch) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    page.write_bytes(page.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+    pieces, offset = [], 0
+    while offset is not None:
+        result = commands.op_read_memory(vault, path=stub.sidecar_path, offset=offset)
+        pieces.append(result["body"])
+        offset = result["window"]["next_offset"]
+
+    assert "".join(pieces).replace("\r\n", "\n") == text
+
+
+def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
+    stub, _text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    part = extraction_parts.part_path(page, 2).relative_to(vault).as_posix()
+    other_hidden = part.replace("part-02.md", "cache.bin")
+
+    assert vault_portability.classify_artifact(part).artifact_class.value == "canonical"
+    assert vault_portability.classify_artifact(other_hidden).artifact_class.value == "disposable-runtime"
+
+
+def test_parts_are_not_counted_as_unprocessed_sources(vault, monkeypatch) -> None:
+    stub, _text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    parts = {p.relative_to(vault).as_posix() for p in extraction_parts.folder_for(page).glob("part-*.md")}
+    assert parts
+
+    report = audit.audit(vault, categories=["unprocessed_source"])
+
+    flagged = {finding.path for finding in report.findings}
+    assert stub.sidecar_path in flagged
+    assert not parts & flagged
