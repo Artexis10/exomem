@@ -1021,8 +1021,8 @@ def _check_write_journal(vault_root: Path | None) -> DoctorCheck:
             "write_journal",
             "fail",
             message,
-            "Start the service, or run any journaling command such as `exomem writes list`, so an applier "
-            "starts and commits the queued writes in order. Read the service log if they stay queued.",
+            "Start or restart the service: its applier commits the queued writes in order, even with "
+            "EXOMEM_WRITE_INTENTS off. `exomem writes list` only reads. Read the service log if they stay queued.",
             details=health,
         )
     if stale or health["conflicted"]:

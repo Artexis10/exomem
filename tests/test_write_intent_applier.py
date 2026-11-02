@@ -31,6 +31,7 @@ from exomem import (
     intent_accept,
     intent_applier,
     server_auth,
+    state_paths,
     write_intents,
     writer_lease,
 )
@@ -416,8 +417,10 @@ def test_a_service_stop_during_an_apply_that_waits_for_the_boundary_returns_the_
     assert len(list(vault.rglob("accepted-save-27*.md"))) == 1
 
 
-def test_with_the_journal_off_no_applier_starts(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The flag is the rollback: off must start no thread, from a write or from the service lifecycle."""
+def test_with_the_journal_off_and_no_journal_file_nothing_starts_and_no_file_is_made(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off is the rollback: with no journal there is nothing to drain, so no thread starts and no file appears."""
     monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
     manager = _manager()
     assert intent_applier.ensure_running(manager, vault) is None
@@ -428,6 +431,18 @@ def test_with_the_journal_off_no_applier_starts(vault: Path, monkeypatch: pytest
         assert not _applier_threads()
     finally:
         writer_lease.stop_server_lifecycle()
+    assert not (state_paths.vault_state_dir(vault) / write_intents.JOURNAL_FILENAME).exists()
+
+
+def test_with_the_journal_off_accepted_writes_still_drain(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rolling the switch back must not strand intents already accepted: off accepts nothing new and drains the rest."""
+    manager = _manager()
+    who = owner_principal(surface="mcp")
+    with _no_applier(monkeypatch, EXOMEM_WRITE_INTENTS="on"):
+        intent = _seed(manager, vault, "remember", _draft_kwargs(vault, 29), who, key="stranded")
+    monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
+    assert intent_applier.ensure_running(manager, vault) is not None
+    assert _wait_for(_journal(manager, vault), intent.intent_id, ("committed",)).state == "committed"
 
 
 def test_the_service_lifecycle_starts_and_stops_the_applier_for_its_vault(vault: Path) -> None:

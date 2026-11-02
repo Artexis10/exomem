@@ -37,6 +37,7 @@ from . import (
     mutation_journal,
     mutation_lock,
     request_budget,
+    state_paths,
     write_intents,
 )
 from .cli_ops import error_dict
@@ -579,15 +580,21 @@ def _forget(applier: Applier, *, only_if_idle: bool = False) -> bool:
 
 
 def ensure_running(manager: Any, vault_root: Path | str, *, kind: str = KIND_CLI) -> Applier | None:
-    """Start this process's applier for a vault unless one runs, and wake it. Nothing starts with the journal off.
+    """Start this process's applier for a vault unless one runs, and wake it.
+
+    With the journal off nothing new is accepted, but accepted writes still drain: the applier starts for an
+    existing journal that holds active intents, and for no other. It creates no file and no thread otherwise.
 
     A CLI applier does not start while a service holds the preference, so a service-less process
     never takes work the service would run with its own environment and code version.
     """
-    if intent_accept.mode() == "off":
+    off = intent_accept.mode() == "off"
+    if off and not (state_paths.vault_state_dir(Path(vault_root)) / write_intents.JOURNAL_FILENAME).exists():
         return None
     try:
         journal = manager._intent_journal(vault_root)
+        if off and (journal is None or not journal.has_active()):
+            return None
     except write_intents.JournalRefusal:
         return None
     if journal is None:
