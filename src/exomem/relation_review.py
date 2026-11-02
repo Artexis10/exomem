@@ -3322,7 +3322,13 @@ def _attempt(
         )
         expected_artifact = expected_kind in _KINDS
         receipt_expected_kind = expected_kind
-        if commit_disposition == "reviewed_none":
+        if (
+            commit_disposition == "reviewed_none"
+            and artifact is not None
+            and artifact.kind == "reviewed_none"
+        ):
+            # Re-sent review fields match only a stored review. A page that needed
+            # none dropped them and stored another kind, so its own kind decides.
             receipt_expected_kind = "reviewed_none"
         elif (
             expected_kind not in {"bootstrap", "qualifying"}

@@ -280,3 +280,50 @@ def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> 
     assert rule in loop
     assert rule in skill
     assert "Working on Exomem does not make an unrelated conversation diagnostic." in skill
+
+
+def _retry_outcome(call) -> str:
+    """The refusal code of a repeated commit, or "committed" when it ran again."""
+    try:
+        call()
+    except Exception as error:  # noqa: BLE001 - the test reports whatever the retry raised
+        return str(error).split(":", 1)[0]
+    return "committed"
+
+
+def test_retrying_a_committed_page_with_dropped_review_fields_reports_already_committed(
+    vault: Path,
+) -> None:
+    arguments = _connected_page(_seed_peer(vault))
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+    commit = {
+        **_commit_arguments(arguments, validation),
+        "relation_disposition": "reviewed_none",
+        "relation_review_reason": REASON,
+    }
+    commands.op_remember(vault, **commit)
+
+    assert _retry_outcome(lambda: commands.op_remember(vault, **commit)) == "DRAFT_ALREADY_COMMITTED"
+    without_fields = {k: v for k, v in commit.items() if not k.startswith("relation_")}
+    assert (
+        _retry_outcome(lambda: commands.op_remember(vault, **without_fields))
+        == "DRAFT_ALREADY_COMMITTED"
+    )
+
+
+def test_retrying_a_governed_commit_with_dropped_review_fields_reports_already_committed(
+    vault: Path,
+) -> None:
+    arguments = _connected_page(_seed_peer(vault))
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+    commit = {
+        **_commit_arguments(arguments, validation),
+        "relation_disposition": "reviewed_none",
+        "relation_review_reason": REASON,
+    }
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "remember")
+    writer_lease.invoke_command(command, vault, **commit)
+
+    outcome = _retry_outcome(lambda: writer_lease.invoke_command(command, vault, **commit))
+
+    assert outcome == "DRAFT_ALREADY_COMMITTED"
