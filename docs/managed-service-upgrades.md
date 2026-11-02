@@ -543,9 +543,11 @@ A promoted worker runs its own warm-up, and subtracts from it whatever its
 standby already finished in the same process and promotion either re-verified or
 cannot invalidate. `carried_from_standby` on the `cutover` block and on the
 promotion record names what was subtracted, and the worker's `warm complete` log
-line repeats it. The graph handoff is carried only when promotion re-proved the
-snapshot as `current`; an `advanced`, `unproven` or `rebuild-after-promotion`
-verdict leaves it out and the adoption runs again in full. What remains after a
+line repeats it. The graph handoff is carried only when the promotion verdict is
+`current`: the snapshot the standby proved is still on disk, or promotion
+re-proved the one the old worker published after that proof. An `advanced`,
+`unproven` or `rebuild-after-promotion` verdict leaves it out, and the adoption
+runs again in full while the writers' gate refuses writes. What remains after a
 carried promotion is the retrieval catalog check and any model the standby's
 preload policy did not load. When promotion adopted a catalog the standby built
 detached, `carried_from_standby` names `catalogue_handoff` and not `lexical`: the
@@ -645,17 +647,27 @@ precisely the one worth reading closely, so neither value overwrites the other.
 
 `migration.state` is `ran` with the reason (`descriptors_changed`, or the
 manifest state that was not complete) when it runs. `promotion.snapshot` is
-`current` when the checkpoint the standby proved is still the one on disk,
-`advanced` when it moved, and `rebuild-after-promotion` when the re-proof failed
-— in that last case promotion still proceeds and the coalesced rebuild path owns
-the repair.
+`current` when the checkpoint this process adopted is the one on disk,
+`advanced` when it moved and promotion could not re-prove it, and
+`rebuild-after-promotion` when the migrated re-proof failed — in that last case
+promotion still proceeds and the coalesced rebuild path owns the repair.
 
 `promotion.revalidated` says promotion re-checked the snapshot at all;
-`promotion.reproved` says it re-ran the whole source proof, which happens only
-when the migrator ran. Without a migration, promotion compares the checkpoint
-pair instead — a real re-validation against the one writer the sequence has not
-already excluded, and deliberately cheaper, because a full source proof would
-add seconds to the one window this whole sequence exists to shorten.
+`promotion.reproved` says it re-ran the source proof. With a migration it re-runs
+the whole proof, because the migrator may have rewritten what the standby proved.
+Without one, promotion compares the checkpoint pair — a real re-validation
+against the one writer the sequence has not already excluded. A whole source
+proof would add seconds to the one window this sequence exists to shorten.
+
+When the pair moved, the old worker published after the standby's proof, which
+is the usual case under live writes. Promotion then re-proves the snapshot on
+disk from the page reads of the standby's proof. It reads only the pages that
+moved since. Each of its one or two rounds costs a stat of each page and two
+walks of the vault, not a read of every page. An adoption records `current`
+with `reproved: true`. The re-proof has a deadline of 4 s, 40% of the
+supervisor's 10 s promotion request. A decline
+records `advanced` with the reason in `promotion.reproof_declined`, for example
+`proof_deadline_passed`, and the promoted worker runs the handoff in full.
 
 ### A collection store schema change
 

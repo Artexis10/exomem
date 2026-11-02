@@ -6,6 +6,7 @@ The standby sequence shipped in 0.85.1 admits writes at promotion and serves the
 
 - Carry the watcher's start-up graph validation across promotion: when the graph handoff was carried on a current verdict, the promoted worker admits the graph on the durable checkpoint alone and does not repeat the source-bytes proof.
 - Treat an unacknowledged checkpoint under a held boundary as contention, not incoherence: start-up validation waits for the in-flight governed write's own acknowledgement instead of a fixed budget, and never suspends reads or rebuilds on that evidence alone.
+- Re-prove a snapshot that the serving worker published after the standby's proof inside the promotion request, from the page reads the standby's proof ended on, so the graph handoff is still carried and writes are admitted at promotion. On 2026-11-02 a rehearsal promoted as `advanced` after such a publication, and the promoted worker refused writes as warming for the 100-second graph handoff.
 - Let the incremental drain retire a path-scoped external mark for exactly the paths it re-derives, inside its own boundary hold, so convergence after a restart happens at the drain's cadence.
 
 ## Capabilities
@@ -16,9 +17,9 @@ None.
 
 ### Modified Capabilities
 
-- `managed-service-upgrades`: start-up validation counts as carried; contention during validation is not incoherence.
+- `managed-service-upgrades`: start-up validation counts as carried; contention during validation is not incoherence; promotion re-proves a moved snapshot from the standby's reads.
 - `instant-start`: the drain retires path-scoped marks it re-derives.
 
 ## Impact
 
-`file_watcher.py` (`finish_startup_recovery`, `_validate_existing_graph_on_seed`, `_await_admissible_graph`), `warmup.py` and `service_standby.py` (the carried set and its completion record), `graph_drain.py`, `index_sync.py` and `freshness.py` (mark retirement inside the drain), `tests/test_standby_handoff_writes.py`, `tests/test_graph_deferred_queue.py`, the product E2E restart step, `docs/managed-service-upgrades.md`. No change to the transport, the supervisor protocol, or write scope.
+`epistemic_graph.py` (the seeded, deadline-bound cold proof), `service_manager.py` (the promotion request bound), `file_watcher.py` (`finish_startup_recovery`, `_validate_existing_graph_on_seed`, `_await_admissible_graph`), `warmup.py` and `service_standby.py` (the carried set and its completion record), `graph_drain.py`, `index_sync.py` and `freshness.py` (mark retirement inside the drain), `tests/test_standby_handoff_writes.py`, `tests/test_graph_deferred_queue.py`, the product E2E restart step, `docs/managed-service-upgrades.md`. No change to the transport, the supervisor protocol, or write scope.

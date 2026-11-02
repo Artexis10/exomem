@@ -1948,9 +1948,13 @@ class _ProofReads:
     proof of a later snapshot may start from these pages and re-read only the
     ones whose fold guard moved since. Admission and titles depend on the recall
     policy, so the reads hold only under the identity they were made under.
+    The memberships are the ones that proof's last recheck walked, which its
+    pages cover exactly.
     """
 
     policy_identity: tuple[str, str]
+    resolver_membership: frozenset[str]
+    indexed_membership: frozenset[str]
     pages: Mapping[str, _ProofPage]
 
 
@@ -3368,12 +3372,14 @@ class EpistemicGraphIndex:
         ends the proof too. `seal_out` carries the content guards, so a caller's
         later strict seal still compares bytes.
 
-        `prior_reads` starts a folding proof from the pages an earlier proof
-        ended on, under the same policy identity, instead of an empty read set.
-        Nothing about the invariant changes: a seeded page is rechecked against
-        its fold guard like a page read in this proof, and one that moved is
-        read again, so a proof of a snapshot published after the earlier one
-        re-reads only what moved in between. `reads_out` receives the pages a
+        `prior_reads` starts a folding proof from the pages and memberships an
+        earlier proof ended on, under the same policy identity, instead of a
+        first membership walk and an empty read set. Nothing about the
+        invariant changes: a seeded page is rechecked against its fold guard
+        like a page read in this proof, the recheck walks both memberships
+        again, and a page that moved or appeared is read, so a proof of a
+        snapshot published after the earlier one re-reads only what moved in
+        between. `reads_out` receives the pages a
         True answer ended on, for the next proof to start from. `deadline`, a
         `time.monotonic()` value checked per page and per walked path, declines
         `proof_deadline_passed` once passed.
@@ -3413,8 +3419,23 @@ class EpistemicGraphIndex:
 
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
-            resolver_membership = self._recall_membership(interrupt=interrupt)
-            indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
+            seed = (
+                prior_reads
+                if fold and prior_reads is not None
+                and prior_reads.policy_identity == policy_identity
+                else None
+            )
+            resolver_membership: frozenset[str] | None
+            indexed_membership: frozenset[str] | None
+            if seed is not None:
+                # The earlier proof converged on these memberships with every
+                # page read. The recheck below walks both memberships before
+                # any page is accepted, so a walk here would only repeat it.
+                resolver_membership = seed.resolver_membership
+                indexed_membership = seed.indexed_membership
+            else:
+                resolver_membership = self._recall_membership(interrupt=interrupt)
+                indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
             if resolver_membership is None or indexed_membership is None:
                 return declined("recall_membership_unreadable")
             stored_hashes = {
@@ -3424,10 +3445,8 @@ class EpistemicGraphIndex:
                 ).fetchall()
             }
             carry = self._read_topology_carry(conn)
-            pages: dict[str, _ProofPage] = {}
             admitted = resolver_membership | indexed_membership
-            if fold and prior_reads is not None and prior_reads.policy_identity == policy_identity:
-                pages = {rel: page for rel, page in prior_reads.pages.items() if rel in admitted}
+            pages: dict[str, _ProofPage] = dict(seed.pages) if seed is not None else {}
             to_read = sorted(admitted - pages.keys())
             rounds = 0
             while True:
@@ -3571,7 +3590,11 @@ class EpistemicGraphIndex:
             if seal_out is not None:
                 seal_out.append(seal)
             if reads_out is not None:
-                reads_out.append(_ProofReads(policy_identity, dict(pages)))
+                reads_out.append(
+                    _ProofReads(
+                        policy_identity, resolver_membership, indexed_membership, dict(pages)
+                    )
+                )
             return True
         except _ProofDeadlinePassed:
             return declined("proof_deadline_passed")

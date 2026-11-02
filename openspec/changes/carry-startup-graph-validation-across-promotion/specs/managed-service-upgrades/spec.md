@@ -2,7 +2,7 @@
 
 ### Requirement: A promoted standby does not repeat the warm it already ran
 
-A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where promotion re-verified that the proved checkpoint is still current. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged. The watcher's start-up graph validation SHALL count as carried when the graph handoff was carried on a current verdict: the promoted worker SHALL NOT repeat the source-bytes proof its standby completed and promotion re-verified. Where start-up validation does run and finds the durable checkpoint unacknowledged while a governed mutation holds the boundary, it SHALL treat that as contention and wait for that mutation's own acknowledgement rather than a fixed budget, and SHALL NOT suspend reads or schedule a whole-vault rebuild on that evidence alone; only a proof that fails with the boundary free is incoherence.
+A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where the checkpoint the standby holds a proof for is current at promotion. Where the serving worker published again after the standby's proof, promotion SHALL re-prove the new checkpoint from the page reads the standby's proof ended on, re-reading only the pages that moved, under the same invariant as the standby's proof and inside the bound of the promotion request; a re-proof that adopts makes the checkpoint current, and one that declines or runs out of time SHALL leave the graph handoff uncarried. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged. The watcher's start-up graph validation SHALL count as carried when the graph handoff was carried on a current verdict: the promoted worker SHALL NOT repeat the source-bytes proof its standby completed and promotion re-verified. Where start-up validation does run and finds the durable checkpoint unacknowledged while a governed mutation holds the boundary, it SHALL treat that as contention and wait for that mutation's own acknowledgement rather than a fixed budget, and SHALL NOT suspend reads or schedule a whole-vault rebuild on that evidence alone; only a proof that fails with the boundary free is incoherence.
 
 #### Scenario: A governed write arrives immediately after promotion
 - **WHEN** a governed write reaches a worker that was promoted from a standby whose warm completed
@@ -13,8 +13,12 @@ A promoted worker SHALL NOT repeat warm-up work its own standby completed and pr
 - **THEN** it neither adopts the snapshot again nor rebuilds the semantic corpus context, and its completion record names the carried components
 
 #### Scenario: The snapshot moved under the standby
-- **WHEN** promotion finds the checkpoint the standby proved is no longer current
-- **THEN** the graph handoff is not carried forward and the promoted worker's warm runs it in full
+- **WHEN** the serving worker published again after the standby's proof, and promotion re-proves the new checkpoint from the standby's page reads inside its bound
+- **THEN** promotion records the snapshot as current and the re-proof as run, the graph handoff is carried forward, and a governed write arriving immediately after promotion is admitted and served incrementally
+
+#### Scenario: The promotion re-proof does not finish
+- **WHEN** promotion's re-proof of a moved checkpoint declines or runs past its bound
+- **THEN** promotion records the snapshot as advanced with the decline reason, the graph handoff is not carried forward, and the promoted worker's warm runs it in full
 
 #### Scenario: A cold start carries nothing
 - **WHEN** a worker starts without having been a standby
