@@ -1127,7 +1127,6 @@ def test_an_upgrade_heals_this_releases_catalogue_instead_of_rebuilding_the_old_
     assert lexstore.search_bm25(root, "quokkalastsave", k=3, scope="kb")
 
 
-
 def test_a_save_between_the_heal_and_the_proof_is_caught_up_not_rebuilt(
     earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
