@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import bisect
 import contextvars
 import hashlib
 import json
 import logging
+import operator
 import os
 import re
 import stat
@@ -221,6 +223,13 @@ def _mapping_of_tuples(
     values: Mapping[str, Iterable[Any]],
 ) -> Mapping[str, tuple[Any, ...]]:
     return MappingProxyType({key: tuple(values[key]) for key in sorted(values)})
+
+
+def _frozen_buckets(
+    values: Mapping[str, Iterable[Any]],
+) -> Mapping[str, tuple[Any, ...]]:
+    """A read-only copy that keeps the given key order; resolver lookups only call `get`, so keys need no sort."""
+    return MappingProxyType({key: tuple(bucket) for key, bucket in values.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1176,20 +1185,12 @@ class SemanticCorpusContext:
         # The constructor's resolver already holds these; a second build from the entries cost a full pass per commit.
         object.__setattr__(
             self, "resolver_candidates_by_key",
-            _mapping_of_tuples(self.resolver_candidates_by_key),
+            _frozen_buckets(self.resolver_candidates_by_key),
         )
         object.__setattr__(self, "resolver_full_paths", frozenset(self.resolver_full_paths))
         object.__setattr__(self, "resolver_kb_stripped", frozenset(self.resolver_kb_stripped))
-        object.__setattr__(
-            self,
-            "resolver_stems",
-            _mapping_of_tuples(self.resolver_stems),
-        )
-        object.__setattr__(
-            self,
-            "resolver_titles",
-            _mapping_of_tuples(self.resolver_titles),
-        )
+        object.__setattr__(self, "resolver_stems", _frozen_buckets(self.resolver_stems))
+        object.__setattr__(self, "resolver_titles", _frozen_buckets(self.resolver_titles))
         object.__setattr__(
             self,
             "raw_target_dependencies",
@@ -4034,22 +4035,6 @@ def build_stable_identity_census(vault_root: Path) -> StableIdentityCensus:
     return census
 
 
-def _resolver_snapshot(
-    resolver: vault.WikilinkResolver,
-) -> tuple[
-    frozenset[str],
-    frozenset[str],
-    Mapping[str, tuple[str, ...]],
-    Mapping[str, tuple[str, ...]],
-]:
-    return (
-        frozenset(resolver.full_paths),
-        frozenset(resolver.kb_stripped),
-        _mapping_of_tuples({key: tuple(values) for key, values in resolver.stems.items()}),
-        _mapping_of_tuples({key: tuple(values) for key, values in resolver.titles.items()}),
-    )
-
-
 def _context_from_state_map(
     root: Path,
     states: Mapping[str, SemanticPageState],
@@ -4142,6 +4127,26 @@ def _resolver_dependency_keys(root: Path, path: str, title: str) -> set[str]:
     }
 
 
+def _patched_resolver_entries(
+    entries: tuple[tuple[str, str], ...],
+    updated: Mapping[str, str],
+    removed: Iterable[str],
+) -> tuple[tuple[str, str], ...]:
+    """The path-sorted resolver entries with `updated` set and `removed` dropped, without a re-sort."""
+    patched = list(entries)
+    for path in sorted({*updated, *removed}):
+        index = bisect.bisect_left(patched, path, key=operator.itemgetter(0))
+        present = index < len(patched) and patched[index][0] == path
+        if path in updated:
+            if present:
+                patched[index] = (path, updated[path])
+            else:
+                patched.insert(index, (path, updated[path]))
+        elif present:
+            del patched[index]
+    return tuple(patched)
+
+
 def _context_with_page_delta(
     base: SemanticCorpusContext,
     pages: Mapping[str, SemanticPageState],
@@ -4192,14 +4197,19 @@ def _context_with_page_delta(
         path not in old or path not in pages or old[path].title != pages[path].title
         for path in delta
     ):
-        by_path = dict(base.resolver_entries)
-        for path in delta:
-            if path in pages:
-                by_path[path] = pages[path].title
-            else:
-                by_path.pop(path, None)
-        entries = tuple(sorted(by_path.items()))
-        resolver = vault.WikilinkResolver.from_entries(base.vault_root, entries)
+        # Patch the base resolver by the changed pages; a rebuild re-adds every page each commit.
+        updated = {path: pages[path].title for path in delta if path in pages}
+        removed = tuple(path for path in delta if path not in pages)
+        entries = _patched_resolver_entries(base.resolver_entries, updated, removed)
+        resolver = vault.WikilinkResolver.from_maps(
+            base.vault_root,
+            full_paths=base.resolver_full_paths,
+            kb_stripped=base.resolver_kb_stripped,
+            stems=base.resolver_stems,
+            titles=base.resolver_titles,
+            candidates_by_key=base.resolver_candidates_by_key,
+        )
+        resolver.on_entries_changed(updated.items(), removed)
     else:
         entries = base.resolver_entries
         resolver = _WikilinkResolverView(
@@ -4235,30 +4245,19 @@ def _context_with_page_delta(
     affected |= {path for path in stale_authors if path in pages}
     # Fact identities count occurrences per authored id across the corpus, so
     # every holder of an id that one re-derived page carries is re-derived with
-    # it, in sorted order, as a full build would.
-    holders: dict[str, list[str]] = {}
-    for page in pages.values():
-        if page.identity_kind == "exomem_id":
-            holders.setdefault(page.identity, []).append(page.path)
-    seen_ids: set[str] = set()
-    pending = [
+    # it, in sorted order, as a full build would. A holder carries that same id,
+    # so the set of ids to follow is known before the scan.
+    shared_ids = {
         page.identity
         for path in (*delta, *affected)
         for page in (old.get(path), pages.get(path))
         if page is not None and page.identity_kind == "exomem_id"
-    ]
-    while pending:
-        identity = pending.pop()
-        if identity in seen_ids:
-            continue
-        seen_ids.add(identity)
-        for path in holders.get(identity, ()):
-            if path not in affected:
-                affected.add(path)
-                stale_authors.add(path)
-            state = pages[path]
-            if state.identity_kind == "exomem_id":
-                pending.append(state.identity)
+    }
+    if shared_ids:
+        for page in pages.values():
+            if page.identity_kind == "exomem_id" and page.identity in shared_ids:
+                affected.add(page.path)
+                stale_authors.add(page.path)
     if len(affected) > max(_PAGE_DELTA_LIMIT, len(pages) // 2):
         return None
     candidate_facts = _derive_relation_facts(
@@ -4317,7 +4316,6 @@ def _context_from_resolved_state(
             outbound.setdefault(fact.logical_source_path, []).append(fact)
         if fact.logical_target_path in ordered_pages:
             inbound.setdefault(fact.logical_target_path, []).append(fact)
-    full_paths, kb_stripped, stems, titles = _resolver_snapshot(resolver)
     # The census is structural and records raw labels unclassified, so it is the
     # same for every caller and may live in the shared cache.
     census = validated_census
@@ -4331,10 +4329,10 @@ def _context_from_resolved_state(
         vault_root=root,
         pages=MappingProxyType(ordered_pages),
         resolver_entries=entries,
-        resolver_full_paths=full_paths,
-        resolver_kb_stripped=kb_stripped,
-        resolver_stems=stems,
-        resolver_titles=titles,
+        resolver_full_paths=resolver.full_paths,
+        resolver_kb_stripped=resolver.kb_stripped,
+        resolver_stems=resolver.stems,
+        resolver_titles=resolver.titles,
         resolver_candidates_by_key=resolver.candidates_by_key,
         raw_target_dependencies=_mapping_of_tuples(
             {key: tuple(sorted(values)) for key, values in dependencies.items()}

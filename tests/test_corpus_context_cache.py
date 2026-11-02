@@ -345,6 +345,53 @@ def test_incremental_reconcile_matches_full_rebuild(
     assert incremental.as_dict() == rebuilt.as_dict()
 
 
+def _resolver_maps(context) -> dict:
+    """The corpus resolver as plain values; `as_dict` leaves it out."""
+    return {
+        "entries": list(context.resolver_entries),
+        "full_paths": sorted(context.resolver_full_paths),
+        "kb_stripped": sorted(context.resolver_kb_stripped),
+        "stems": dict(context.resolver_stems),
+        "titles": dict(context.resolver_titles),
+        "candidates_by_key": dict(context.resolver_candidates_by_key),
+    }
+
+
+@pytest.mark.parametrize("change", ["added", "removed", "renamed"])
+def test_page_delta_patches_the_resolver_as_a_full_rebuild_would(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    # A wrong patch keeps a removed page or misses an added one, so links resolve to the wrong page.
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    # Each change edits a title, stem or KB-relative key that another page still holds.
+    (notes / "three.md").write_text(_page(title="Two"), encoding="utf-8")
+    (notes / "Sub").mkdir()
+    (notes / "Sub" / "one.md").write_text(_page(title="Nested"), encoding="utf-8")
+    (vault / "Notes" / "Insights").mkdir(parents=True)
+    (vault / "Notes" / "Insights" / "three.md").write_text(_page(title="Root"), encoding="utf-8")
+    _shared_context(vault)
+    if change == "added":
+        (notes / "four.md").write_text(_page(title="Two"), encoding="utf-8")
+    elif change == "removed":
+        (notes / "three.md").unlink()
+    else:
+        (notes / "Sub" / "one.md").rename(notes / "Sub" / "uno.md")
+
+    def refuse_rebuild(*args, **kwargs):
+        raise AssertionError("the page delta must patch the corpus, not rebuild it")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_contract, "_context_from_state_map", refuse_rebuild)
+        incremental = _shared_context(vault)
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert _resolver_maps(incremental) == _resolver_maps(rebuilt)
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
 def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
