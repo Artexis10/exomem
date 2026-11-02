@@ -178,11 +178,11 @@ Rejected: journal every eligible write, with no inline path. It changes the exec
 4. Every dispatch of the intent uses the stored `request_id` as the active mutation request id. The collection store deduplicates on it in tranche 2.
 5. The resend lookup of D2 also returns terminal intents within K's window. A resend after the intent ended gets its terminal or its review state, never a second intent.
 6. `retry-write` mints a new key, `intent:<intent_id>:retry:<n>`, with the old key's window and a new `request_id`. The old key keeps its outcome.
-7. A completed receipt for a journaled K stays until the later of K's own window and the end of the intent's retention. `IdempotencyStore` therefore stores each row's expiry and prunes by it, not by the window of the current caller. This also fixes the prune that the probe showed for implicit keys.
+7. A completed receipt for a journaled K, and the dedupe of a resend, last for K's own window. `IdempotencyStore` stores each row's expiry and prunes by it, not by the window of the current caller. This also fixes the prune that the probe showed for implicit keys. The journal row outlives the window as a content-free row for 24 h, for polls only.
 
 **Order.** The applier applies by `seq`. A later intent for the same target applies after the earlier one, because order is global per vault.
 
-**Retention.** A terminal intent drops its arguments and inputs at once. It keeps content-free fields and the compact terminal for its key's own window after the terminal, for polls and resends. A `rejected` intent keeps its arguments for that window, readable by its own principal. A `conflicted` intent keeps them until a decision.
+**Retention.** A terminal intent drops its arguments and inputs at once. It keeps content-free fields and the compact terminal for 24 h after the terminal, for polls. A resend dedupes only within its key's own window. A `rejected` intent keeps its arguments for that window, readable by its own principal, and drops them when it ends. A `conflicted` intent keeps them until a decision.
 
 **Orphan sweep.** A crash can leave staged inputs without a committed row. At start, and then every hour, the applier deletes each input directory whose intent is missing or terminal.
 

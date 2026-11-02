@@ -540,8 +540,6 @@ def test_retry_write_is_refused_for_a_revoked_login_and_for_an_unknown_outcome_u
         with pytest.raises(ValueError, match="only the vault owner"):
             commands.op_triage_memory(vault, f"exomem://write/{cases['unknown']}", "retry-write")
     with request_scope(owner_principal(surface="mcp")):
-        answer = commands.op_triage_memory(
-            vault, f"exomem://write/{cases['unknown']}", "retry-write"
-        )
-    assert answer["retried_as"]["state"] == "accepted"
-    assert journal.get(cases["unknown"]).state == "discarded"
+        with pytest.raises(ValueError, match="probably landed"):
+            commands.op_triage_memory(vault, f"exomem://write/{cases['unknown']}", "retry-write")
+    assert journal.get(cases["unknown"]).state == "conflicted"

@@ -446,7 +446,7 @@ def test_with_the_journal_off_accepted_writes_still_drain(vault: Path, monkeypat
     assert _wait_for(_journal(manager, vault), intent.intent_id, ("committed",)).state == "committed"
 
 
-def test_a_running_applier_purges_expired_rows_and_sweeps_orphaned_inputs(vault: Path) -> None:
+def test_a_running_applier_runs_the_purge_and_sweeps_orphaned_inputs(vault: Path) -> None:
     """Nothing else calls the purge or the sweep, so without the applier the journal and its inputs only grow."""
     manager = _manager()
     journal = _journal(manager, vault)
@@ -464,10 +464,11 @@ def test_a_running_applier_purges_expired_rows_and_sweeps_orphaned_inputs(vault:
     intent_applier.ensure_running(manager, vault)
 
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline and (journal.get(intent.intent_id) or orphan.exists()):
+    while time.monotonic() < deadline and orphan.exists():
         time.sleep(0.05)
-    assert journal.get(intent.intent_id) is None
     assert not orphan.exists()
+    # Past its window the row is purged only after the 24 h poll hold, so a poll still finds it.
+    assert journal.get(intent.intent_id) is not None
 
 
 def test_the_service_lifecycle_starts_and_stops_the_applier_for_its_vault(vault: Path) -> None:

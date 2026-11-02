@@ -72,16 +72,35 @@ def _reader() -> tuple[str, bool]:
     return audience, audience == OWNER_AUDIENCE
 
 
-def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
-    """Whether this reader's audience and client binding admit every page the intent plans to write.
+def _same_client(intent: write_intents.Intent) -> bool:
+    """Whether the intent was accepted for the reader's own authenticated client binding."""
+    from .governance.principal import effective_principal
 
-    It runs the check a synchronous write runs (`connector_boundary.require_write`), for the reader and not the
-    caller who made the intent, so a restricted client of the owner's audience learns nothing of a private page.
+    binding = effective_principal().client_binding
+    stored = (intent.principal or {}).get("client_binding") if isinstance(intent.principal, dict) else None
+    return (
+        binding is not None
+        and isinstance(stored, dict)
+        and (stored.get("issuer"), stored.get("client_id")) == (binding.issuer, binding.client_id)
+    )
+
+
+def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
+    """Whether this reader may see or decide the intent.
+
+    The audience must match (the owner sees all). A reader with any denied scope sees another client's intent only
+    when the client binding is the same, because an intent with no planned page (a creation) has no path to check.
+    For the planned pages it then runs the check a synchronous write runs (`connector_boundary.require_write`),
+    for the reader and not the caller who made the intent.
     """
     from .governance import connector_boundary
+    from .governance.principal import effective_principal
 
     audience, owner = _reader()
     if not (owner or intent.audience == audience):
+        return False
+    current = connector_boundary.snapshot(vault_root)
+    if current is not None and current.denied_scopes(effective_principal()) and not _same_client(intent):
         return False
     try:
         for path in intent.planned_paths or ():
@@ -114,10 +133,11 @@ def _retry_refusal(
         return "the caller's authorization is gone; send the write again under a live login, or discard this item"
     if cause == intent_outcomes.CAUSE_OUTCOME_UNKNOWN and not owner:
         return "only the vault owner may retry a write whose outcome is unknown; a retry can write twice"
-    if cause == intent_outcomes.CAUSE_OUTCOME_UNKNOWN and intent_accept.planned_hashes(
-        vault_root, intent.planned_paths
-    ) != (intent.target_hashes or {}):
-        return "a planned page changed since the write was accepted, so the write probably landed; read the page before you decide"
+    if cause == intent_outcomes.CAUSE_OUTCOME_UNKNOWN and (
+        not intent.planned_paths  # nothing to compare: whether it landed is unknown, so the same answer
+        or intent_accept.planned_hashes(vault_root, intent.planned_paths) != (intent.target_hashes or {})
+    ):
+        return "a planned page changed since the write was accepted, or none was named to compare, so the write probably landed; read the page before you decide"
     arguments = intent.arguments or {}
     if rebase and cause not in _BASIS_CAUSES:
         return f"rebase applies to a changed basis, not to cause {cause!r}"

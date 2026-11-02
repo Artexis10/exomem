@@ -49,7 +49,11 @@ def for_path(vault_root: Path, path: str) -> list[dict[str, Any]]:
             return []
         journal, audience = found
         rows = journal.open_intents(audience=audience, limit=READ_SCAN_LIMIT)
-        return [_view(row) for row in rows if path in (row.planned_paths or ())]
+        return [
+            _view(row)
+            for row in rows
+            if path in (row.planned_paths or ()) and intent_review._admitted(vault_root, row)
+        ]
     except Exception:  # noqa: BLE001 - disclosure is best effort; the read must not fail on the journal
         log.warning("pending writes of %r were not read", path, exc_info=True)
         return []
@@ -62,13 +66,19 @@ def status(vault_root: Path) -> dict[str, Any] | None:
         if found is None:
             return None
         journal, audience = found
-        counts = journal.count_open(audience=audience)
+        # The counts follow the review rule, so they and the refs cover only what this reader may see.
+        rows = [
+            row
+            for row in journal.open_intents(audience=audience)
+            if intent_review._admitted(vault_root, row)
+        ]
+        counts = {
+            "accepted": sum(row.state in write_intents.ACTIVE_STATES for row in rows),
+            "conflicted": sum(row.state == "conflicted" for row in rows),
+        }
         if not any(counts.values()):
             return None
-        refs = [
-            f"{intent_review.REF_PREFIX}{row.intent_id}"
-            for row in journal.open_intents(audience=audience, limit=STATUS_REFS)
-        ]
+        refs = [f"{intent_review.REF_PREFIX}{row.intent_id}" for row in rows[:STATUS_REFS]]
         return {**counts, "refs": refs}
     except Exception:  # noqa: BLE001 - disclosure is best effort; the read must not fail on the journal
         log.warning("pending write counts were not read", exc_info=True)

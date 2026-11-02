@@ -295,19 +295,23 @@ def test_terminal_rows_are_purged_after_their_retention(vault: Path) -> None:
     assert journal.get(intent.intent_id) is None
 
 
-def test_a_resend_dedupes_and_the_row_is_purged_for_the_keys_own_window_not_a_day(vault: Path) -> None:
-    """One retention rule: a contended write dedupes for its key's 600 s, the same as an inline one, and then leaves."""
+def test_a_resend_dedupes_for_the_keys_window_and_a_poll_still_finds_the_content_free_row_for_a_day(vault: Path) -> None:
+    """A landed write dedupes a resend for its key's 600 s; a poll later must not find nothing and invite a redo."""
     now = [1_000_000.0]
     journal = _journal(vault, clock=lambda: now[0])
     intent, _ = journal.accept(**_ACCEPT, retry_key="implicit:owner:w", window_seconds=600.0)
-    journal.finish(intent.intent_id, "committed", terminal={"ok": True})
+    journal.finish(intent.intent_id, "rejected", terminal={"ok": True})
 
     now[0] += 599
     assert journal.find_by_key("implicit:owner:w") is not None
-    assert journal.purge_expired() == 0
     now[0] += 2
     assert journal.find_by_key("implicit:owner:w") is None
+    assert journal.purge_expired() == 0
+    kept = journal.get(intent.intent_id)
+    assert kept is not None and kept.terminal == {"ok": True} and kept.arguments is None
+    now[0] += write_intents.INTENT_RETENTION_SECONDS
     assert journal.purge_expired() == 1
+    assert journal.get(intent.intent_id) is None
 
 
 def test_a_resend_answer_names_the_intent_and_a_conflicted_one_keeps_its_cause(vault: Path) -> None:

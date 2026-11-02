@@ -10,7 +10,7 @@ from test_connector_boundary import PRIVATE, PUBLIC
 from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
 from test_write_intent_accept import _journal, _manager
 
-from exomem import commands, intent_applier, writer_lease
+from exomem import commands, intent_accept, intent_applier, intent_disclosure, writer_lease
 from exomem.governance.principal import request_scope
 
 
@@ -29,7 +29,7 @@ def _conflicted_on(manager, vault: Path, who, path: str, key: str, cause: str = 
         command="edit_memory",
         arguments={"path": path, "operation": {"expected_hash": "0" * 64}},
         surface="mcp",
-        principal={"audience_id": who.audience_id},
+        principal=intent_accept.principal_snapshot(who),
         digest=key,
         retry_key=key,
         window_seconds=600.0,
@@ -50,7 +50,7 @@ def test_a_limited_client_cannot_see_retry_or_discard_the_full_clients_intent_on
     limited, full = authenticate("limited"), authenticate("full")
     manager = _manager()
     private_id = _conflicted_on(manager, vault, full, PRIVATE, "private-edit")
-    public_id = _conflicted_on(manager, vault, full, PUBLIC, "public-edit")
+    public_id = _conflicted_on(manager, vault, limited, PUBLIC, "public-edit")
     before = hashlib.sha256((vault / PRIVATE).read_bytes()).hexdigest()
     private_ref, public_ref = f"exomem://write/{private_id}", f"exomem://write/{public_id}"
     with request_scope(limited):
@@ -83,11 +83,11 @@ def test_later_intents_list_only_what_the_reader_may_see(
     manager = _manager()
     first = _conflicted_on(manager, vault, limited, PUBLIC, "first")
     # A later write on the same page that the limited client may see, and one that also plans the private page.
-    visible = _conflicted_on(manager, vault, full, PUBLIC, "visible")
+    visible = _conflicted_on(manager, vault, limited, PUBLIC, "visible")
     journal = _journal(manager, vault)
     mixed, _ = journal.accept(
         audience=full.audience_id, command="edit_memory", arguments={"path": PUBLIC}, surface="mcp",
-        principal={"audience_id": full.audience_id}, digest="mixed", retry_key="mixed",
+        principal=intent_accept.principal_snapshot(limited), digest="mixed", retry_key="mixed",
         window_seconds=600.0, validation="complete", planned_paths=[PUBLIC, PRIVATE], target_hashes={},
     )
     with request_scope(limited):
@@ -127,3 +127,51 @@ def test_retrying_an_unknown_outcome_is_refused_once_a_planned_page_changed_sinc
         allowed = commands.op_triage_memory(vault, f"exomem://write/{ids['unchanged']}", "retry-write")
     assert allowed["retried_as"]["state"] == "accepted"
     assert journal.get(ids["changed"]).state == "conflicted"
+
+
+def test_retrying_an_unknown_outcome_with_no_planned_page_is_refused(vault: Path) -> None:
+    """With no page to compare, whether the write landed is unknown, so the owner reads first."""
+    from exomem.governance.principal import owner_principal
+
+    manager = _manager()
+    owner = owner_principal(surface="mcp")
+    journal = _journal(manager, vault)
+    intent, _ = journal.accept(
+        audience=owner.audience_id, command="remember", arguments={"content": "x"}, surface="mcp",
+        principal=intent_accept.principal_snapshot(owner), digest="np", retry_key="np",
+        window_seconds=600.0, validation="complete", planned_paths=[], target_hashes={},
+    )
+    assert journal.begin_apply(intent.intent_id)
+    journal.finish(intent.intent_id, "conflicted", conflict={"cause": "outcome_unknown"})
+    with request_scope(owner):
+        with pytest.raises(ValueError, match="probably landed"):
+            commands.op_triage_memory(vault, f"exomem://write/{intent.intent_id}", "retry-write")
+
+
+def test_a_limited_client_cannot_see_a_full_clients_write_that_plans_no_path(
+    configured_boundary, vault: Path  # noqa: F811
+) -> None:
+    """A creation with no planned page (a remember) is held back by the client binding, not by its paths."""
+    _, authenticate = configured_boundary
+    limited, full = authenticate("limited"), authenticate("full")
+    manager = _manager()
+    journal = _journal(manager, vault)
+    intent, _ = journal.accept(
+        audience=full.audience_id, command="remember", arguments={"content": "protected canary", "project": "private-project"},
+        surface="mcp", principal=intent_accept.principal_snapshot(full), digest="no-path", retry_key="no-path",
+        window_seconds=600.0, validation="complete", planned_paths=[], target_hashes={},
+    )
+    assert journal.begin_apply(intent.intent_id)
+    journal.finish(intent.intent_id, "conflicted", conflict={"cause": "basis_changed"})
+    ref = f"exomem://write/{intent.intent_id}"
+    with request_scope(limited):
+        assert commands.op_review_memory(vault, mode="write-intent")["writes"] == []
+        with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+            commands.op_review_memory(vault, mode="item", ref=ref)
+        with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+            commands.op_triage_memory(vault, ref, "discard-write")
+        assert intent_disclosure.status(vault) is None
+    assert journal.get(intent.intent_id).state == "conflicted"
+    with request_scope(full):
+        assert commands.op_review_memory(vault, mode="item", ref=ref)["state"] == "conflicted"
+        assert intent_disclosure.status(vault)["refs"] == [ref]

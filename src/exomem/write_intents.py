@@ -40,8 +40,8 @@ FORMAT_VERSION = 1
 JOURNAL_FILENAME = ".write-intents.sqlite"
 INPUTS_DIRNAME = "write-intents"
 
-#: A terminal intent keeps its content-free fields, its compact terminal and (if rejected) its arguments
-#: for this long, for polls and resends. It is also the floor for the idempotency receipt of its key.
+#: A terminal intent keeps its content-free row (fields and compact terminal) for this long, for polls.
+#: Resends dedupe only within the key's own window; its arguments go when that window ends.
 INTENT_RETENTION_SECONDS = 24 * 60 * 60.0
 
 #: Orphan staging younger than this may belong to an accept that has not committed its row yet.
@@ -945,15 +945,25 @@ class WriteIntentJournal:
 
     @_unavailable_on_sqlite_error
     def purge_expired(self) -> int:
-        """Delete terminal rows once their key's own window has passed since the terminal. Returns the number removed."""
+        """End each terminal row's hold in two steps. Returns the number of rows deleted.
+
+        Past its key's own window a terminal row drops its arguments (it dedupes no resend any more) but stays
+        as a content-free row, so a poll of a landed write still finds it. After `INTENT_RETENTION_SECONDS` it goes.
+        """
         now = self.clock()
         marks = ", ".join("?" for _ in TERMINAL_STATES)
         conn = self._connect()
         try:
+            conn.execute(
+                "UPDATE intents SET arguments = NULL, leaf_arguments = NULL "
+                f"WHERE state IN ({marks}) AND terminal_at IS NOT NULL AND terminal_at <= ? - window_seconds "
+                "AND (arguments IS NOT NULL OR leaf_arguments IS NOT NULL)",
+                (*TERMINAL_STATES, now),
+            )
             cursor = conn.execute(
                 f"DELETE FROM intents WHERE state IN ({marks}) AND terminal_at IS NOT NULL "
-                "AND terminal_at <= ? - window_seconds",
-                (*TERMINAL_STATES, now),
+                "AND terminal_at <= ? - MAX(window_seconds, ?)",
+                (*TERMINAL_STATES, now, INTENT_RETENTION_SECONDS),
             )
             return cursor.rowcount
         except sqlite3.Error as error:
