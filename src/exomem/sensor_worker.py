@@ -22,8 +22,12 @@ The supervisor is the policy:
 * It spends at most `CPU_SECONDS_PER_HOUR` CPU-seconds (model load included)
   and `JUDGEMENTS_PER_HOUR` judgements per rolling hour. A child that dies
   without reporting its spend is charged its whole allotment.
-* A child that cannot admit its instrument exits with a named refusal. It is
-  not relaunched until the setting or the instrument identity changes.
+* One child serves every question an active instrument answers, on one shared
+  model. A child that cannot admit a question's instrument records a named
+  refusal for that question and serves the others; with none left it exits
+  with the refusal. A refused question is not counted in the queue depth, and
+  it is tried again only when the setting or that question's instrument
+  identity changes. So a refusal never relaunches the child for its own queue.
 
 Every number states what it prevents, and none has an environment knob.
 """
@@ -39,12 +43,12 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import cloud_cell, runtime_resources, sensing, sensing_ledger
+from . import cloud_cell, runtime_resources, sensed_model, sensing, sensing_ledger
 
 log = logging.getLogger(__name__)
 
@@ -126,8 +130,9 @@ class Supervisor:
         self._child: Any = None
         self._allotment: tuple[float, int] = (0.0, 0)
         self._window: deque[_Charge] = deque()
-        self._refusal: tuple[str, str] | None = None
-        self._refusal_key: str | None = None
+        #: Per refused question: its reason, its detail and the refusal key it was
+        #: filed under (`_refusal_key`).
+        self._refusals: dict[str, tuple[str, str, str]] = {}
         #: The instrument key of the running child, taken at launch, so its peak
         #: is filed under the model it loaded.
         self._launch_key: str | None = None
@@ -222,12 +227,34 @@ class Supervisor:
             # It died without a final report: charge everything it was allowed.
             cpu, judgements = self._allotment
             self._charge(cpu, judgements)
-        if child.returncode == EXIT_REFUSED:
-            status = _read_json(_state_file(self.vault_root, STATUS_FILE)) or {}
-            reason = str(status.get("refused") or "unknown")
-            self._refusal = (reason, str(status.get("detail") or ""))
-            self._refusal_key = _refusal_key()
-            log.info("sensor worker refused (%s); not relaunching until it can change", reason)
+        self._note_refusals(pid, whole=child.returncode == EXIT_REFUSED)
+
+    def _note_refusals(self, pid: int | None, *, whole: bool) -> None:
+        """Keep the questions the child's status file says it refused.
+
+        `whole` is a child that served nothing. If it left no readable status, every
+        answered question is refused for a reason that stays `unknown`.
+        """
+        status = _read_json(_state_file(self.vault_root, STATUS_FILE)) or {}
+        refused = status.get("refused") if status.get("pid") == pid else None
+        if not isinstance(refused, dict):
+            refused = {}
+        if whole and not refused:
+            refused = {question: {} for question in sensed_model.answered_questions()}
+        for question_type, why in refused.items():
+            if question_type not in sensing.QUESTIONS or not isinstance(why, dict):
+                continue
+            reason = str(why.get("reason") or "unknown")
+            self._refusals[question_type] = (
+                reason,
+                str(why.get("detail") or ""),
+                _refusal_key(question_type),
+            )
+            log.info(
+                "sensor worker refused %s (%s); not relaunching it until it can change",
+                question_type,
+                reason,
+            )
 
     def terminate(self, reason: str) -> None:
         """Stop the child now: terminate, then kill after the grace period."""
@@ -265,8 +292,17 @@ class Supervisor:
 
     # the step ------------------------------------------------------------
 
-    def step(self, *, gate_run: bool, gate_reason: str, queue_depth: Callable[[], int]) -> str:
+    def step(
+        self,
+        *,
+        gate_run: bool,
+        gate_reason: str,
+        queue_depth: Callable[[Sequence[str]], int],
+    ) -> str:
         """One supervision decision. Returns the action taken, a closed code.
+
+        `queue_depth` counts the queued pairs of the questions it is given: the
+        supervisor gives it every answered question that is not refused.
 
         The codes: `off`, `gate:<reason>`, `cloud_placement`, `running`, `refused`,
         `budget`, `idle`, `memory`, `launch_failed` and `launched`.
@@ -285,17 +321,21 @@ class Supervisor:
             return self._act("cloud_placement")
         if self.alive():
             return self._act("running")
-        if self._refusal is not None:
-            if self._refusal_key == _refusal_key():
-                return self._act("refused")
-            self._refusal = None
-            self._refusal_key = None
+        answered = sensed_model.answered_questions()
+        self._refusals = {
+            question_type: refusal
+            for question_type, refusal in self._refusals.items()
+            if refusal[2] == _refusal_key(question_type)
+        }
+        open_questions = tuple(q for q in answered if q not in self._refusals)
+        if answered and not open_questions:
+            return self._act("refused")
         cpu, judgements = self.used()
         cpu_left = CPU_SECONDS_PER_HOUR - cpu
         judgements_left = JUDGEMENTS_PER_HOUR - judgements
         if cpu_left <= 0 or judgements_left <= 0:
             return self._act("budget")
-        if queue_depth() <= 0:
+        if queue_depth(open_questions) <= 0:
             return self._act("idle")
         # A child that could not fit is killed by the kernel after it loaded the
         # model for nothing. With no peak on record the first child measures it.
@@ -335,7 +375,7 @@ class Supervisor:
             "running": self.alive(),
             "hour_cpu_used": round(cpu, 3),
             "hour_judgements": judgements,
-            "refused": None if self._refusal is None else self._refusal[0],
+            "refused": {question: refusal[0] for question, refusal in self._refusals.items()},
             "peak_rss_bytes": self.peak_rss_bytes(),
             "launches": self.launches,
             "kills": self.kills,
@@ -350,16 +390,20 @@ def _peak_value(value: Any) -> int | None:
 
 
 def _instrument_key() -> str:
-    """The active instruments: what a recorded peak holds for."""
-    from . import sensed_model
-
+    """Every active instrument: what a recorded peak holds for. One child loads one
+    model for all of them, so the peak has one key."""
     return json.dumps(sorted(sensed_model.active_instruments()))
 
 
-def _refusal_key() -> str:
-    """The setting and active instruments: a refused child is tried again only
-    when this changes."""
-    return json.dumps([sensing.setting(), json.loads(_instrument_key())])
+def _refusal_key(question_type: str) -> str:
+    """The setting and the question's active instruments: a refused question is
+    tried again only when this changes."""
+    from . import sensed_model
+
+    question = sensing.question(question_type)
+    return json.dumps(
+        [sensing.setting(), sorted(sensed_model.active_for(sensed_model.active_instruments(), question))]
+    )
 
 
 #: The only variables the child inherits: where state, logs and the model
@@ -442,13 +486,13 @@ def supervisor(vault_root: Path) -> Supervisor:
 
 def supervise(vault_root: Path, *, gate_run: bool, gate_reason: str) -> str:
     """The dreamer loop's call. Never raises."""
-    from . import sensed_model
-
     try:
         return supervisor(vault_root).step(
             gate_run=gate_run,
             gate_reason=gate_reason,
-            queue_depth=lambda: sensed_model.queue_depth(vault_root),
+            queue_depth=lambda questions: sensed_model.queue_depth(
+                vault_root, question_types=questions
+            ),
         )
     except Exception:  # noqa: BLE001 - supervision never breaks the dreamer
         log.warning("sensor worker: supervision failed", exc_info=True)
@@ -493,6 +537,17 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _by_question(given: Any) -> dict[str, Any]:
+    """The instruments `given` (one, or a sequence) by the question their template answers."""
+    items = tuple(given) if isinstance(given, (list, tuple)) else (given,)
+    return {
+        question_type: item
+        for item in items
+        for question_type, question in sensing.QUESTIONS.items()
+        if question.template_version == item.identity.template_version
+    }
+
+
 def run_child(
     vault_root: Path,
     *,
@@ -501,12 +556,17 @@ def run_child(
     judgement_allotment: int,
     idle_seconds: float = IDLE_EXIT_SECONDS,
     instrument: Any = None,
-    admit: Callable[[], Any] | None = None,
+    admit: Callable[[str], Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     cpu_clock: Callable[[], float] = time.process_time,
 ) -> int:
     """Sense queued pairs until idle, out of budget, or orphaned. Returns an exit code.
+
+    One child serves every registered question whose instrument it can admit.
+    `instrument` is a ready instrument, or a sequence of them, for tests; `admit`
+    maps a question type to its admitted instrument. Each question that cannot be
+    admitted is recorded in the status file and left unsensed.
 
     Reads only the projection's queue and the ledger, and appends only to the
     ledger. Never reads or writes the vault.
@@ -530,34 +590,44 @@ def run_child(
             spend["peak_rss_bytes"] = peak
         _write_json(_state_file(vault_root, SPEND_FILE), spend)
 
+    def refuse(refused: dict[str, dict[str, str]]) -> int:
+        _write_json(_state_file(vault_root, STATUS_FILE), {"refused": refused, "pid": pid})
+        report(True)
+        return EXIT_REFUSED
+
     report(False)
+    instruments: dict[str, Any]
+    refused: dict[str, dict[str, str]] = {}
     if instrument is None:
         from . import sensing_nli
 
-        try:
-            instrument = (admit or (lambda: sensing_nli.admit(
-                evidence_path=_state_file(vault_root, ADMISSION_FILE)
-            )))()
-        except sensing_nli.Refused as refused:
-            _write_json(
-                _state_file(vault_root, STATUS_FILE),
-                {"refused": refused.reason, "detail": refused.detail[:500], "pid": pid},
+        def admit_question(question_type: str) -> Any:
+            return sensing_nli.admit(
+                evidence_path=_state_file(vault_root, ADMISSION_FILE), question_type=question_type
             )
-            report(True)
-            return EXIT_REFUSED
-    identity: sensing.InstrumentIdentity = instrument.identity
+
+        instruments = {}
+        for question_type in sensing.QUESTIONS:
+            try:
+                instruments[question_type] = (admit or admit_question)(question_type)
+            except sensing_nli.Refused as why:
+                refused[question_type] = {"reason": why.reason, "detail": why.detail[:500]}
+        if not instruments:
+            return refuse(refused)
+    else:
+        instruments = _by_question(instrument)
     ledger = sensing_ledger.Ledger(vault_root)
     try:
         lconn = ledger.connect()
     except sensing_ledger.LedgerUnavailable as error:
-        _write_json(
-            _state_file(vault_root, STATUS_FILE),
-            {"refused": "ledger-unavailable", "detail": str(error)[:500], "pid": pid},
+        return refuse(
+            {
+                question_type: {"reason": "ledger-unavailable", "detail": str(error)[:500]}
+                for question_type in instruments
+            }
         )
-        report(True)
-        return EXIT_REFUSED
-    _write_json(_state_file(vault_root, STATUS_FILE), {"refused": None, "pid": pid})
-    done: set[str] = set()
+    _write_json(_state_file(vault_root, STATUS_FILE), {"refused": refused, "pid": pid})
+    done: set[tuple[str, str]] = set()
     last_work = clock()
     try:
         while _parent_alive(parent_pid):
@@ -565,7 +635,7 @@ def run_child(
                 report(True)
                 return EXIT_BUDGET
             batch = _next_batch(
-                vault_root, lconn, identity, done, min(BATCH, judgement_allotment - judgements)
+                vault_root, lconn, instruments, done, min(BATCH, judgement_allotment - judgements)
             )
             if not batch:
                 if clock() - last_work >= idle_seconds:
@@ -574,32 +644,36 @@ def run_child(
                 sleep(min(1.0, idle_seconds))
                 continue
             last_work = clock()
-            try:
-                results = instrument.judge([pair.texts for pair in batch])
-            except ValueError:
-                # Non-finite or misshapen output refuses that output: no reading,
-                # and the batch is not retried by this child.
-                log.warning("sensor worker: a batch produced unusable output", exc_info=True)
-                done.update(pair.pair_key for pair in batch)
-                judgements += len(batch)
-                report(False)
-                continue
+            grouped: dict[str, list[Any]] = {}
+            for pair in batch:
+                grouped.setdefault(pair.question_type, []).append(pair)
             readings = []
-            for pair, (ab, ba, reason) in zip(batch, results, strict=True):
-                done.add(pair.pair_key)
-                reading = sensing.make_reading(
-                    sensing.PAIR_RELATION,
-                    identity,
-                    list(pair.inputs),
-                    ab=ab,
-                    ba=ba,
-                    abstain_reason=reason,
-                    sensed_at=_utc_now(),
-                )
-                if reading is not None:
-                    readings.append(reading)
+            for question_type, pairs in grouped.items():
+                judge = instruments[question_type]
+                try:
+                    results = judge.judge([pair.texts for pair in pairs])
+                except ValueError:
+                    # Non-finite or misshapen output refuses that output: no reading,
+                    # and the pairs are not retried by this child.
+                    log.warning("sensor worker: a batch produced unusable output", exc_info=True)
+                    done.update((question_type, pair.pair_key) for pair in pairs)
+                    judgements += len(pairs)
+                    continue
+                for pair, (ab, ba, reason) in zip(pairs, results, strict=True):
+                    done.add((question_type, pair.pair_key))
+                    reading = sensing.make_reading(
+                        pair.question_type,
+                        judge.identity,
+                        list(pair.inputs),
+                        ab=ab,
+                        ba=ba,
+                        abstain_reason=reason,
+                        sensed_at=_utc_now(),
+                    )
+                    if reading is not None:
+                        readings.append(reading)
+                judgements += len(pairs)
             ledger.append(lconn, readings)
-            judgements += len(batch)
             report(False)
         report(True)
         return EXIT_IDLE
@@ -607,9 +681,14 @@ def run_child(
         lconn.close()
 
 
-def _next_batch(vault_root, lconn, identity, done: set[str], limit: int) -> list:
-    from . import sensed_model
-
+def _next_batch(
+    vault_root: Path,
+    lconn: Any,
+    instruments: Mapping[str, Any],
+    done: set[tuple[str, str]],
+    limit: int,
+) -> list:
+    """The next queued pairs of the served questions that the ledger has no reading for."""
     if limit <= 0:
         return []
     conn = sensed_model.open_readonly(vault_root)
@@ -617,16 +696,18 @@ def _next_batch(vault_root, lconn, identity, done: set[str], limit: int) -> list
         return []
     out = []
     try:
-        for pair in sensed_model.queued_pairs(conn, 256):
-            if pair.pair_key in done:
+        for pair in sensed_model.queued_pairs(conn, 256, question_types=tuple(instruments)):
+            marker = (pair.question_type, pair.pair_key)
+            if marker in done:
                 continue
             hashes = [item.text_sha256 for item in pair.inputs]
             if [sensing.text_sha256(text) for text in pair.texts] != hashes:
-                done.add(pair.pair_key)
+                done.add(marker)
                 continue
-            rid = sensing.reading_id(sensing.PAIR_RELATION, identity.instrument_id, hashes)
+            instrument_id = instruments[pair.question_type].identity.instrument_id
+            rid = sensing.reading_id(pair.question_type, instrument_id, hashes)
             if sensing_ledger.has_reading(lconn, rid):
-                done.add(pair.pair_key)
+                done.add(marker)
                 continue
             out.append(pair)
             if len(out) >= limit:

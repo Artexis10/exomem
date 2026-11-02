@@ -1676,9 +1676,26 @@ class QueuedPair:
     question_type: str = sensing.PAIR_RELATION
 
 
-#: The questions the sensor worker reads today. The queue and its depth default
-#: to them, so a question the worker cannot yet sense never starts a child.
+#: The questions `queued_pairs` and `queue_depth` read when a caller names none:
+#: the pair queue every older caller meant. The sensor worker names its own
+#: (`answered_questions`).
 _WORKER_QUESTIONS = (sensing.PAIR_RELATION,)
+
+
+def answered_questions(
+    active: Mapping[str, sensing.InstrumentIdentity] | None = None,
+) -> tuple[str, ...]:
+    """The registered questions that an active instrument answers, in registry order.
+
+    The sensor worker senses these and no others: a question with no active
+    instrument has no one to read its queue, so its pending pairs never start a child.
+    """
+    found = active_instruments() if active is None else active
+    return tuple(
+        question_type
+        for question_type, question in sensing.QUESTIONS.items()
+        if active_for(found, question)
+    )
 
 
 def _queue_rows(conn: sqlite3.Connection, question: sensing.Question, limit: int):

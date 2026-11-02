@@ -88,7 +88,7 @@ def _supervisor(vault: Path, now: list[float]) -> tuple[sensor_worker.Supervisor
 
 
 def _step(sup, *, run=True, reason="ready", depth=3):
-    return sup.step(gate_run=run, gate_reason=reason, queue_depth=lambda: depth)
+    return sup.step(gate_run=run, gate_reason=reason, queue_depth=lambda _questions: depth)
 
 
 def test_launches_only_with_every_gate_open(tmp_path: Path, monkeypatch) -> None:
@@ -157,6 +157,24 @@ def test_a_peak_recorded_for_another_instrument_does_not_block_a_launch(
     sf.enable(monkeypatch, sf.with_identity(revision="9"))
     assert _step(sup) == "launched", "the old peak says nothing about the new model"
     assert sup.peak_rss_bytes() is None
+
+
+def test_one_child_for_both_questions_records_and_reads_one_peak(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The coverage template adds no model: its child's peak is the pair child's, under one key."""
+    sf.enable(monkeypatch, sf.STUB, sf.COVERAGE_STUB)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    assert _step(sup) == "launched"
+    _record_peak(vault, launcher, sup)
+    stored = json.loads(
+        sensing_ledger.ledger_path(vault).with_name(sensor_worker.PEAK_FILE).read_text()
+    )
+    assert json.loads(stored["key"]) == sorted([sf.STUB.instrument_id, sf.COVERAGE_STUB.instrument_id])
+    assert sup.peak_rss_bytes() == PEAK
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK - 1)
+    assert _step(sup) == "memory"
 
 
 def test_a_host_that_cannot_read_free_memory_still_launches(tmp_path: Path, monkeypatch) -> None:
@@ -325,12 +343,15 @@ def test_a_refusal_suspends_relaunch_until_the_instrument_changes(
     _step(sup)
     child = launcher.children[0]
     status = sensing_ledger.ledger_path(vault).with_name(sensor_worker.STATUS_FILE)
-    status.write_text(json.dumps({"refused": "weights-missing", "pid": child.pid}), encoding="utf-8")
+    status.write_text(
+        json.dumps({"refused": {"pair.relation": {"reason": "weights-missing"}}, "pid": child.pid}),
+        encoding="utf-8",
+    )
     child.write({"cpu": 0.5, "judgements": 0, "final": True})
     child.exit(sensor_worker.EXIT_REFUSED)
     assert _step(sup) == "refused"
     assert _step(sup) == "refused"
-    assert sup.status()["refused"] == "weights-missing"
+    assert sup.status()["refused"] == {"pair.relation": "weights-missing"}
     assert len(launcher.children) == 1
     sf.enable(monkeypatch, sf.with_identity(revision="9"))
     assert _step(sup) == "launched"
@@ -414,7 +435,7 @@ def test_a_real_child_without_weights_refuses_and_is_not_relaunched(
         time.sleep(0.1)
     assert not sup.alive()
     assert _step(sup) == "refused"
-    assert sup.status()["refused"] in {"dependency-missing", "weights-missing"}
+    assert sup.status()["refused"]["pair.relation"] in {"dependency-missing", "weights-missing"}
     assert sup.launches == 1
     assert not sensing_ledger.ledger_path(vault).exists(), "a refused child appends nothing"
 

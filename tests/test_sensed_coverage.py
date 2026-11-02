@@ -1,13 +1,14 @@
 """`recap.covered_by`: a recap's Decided lines read against the page they name.
 
-The sensor worker senses pair.relation only until its own round, so these tests
-do what that loop will do for coverage: judge the queued claims with a stub
-instrument and append the readings.
+Most tests judge the queued claims with a stub instrument and append the
+readings themselves (`sense_coverage`), which lets them replay in any order.
+The worker tests at the end run the sensor child's own loop.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 
 import dreamer_fixture as fx
@@ -307,3 +308,82 @@ def test_the_pair_relation_projection_is_unchanged_with_coverage_active(
 
     assert alone and both == alone
     assert both_key == alone_key == sensed_model._active_key({sf.STUB.instrument_id: sf.STUB}, "relation-v1")
+
+
+def run_child(vault: Path, **kwargs) -> int:
+    return sensor_worker.run_child(
+        vault, parent_pid=0, cpu_allotment=1e9, judgement_allotment=10**6, idle_seconds=0.0,
+        sleep=lambda _seconds: None, **kwargs,
+    )
+
+
+def ledger_counts(vault: Path) -> dict[str, int]:
+    conn = sensing_ledger.open_readonly(vault)
+    try:
+        return dict(conn.execute("SELECT question_type, count(*) FROM readings GROUP BY 1"))
+    finally:
+        conn.close()
+
+
+def test_one_child_senses_both_questions_from_one_queue(tmp_path: Path, monkeypatch) -> None:
+    """A worker that sensed only pair.relation would leave every claim `incomplete` for ever."""
+    vault = start(tmp_path, monkeypatch, recap_page([LINE]))
+    relation = sf.StubInstrument(sf.default_table())
+    coverage = sf.CoverageStubInstrument({(sf.SEAL_TEXT, CLAIM): "partial"})
+
+    assert run_child(vault, instrument=[relation, coverage]) == sensor_worker.EXIT_IDLE
+    sf.settle(vault)
+
+    assert coverage.calls == [(sf.SEAL_TEXT, CLAIM)], "the claim is read in slot order"
+    assert relation.calls and (sf.SEAL_TEXT, CLAIM) not in relation.calls
+    assert set(ledger_counts(vault)) == {sensing.PAIR_RELATION, sensing.RECAP_COVERED_BY}
+    assert states(vault) == {CLAIM: "partial"}
+    assert {row[5] for row in sf.edges(vault)} >= {"current"}, "the pair edges are served as before"
+
+
+def test_a_refused_question_does_not_relaunch_the_child_for_its_own_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Each relaunch loads the model for nothing, and the hourly budget pays for the loop."""
+    from exomem import sensing_nli
+
+    vault = start(tmp_path, monkeypatch, recap_page([LINE]))
+    relation = sf.StubInstrument(sf.default_table())
+
+    def admit(question_type: str):
+        if question_type == sensing.RECAP_COVERED_BY:
+            raise sensing_nli.Refused("fixtures-failed", "a coverage fixture read wrongly")
+        return relation
+
+    class Ended:
+        """A finished child: the sensor loop ran in this process."""
+
+        pid = os.getpid()
+        returncode = sensor_worker.EXIT_IDLE
+
+        def poll(self):
+            return self.returncode
+
+    launches: list[int] = []
+
+    def launch(_vault, _cpu, _judgements):
+        launches.append(run_child(vault, admit=admit))
+        return Ended()
+
+    supervisor = sensor_worker.Supervisor(vault, launch=launch)
+
+    def step() -> str:
+        return supervisor.step(
+            gate_run=True, gate_reason="ready",
+            queue_depth=lambda questions: sensed_model.queue_depth(vault, question_types=questions),
+        )
+
+    assert step() == "launched"
+    sf.settle(vault)
+    assert sensed_model.queue_depth(vault, question_types=COVERAGE) == 1, "the claim is still queued"
+
+    assert step() == "idle", "the coverage queue is not counted for a refused question"
+    assert launches == [sensor_worker.EXIT_IDLE] and supervisor.launches == 1
+    assert supervisor.status()["refused"] == {sensing.RECAP_COVERED_BY: "fixtures-failed"}
+    assert set(ledger_counts(vault)) == {sensing.PAIR_RELATION}, "the other question still ran"
+    assert states(vault) == {CLAIM: "incomplete"}
