@@ -8094,7 +8094,11 @@ class WikilinkResolver:
             self.candidates_by_key.pop(no_ext, None)
             self.full_paths.discard(no_ext)
             stripped = no_ext.removeprefix(kb_prefix())
-            if stripped not in self.full_paths and kb_prefix() + stripped not in self.full_paths:
+            # Another page still strips to this key: the KB page itself, or the same path outside the KB.
+            still_held = kb_prefix() + stripped in self.full_paths or (
+                stripped in self.full_paths and not stripped.startswith(kb_prefix())
+            )
+            if not still_held:
                 self.kb_stripped.discard(stripped)
         stem = no_ext.rsplit("/", 1)[-1]
         _discard_from_bucket(self.stems, stem, no_ext)
