@@ -386,27 +386,34 @@ def evaluate_path_only(
     return MembershipOutcome("classified", frozenset(matched))
 
 
-def _source_of_part(page: ParsedPage) -> ParsedPage | None:
-    """The live Source page when `page` is one of its part pages, else None.
+def _governing_parent(page: ParsedPage) -> ParsedPage | None:
+    """The live page whose membership `page` carries, else None.
 
-    A part holds more of its Source's extracted text, so its scope membership, and with it the
-    audience that may read it, is its Source's: decided here for every evaluation, from the
-    part's path. A Source page that cannot be read leaves the part's membership unresolved.
+    A part of a Source's extracted text and a scene frame of a video hold their parent's own
+    content, so their scope membership, and with it the audience that may read them, is the
+    parent's: decided here for every evaluation. A parent page that cannot be read leaves the
+    child's membership unresolved.
     """
-    # The same rule as search (`ParsedPage.part_of`): a page at a part's path without the
-    # `part_of` field a written part carries is governed as itself, never as its neighbour.
-    source = page.part_of
-    if source is None:
+    from .. import scene_frames
+
+    # The same rules as search: a part needs its path shape and the `part_of` field a written
+    # part carries; a frame needs `parent_media` and to sit in that video's own frames folder.
+    # A page that only claims a parent is governed as itself, never as its neighbour.
+    parent = page.part_of
+    if parent is None and page.parent_media is not None:
+        if Path(page.rel_path).parent == scene_frames.frames_dir_for(Path(page.parent_media)):
+            parent = page.parent_media + ".md"
+    if parent is None:
         return None
     if page.vault_root is None:
-        raise MembershipUnresolved(f"the Source page of part {page.rel_path!r} has no vault root")
-    path = page.vault_root / source
+        raise MembershipUnresolved(f"the parent page of {page.rel_path!r} has no vault root")
+    path = page.vault_root / parent
     try:
         parsed = find_corpus.parse_page(path, path.stat().st_mtime, page.vault_root)
     except OSError as exc:
-        raise MembershipUnresolved(f"cannot read the Source page of part {page.rel_path!r}: {exc}") from exc
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
     if parsed is None:
-        raise MembershipUnresolved(f"cannot read the Source page of part {page.rel_path!r}")
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}")
     return parsed
 
 
@@ -414,7 +421,7 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     """Return the set of scope ids `page` belongs to under `policy`, memoized."""
     if policy.empty or not policy.scopes:
         return frozenset()
-    if (source := _source_of_part(page)) is not None:
+    if (source := _governing_parent(page)) is not None:
         return evaluate(source, policy)
     # `st_size` alongside `st_mtime_ns`, not `st_mtime_ns` alone. Two writes
     # in quick succession can share an identical `st_mtime_ns` — the platform
@@ -487,7 +494,7 @@ def evaluate_snapshot(
     """
     if policy.empty or not policy.scopes:
         return frozenset()
-    if (source := _source_of_part(page)) is not None:
+    if (source := _governing_parent(page)) is not None:
         # The part's own bytes do not decide its membership, so nothing is memoized under them.
         return evaluate(source, policy)
     key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
