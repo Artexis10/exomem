@@ -111,6 +111,7 @@ import object left in the old bucket is orphaned.
     `infra/scripts/apply_saved_plan.sh durability <plan> --allow-destructive 'b2_application_key.cloud_controller[0]'`
 12. Delete the old controller Secret.
     `kubectl delete secret exomem-cloud-b2-key-management --namespace exomem-cloud`
-13. Retire its SOPS artifact through the [retirement disposal](cloud-hosted-retirement.md).
+13. Record its absence proof in the [retirement disposal](cloud-hosted-retirement.md) row for
+    `k3s.cloud.exomem-cloud-b2-key-management.active`. Its SOPS artifact is already gone from the tree.
 14. Remove the deleted key's ID from the founder account in the key watcher's pinned set, then run the watcher
     once. Expect `0 active` for both accounts. No key that can create keys is now reachable from the cluster.
