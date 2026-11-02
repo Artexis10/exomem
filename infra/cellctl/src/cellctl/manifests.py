@@ -292,6 +292,9 @@ class CellManifestSpec:
     # The PEM public half of the gateway's artifact signing pair, or "" for a cell
     # that does not serve the upload handoff. Public material, so it renders as a value.
     upload_public_key: str = ""
+    # contain-cloud-controller-compromise D1: the same public key, for the proof the gateway signs for every
+    # cell. It selects no feature, so every cell receives it and the upload key still marks the upload cells.
+    proof_public_key: str = ""
     # contain-cloud-controller-compromise D2/D4: the anchors an import or export Job checks its grant and
     # presigned URLs against. Only those Jobs receive them. The endpoint and the bucket are the ones
     # cellctl itself presigns for; the grant key is "" until Substrate signs grants.
@@ -325,6 +328,7 @@ class CellManifestSpec:
         check_media_edge_url(self.media_edge_url)
         check_media_slot_url(self.media_slot_url)
         check_upload_public_key(self.upload_public_key)
+        _check_ed25519_public_key(self.proof_public_key, "cell proof public key")
         check_grant_public_key(self.grant_public_key)
         if self.media_edge_url and not (
             self.media_edge_credential and self.media_age_identity and self.media_recipient
@@ -861,6 +865,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": "EXOMEM_CLOUD_MEDIA_SLOT_URL", "value": spec.media_slot_url})
     if spec.upload_public_key:
         env.append({"name": "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY", "value": spec.upload_public_key})
+    if spec.proof_public_key:
+        env.append({"name": "EXOMEM_CLOUD_PROOF_PUBLIC_KEY", "value": spec.proof_public_key})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": CELL_VAULT_PATH},

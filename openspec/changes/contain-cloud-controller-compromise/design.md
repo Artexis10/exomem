@@ -67,7 +67,11 @@ Why not keep a per-cell random bearer? `cellctl` would still render it. A signed
 
 **Which cells receive which signed object.** The gateway signs an `mcp` proof for every cell once its signing key is present. It signs the route capsule, the object that lets a cell publish an upload handoff, only for a cell that serves upload handoffs. A cell therefore verifies an `mcp` proof with no capsule, binds the login from the proof alone, and publishes no handoff. A capsule that is present must still verify and name the proof's login, or the cell refuses the whole origin. A bad capsule is never dropped to serve the request as capsule-less.
 
-**The verifying key still marks the upload feature.** `cellctl` renders `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY` only into the cells that `CELLCTL_UPLOAD_CELL_IDS` lists, and the cell registers its `/upload` and `/download` routes when the key is present. The D1 migration needs the key in every cell, so the key and the upload feature need separate switches first (see Open Questions).
+**Decided: a separate proof key name, and the upload key stays the upload switch.** A cell would otherwise register its `/upload` and `/download` routes whenever it holds the gateway's key, and the D1 migration needs the key in every cell. So the cell reads two names:
+- `EXOMEM_CLOUD_PROOF_PUBLIC_KEY` verifies the proofs. `cellctl` renders it into every cell whenever it holds the gateway key, as the value that it already holds for `CELLCTL_UPLOAD_PUBLIC_KEY`.
+- `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY` is the upload switch. `cellctl` renders it only into the cells that `CELLCTL_UPLOAD_CELL_IDS` lists, and only a cell that holds it registers `/upload` and `/download`.
+
+A cell verifies with the proof key and falls back to the upload key when the proof key is absent, so a `cellctl` that predates the proof key still verifies on its upload cells. When both are set and differ, only the proof key verifies, and the cell never tries both. Rolling the proof key out restarts every cell once, because the render digest changes. The operator runs that rollout. Both names carry the gateway's verifying key, so the D2 policy pins both.
 
 ### D2. The admission policy pins every trust anchor that a cell reads
 
@@ -340,7 +344,7 @@ Every container command is `sh -c` with a preamble. The preamble is `ulimit -c 0
 | Kind | Process and arguments | Environment names |
 |---|---|---|
 | StatefulSet init container | `command`: `exomem cell-init`. `args`: `--vault /data/vault --json` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`; with a local volume, also `EXOMEM_CLOUD_CELL_BACKED_UP` (optional `secretKeyRef`) |
-| StatefulSet serving container | `exomem --transport http --host 0.0.0.0 --port 8765` | Fixed: `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `EXOMEM_CLOUD_CELL_TOKEN` (`secretKeyRef`), `EXOMEM_CLOUD_HEALTH_PORT`, `EXOMEM_VAULT_PATH`, `TMPDIR`, `EXOMEM_LOG_DIR`. Conditional: `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS` (optional `secretKeyRef`), `EXOMEM_CLOUD_READ_ONLY`, `EXOMEM_CLOUD_ARTIFACT_BROKER_URL`, `EXOMEM_CLOUD_MEDIA_SLOT_URL`, `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, `EXOMEM_MEDIA_STORE_CONFIG`, `EXOMEM_MEDIA_EDGE_URL`, `EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE`, `EXOMEM_MEDIA_ENGINES`. Then every `model_env` entry |
+| StatefulSet serving container | `exomem --transport http --host 0.0.0.0 --port 8765` | Fixed: `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `EXOMEM_CLOUD_CELL_TOKEN` (`secretKeyRef`), `EXOMEM_CLOUD_HEALTH_PORT`, `EXOMEM_VAULT_PATH`, `TMPDIR`, `EXOMEM_LOG_DIR`. Conditional: `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS` (optional `secretKeyRef`), `EXOMEM_CLOUD_READ_ONLY`, `EXOMEM_CLOUD_ARTIFACT_BROKER_URL`, `EXOMEM_CLOUD_MEDIA_SLOT_URL`, `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, `EXOMEM_CLOUD_PROOF_PUBLIC_KEY`, `EXOMEM_MEDIA_STORE_CONFIG`, `EXOMEM_MEDIA_EDGE_URL`, `EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE`, `EXOMEM_MEDIA_ENGINES`. Then every `model_env` entry |
 | `cell-backup` Job | One shell string: vault check, `restic snapshots \|\| restic init`, `restic backup`, snapshot-ID capture, `restic forget --prune`, the termination message | `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (`secretKeyRef`), `RESTIC_PASSWORD` (`secretKeyRef`), `RESTIC_CACHE_DIR`, `TMPDIR` |
 | `cell-restore` Job | One shell string: `restic restore <64-hex snapshot ID> --target / --delete --include /data/vault --include /data/host` | The same six names as the backup Job |
 | `cell-import` Job | `exomem cell-import <prepare\|import\|discard> --import-id <id>`; `import` adds `--request <json> --url <presigned URL>`; `discard` may add `--keep-adoption` | The init container's names, plus `EXOMEM_IMPORT_MAX_MEMBERS`, `EXOMEM_IMPORT_RESERVE_BYTES` |
@@ -410,7 +414,6 @@ The query may hold only these names, each once and in exact case, and no raw `;`
 
 ## Open Questions
 
-- The upload feature switch for D1. A cell registers its upload routes because the gateway key is present, and `cellctl` renders the key only for upload cells. Giving every cell the key needs a switch that the cell reads apart from the key, such as a rendered flag for upload cells, or a separate environment name for the proof key.
 - The browser side of encrypted owner exports (D4): `age` in the browser, and how a tenant who loses the export key asks for a new export.
 - Whether a tenant-initiated restore needs a confirmation step in Substrate before it signs a restore grant.
 - The age-custody recovery path for the escrow identity, shared with `make-cloud-cells-operator-resistant` task 4.5.

@@ -810,7 +810,7 @@ def build_server(
         from . import cloud_origin
 
         cloud_origin.validate_configuration()
-        upload_bridge = cloud_origin.enabled()
+        upload_bridge = cloud_origin.upload_enabled()
         if upload_bridge:
             register_cloud_upload_route(mcp, vault_root=runtime.vault_root, cell_bearer=auth)
             register_cloud_download_route(mcp, vault_root=runtime.vault_root, cell_bearer=auth)
