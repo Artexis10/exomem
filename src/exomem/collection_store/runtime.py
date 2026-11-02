@@ -20,6 +20,7 @@ from contextlib import AbstractContextManager, ExitStack, closing, contextmanage
 from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 from .. import call_spans, foreground_priority, state_paths
 from . import connection, legacy_originals, replica, schema
@@ -828,8 +829,20 @@ def serve(vault_root, manager):
         _server(root)
 
 
+class Routed(NamedTuple):
+    """The store thread a request runs on (None for file collections) and the ownership proof that chose it, if any."""
+
+    server: StoreServer | None
+    proof: object = None
+
+
 def route(command, vault_root, arguments):
-    """The store thread a request must run on, or None when file collections answer it.
+    """The store thread a request must run on, or None when file collections answer it; see ``route_with_proof``."""
+    return route_with_proof(command, vault_root, arguments).server
+
+
+def route_with_proof(command, vault_root, arguments):
+    """The store thread a request must run on, or None when file collections answer it, with the proof.
 
     A selector the vault's marker routes to the store, a NEW summary collection's create,
     Records discovery, and a curation or episode command that runs a Records step or
@@ -843,11 +856,11 @@ def route(command, vault_root, arguments):
 
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
-        return None
+        return Routed(None)
     if command in _CURATION_COMMANDS:
-        return _curation_route(command, root, arguments)
+        return Routed(_curation_route(command, root, arguments))
     if command not in _STORE_COMMANDS:
-        return None
+        return Routed(None)
     from . import ownership
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
@@ -870,17 +883,17 @@ def route(command, vault_root, arguments):
     ):
         # Both public store tools need the service writer for global inventory.
         server = None if proof.marker is None else _server(root)
-        return server if server is not None and server.runtime is not None else None
+        return Routed(server, proof) if server is not None and server.runtime is not None else Routed(None)
     elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
-        return None
+        return Routed(None)
     server = _server(root)
     if server is None and not summary:
-        return None  # Collection resolution decides visibility before reporting an unavailable store.
+        return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
         raise OpError(
             "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
         )
-    return server
+    return Routed(server, proof)
 
 
 def _curation_route(command, root, arguments):
@@ -1095,13 +1108,14 @@ def notify_view_change(root, path, *, destination=None, directory=False):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work, *, wake_maintenance=True, read_only=False):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None):
         import contextvars
 
         self.context = contextvars.copy_context()
         self.work = work
         self.wake_maintenance = wake_maintenance
         self.read_only = read_only
+        self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
         self.taken = False
         self.done = threading.Event()
         self.result = self.error = None
@@ -1166,11 +1180,13 @@ class StoreServer:
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None):
+    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None, initial=None):
         """Run ``work`` on the store thread and return its result or raise its error.
 
         ``read_only`` says the work changes nothing, so it runs under one view of path
-        placement, host configuration and governance policy (``_serve``). ``extend`` lets a
+        placement, host configuration and governance policy (``_serve``). ``initial`` is the
+        ownership proof the caller routed this read on: the read starts from it instead of proving
+        again, and its release proves afresh and refuses the read when the two differ. ``extend`` lets a
         write that is still waiting at its acceptance deadline keep its place: it takes the
         completion deadline and returns a later acceptance deadline, or None to refuse.
         ``on_refusal(error, waited_seconds)`` hears a write refusal this queue makes
@@ -1193,7 +1209,7 @@ class StoreServer:
                 on_refusal(error, time.monotonic() - entry)
             return error
 
-        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
+        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial)
         with self._condition:
             if not self._closed:
                 self._requests.append(request)
@@ -1433,6 +1449,7 @@ class StoreServer:
     def _serve(self, request):
         from ..cli_ops import OpError
         from ..governance import policy
+        from . import ownership
         from .preview import preview_store
 
         def bound():
@@ -1448,6 +1465,10 @@ class StoreServer:
                     scope.enter_context(state_paths.resolution_scope())
                     scope.enter_context(policy.request_policy_snapshot())
                 scope.enter_context(preview_store(self.root, self.runtime))
+                if request.read_only and request.initial is not None:
+                    # After the checkout, so its own ownership reads still prove afresh. The release in
+                    # `invoke_command` proves again and compares, so a change since routing withholds the read.
+                    scope.enter_context(ownership.read_scope(self.root, initial=request.initial))
                 self._scope = scope
                 try:
                     return request.work()

@@ -8449,10 +8449,13 @@ def _collection_store_thread(func):
                     if routed is not None:
                         return get_manager()._attempt_store_write(func, command, injected, kwargs, routed)
                     return func(command, *injected, **kwargs)
-                server = store_runtime.route(command.name, injected[0], kwargs)
+                routing = store_runtime.route_with_proof(command.name, injected[0], kwargs)
+                server = routing.server
                 if server is not None:
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
+                        # A read hands the proof that routed it to the store thread, which skips its own.
+                        initial=routing.proof if read_only else None,
                         # A read cannot start a job, revise a declaration or leave views pending; waking
                         # every tick after it kept the store thread busy beside the next request.
                         wake_maintenance=not (read_only or import_status),

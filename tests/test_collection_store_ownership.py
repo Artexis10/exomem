@@ -741,3 +741,33 @@ def test_a_proof_refuses_a_manifest_whose_text_no_longer_matches_its_hash(servic
     with pytest.raises(OpError) as refused:
         ownership.current(root)
     assert refused.value.code == "COLLECTION_STORE_UNAVAILABLE"
+
+
+def test_a_read_routed_before_a_namespace_change_is_withheld_after_its_queue_wait(service, monkeypatch):
+    """Defect: the store thread serves a queued read on the ownership proof that routing made before the wait,
+    so a collection created meanwhile never withholds a result read from the earlier namespace."""
+    root = service.root
+    created = []
+    queue = runtime.StoreServer.call
+
+    def create_while_queued(server, work, **kwargs):
+        # The read that carries its routing proof is the one under test; it is queued after routing proved.
+        if kwargs.get("initial") is not None and not created:
+            def create():
+                created.append(call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                                    manifest_text=DAILY_TEXT, why="created while the read waits"))
+
+            creator = threading.Thread(target=create)
+            creator.start()
+            creator.join(30)
+        return queue(server, work, **kwargs)
+
+    monkeypatch.setattr(runtime.StoreServer, "call", create_while_queued)
+    with pytest.raises(OpError) as refused:
+        call(root, "record_memory", action="query", collection=CID)
+    assert created and refused.value.code == "COLLECTION_STORE_UNAVAILABLE"
+    assert not any(outcome.get("command") == "record_query"
+                   and outcome["decision"] in ("released", "release_authorized")
+                   for event in _receipt_records(root) if event["event_type"] == "disclosure"
+                   for outcome in event["outcomes"])
+    assert titles(root, CID) == ["Canonical"]  # the retry the refusal asks for reads the new namespace

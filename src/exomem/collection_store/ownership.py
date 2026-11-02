@@ -330,9 +330,10 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 
 class ReadScope:
-    def __init__(self, root):
+    def __init__(self, root, *, initial=None):
         self.root = Path(root).resolve()
-        self.initial = None
+        # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
+        self.initial = initial
         self.store_enrolled = False
         self.finished = False
 
@@ -359,6 +360,7 @@ class ReadScope:
         from .preview import bound_writer, production_bound
 
         manager = _manager(self.root)
+        refusal = None
         try:
             # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
             # so neither this proof nor the body's WAL snapshot is reused.
@@ -369,8 +371,9 @@ class ReadScope:
                 current = resolve(self.root, private=private, path=writer.handle.path if private else None)
             if current.binding == self.initial.binding:
                 return
-        except Exception:  # noqa: BLE001 - an unresolved final binding cannot release the earlier payload
-            pass
+        except Exception as error:  # noqa: BLE001 - an unresolved final binding cannot release the earlier payload
+            refusal = error
+        from ..cli_ops import OpError
         from ..governance import egress
 
         collector = egress._collector()
@@ -381,16 +384,19 @@ class ReadScope:
             collector.outcomes[:] = [outcome for outcome in collector.outcomes
                                      if outcome.value.get("decision") not in released]
             collector.path_outcomes = {outcome for outcome in collector.path_outcomes if outcome[1] not in released}
+        if isinstance(refusal, OpError) and refusal.code == "MUTATION_BUSY":
+            # A boundary the release could not take is the typed busy result callers retry, as at a read's start.
+            raise refusal
         raise unavailable()
 
 
 @contextmanager
-def read_scope(root, *, finalize=False):
+def read_scope(root, *, finalize=False, initial=None):
     previous = _READ.get()
     if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
         yield previous
         return
-    scope = ReadScope(root)
+    scope = ReadScope(root, initial=initial)
     token = _READ.set(scope)
     try:
         yield scope
