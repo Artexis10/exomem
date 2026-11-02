@@ -3255,3 +3255,25 @@ def test_sync_conflict_evidence_fails_the_append_closed(vault: Path) -> None:
         item["code"] == "evidence_conflict"
         for item in receipts.verify_chain(vault)["issues"]
     )
+
+
+def test_a_trashed_video_folder_with_scene_frames_recovers_in_a_governed_vault(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Projects/demo/media"
+    frames = vault / rel / "clip.mp4.frames"
+    frames.mkdir(parents=True)
+    (vault / rel / "clip.mp4.md").write_text("---\ntype: source\n---\n# Clip\n", encoding="utf-8")
+    (frames / "scene-001.jpg.md").write_text(
+        "---\ntype: source\nparent_media: Knowledge Base/Projects/demo/media/clip.mp4\n---\nWhiteboard text\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Private/**")
+    deleted = delete_directory.delete_directory(
+        vault, path=rel, confirm=True, recursive=True, force_orphan=True
+    )
+
+    recovered = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+
+    assert recovered.restored_path == rel
+    assert (frames / "scene-001.jpg.md").exists()
