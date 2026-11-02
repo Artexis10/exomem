@@ -1919,13 +1919,13 @@ def split_response_detail(
     return payload, cast(ResponseDetail, detail)
 
 
-def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb) -> str | None:
+def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | None:
     """One plain sentence for the person, built only from fields the terminal stores.
 
     A replay stores the same `path` or `paths`, so it yields the same sentence.
-    A refusal or a call that awaits review has no completed outcome to state.
+    A refusal, a call that awaits review, or a write that declares no verb has no outcome to state.
     """
-    if result.get("ok") is not True:
+    if verb is None or result.get("ok") is not True:
         return None
     if result.get("status") == "committed":
         head = verb.capitalize()
@@ -1948,11 +1948,14 @@ def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb) -> str | None:
     if verb == "moved" and len(names) == 2:
         # A move stores its two ends as `paths`: [from, to].
         return f"{head} {names[0]} -> {names[1]}"
+    if verb == "replaced" and len(names) == 2:
+        # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
+        return f"{head} -> {names[1]} (was {names[0]})"
     return f"{head} {len(names)} files -> {names[0]} and {len(names) - 1} more"
 
 
 def project_terminal(
-    result: Any, detail: ResponseDetail = "compact", *, outcome_verb: OutcomeVerb = "saved"
+    result: Any, detail: ResponseDetail = "compact", *, outcome_verb: OutcomeVerb | None = None
 ) -> Any:
     """Project a canonical terminal, preserving unversioned legacy results."""
     if not isinstance(detail, str) or detail not in _RESPONSE_DETAILS:

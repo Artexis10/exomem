@@ -374,9 +374,10 @@ class Command:
     )
     #: The command's own argument rules, which every spelling of it shares.
     argument_rules: ArgumentRules | None = field(default=None, compare=False, hash=False)
-    #: What a completed call does to the vault, so the user-facing summary of a write
-    #: says "Deleted" and not "Saved". A grouped command takes it from its operation rows.
-    outcome_verb: OutcomeVerb = "saved"
+    #: What a completed write reports, so the user-facing summary says "Deleted" and not "Saved".
+    #: A write declares one; a grouped command declares it on each operation row instead, and a
+    #: read declares none. A write that declares none gets no summary.
+    outcome_verb: OutcomeVerb | None = None
 
     def __post_init__(self) -> None:
         if self.renderings and self.argument_rules is None:
@@ -428,12 +429,12 @@ class Command:
         )
 
 
-def outcome_verb_of(command: object, arguments: Mapping[str, typing.Any]) -> OutcomeVerb:
-    """The verb a completed call of `command` reports; a bare command stand-in says "saved"."""
+def outcome_verb_of(command: object, arguments: Mapping[str, typing.Any]) -> OutcomeVerb | None:
+    """The verb a completed call of `command` reports, or None when the write declares none."""
     operations = operation_entries.OPERATIONS.get(getattr(command, "name", ""))
-    if operations is not None and operations.selector is not None:
-        return operations.outcome_verb(arguments.get(operations.selector))
-    return getattr(command, "outcome_verb", "saved")
+    if operations is not None:
+        return operations.outcome_verb(arguments.get(operations.selector), arguments)
+    return getattr(command, "outcome_verb", None)
 
 
 def gateway_required_error(name: str):

@@ -23,8 +23,10 @@ from typing import Any, Literal, get_args
 
 Effect = Literal["read", "write"]
 
-#: What a completed write did to the vault, in the one word the user-facing summary leads with.
-OutcomeVerb = Literal["saved", "updated", "moved", "deleted"]
+#: What a completed write did, in the one word the user-facing summary leads with. This is a closed
+#: contract set, not vault vocabulary: the summary sentence is built from it, and each write
+#: operation declares exactly one (a write that declares none gets no summary).
+OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored"]
 
 #: How the MCP surface publishes a command that has renderings. `nested` carries the
 #: operation in one `operation` object, and `grouped` lists only the grouped command.
@@ -80,7 +82,8 @@ class OperationEntry:
     constraints: tuple[LiteralConstraint, ...] = ()
     #: Public discriminator when the grouped selector would collide with another job.
     public_kind: str | None = None
-    outcome_verb: OutcomeVerb = "saved"
+    #: What a completed write of this operation reports. A write declares one; a read declares none.
+    outcome_verb: OutcomeVerb | None = None
 
     @property
     def kind(self) -> str:
@@ -247,12 +250,12 @@ class CommandOperations:
     def actions(self) -> frozenset[str]:
         return frozenset(entry.action for entry in self.entries)
 
-    def outcome_verb(self, action: object) -> OutcomeVerb:
-        """The verb a completed write of this selector value reports; "saved" when none declares one."""
+    def outcome_verb(self, action: object, arguments: Mapping[str, object]) -> OutcomeVerb | None:
+        """The verb the write that `action` and `arguments` select declares; None for a read."""
         for entry in self.entries:
-            if entry.action == action and entry.effect == "write":
+            if entry.effect == "write" and (self.selector is None or entry.matches(action, arguments)):
                 return entry.outcome_verb
-        return "saved"
+        return None
 
     def every_field(self) -> frozenset[str]:
         """Every field some operation accepts, which is the grouped command's whole signature."""
@@ -304,7 +307,7 @@ def _entry(
     destructive: bool = False,
     constraints: tuple[LiteralConstraint, ...] = (),
     public_kind: str | None = None,
-    outcome_verb: OutcomeVerb = "saved",
+    outcome_verb: OutcomeVerb | None = None,
 ) -> OperationEntry:
     return OperationEntry(
         action=action,
@@ -388,7 +391,7 @@ RECORDS = CommandOperations(
         ),
         _entry(
             "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold"),
-            ("manifest_path", "manifest_text", "why"), effect="write",
+            ("manifest_path", "manifest_text", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         # `item` is required only when the caller is not resuming a held candidate,
         # which the leaf's argument rules say in as many words.
@@ -398,7 +401,7 @@ RECORDS = CommandOperations(
                 "collection", "item", "why", "item_key", "expected_container_hash", "body",
                 "delivery", "held", "hold",
             ),
-            ("collection", "why"), effect="write",
+            ("collection", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         _entry(
             "update", CHANGE_RECORDS,
@@ -407,35 +410,37 @@ RECORDS = CommandOperations(
                 "expected_item_version", "why", "refresh_presentation", "held", "hold",
             ),
             ("collection", "item_key", "expected_container_hash", "expected_item_version", "why"),
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
             "bulk_upsert", CHANGE_RECORDS,
             ("collection", "rows", "why", "expected_container_hash", "source", "on_reject"),
             ("collection", "rows", "why", "expected_container_hash"),
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="saved",
         ),
         _entry(
             "discard", CHANGE_RECORDS, ("collection", "held", "why"),
             ("collection", "held", "why"), effect="write", destructive=True,
+            outcome_verb="discarded",
         ),
         _entry(
             "revise", CHANGE_RECORDS, _MANIFEST_REVISION_FIELDS, _MANIFEST_REVISION_FIELDS,
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
             "rebaseline", CHANGE_RECORDS, _REBASELINE_FIELDS, _REBASELINE_FIELDS,
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="updated",
         ),
         # A start replaces the values of rows it re-imports; cancelling a job removes nothing.
         _entry(
             "import", CHANGE_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="saved",
             constraints=(LiteralConstraint(("import_request", "mode"), "start"),),
         ),
         _entry(
             "import", CHANGE_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,
-            effect="write", constraints=(LiteralConstraint(("import_request", "mode"), "cancel"),),
+            effect="write", outcome_verb="discarded",
+            constraints=(LiteralConstraint(("import_request", "mode"), "cancel"),),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
     ),
 )
@@ -490,29 +495,30 @@ PLANS = CommandOperations(
         ),
         _entry(
             "create", CHANGE_PLANS, ("manifest_path", "manifest_text", "why", "scaffold"),
-            ("manifest_path", "manifest_text", "why"), effect="write",
+            ("manifest_path", "manifest_text", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         _entry(
             "add", CHANGE_PLANS,
             ("collection", "item", "plan_id", "expected_container_hash", "body", "why"),
-            ("collection", "item", "why"), effect="write",
+            ("collection", "item", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         _entry(
             "update", CHANGE_PLANS,
             (*_PLAN_GUARDED_FIELDS, "changes", "body"), _PLAN_GUARDED_FIELDS,
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
             "triage", CHANGE_PLANS, (*_PLAN_GUARDED_FIELDS, "transition"),
             (*_PLAN_GUARDED_FIELDS, "transition"), effect="write", destructive=True,
+            outcome_verb="updated",
         ),
         _entry(
             "revise", CHANGE_PLANS, _MANIFEST_REVISION_FIELDS, _MANIFEST_REVISION_FIELDS,
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
             "rebaseline", CHANGE_PLANS, _REBASELINE_FIELDS, _REBASELINE_FIELDS,
-            effect="write", destructive=True,
+            effect="write", destructive=True, outcome_verb="updated",
         ),
     ),
 )
@@ -555,7 +561,7 @@ def _literal(field: str, value: bool | str | None, omitted: bool = False, *, imp
     return LiteralConstraint(tuple(field.split(".")), value, allow_omitted=omitted, implied=implied)
 
 
-def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb="saved"):
+def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb=None):
     return (action, tool, fields, required, kind, constraints, destructive, verb)
 
 
@@ -567,8 +573,8 @@ _REMAINING = {
     "coordination_status": (None, (_row("writer-status", "bootstrap"),)),
     "configure_memory": ("action", (
         _row("inspect", "bootstrap", (), kind="settings"),
-        _row("set", "change_settings", ("prominence", "expected_revision", "context"), ("prominence", "expected_revision")),
-        _row("clear", "change_settings", ("context", "expected_revision"), ("context", "expected_revision"), destructive=True),
+        _row("set", "change_settings", ("prominence", "expected_revision", "context"), ("prominence", "expected_revision"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("clear", "change_settings", ("context", "expected_revision"), ("context", "expected_revision"), destructive=True, verb="discarded"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "read_memory": (None, (_row("page", "read_memory"),)),
     "viewer_map": (None, (_row("graph", "read_memory"),)),
@@ -580,32 +586,32 @@ _REMAINING = {
     "query_dataset": (None, (_row("dataset", "read_memory"),)),
     "adopt_vault": ("mode", (
         _row("scan-only", "read_import", (*_ADOPTION_SCAN_FIELDS, "semantic_max_files", "semantic_max_bytes", "semantic_example_limit")),
-        _row("save-manifest", "import_memory", (*_ADOPTION_SCAN_FIELDS, "manifest_path")),
-        _row("copy-as-sources", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
-        _row("compile-selected", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
+        _row("save-manifest", "import_memory", (*_ADOPTION_SCAN_FIELDS, "manifest_path"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("copy-as-sources", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("compile-selected", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "adoption_studio": ("action", (
-        _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume")),
+        _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes")),
-        _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
-        _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",)),
-        _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),
-        _row("cancel", "import_memory", ("run_id", "why"), ("run_id",)),
-        _row("finish", "import_memory", ("run_id", "write_manifest"), ("run_id",)),
+        _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("cancel", "import_memory", ("run_id", "why"), ("run_id",), verb="discarded"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("finish", "import_memory", ("run_id", "write_manifest"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("work-item", "read_import", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
-        _row("propose", "import_memory", ("run_id", "proposals"), ("run_id",)),
-        _row("apply-proposal", "import_memory", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True),
+        _row("propose", "import_memory", ("run_id", "proposals"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("apply-proposal", "import_memory", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         # `paths` stays optional so the handler refuses a call without them, whatever the client sends.
-        _row("acknowledge", "import_memory", ("import_id", "paths"), ("import_id",), destructive=True),
+        _row("acknowledge", "import_memory", ("import_id", "paths"), ("import_id",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "read_media": (None, (_row("video", "read_media"),)),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
-        _row("process", "change_media", ("path", "paths", "language", "multilingual")),
-        _row("retry", "change_media", ("path", "paths")),
-        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual")),
+        _row("process", "change_media", ("path", "paths", "language", "multilingual"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
-    "triage_memory": (None, (_row("decision", "triage_memory"),)),
+    "triage_memory": (None, (_row("decision", "triage_memory", verb="saved"),)),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     "review_item_context": (None, (_row("item-context", "read_review"),)),
     "review_memory": ("mode", (
         _row("attention", "read_review", ("categories", "limit", "state")),
@@ -624,7 +630,7 @@ _REMAINING = {
         _row("write-advisory-result", "read_review", ("ref",), ("ref",)),
         _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family"),
              constraints=(_literal("path", None, True), _literal("query", "", True), _literal("family", None, True))),
-        _row("vocabulary", "triage_memory", ("path", "query", "family", "ref"), ("path", "query", "family"), kind="question"),
+        _row("vocabulary", "triage_memory", ("path", "query", "family", "ref"), ("path", "query", "family"), kind="question", verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "connect_memory": ("operation", (
         _row("suggest-links", "read_connections", ("path", "draft_title", "draft_body", "limit", "scope")),
@@ -634,14 +640,14 @@ _REMAINING = {
         _row("inbound-links", "read_connections", ("target", "path")),
         _row("resolve-entity", "read_connections", ("name", "entity_type", "entity_family", "limit"), ("name",)),
         _row("resolve-relation", "read_connections", ("path", "target", "query", "requested_relation", "limit", "continuation")),
-        _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations"), ("name",)),
-        _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("ref", "expected_hash", "expected_fingerprint", "why")),
+        _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations"), ("name",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("ref", "expected_hash", "expected_fingerprint", "why"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "observe_memory": ("operation", (
         _row("validate", "prepare_note", None, ("path",), kind="observation"),
-        _row("add", "change_observations", None, ("path", "content", "category")),
-        _row("update", "change_observations", None, ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True),
-        _row("remove", "change_observations", ("path", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True),
+        _row("add", "change_observations", None, ("path", "content", "category"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("update", "change_observations", None, ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("remove", "change_observations", ("path", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "manage_memory_file": ("operation", (
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),
@@ -651,18 +657,18 @@ _REMAINING = {
         *(_row(action, "browse_memory", ("path", "content", "frontmatter", "overwrite", "allow_curated", "kind", "parents", "validate_only", "draft_id", "draft_hash", "draft_token", "semantic_transition_token", "relation_disposition", "relation_review_hash", "relation_review_reason", "promotion_reason"), ("path",), kind=f"validate-{action}", constraints=(_literal("validate_only", True, implied=True),)) for action in ("create", "append")),
         _row("move", "change_files", ("old_path", "new_path", "update_wikilinks", "allow_curated", "promotion_reason"), ("old_path", "new_path"), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("delete", "change_files", ("path", "confirm", "recursive", "force_orphan", "force_superseded", "allow_curated", "expected_dead_inbound"), ("path",), destructive=True, verb="deleted"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("recover", "change_files", ("trash_path", "path", "restore_path"), ()),
+        _row("recover", "change_files", ("trash_path", "path", "restore_path"), (), verb="restored"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "reason"), ("reason",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("revert-reclassification", "change_files", ("path", "reason"), ("path",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "episode_memory": ("action", (
-        _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client")),
+        _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("inspect", "read_episode", ("episode", "subject")),
         _row("candidates", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
         _row("coverage", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
-        _row("prepare", "record_episode", ("episode", "candidate", "proposal", "input_revision", "journal_digest", "order", "max_leaves")),
-        _row("disposition", "record_episode", ("episode", "candidate", "disposition", "reason", "input_revision", "journal_digest")),
-        _row("resume", "record_episode", ("episode", "candidate", "input_revision", "journal_digest", "order", "max_leaves", "postcommit")),
+        _row("prepare", "record_episode", ("episode", "candidate", "proposal", "input_revision", "journal_digest", "order", "max_leaves"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("disposition", "record_episode", ("episode", "candidate", "disposition", "reason", "input_revision", "journal_digest"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("resume", "record_episode", ("episode", "candidate", "input_revision", "journal_digest", "order", "max_leaves", "postcommit"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
 }
 
@@ -683,7 +689,8 @@ def _schema_rows():
         ):
             rows.append(_row(action, "change_schema" if action in {"save", "restore"} else "read_schema",
                              fields, required, kind="preview" if action == "propose" else None,
-                             constraints=(_literal("subject", subject),), destructive=action in {"save", "restore"}))
+                             constraints=(_literal("subject", subject),), destructive=action in {"save", "restore"},  # nosemgrep: ep-word-membership -- closed schema operation names; only its outcome verb changed.
+                             verb="restored" if action == "restore" else "saved" if action == "save" else None))
     # These are closed schema API subjects, not extensible vocabulary entry keys.
     for subject in ("contract", "categories", "relations", "traversal-profiles"):
         for action in ("infer", "validate", "diff"):
@@ -695,7 +702,8 @@ def _schema_rows():
             rows.append(_row(action, "read_schema", fields, ("name",) if subject == "contract" else (), kind=kind, constraints=constraints))
             if action == "infer":
                 rows.append(_row(action, "change_schema", fields, ("name",) if subject == "contract" else ("proposal",),
-                                 kind="infer-and-save", constraints=(subject_constraint, _literal("save", True, implied=True)), destructive=True))
+                                 kind="infer-and-save", constraints=(subject_constraint, _literal("save", True, implied=True)), destructive=True,
+                                 verb="saved"))
     for action, fields, required in (
         ("inventory", ("subject",), ()),
         ("inspect", ("subject", "name"), ("name",)),
@@ -707,7 +715,8 @@ def _schema_rows():
     ):
         write = action in {"save", "refresh"}
         rows.append(_row(action, "change_schema" if write else "read_schema", fields, required,
-                         constraints=(_literal("subject", "workflow-contracts"),), destructive=write))
+                         constraints=(_literal("subject", "workflow-contracts"),), destructive=write,
+                         verb=("saved" if action == "save" else "updated") if write else None))
     for subject, save_operation in (("context-roles", "save-roles"), ("activation-conventions", "save-conventions")):
         for action, fields, required in (
             ("validate", ("subject", "proposal"), ()),
@@ -718,13 +727,14 @@ def _schema_rows():
         ):
             write = action in {save_operation, "restore"}
             rows.append(_row(action, "change_schema" if write else "read_schema", fields, required,
-                             constraints=(_literal("subject", subject),), destructive=write))
+                             constraints=(_literal("subject", subject),), destructive=write,
+                             verb=("restored" if action == "restore" else "saved") if write else None))
     rows.extend((
         _row("inspect", "read_schema", ("subject", "name"), constraints=(_literal("subject", "query-engine"),)),
         _row("resolve-entity-type", "read_schema", ("subject", "query", "requested_type", "limit", "continuation"), constraints=(_literal("subject", "entity-types"),)),
         _row("propose-relation", "read_schema", ("subject", "proposal", "date_from", "date_to", "continuation", "limit"), ("proposal",), constraints=(_literal("subject", "relations"),)),
-        _row("save-relations", "change_schema", ("subject", "proposal", "expected_hash", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("proposal", "why"), constraints=(_literal("subject", "relations"),), destructive=True),
-        _row("save-entity-types", "change_schema", ("subject", "proposal", "expected_hash", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("proposal", "why"), destructive=True),
+        _row("save-relations", "change_schema", ("subject", "proposal", "expected_hash", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("proposal", "why"), constraints=(_literal("subject", "relations"),), destructive=True, verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("save-entity-types", "change_schema", ("subject", "proposal", "expected_hash", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("proposal", "why"), destructive=True, verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("census", "read_schema", ("subject", "detail", "date_from", "date_to"), constraints=(_literal("subject", "relations"),)),
     ))
     return "operation", tuple(rows)
@@ -750,27 +760,33 @@ def _governance_rows():
         raise RuntimeError("governance operation fields drifted from OPERATION_SPECS")
     tools = {"inspect": "read_governance", "owner": "change_governance",
              "token_session": "grant_session_access", "self_session": "change_session_access"}
+    # Each owner write reports one verb; the inspect operations are reads and have none. The keys are
+    # the closed operation names of OPERATION_SPECS, which the fields check above keeps in step.
+    verbs = {"propose": "saved", "commit": "saved", "grant": "saved", "revoke": "discarded", "suspend": "updated",  # nosemgrep: ep-word-dict -- closed OPERATION_SPECS names.
+             "resume": "updated", "undo": "discarded", "declare": "saved", "backfill_companion": "saved"}
     rows = []
     for action, spec in OPERATION_SPECS.items():
         if action == "session":
             # These are the command's closed authorization-session actions.
-            for session_action in ("open", "status", "rotate", "close"):
-                rows.append(_row(action, "manage_authorization_session", fields[action],
-                                 kind=session_action, constraints=(_literal("session_action", session_action, implied=True),)))
+            for session_action, session_verb in (("open", "saved"), ("status", "updated"), ("rotate", "updated"), ("close", "discarded")):  # nosemgrep: ep-word-set -- closed session actions.
+                rows.append(_row(action, "manage_authorization_session", fields[action], kind=session_action,
+                                 constraints=(_literal("session_action", session_action, implied=True),), verb=session_verb))
         elif action in {"grant", "revoke"}:
             rows.append(_row(action, tools[spec.authorization], fields[action],
-                             constraints=(_literal("scope", "session", True),), destructive=spec.destructive))
+                             constraints=(_literal("scope", "session", True),), destructive=spec.destructive, verb=verbs[action]))
             rows.append(_row(action, tools[spec.authorization], fields[action],
-                             constraints=(_literal("scope", None),), destructive=spec.destructive))
+                             constraints=(_literal("scope", None),), destructive=spec.destructive, verb=verbs[action]))
             for variant in spec.variants:
                 rows.append(_row(action, tools[variant.authorization], fields[action], kind=f"{action}-{variant.mode}",
-                                 constraints=(_literal("scope", variant.mode, implied=True),), destructive=variant.destructive))
+                                 constraints=(_literal("scope", variant.mode, implied=True),), destructive=variant.destructive,
+                                 verb=verbs[action]))
         elif action == "backfill_companion":
             for mode in ("preview", "commit"):
                 rows.append(_row(action, "change_governance", fields[action], kind=f"backfill-{mode}",
-                                 constraints=(_literal("backfill_action", mode, implied=True),)))
+                                 constraints=(_literal("backfill_action", mode, implied=True),), verb=verbs[action]))
         else:
-            rows.append(_row(action, tools[spec.authorization], fields[action], destructive=spec.destructive))
+            rows.append(_row(action, tools[spec.authorization], fields[action], destructive=spec.destructive,
+                             verb=verbs.get(action)))
     return "operation", tuple(rows)
 
 
@@ -789,15 +805,17 @@ def _maintenance_rows():
             # the dispatcher refuses it without both. The audit paging fields stay on the read variants.
             rows.append(_row(action, "check_memory" if read else "repair_memory",
                              fields if read else (field, *write_extra, "plan_id", "why"),
-                             constraints=(_literal(field, value, value is default),), destructive=not read))
+                             constraints=(_literal(field, value, value is default),), destructive=not read,
+                             verb=None if read else "updated"))
     rows.append(_row("maintenance-job", "check_memory", ("run_id", "cursor")))
-    rows.append(_row("maintenance-job-cancel", "repair_memory", ("run_id", "why"), ("run_id", "why")))
+    rows.append(_row("maintenance-job-cancel", "repair_memory", ("run_id", "why"), ("run_id", "why"), verb="discarded"))  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     for action in ("structured-files", "tag-variants", "collections-store-adopt-local", "collections-store-export"):
         fields = ("collection", "apply", "plan_id", "source_snapshot", "why", "exclude_groups", "acknowledge_skipped")
         for value in (None, False, True):
             write = value is True
             rows.append(_row(action, "repair_memory" if write else "check_memory", fields,
-                             constraints=(_literal("apply", value, value is None),), destructive=write))
+                             constraints=(_literal("apply", value, value is None),), destructive=write,
+                             verb="updated" if write else None))
     fields_by_action = {
         "work-item": ("refs", "paths", "review_ref", "hydration_recheck"),
         "propose": ("plan",), "preview": ("run_id",), "status": ("run_id",),
@@ -811,10 +829,12 @@ def _maintenance_rows():
         raise RuntimeError("curation operation fields drifted from CURATION_ACTIONS")
     for action in CURATION_ACTIONS:
         read = action in READ_ONLY_ACTIONS
+        destructive = not read and action not in {"propose", "propose-compensation"}  # nosemgrep: ep-word-membership -- closed CURATION_ACTIONS names.
         rows.append(_row("curation", "check_memory" if read else "repair_memory",
                          ("curation_action", *fields_by_action[action]),
                          kind=f"curation-{action}", constraints=(_literal("curation_action", action, implied=True),),
-                         destructive=not read and action not in {"propose", "propose-compensation"}))
+                         destructive=destructive,
+                         verb=None if read else "restored" if action == "revert" else "updated" if destructive else "saved"))
     return "mode", tuple(rows)
 
 

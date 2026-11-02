@@ -156,5 +156,5 @@ def test_legacy_detail_returns_the_untouched_leaf_for_both_states():
 def test_envelope_keys_lead_the_compact_projection():
     """A client scanning the first keys must reach the decisive ones immediately."""
     env = mt.project_terminal(_committed())
-    leading = list(env)[:5]
-    assert leading == ["user_summary", "ok", "state", "terminal", "status"]
+    leading = list(env)[:4]
+    assert leading == ["ok", "state", "terminal", "status"]

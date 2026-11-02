@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import typing
 from pathlib import Path
 
 import pytest
 
-from exomem import commands, mutation_terminal, relation_review, writer_lease
+from exomem import (
+    command_surface,
+    commands,
+    mutation_terminal,
+    operation_entries,
+    relation_review,
+    writer_lease,
+)
 from exomem import server as server_module
 from exomem.governance import principal as principal_module
 
@@ -219,7 +227,7 @@ def test_a_write_that_stores_several_files_names_the_first_and_counts_the_rest()
         idempotency_key=None,
     )
 
-    summary = mutation_terminal.project_terminal(terminal)["user_summary"]
+    summary = mutation_terminal.project_terminal(terminal, outcome_verb="saved")["user_summary"]
 
     assert summary == "Saved 3 files -> Sources/a.md and 2 more"
 
@@ -261,11 +269,11 @@ def test_a_replayed_write_says_it_was_already_saved() -> None:
         idempotency_key="same-call",
     )
 
-    projected = mutation_terminal.project_terminal(terminal)
+    projected = mutation_terminal.project_terminal(terminal, outcome_verb="saved")
 
     assert next(iter(projected)) == "user_summary"
     assert projected["user_summary"] == "Already saved -> Knowledge Base/Records/log.md"
-    assert mutation_terminal.project_terminal(terminal) == projected
+    assert mutation_terminal.project_terminal(terminal, outcome_verb="saved") == projected
 
 
 def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> None:
@@ -280,6 +288,72 @@ def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> 
     assert rule in loop
     assert rule in skill
     assert "Working on Exomem does not make an unrelated conversation diagnostic." in skill
+
+
+def test_a_supersede_summary_leads_with_the_new_page(vault: Path) -> None:
+    peer = _seed_peer(vault)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "replace_memory")
+
+    out = writer_lease.invoke_command(
+        command, vault, old_path=peer, content=_PAGE, title="Successor", note_type="insight"
+    )
+
+    old_path, new_path = out["paths"]
+    assert old_path == peer
+    assert out["user_summary"] == f"Replaced -> {new_path} (was {peer})"
+
+
+def test_a_discard_summary_says_discarded_not_saved() -> None:
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "record_memory")
+    terminal = mutation_terminal.committed_terminal(
+        {"affected_paths": ["Knowledge Base/Records/log.md"]},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-1",
+        idempotency_key=None,
+    )
+    verb = command_surface.outcome_verb_of(command, {"action": "discard"})
+
+    summary = mutation_terminal.project_terminal(terminal, outcome_verb=verb)["user_summary"]
+
+    assert verb == "discarded"
+    assert summary.startswith("Discarded")
+
+
+def _declared_verbs() -> list[tuple[str, object]]:
+    """Every write command, and every write operation row of a grouped command, with its verb."""
+    declared: list[tuple[str, object]] = []
+    seen = set()
+    for command in (*commands.COMMANDS, *commands.PRODUCT_COMMANDS):
+        operations = operation_entries.OPERATIONS.get(command.name)
+        if operations is not None:
+            for entry in operations.entries:
+                if entry.effect == "write":
+                    declared.append((f"{command.name}.{entry.kind}", entry.outcome_verb))
+        elif command.cli_writes and command.name not in seen:
+            declared.append((command.name, command.outcome_verb))
+        seen.add(command.name)
+    return declared
+
+
+def test_every_write_declares_its_outcome_verb_from_the_closed_set() -> None:
+    """A new write that forgets its verb cannot silently report "saved"."""
+    closed = set(typing.get_args(operation_entries.OutcomeVerb))
+
+    undeclared = [name for name, verb in _declared_verbs() if verb not in closed]
+
+    assert undeclared == []
+    assert len(_declared_verbs()) > 80
+
+
+def test_a_write_that_declares_no_verb_gets_no_summary() -> None:
+    terminal = mutation_terminal.committed_terminal(
+        {"path": "Sources/a.md"},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-1",
+        idempotency_key=None,
+    )
+
+    assert "user_summary" not in mutation_terminal.project_terminal(terminal)
 
 
 def _retry_outcome(call) -> str:

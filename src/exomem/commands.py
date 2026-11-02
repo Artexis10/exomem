@@ -13576,7 +13576,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "first_run_safe": True,
     },
     "audit": {"surface": "primary", "actions": ("review",), "first_run_safe": True},
-    "edit": {"surface": "primary", "actions": ("update",), "first_run_safe": False, "outcome_verb": "updated"},
+    "edit": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
     "replace": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
     "link": {"surface": "primary", "actions": ("connect", "save"), "first_run_safe": False},
     "suggest_links": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
@@ -13598,10 +13598,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
     },
     "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
     "reconcile": {"surface": "advanced", "actions": ("update",), "first_run_safe": False},
-    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False, "outcome_verb": "updated"},  # nosemgrep: ep-word-set -- the product action tokens this command already declared; only outcome_verb was added.
-    "append_to_file": {"outcome_verb": "updated"},
-    "move_file": {"outcome_verb": "moved"},
-    "delete": {"outcome_verb": "deleted"},
+    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False},
     "record_memory": {
         "surface": "primary",
         "actions": ("ask", "review", "save", "update", "record"),
@@ -13615,6 +13612,18 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "episode_memory": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
 }
+#: What each write command reports on success. A grouped command declares its verbs on its operation
+#: rows (`operation_entries`) instead. A write in neither place gets no `user_summary`, and
+#: tests/test_plain_write_outcomes.py fails until it declares one. The keys are command names.
+_COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingProxyType({  # nosemgrep: ep-word-dict -- the registry's own command names, each mapped to a closed contract verb.
+    "add": "saved", "adopt": "saved", "audit_fix": "updated", "reconcile": "updated",
+    "edit": "updated", "replace": "replaced", "link": "updated", "preserve": "saved",
+    "note": "saved", "create_file": "saved", "move_file": "moved", "delete": "deleted",
+    "append_to_file": "updated", "recover_from_trash": "restored",
+    "remember": "saved", "edit_memory": "updated", "replace_memory": "replaced",
+    "capture_source": "saved", "preserve_evidence": "saved", "preserve_artifacts": "saved",
+    "transfer_artifact": "saved", "transfer_memory": "saved",
+})
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -13704,7 +13713,7 @@ def _build_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
                 restricted_refusal_floor=name in floored,
-                outcome_verb=meta.get("outcome_verb", "saved"),
+                outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
             )
         )
     return tuple(cmds)
@@ -13820,7 +13829,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False, "outcome_verb": "updated"},  # nosemgrep: ep-word-set -- the product action tokens this command already declared; only outcome_verb was added.
+        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
         "observe_memory",
@@ -14389,7 +14398,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
-                outcome_verb=meta.get("outcome_verb", "saved"),
+                outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
             )
         )
     return tuple(cmds)
