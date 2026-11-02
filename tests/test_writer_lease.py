@@ -7,6 +7,7 @@ import logging
 import multiprocessing
 import os
 import pickle
+import pprint
 import sqlite3
 import stat
 import threading
@@ -412,6 +413,8 @@ def _initialize_idempotency_client(database: Path, role: str, legacy: bool, chan
                     {
                         "role": role,
                         "phase": phase,
+                        # A post-commit storage failure is chained as the cause; it names the root error.
+                        "cause": repr(error.__cause__),
                         "python": sys.version.split()[0],
                         "sqlite": sqlite3.sqlite_version,
                         "windows_build": tuple(sys.getwindowsversion()),
@@ -481,7 +484,8 @@ def test_concurrent_cold_idempotency_initialization_keeps_both_clients_usable(tm
     results = _run_concurrent_idempotency_initialization(database, legacy=False)
 
     for role, result in zip(("first", "second"), results, strict=True):
-        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, None), result
+        # pytest truncates a tuple message; the formatted text keeps the child's full diagnostics.
+        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, None), pprint.pformat(result)
         if os.name != "nt":
             assert result[4] and all(mode == 0o600 for mode in result[4])
 
@@ -511,7 +515,7 @@ def test_concurrent_legacy_idempotency_initialization_preserves_completed_result
     results = _run_concurrent_idempotency_initialization(database, legacy=True)
 
     for role, result in zip(("first", "second"), results, strict=True):
-        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, {"kept": True}), result
+        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, {"kept": True}), pprint.pformat(result)
         if os.name != "nt":
             assert result[4] and all(mode == 0o600 for mode in result[4])
 
