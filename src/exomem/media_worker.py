@@ -38,6 +38,7 @@ from . import (
     embeddings,
     epistemic_graph,
     extract,
+    extraction_parts,
     graph_sync,
     index_sync,
     media_brakes,
@@ -78,6 +79,7 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
+    parse_frontmatter,
     post_commit_batch_fanout,
     read_guarded_text,
 )
@@ -375,6 +377,26 @@ def _result_binary_identity(
     identity: tuple[tuple[int, int, int, int, int], str | None]
 ) -> dict[str, object]:
     return {"stat": list(identity[0]), "sha256": identity[1]}
+
+
+def _within_result_limit(text: str, name: str) -> str:
+    """`text`, or as much of its start as one result carries, then a line that says the rest is cut.
+
+    The original keeps the whole content; the cut is visible on the page and in the log.
+    """
+    limit = media_jobs.MAX_EXTRACTED_TEXT_BYTES
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    marker = (
+        f"\n\n[... truncated: kept the first {limit:,} of {len(raw):,} bytes of extracted text; "
+        "the whole content is in the original ...]"
+    )
+    kept = raw[: limit - len(marker.encode("utf-8"))].decode("utf-8", errors="ignore").rstrip()
+    log.warning(
+        "extracted text of %s is %d bytes, over the %d-byte limit of one result; kept its start", name, len(raw), limit
+    )
+    return kept + marker
 
 
 class MediaWorker:
@@ -823,7 +845,7 @@ class MediaWorker:
                 next_action=_FAILED_ACTION,
             )
             return self._publication_outcome(committed, FAILED, error)
-        text = result.sidecar_text
+        text = _within_result_limit(result.sidecar_text, job.sidecar_path.name)
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
                 BLOCKED,
@@ -1188,7 +1210,7 @@ class MediaWorker:
     ) -> bool:
         if self._store is not None:
             payload: dict[str, object] = {
-                "text": preserve._cap_extracted_text(text),
+                "text": text,
                 "engine": engine,
                 "speakers": speakers or [],
                 "speaker_verification": speaker_verification or "unavailable",
@@ -1197,7 +1219,7 @@ class MediaWorker:
                 payload["asr"] = asr.as_payload()
             if ocr is not None:
                 payload["ocr"] = OcrFacts(
-                    ocr.confidence, preserve._cap_extracted_text(ocr.low_confidence_text)
+                    ocr.confidence, preserve._cap_low_confidence_text(ocr.low_confidence_text)
                 ).as_payload()
             if replaces is not None:
                 payload["replaces"] = replaces
@@ -1238,7 +1260,7 @@ class MediaWorker:
                 before, media_type=job.media_type
             ):
                 return False
-            writes = self._extraction_writes(
+            writes, surplus = self._extraction_writes(
                 job,
                 before,
                 guard,
@@ -1269,6 +1291,7 @@ class MediaWorker:
                 return False
             assert isinstance(handoff, DeferredGraphCompletion)
         self._complete_deferred_graph_completion(handoff, receipts)
+        extraction_parts.retire(self._vault_root, surplus)
         return True
 
     def _extraction_writes(
@@ -1284,55 +1307,62 @@ class MediaWorker:
         asr: AsrFacts | None,
         ocr: OcrFacts | None,
         reprocessing: bool,
-    ) -> tuple[PlannedWrite, ...]:
-        """The sidecar write for a finished extraction; a reprocess adds the page for the old one.
+    ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
+        """The writes for a finished extraction, and the part pages to retire once they commit.
 
-        The old extraction moves to its own page in the same atomic batch, so the sidecar
-        always holds one extraction, and a rejected batch leaves the old text where it was.
+        The first write is the sidecar. It holds the first part of the text; the rest is on
+        part pages in the same batch. A reprocess adds the pages for the old extraction, with its
+        parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
+        text where it was.
         """
-        if not reprocessing:
-            target = preserve.render_sidecar_extraction(
-                before,
-                text=text,
-                engine=engine,
-                speakers=speakers,
-                speaker_verification=speaker_verification,
-                attempts=max(1, job.attempts),
-                asr=asr,
-                ocr=ocr,
-            )
-            return (
-                PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
-            )
-        page, ordinal = prior_extraction.next_page(
-            job.sidecar_path, prior_extraction.links_of(before)
-        )
-        prior_page = prior_extraction.render(
-            before,
-            artifact_name=job.sidecar_path.name.removesuffix(".md"),
-            sidecar_link=prior_extraction.link_to(self._vault_root, job.sidecar_path),
-            ordinal=ordinal,
-            date_iso=temporal.stamp(temporal.now()),
-        )
-        target = preserve.render_sidecar_extraction(
-            before,
-            text=text,
+        fields = dict(
             engine=engine,
             speakers=speakers,
             speaker_verification=speaker_verification,
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
+        )
+        if not reprocessing:
+            plan, write = preserve.sidecar_extraction_writes(
+                self._vault_root, job.sidecar_path, before, guard, text=text, **fields
+            )
+            return (write, *plan.writes), plan.surplus
+        page, ordinal = prior_extraction.next_page(
+            job.sidecar_path, prior_extraction.links_of(before)
+        )
+        date_iso = temporal.stamp(temporal.now())
+        old_pieces = extraction_parts.split(
+            extraction_parts.text_with_gaps(self._vault_root, job.sidecar_path, before)
+        )
+        old_plan = extraction_parts.plan(
+            self._vault_root, page, old_pieces,
+            inherited=parse_frontmatter(before)[0], date_iso=date_iso,
+        )
+        prior_page = prior_extraction.render(
+            before,
+            artifact_name=job.sidecar_path.name.removesuffix(".md"),
+            sidecar_link=prior_extraction.link_to(self._vault_root, job.sidecar_path),
+            ordinal=ordinal,
+            date_iso=date_iso,
+            text=old_pieces[0],
+            parts=extraction_parts.layout(page, old_pieces),
+        )
+        plan, write = preserve.sidecar_extraction_writes(
+            self._vault_root, job.sidecar_path, before, guard, text=text,
             prior_extractions=(
                 *prior_extraction.links_of(before),
                 prior_extraction.link_to(self._vault_root, page),
             ),
             reset_speakers=True,
+            **fields,
         )
         return (
-            PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
+            write,
             PlannedWrite(page, prior_page, expected_hash=MISSING_CONTENT_HASH),
-        )
+            *old_plan.writes,
+            *plan.writes,
+        ), plan.surplus
 
     def _reprocesses_completed(self, job: _Job) -> bool:
         """Whether this job re-extracts a transcript that is complete, so it must not touch the sidecar."""
@@ -2244,11 +2274,12 @@ class MediaWorker:
             if not basis_holds(before):
                 return
             writes: tuple[PlannedWrite, ...] = ()
+            surplus: tuple[Path, ...] = ()
             try:
                 if result.kind == "extraction":
                     asr = result.payload.get("asr")
                     ocr = result.payload.get("ocr")
-                    writes = self._extraction_writes(
+                    writes, surplus = self._extraction_writes(
                         job,
                         before,
                         guard,
@@ -2327,6 +2358,7 @@ class MediaWorker:
             parent_receipted_handoff=True,
         ):
             return
+        extraction_parts.retire(self._vault_root, surplus)
         self._store.finalize_result(
             result, requeue_remaining=result.kind in {"extraction", "pending"}
         )
