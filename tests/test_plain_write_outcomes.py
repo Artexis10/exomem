@@ -15,6 +15,7 @@ from exomem import (
     mutation_terminal,
     operation_entries,
     relation_review,
+    workflow_skills,
     writer_lease,
 )
 from exomem import server as server_module
@@ -205,7 +206,7 @@ def test_a_committed_save_leads_with_a_plain_summary(vault: Path) -> None:
     )
 
     assert next(iter(out)) == "user_summary"
-    assert out["user_summary"] == "Saved -> Knowledge Base/Notes/plain.md"
+    assert out["user_summary"] == "Saved -> Knowledge Base/Notes/plain.md (personal Exomem)"
 
 
 def test_a_delete_summary_says_deleted_not_saved(vault: Path) -> None:
@@ -219,7 +220,9 @@ def test_a_delete_summary_says_deleted_not_saved(vault: Path) -> None:
         confirm=True,
     )
 
-    assert out["user_summary"] == "Deleted -> Knowledge Base/Notes/Insights/to-delete.md"
+    assert out["user_summary"] == (
+        "Deleted -> Knowledge Base/Notes/Insights/to-delete.md (personal Exomem)"
+    )
 
 
 def test_a_move_summary_says_moved_and_names_both_ends(vault: Path) -> None:
@@ -233,7 +236,7 @@ def test_a_move_summary_says_moved_and_names_both_ends(vault: Path) -> None:
     )
 
     assert out["user_summary"] == (
-        "Moved Knowledge Base/Notes/old-name.md -> Knowledge Base/Notes/new-name.md"
+        "Moved Knowledge Base/Notes/old-name.md -> Knowledge Base/Notes/new-name.md (personal Exomem)"
     )
 
 
@@ -247,7 +250,7 @@ def test_a_write_that_stores_several_files_names_the_first_and_counts_the_rest()
 
     summary = mutation_terminal.project_terminal(terminal, outcome_verb="saved")["user_summary"]
 
-    assert summary == "Saved 3 files -> Sources/a.md and 2 more"
+    assert summary == "Saved 3 files -> Sources/a.md and 2 more (personal Exomem)"
 
 
 def test_a_repeated_request_returns_the_same_summary_as_the_first(vault: Path) -> None:
@@ -290,8 +293,30 @@ def test_a_replayed_write_says_it_was_already_saved() -> None:
     projected = mutation_terminal.project_terminal(terminal, outcome_verb="saved")
 
     assert next(iter(projected)) == "user_summary"
-    assert projected["user_summary"] == "Already saved -> Knowledge Base/Records/log.md"
+    assert projected["user_summary"] == (
+        "Already saved -> Knowledge Base/Records/log.md (personal Exomem)"
+    )
     assert mutation_terminal.project_terminal(terminal, outcome_verb="saved") == projected
+
+
+def test_the_summary_names_the_store_that_took_the_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two connectors can share a display name; the sentence tells the user which store saved."""
+    terminal = mutation_terminal.committed_terminal(
+        {"path": "Sources/a.md"},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-1",
+        idempotency_key="same-call",
+    )
+
+    personal = mutation_terminal.project_terminal(terminal, outcome_verb="saved")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    cloud = mutation_terminal.project_terminal(terminal, outcome_verb="saved")
+
+    assert personal["user_summary"] == "Saved -> Sources/a.md (personal Exomem)"
+    assert cloud["user_summary"] == "Saved -> Sources/a.md (Exomem Cloud)"
+    assert next(iter(cloud)) == "user_summary"
+    # A replay reads the stored terminal, so the same deployment gives the same sentence.
+    assert mutation_terminal.project_terminal(terminal, outcome_verb="saved") == cloud
 
 
 def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> None:
@@ -308,6 +333,23 @@ def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> 
     assert "Working on Exomem does not make an unrelated conversation diagnostic." in skill
 
 
+def test_every_skill_tells_the_agent_to_use_the_store_the_user_named() -> None:
+    """The rule is only in skill text, and a standalone workflow skill is installed without the core."""
+    schema = Path(__file__).parents[1] / "src/exomem/_scaffold/_Schema"
+    skills = [
+        source
+        for _, source in workflow_skills.contract_sources(schema)
+        if source.name == "SKILL.md"
+    ]
+
+    assert skills
+    for source in skills:
+        text = " ".join(source.read_text(encoding="utf-8").split())
+        assert "Bootstrap's `store` names the Exomem this connector reaches." in text, source
+        assert "write nothing elsewhere" in text, source
+        assert "a write landed in a store other than the one `user_summary` names" in text, source
+
+
 def test_a_supersede_summary_leads_with_the_new_page(vault: Path) -> None:
     peer = _seed_peer(vault)
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "replace_memory")
@@ -318,7 +360,7 @@ def test_a_supersede_summary_leads_with_the_new_page(vault: Path) -> None:
 
     old_path, new_path = out["paths"]
     assert old_path == peer
-    assert out["user_summary"] == f"Replaced -> {new_path} (was {peer})"
+    assert out["user_summary"] == f"Replaced -> {new_path}, was {peer} (personal Exomem)"
 
 
 def test_a_discard_summary_says_discarded_not_saved() -> None:

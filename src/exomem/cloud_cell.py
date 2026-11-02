@@ -80,6 +80,26 @@ def cloud_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
     return raw in _TRUE
 
 
+def hosted_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether `EXOMEM_HOSTED_CELL` selects the hosted cell (the one parse of that flag here)."""
+    values = os.environ if env is None else env
+    raw = str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower()
+    return raw in _TRUE
+
+
+def store_identity(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Which Exomem this process serves: its `kind` and the `name` to give a person.
+
+    One home for the answer, so the bootstrap and the write summary cannot disagree. Two
+    connectors can present the same display name; this tells their stores apart.
+    """
+    if cloud_mode_enabled(env):
+        return {"kind": "cloud", "name": "Exomem Cloud"}
+    if hosted_mode_enabled(env):
+        return {"kind": "hosted", "name": "Exomem Hosted"}
+    return {"kind": "personal", "name": "personal Exomem"}
+
+
 def cloud_read_only_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Whether `EXOMEM_CLOUD_READ_ONLY` puts the cell in read-only mode (D1.4)."""
     values = os.environ if env is None else env
@@ -118,7 +138,7 @@ def resource_policy(env: Mapping[str, str] | None = None) -> str:
         return selected
     if not cloud_mode_enabled(values):
         raise CloudConfigError("CLOUD_RESOURCE_POLICY_INVALID", "service profile requires Cloud mode")
-    if str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower() in _TRUE:
+    if hosted_mode_enabled(values):
         raise CloudConfigError("CLOUD_RESOURCE_POLICY_CONFLICT", "service profile cannot select Hosted mode")
     for name in ("EXOMEM_PRELOAD_MODELS", "EXOMEM_RELEASE_GPU_WHEN_IDLE"):
         if str(values.get(name, "")).strip():

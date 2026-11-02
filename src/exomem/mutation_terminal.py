@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
-from . import capabilities, operation_entries, relation_registry
+from . import capabilities, cloud_cell, operation_entries, relation_registry
 from . import curation as curation_module
 from .operation_entries import OutcomeVerb
 
@@ -1950,7 +1950,7 @@ def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | 
         return f"{head} {names[0]} -> {names[1]}"
     if verb == "replaced" and len(names) == 2:
         # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
-        return f"{head} -> {names[1]} (was {names[0]})"
+        return f"{head} -> {names[1]}, was {names[0]}"
     return f"{head} {len(names)} files -> {names[0]} and {len(names) - 1} more"
 
 
@@ -1985,7 +1985,9 @@ def project_terminal(
     compact: dict[str, Any] = {}
     user_summary = _user_summary(result, outcome_verb)
     if user_summary is not None:
-        compact["user_summary"] = user_summary
+        # Named at render time from the deployment, so a replay of the stored terminal reads the
+        # same. Two connectors can present one display name; the sentence says which store it was.
+        compact["user_summary"] = f"{user_summary} ({cloud_cell.store_identity()['name']})"
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
