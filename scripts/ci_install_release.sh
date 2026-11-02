@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install a published exomem release into a new virtual environment for the
-# installed journey's compatibility checks. Dependencies come from the release's
+# compatibility tests and the installed journey. Dependencies come from the release's
 # own uv.lock with their hashes, so a later upstream release cannot change what
 # those checks run. The wheel installs from a local file URL with its digest, so its
 # provenance record names the file and the digest that the journey verifies.
