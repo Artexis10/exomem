@@ -9312,7 +9312,7 @@ def _process_media(
                 continue
             row: dict[str, object] = {
                 "path": relative,
-                "outcome": _MEDIA_OUTCOMES[operation],
+                "outcome": mutation_terminal_module.MEDIA_OUTCOMES[operation],
                 "state": state,
                 "media_type": result.media_type,
                 "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
@@ -9404,8 +9404,6 @@ def _process_media(
     payload["index_refresh_remaining"] = _index_refresh_remaining()
     return payload
 
-
-_MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
 
 
 def _run_media_operation(

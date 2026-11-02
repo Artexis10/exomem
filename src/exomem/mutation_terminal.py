@@ -143,6 +143,10 @@ _ADVISORY_FAILURE = (
 #: multi-batch mutation shares this budget rather than multiplying it.
 _MAX_DERIVED_DIAGNOSTICS = 9
 
+#: Each media operation and the outcome its result reports.
+# nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
+MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+
 #: How an agent tells the user about a write. One sentence, carried by the bootstrap
 #: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
 #: keeps both copies equal to this one.
@@ -381,7 +385,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         return {}
     operation = result.get("operation")
-    if operation not in {"process", "retry", "reprocess"}:
+    if operation not in MEDIA_OUTCOMES:
         return {}
 
     def integer(value: Any, *, allow_none: bool = False) -> bool:
@@ -468,7 +472,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
                 }
             )
             continue
-        if outcome not in {"processed", "retried", "reprocessed"} or state not in {
+        if outcome not in MEDIA_OUTCOMES.values() or state not in {
             "pending",
             "running",
             "blocked",
