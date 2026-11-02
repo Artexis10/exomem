@@ -62,13 +62,16 @@ def paired_interval(
 
 
 def bootstrap_profiles(row: dict) -> str:
-    """How the agent called bootstrap: `session`, `compact`, or `none`, one word per call, in order."""
-    kinds = [
-        str((c["arguments"].get("operation") or {}).get("profile", "compact"))
-        for c in row["calls"]
-        if c["tool"] == "bootstrap"
-    ]
-    return "+".join(kinds) or "none"
+    """How the agent called bootstrap, one word per call in order: `settings`, `writer-status`, or the profile of an
+    `instructions` call (`compact` unless the call names one). `none` when it never called bootstrap."""
+    words = []
+    for call in row["calls"]:
+        if call["tool"] != "bootstrap":
+            continue
+        operation = call["arguments"].get("operation") or {}
+        kind = str(operation.get("kind"))
+        words.append(str(operation.get("profile", "compact")) if kind == "instructions" else kind)
+    return "+".join(words) or "none"
 
 
 def mentions(text: str) -> list[str]:
@@ -172,8 +175,9 @@ def build(paths: Sequence[Path], *, baseline: str, candidate: str) -> str:
         "",
         "## Bootstrap calls",
         "",
-        "How each agent called bootstrap (the profile of each call, in order). The scripted server serves the session",
-        "profile for any `profile: session` call and does not check the digest.",
+        "How each agent called bootstrap, one word per call in order: the profile of an `instructions` call, or the",
+        "operation kind otherwise. Only an `instructions` call with the `session` profile returns `store` (candidate).",
+        "The scripted server serves the session profile for any `profile: session` call and does not check the digest.",
         "",
         "| case | arm | model | calls per run |",
         "|---|---|---|---|",
