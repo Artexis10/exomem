@@ -1070,22 +1070,14 @@ def test_the_registry_is_reseeded_after_the_build_before_the_graph_proof(
 
 
 @pytest.fixture
-def earlier_release_catalogue(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def earlier_release_catalogue(older_catalogue: Path) -> Path:
     """A current-schema catalogue that the serving worker of an earlier release built.
 
     Its checkpoints carry that worker's registry instance; `freshness.clear()`
     makes this process the new one, as an upgrade does.
     """
-    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
-    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    for relative, text in NOTES.items():
-        path = vault / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    freshness.clear()
-    lexstore.clear_stores()
-    lexstore.ensure_fresh(vault)
-    connection = sqlite3.connect(lexstore.lexical_path(vault))
+    lexstore.ensure_fresh(older_catalogue)
+    connection = sqlite3.connect(lexstore.lexical_path(older_catalogue))
     try:
         connection.execute(
             "UPDATE meta SET value = 'an-earlier-release' WHERE key = 'catalog_release'"
@@ -1095,17 +1087,7 @@ def earlier_release_catalogue(vault: Path, monkeypatch: pytest.MonkeyPatch) -> I
         connection.close()
     lexstore.clear_stores()
     freshness.clear()
-    service_standby.reset_for_tests()
-    readiness.reset()
-    try:
-        yield vault
-    finally:
-        lexstore.discard_detached_catalogs()
-        lexstore.await_repairs_idle(vault)
-        service_standby.reset_for_tests()
-        readiness.reset()
-        lexstore.clear_stores()
-        freshness.clear()
+    return older_catalogue
 
 
 def _editor_save(path: Path, text: str) -> None:

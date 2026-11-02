@@ -374,29 +374,13 @@ def test_every_declared_site_remains_constructible() -> None:
 @pytest.fixture
 def current_catalogue(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A seeded live registry and a lexical catalogue published at it."""
-    from exomem import freshness, lexstore, readiness
-    from exomem import vault as vault_module
+    from exomem import file_watcher, freshness, lexstore, readiness
 
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     freshness.clear()
     lexstore.clear_stores()
-    freshness.seed(
-        vault,
-        "kb",
-        (
-            (str(path), freshness.stat_signature(path))
-            for path in find_module._walk_md(vault / "Knowledge Base")
-        ),
-    )
-    freshness.seed(
-        vault,
-        "vault",
-        (
-            (str(path), freshness.stat_signature(path))
-            for path in vault_module.walk_vault_md(vault)
-        ),
-    )
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
     lexstore.ensure_fresh(vault)
     try:
         yield vault
