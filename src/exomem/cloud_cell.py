@@ -81,7 +81,7 @@ def cloud_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
 
 
 def hosted_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Whether `EXOMEM_HOSTED_CELL` selects the hosted cell (the one parse of that flag here)."""
+    """Whether `EXOMEM_HOSTED_CELL` selects the hosted cell (truthy-set parse, like the cloud flag)."""
     values = os.environ if env is None else env
     raw = str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower()
     return raw in _TRUE
