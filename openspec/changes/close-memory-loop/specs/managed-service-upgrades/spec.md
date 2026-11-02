@@ -32,7 +32,7 @@ Final runtime admission SHALL retain the existing strict source and access check
 - **AND** promotion adopts it after ownership and heals changed, new, deleted and excluded material before runtime admission
 
 #### Scenario: A release change without a schema change cuts over through the standby's catalogue
-- **WHEN** a managed upgrade targets a release whose catalogue schema and semantic identity match the live catalogue, and the live catalogue's release stamp names the serving release
+- **WHEN** a managed upgrade targets a release whose catalogue schema and semantic identity match the live catalogue, and the live catalogue's release stamp names the release being replaced
 - **THEN** the standby builds a complete held temporary instead of proving the live catalogue current
 - **AND** promotion adopts that catalogue and records `lexical_catalogue: adopted`
 - **AND** a save that landed after the build is searchable once retrieval is admitted, with no whole-catalogue rebuild
