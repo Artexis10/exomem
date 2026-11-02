@@ -100,11 +100,25 @@ if retry_catalogue:
 
     lexstore.assess_live_catalog = transient_assessment
 
+if reprove_graph:
+    # The candidate's first proof declines. A held proof is kept across a
+    # publication, so the re-proof below runs only because none is held.
+    from exomem.epistemic_graph import SnapshotAdoption  # noqa: E402
+
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+
+    def declined_once(self, **kwargs):
+        EpistemicGraphIndex.adopt_published_snapshot = real_adopt
+        return SnapshotAdoption(False, reason="sources_kept_moving")
+
+    EpistemicGraphIndex.adopt_published_snapshot = declined_once
+
 # D7: warm as a standby. No lease, no publication, no scheduler, no watcher --
 # the old worker is still the one serving and still owns every repair.
 service_standby.enter_standby()
 service_standby.warm(root)
 if reprove_graph:
+    assert service_standby.cutover_components()["graph_snapshot"] == "waiting"
     # A separate serving interpreter republishes after the candidate's proof.
     assert _run_child(root, root.parent, ["outgoing"])["available"]
     service_standby.REPROVE_INTERVAL_SECONDS = 0.0
