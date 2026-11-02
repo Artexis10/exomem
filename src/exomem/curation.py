@@ -1272,30 +1272,49 @@ def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
     return _guarded_text(Path(vault_root), path, stale=True)
 
 
+@dataclass
+class _PlanPeers:
+    """The pages a plan's earlier steps create, as a later step's leaf will count them."""
+
+    possible: bool = False  # an earlier create that may be a governed page
+    certain: bool = False  # an earlier create whose leaf reported a fully governed page
+    applicability: str | None = None  # what the step being prepared reported, for the next
+
+
 def _require_committable(
     review: Mapping[str, Any],
     validation: Mapping[str, Any],
     *,
     relation_pending: bool,
-    pages_pending: bool,
+    peers: _PlanPeers,
 ) -> None:
     """Refuse a create or supersede step the leaf would refuse at commit.
 
     The review is held back from the leaf's validation, so the leaf cannot object
     to it there; its validation still says whether the page needs one. Only a
     fully governed page is reviewed at commit; the leaf ignores a review elsewhere.
-    When an earlier step creates a page, the page gains a peer before it commits and
-    may need the review then, so the leaf judges it at execution.
+    A page that needs no review only because no other governed page exists
+    (`bootstrap`) needs one once an earlier step's governed page exists.
     """
+    from . import semantic_contract
+
+    peers.applicability = validation.get("applicability")
+    bootstrap = validation.get("relation_disposition") == semantic_contract.RELATION_BOOTSTRAP_KIND
     if (
         review
-        and not pages_pending
         and validation.get("applicability") == "full"
         and not validation.get("reviewed_none_required")
+        and not (bootstrap and peers.possible)
     ):
         raise _error(
             "RELATION_REVIEW_NOT_APPLICABLE",
             "the page needs no reviewed-none relation review; drop relation_disposition",
+        )
+    if not review and bootstrap and peers.certain and not relation_pending:
+        raise _error(
+            "SEMANTIC_CONTRACT_BLOCKED",
+            "the step would block at commit: RELATION_DISPOSITION_MISSING once an earlier "
+            "step's page exists; give the page a relation or a reviewed_none review",
         )
     _refuse_blocked(
         validation.get("contract_result"), relation_answered=bool(review) or relation_pending
@@ -1341,9 +1360,10 @@ def _prepare_step(
     ordinal: int,
     *,
     relation_pending: bool = False,
-    pages_pending: bool = False,
+    peers: _PlanPeers | None = None,
 ) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
+    peers = peers if peers is not None else _PlanPeers()
     from . import (
         commands,
         relation_queue,
@@ -1392,10 +1412,7 @@ def _prepare_step(
                 )
             validation = preflight.as_dict()
             _require_committable(
-                review,
-                validation,
-                relation_pending=relation_pending,
-                pages_pending=pages_pending,
+                review, validation, relation_pending=relation_pending, peers=peers
             )
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
@@ -1489,10 +1506,7 @@ def _prepare_step(
                     canonical_json({"vocabulary_preparation": preparation}),
                 )
             _require_committable(
-                review,
-                validation,
-                relation_pending=relation_pending,
-                pages_pending=pages_pending,
+                review, validation, relation_pending=relation_pending, peers=peers
             )
             prepared = {
                 "draft_id": validation["draft_id"],
@@ -1747,7 +1761,9 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     created: list[tuple[str, str | None]] = []
     superseded: list[tuple[str, str | None]] = []
     written: set[str] = set()
+    peers = _PlanPeers()
     for ordinal, step in enumerate(steps):
+        peers.applicability = None
         args = step["args"]
         retired = _planned_link_targets(vault_root, args, superseded)
         if retired:
@@ -1773,7 +1789,7 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 step,
                 ordinal,
                 relation_pending=bool(related),
-                pages_pending=bool(created),
+                peers=peers,
             )
         conflicts = sorted(
             {str(expected["path"]) for expected in _binding_expectations(item)} & written
@@ -1789,11 +1805,16 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
         written |= after
         title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
         title = args.get(title_argument) if title_argument else None
-        created.extend(
+        new_pages = [
             (str(entry["path"]), title if isinstance(title, str) else None)
             for entry in item["effect_before"]
             if entry.get("absent") is True and entry["path"] in after
-        )
+        ]
+        created.extend(new_pages)
+        if new_pages:
+            # A create whose leaf reported nothing (an entity) may still be governed.
+            peers.possible |= peers.applicability is None or peers.applicability == "full"
+            peers.certain |= peers.applicability == "full"
         if step["kind"] == "supersede":
             from .vault import parse_frontmatter, resolve_display_title
 

@@ -65,9 +65,12 @@ reviewed instant, differs from the sealed postcondition. Proposal SHALL refuse
 with `RELATION_REVIEW_NOT_APPLICABLE` a step that gives a relation disposition
 when its leaf's validation reports a fully governed page that needs none,
 because the leaf refuses that review at commit; it ignores a review on any
-other page. When an earlier step of the plan creates a page, the step's page
-may need the review once that page exists, so the leaf judges the review at
-execution instead. Proposal SHALL also refuse with `SEMANTIC_CONTRACT_BLOCKED` a step
+other page. A page that needs no review only because no other governed page
+exists yet needs one once an earlier step of the plan creates a governed page.
+For such a page the leaf judges a given review at execution, and proposal
+SHALL refuse with `SEMANTIC_CONTRACT_BLOCKED` the step that gives none when an
+earlier step creates a fully governed page and the step links to no page the
+plan creates. Proposal SHALL also refuse with `SEMANTIC_CONTRACT_BLOCKED` a step
 whose leaf validation reports a blocking finding that the step does not answer,
 because the leaf refuses that step at commit. This covers create, supersede
 and edit steps. The step's own relation review answers a relation-disposition
@@ -102,6 +105,12 @@ leaf still refuses the step there.
   with a `reviewed_none` review
 - **THEN** proposal accepts the plan and both steps apply, because the second
   page needs its review once the first page exists
+
+#### Scenario: Review missing on a page that gains a peer in the plan
+
+- **WHEN** a vault has no governed page and a plan creates two pages, the second
+  without a relation or a review
+- **THEN** proposal refuses with `SEMANTIC_CONTRACT_BLOCKED` and stores no plan
 
 #### Scenario: Plan omits a review the page needs
 

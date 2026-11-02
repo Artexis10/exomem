@@ -411,25 +411,34 @@ def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_revie
     assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
 
 
-def test_a_review_needed_only_once_an_earlier_page_lands_applies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+
+def _fresh_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A new scaffold vault: it has no governed page, so a first page needs no review."""
     from exomem import find as find_module
     from exomem.init import init_vault
 
-    # A fresh vault has no governed page, so the first page needs no review. Once it
-    # lands, the second page has a peer and needs one.
     monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(tmp_path / "machine.json"))
     fresh = tmp_path / "fresh"
     init_vault(fresh)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(fresh))
     find_module.clear_cache()
-    shared = "\n\n## Connections\n\n- [[A name no page has yet]]\n"
+    return fresh
+
+
+_SHARED_NEW_LINK = "\n\n## Connections\n\n- [[A name no page has yet]]\n"
+
+
+def test_a_review_needed_only_once_an_earlier_page_lands_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = _fresh_vault(tmp_path, monkeypatch)
     first = _create_step(
-        "first", "curation-first", "## Observations\n\n- [finding] First. ^first" + shared
+        "first", "curation-first", "## Observations\n\n- [finding] First. ^first" + _SHARED_NEW_LINK
     )
     second = _create_step(
-        "second", "curation-second", "## Observations\n\n- [finding] Second. ^second" + shared
+        "second",
+        "curation-second",
+        "## Observations\n\n- [finding] Second. ^second" + _SHARED_NEW_LINK,
     )
     second["args"].update(
         relation_disposition="reviewed_none",
@@ -440,3 +449,65 @@ def test_a_review_needed_only_once_an_earlier_page_lands_applies(
     _apply(fresh, proposed)
 
     assert _resume(fresh, proposed)["phase"] == "completed"
+
+
+def test_a_page_that_will_need_a_review_once_an_earlier_page_lands_is_refused_at_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = _fresh_vault(tmp_path, monkeypatch)
+    first = _create_step(
+        "first", "curation-first", "## Observations\n\n- [finding] First. ^first" + _SHARED_NEW_LINK
+    )
+    second = _create_step(
+        "second",
+        "curation-second",
+        "## Observations\n\n- [finding] Second. ^second" + _SHARED_NEW_LINK,
+    )
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(fresh, first, second)
+
+    assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+
+
+def test_an_unneeded_review_after_an_earlier_create_is_still_refused_at_proposal(
+    vault: Path,
+) -> None:
+    target = _seed_note(
+        vault, "curation-target", "## Observations\n\n- [finding] Exists. ^target\n"
+    )
+    linked = _create_step(
+        "linked",
+        "curation-linked",
+        "## Observations\n\n- [finding] Cites the target. ^linked\n\n"
+        f"## Connections\n\n- [[{target.removesuffix('.md')}]]\n",
+    )
+    linked["args"].update(
+        relation_disposition="reviewed_none",
+        relation_review_reason="Claims no relation although it links one.",
+    )
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _home_step(), linked)
+
+    assert refused.value.code == "RELATION_REVIEW_NOT_APPLICABLE"
+
+
+def test_an_earlier_structural_page_gives_a_new_page_no_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = _fresh_vault(tmp_path, monkeypatch)
+    log = _create_step(
+        "log", "curation-log", "## Observations\n\n- [finding] Recorded the take. ^log\n"
+    )
+    log["args"].update(note_type="production-log", medium="reels", recorded="2026-10-01")
+    page = _create_step("page", "curation-page", "## Observations\n\n- [finding] Alone. ^page\n")
+    page["args"].update(
+        relation_disposition="reviewed_none",
+        relation_review_reason="A production log is no governed peer.",
+    )
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(fresh, log, page)
+
+    assert refused.value.code == "RELATION_REVIEW_NOT_APPLICABLE"
