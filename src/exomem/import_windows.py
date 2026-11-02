@@ -189,10 +189,10 @@ def _volume(root: Path) -> tuple[int, int]:
 
 
 def _growth_threshold(config: dict) -> float:
-    value = config.get("growth_threshold")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+    threshold = media_capacity.growth_threshold(config)
+    if threshold is None:
         raise _Unknown("the media store policy sets no growth threshold")
-    return float(value)
+    return threshold
 
 
 def _limits(config: dict) -> media_capacity.HydrationLimits:
@@ -407,7 +407,44 @@ def report(root: Path, *, after: str | None = None, series_id: str | None = None
         reply["window_budget"] = {"unknown": config_problem}
     elif config is not None and config.get("enabled") is True:
         reply["window_budget"] = _budget_section(root, config, windows, series)
+    elif config is not None and config.get("enabled") is False:
+        reply["retained_store"] = _retained_section(root, config)
     return reply
+
+
+def _retained_section(root: Path, config: dict) -> dict:
+    """A turned-off store's drain: the shortfall, the census, whether it latched, what it waits for and what cannot hydrate (D12)."""
+    def shortfall() -> int:
+        try:
+            return media_store.retained_shortfall(root, config)
+        except media_store.MediaStoreError as error:
+            raise _Unknown(str(error)) from error
+
+    waiting = None
+    try:
+        record = media_store.drain_record(root)
+    except media_store.MediaStoreError as error:
+        census = drained = {"unknown": str(error)}
+    else:
+        complete = (None if record is None or record.evicted is None else
+                    {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at})
+        if record is not None and record.attempt_failed:
+            # The latest attempt could not count; the last complete figures stay as history, never as the answer.
+            census = {"unknown": "the latest census could not count the evicted originals", "attempted_at": record.attempted_at}
+            if record.blocked_by:
+                census["blocked_by"] = list(record.blocked_by)  # The owner's own originals, for the owner to find.
+            if complete is not None:
+                census["last_complete"] = complete
+        else:
+            census = complete or {"unknown": "no census has completed"}
+        drained = record is not None and record.latched
+        waiting = None if record is None else record.waiting
+    try:
+        above = {"count": media_store.evicted_above_capacity(root, config)}
+    except media_store.MediaStoreError as error:
+        above = {"unknown": str(error)}
+    return {"shortfall": _figure(shortfall), "census": census, "drained": drained, "drain_waiting": waiting,
+            "above_hydration_capacity": above}
 
 
 def _census_or_unknown(root: Path) -> list[Window]:
