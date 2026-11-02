@@ -1273,16 +1273,23 @@ def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
 
 
 def _require_committable(
-    review: Mapping[str, Any], validation: Mapping[str, Any], *, relation_pending: bool
+    review: Mapping[str, Any],
+    validation: Mapping[str, Any],
+    *,
+    relation_pending: bool,
+    pages_pending: bool,
 ) -> None:
     """Refuse a create or supersede step the leaf would refuse at commit.
 
     The review is held back from the leaf's validation, so the leaf cannot object
     to it there; its validation still says whether the page needs one. Only a
     fully governed page is reviewed at commit; the leaf ignores a review elsewhere.
+    When an earlier step creates a page, the page gains a peer before it commits and
+    may need the review then, so the leaf judges it at execution.
     """
     if (
         review
+        and not pages_pending
         and validation.get("applicability") == "full"
         and not validation.get("reviewed_none_required")
     ):
@@ -1329,7 +1336,12 @@ def _refuse_blocked(contract_result: Any, *, relation_answered: bool) -> None:
 
 
 def _prepare_step(
-    vault_root: Path, step: Mapping[str, Any], ordinal: int, *, relation_pending: bool = False
+    vault_root: Path,
+    step: Mapping[str, Any],
+    ordinal: int,
+    *,
+    relation_pending: bool = False,
+    pages_pending: bool = False,
 ) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
     from . import (
@@ -1379,7 +1391,12 @@ def _prepare_step(
                     canonical_json({"vocabulary_preparation": preflight.evidence}),
                 )
             validation = preflight.as_dict()
-            _require_committable(review, validation, relation_pending=relation_pending)
+            _require_committable(
+                review,
+                validation,
+                relation_pending=relation_pending,
+                pages_pending=pages_pending,
+            )
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"create destination {path!r} exists")
@@ -1471,7 +1488,12 @@ def _prepare_step(
                     "CURATION_VOCABULARY_PREPARATION_REQUIRED",
                     canonical_json({"vocabulary_preparation": preparation}),
                 )
-            _require_committable(review, validation, relation_pending=relation_pending)
+            _require_committable(
+                review,
+                validation,
+                relation_pending=relation_pending,
+                pages_pending=pages_pending,
+            )
             prepared = {
                 "draft_id": validation["draft_id"],
                 "draft_hash": validation["draft_hash"],
@@ -1746,7 +1768,13 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 "creates; that link is its relation, so it takes no relation disposition",
             )
         with find_module.planned_pages(vault_root, created):
-            item = _prepare_step(vault_root, step, ordinal, relation_pending=bool(related))
+            item = _prepare_step(
+                vault_root,
+                step,
+                ordinal,
+                relation_pending=bool(related),
+                pages_pending=bool(created),
+            )
         conflicts = sorted(
             {str(expected["path"]) for expected in _binding_expectations(item)} & written
         )

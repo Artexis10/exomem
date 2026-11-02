@@ -409,3 +409,34 @@ def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_revie
         _propose(vault, _home_step(), edit)
 
     assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+
+
+def test_a_review_needed_only_once_an_earlier_page_lands_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import find as find_module
+    from exomem.init import init_vault
+
+    # A fresh vault has no governed page, so the first page needs no review. Once it
+    # lands, the second page has a peer and needs one.
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(tmp_path / "machine.json"))
+    fresh = tmp_path / "fresh"
+    init_vault(fresh)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(fresh))
+    find_module.clear_cache()
+    shared = "\n\n## Connections\n\n- [[A name no page has yet]]\n"
+    first = _create_step(
+        "first", "curation-first", "## Observations\n\n- [finding] First. ^first" + shared
+    )
+    second = _create_step(
+        "second", "curation-second", "## Observations\n\n- [finding] Second. ^second" + shared
+    )
+    second["args"].update(
+        relation_disposition="reviewed_none",
+        relation_review_reason="Its only link points at a page that does not exist yet.",
+    )
+
+    proposed = _propose(fresh, first, second)
+    _apply(fresh, proposed)
+
+    assert _resume(fresh, proposed)["phase"] == "completed"
