@@ -62,7 +62,7 @@ Registry, in build order:
 |---|---|---|---|
 | `pair.relation` | contradicts, refines, restates, neutral, abstain (both directions) | mDeBERTa NLI pin (already admitted) | 1 |
 | `mention.same_referent` | same, different, abstain | open-weight 3–8B instruct model chosen by a fixture spike | 2 |
-| `recap.covered_by` | entailed, partial, absent, abstain (one recap claim against each unit of its home page; no `contradicted`, see "Known misses") | mDeBERTa NLI pin, template `nli-coverage-v1`, label map `coverage-v1`, fixture set `recap-covered-v1` | 4 |
+| `recap.covered_by` | entailed, partial, absent, abstain (one recap claim against each unit of its home page, up to the page-pair cap; no `contradicted`, see "Known misses") | mDeBERTa NLI pin, template `nli-coverage-v1`, label map `coverage-v1`, fixture set `recap-covered-v1` | 4 |
 | supersession direction, relation typing, `term.same_meaning` | closed per question | chosen per question | 4 |
 
 **`pair.relation` (slice 1).**
@@ -232,7 +232,7 @@ Every projection is a pure function of (ledger snapshot, graph, pages):
      - `open_contradictions`: distinct released pages with a current `contradicts` edge where neither page is superseded or archived, and no authored supersession joins them.
    - It never ranks, reorders or filters anything, and it counts released pages only. It is absent when every count is zero and nothing was dropped, so a page with nothing sensed is byte-identical. When every count is zero but an edge to a released partner was dropped as not live (D8), the status is `{refined_by_later: 0, open_contradictions: 0, evidence_complete: false}`, with no line and no items. The drop count covers released partners only, so a withheld page cannot produce it.
    - On activation it is attached to resolved and retrieval-carried anchors, after the packet is built and outside the packet cache, like the upkeep block. Its line is charged to the packet budget.
-2. **Tensions on active or recent work** (slice 3) ride the existing upkeep block: its caps, its delivery ledger and its S6 session-start rule. Sensed families use their own `upkeep_sensed_*` family names, never alter a structural family's rows, order or caps, and route to the existing relation writer. That writer cites the reading id in its `why` evidence. Nothing new pushes.
+2. **Tensions on active or recent work** (slice 3) ride the existing upkeep block: its caps, its delivery ledger and its S6 session-start rule. Sensed families use their own `upkeep_sensed_*` family names, never alter a structural family's rows, order or caps, and route to the existing relation writer. That writer cites the reading id in its `why` evidence. Nothing new pushes. The first sensed family is `upkeep_sensed_compile` (D11).
 
 ### D8. Egress
 
@@ -288,6 +288,37 @@ What slice 1 serves (review of slice 1, 2026-09-28):
   The real pin runs only in the dedicated `nli` lane (`EXOMEM_RUN_REAL_NLI=1`), as the stance verifier's gate does.
 - **Resource probes.** A supervised child's CPU seconds per judgement, peak RSS and kill-to-exit time are measured and recorded below. Standby or the setting off must end the child within one supervisor poll.
 - LongMemEval is not used.
+
+### D11. Recap coverage and the compile family (slice 4)
+
+`recap.covered_by` reads one recap claim against each unit of the page that the claim names. The projection reads the ledger, and the family below serves what it finds.
+
+- **Claim.** A Decided line of a live recap is a claim when its own `[[link]]` names exactly one page that the recap's links resolve to. That page is the claim's home.
+  - `claim_index` is the 0-based position of the line among the recap's Decided lines.
+  - A superseded recap revision has no claims. An edited recap, which `episode_capture.parse` rejects, has none either.
+  - A Decided line that names no single home is counted and never read.
+- **Slots.** The premise is one unit of the home (`unit-text-v1`). The hypothesis is the claim text (`recap-claim-v1`). One (home, recap) pair of pages sends at most `PAIR_CAP` pairs, so another recap of the same home never moves a selection.
+- **Claim state.**
+  - `entailed` when any unit reads entailed.
+  - Otherwise `partial` when any unit reads partial.
+  - Otherwise `absent` when every unit is read and none is entailed or partial.
+  - `incomplete` when a unit is unread, abstained or beyond the cap.
+  - Only `absent` and `partial` are due. An `incomplete` claim is never due, so an unread unit cannot prompt a second compile.
+- **Item.** One per (home, recap), with the kind `episode.compile`. Its id comes from the kind, the home and the recap's episode group token. Its fingerprint hashes the home, the group token, the sorted due-claim hashes and the instrument key. It never hashes a reading id, so a re-read under the same pin leaves it unchanged.
+- **Delivery.** Family `upkeep_sensed_compile`, pull only.
+  - The rows are recomputed for each caller from the projection. Nothing is stored in the dreamer sidecar, so its size cap and delivery clock never see the family.
+  - `review_memory(mode="upkeep")` lists the rows after every structural row. `item`, `context` and `triage` take their ref. Every structural row, count and order is byte-identical with sensing on and off (R2).
+  - Each item carries the recap ref (`compile.episode`), the home ref (`compile.target`), and for each due claim its `claim_index`, `verdict` and `reading_id`.
+  - A dismissal or snooze binds the fingerprint, so it holds until the due-claim set changes. The family dispositions `quiet` and `off` apply. `off` also drops the family from an explicit category request.
+  - Listing an open item stamps it on the first-surfaced ledger with `surface="review"`. No session-start carrier offers it.
+  - An item exists for a caller only when that caller may see both the home and the recap (D8). A withheld page reads as an absent page, an unknown ref included. `evidence_complete` for the family is `false` while a visible claim is `incomplete` or the projection lags.
+- **Effect.** `review_memory(mode="dispositions")` reports the family beside the others.
+  - `acted` counts a surfaced item that is no longer open and has no decision, when the home and the recap still exist and every claim once read `absent` or `partial` now reads `entailed` by a unit that no such reading was made against. An added or edited unit is the only way to meet that test: a re-read of an unchanged unit under a new pin or label map reads against a unit already read, so it counts as `cleared`. A deleted home counts as `cleared`.
+  - Every other family reports `acted: "unknown"`, because none can tell a change from a re-read. Unknown is never 0.
+  - `surfaced` is a lower bound: an item shown where nothing is recorded is not counted. `sources` says so.
+  - `window_days` sets the window, 1 to 90 days and 7 by default. The response states the window as whole UTC dates. A value outside the range is refused with a message that names the range.
+  - A `coverage` line for the window, shown only while sensing is on, counts the claims of the recaps captured in the window by verdict (`entailed`, `partial`, `absent`, `abstain`, `incomplete`), the Decided lines that name no single home (`unlinked_decided`), and `evidence_complete`. A projection that cannot say reports each value as `unknown`, with `evidence_complete: false` and a reason.
+- **Cloud.** Until task 9.3, neither the projection nor this family runs in a Cloud cell: sensing is off there and the supervisor launches no sensor child. A cell holds no coverage reading, so this family would list nothing there.
 
 ## Slices
 
@@ -365,6 +396,7 @@ Recorded from the slice-1 review. The status bound and three rebuild windows are
 - **Replacement initialization is atomic.** Task 8.7 writes the schema and seeding state in one transaction through one initialization path. Only SQLite corruption codes trigger replacement; lock, read-only, and I/O errors leave existing evidence untouched.
 - **Ledger replacement closes the view immediately.** Task 8.7 compares the live ledger genesis before serving status, including before the next tick. An unfinished reprojection cursor also keeps the view unavailable until every pair follows the ledger.
 - **Activation provenance is compact.** Existing activation status carries a line, counts, and completeness; `read_memory` carries the items and reading provenance. Full provenance on activation remains an existing implementation gap against D7. The tool text describes the current compact output.
+- **A claim's home ignores the caller.** The projection resolves a Decided line's link against the pages that the recap's graph edges reach, once, for every caller. A withheld third page that shares a path tail with the home could make a link ambiguous in the owner's projection and drop a claim that a restricted caller could have resolved. The error is a missing item, never a leaked page. Recompute the resolution per caller if a twin finds it.
 - **Only the genesis meta row is protected.** The append-only triggers guard `meta.genesis`, not `meta.schema_version`. A forged `schema_version` makes `connect` refuse the ledger, which fails closed: the worker names the refusal, and nothing is served from a ledger it cannot use. Revisit if `meta` gains a row whose forgery would fail open.
 
 ### Repair-batch query probe (2026-10-26)

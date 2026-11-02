@@ -292,3 +292,122 @@ A request SHALL serve no status when the live ledger genesis differs from the pr
 
 - **WHEN** a ledger with another genesis replaces the current ledger
 - **THEN** requests serve no sensed status until reprojection follows that ledger completely
+
+### Requirement: A recap's decided lines are read against the page they name
+
+`recap.covered_by` SHALL read one claim against each unit of its home page, with the claim as the hypothesis and the unit as the premise. Its closed labels are `entailed`, `partial`, `absent` and `abstain`, from label map `coverage-v1`, with no `contradicted` label.
+
+A Decided line of a live recap SHALL be a claim only when its own `[[link]]` names exactly one page that the recap's links resolve to. A superseded recap revision and a recap that `episode_capture.parse` rejects SHALL yield no claims. A claim SHALL be `entailed` when any unit reads entailed, otherwise `partial` when any unit reads partial, otherwise `absent` when every unit is read. A claim with an unread, abstained or capped unit SHALL be `incomplete`. Only an `absent` or `partial` claim SHALL be due. Each (home, recap) pair of pages SHALL send at most the page-pair cap, and another recap of the same home SHALL NOT move that selection.
+
+#### Scenario: A line that names no page is no claim
+
+- **WHEN** a recap has a linked Decided line and an unlinked one
+- **THEN** only the linked line is a claim, with the home its link names
+
+#### Scenario: A line that names two pages is no claim
+
+- **WHEN** a Decided line's link resolves to two pages
+- **THEN** the line is no claim and no home is guessed
+
+#### Scenario: An unread unit prompts nothing
+
+- **WHEN** the home gains a unit that no reading covers yet
+- **THEN** the claim is `incomplete` and no item is due until the unit is read
+
+#### Scenario: Compiling the claim clears it
+
+- **WHEN** the home is edited so that a new unit entails the claim, and that unit is read
+- **THEN** the claim reads `entailed` and the home is no longer due
+
+#### Scenario: A home over the cap stays incomplete
+
+- **WHEN** the home has more units than the cap allows
+- **THEN** the claim reads `incomplete` and is never due
+
+### Requirement: A claim the home does not state is served as an upkeep item
+
+The sensed family `upkeep_sensed_compile` SHALL serve one item for each (home, recap) with at least one due claim, with kind `episode.compile`. Each item SHALL carry the recap ref, the home ref, the item fingerprint, and for each due claim its `claim_index`, its `verdict` and the deciding reading id. The fingerprint SHALL hash the home, the recap's episode group token, the sorted due-claim hashes and the instrument key, and SHALL NOT hash a reading id.
+
+The family SHALL be pull only. It SHALL rank after every structural family, and it SHALL NOT suppress, reorder or alter a structural item, count or order. It SHALL take the dispositions `dismiss`, `snooze` and family `quiet` and `off`. A dismissal or snooze SHALL hold until the due-claim set changes. Listing an open item SHALL stamp it on the first-surfaced ledger with `surface="review"`. No session-start carrier SHALL offer it.
+
+An item SHALL be served to a caller only when that caller may see both the home and the recap. Its `item`, `context` and `triage` requests SHALL read a withheld item's ref as an unknown ref. Under a governed policy, a restricted caller's answers SHALL be byte-identical to the same requests in a vault where the withheld page does not exist.
+
+#### Scenario: A due claim is served after every structural item
+
+- **WHEN** two recaps link a page and a claim of each is due
+- **THEN** the review lists the structural fold item first and both compile items after it
+- **AND** with a limit of one, the fold item is listed and the review reports it truncated
+- **AND** every structural item, count and completeness flag is byte-identical with sensing off
+
+#### Scenario: A listed item is stamped once
+
+- **WHEN** the review lists two open compile items twice
+- **THEN** the first-surfaced ledger holds one entry for each item, with family `upkeep_sensed_compile` and surface `review`
+
+#### Scenario: A dismissal holds until the due claims change
+
+- **WHEN** a recap has two due claims and the owner dismisses its item
+- **THEN** a later tick leaves the item dismissed
+- **AND** when the home comes to state the first claim, the item reopens with the second claim only and a new fingerprint
+
+#### Scenario: A family setting applies to the sensed items
+
+- **WHEN** the owner sets the family to `quiet`, then `off`, then `normal`
+- **THEN** the items are listed marked `quiet`, then dropped from the review and from an explicit category request, then listed again
+
+#### Scenario: A withheld home is an absent home
+
+- **WHEN** a restricted caller lists, reads, requests the context of and dismisses an item whose home is withheld
+- **THEN** every answer is byte-identical to the same request in a vault where the home does not exist
+- **AND** the owner is served the item
+
+#### Scenario: A withheld recap is an absent recap
+
+- **WHEN** a restricted caller makes the same requests for an item of a withheld recap, in a vault where a visible recap names the same home
+- **THEN** every answer is byte-identical to the same request in a vault where the withheld recap does not exist, and the visible recap's item is unchanged
+
+### Requirement: The dispositions effect separates acting on an item from an item that cleared
+
+`review_memory(mode="dispositions")` SHALL report, for each family, an `acted` count beside `cleared`. For `upkeep_sensed_compile`, a surfaced item with no decision SHALL count as `acted` when it is no longer open, its home and recap still exist, and every claim once read `absent` or `partial` now reads `entailed` by a unit that no such reading was made against. A deleted home, a retired recap, an edited claim, and a re-read of an unchanged unit under a new pin or label map SHALL count as `cleared`. Every other family SHALL report `acted` as `unknown`, never 0.
+
+The `surfaced` count SHALL be labelled a lower bound in `sources`. `window_days`, from 1 to 90 with a default of 7, SHALL set the window, and the response SHALL state its first and last UTC dates. A value outside the range, or any other mode given `window_days`, SHALL be refused with a message that names the range or the mode.
+
+While sensing is on, the effect SHALL carry a coverage line for the window: the claims of the recaps captured in the window counted by `entailed`, `partial`, `absent`, `abstain` and `incomplete`, the Decided lines that name no single home as `unlinked_decided`, and `evidence_complete`. When the projection cannot say, each value SHALL be `unknown`, with `evidence_complete: false` and a reason, and never 0.
+
+#### Scenario: A home that now states the claim counts as acted
+
+- **WHEN** an item was listed, the home was edited with a unit that entails its claim, and that unit was read
+- **THEN** the family reports one surfaced, one `acted`, no `cleared` and no `open`
+- **AND** before the new unit is read, the item counts as `cleared`
+
+#### Scenario: A deleted home counts as cleared
+
+- **WHEN** an item was listed and its home is deleted
+- **THEN** the family reports one `cleared` and no `acted`
+
+#### Scenario: A label map change counts as neither
+
+- **WHEN** a looser label map reads an unchanged unit as entailing the claim of a listed item
+- **THEN** the item leaves the open set, the family reports one `cleared` and no `acted`
+
+#### Scenario: Every other family reports acted as unknown
+
+- **WHEN** another family has surfaced items in the window
+- **THEN** its `acted` is `unknown` and not 0, and `sources` calls `surfaced` a lower bound
+
+#### Scenario: The window bounds are stated and out-of-range values are refused
+
+- **WHEN** the caller asks for 30 days, then for 0, 91 and true
+- **THEN** the first response states a window of 30 days ending today, and the others are refused naming the range 1 to 90
+- **AND** `window_days` with another mode is refused
+
+#### Scenario: The coverage line counts each claim by what its home says
+
+- **WHEN** a recap captured in the window has one entailed claim, one partial claim and one Decided line that names no page
+- **THEN** the coverage line reports one `entailed`, one `partial`, one unlinked Decided line and `evidence_complete: true`
+- **AND** a newly recorded recap whose claim is unread makes it report one `incomplete` and `evidence_complete: false`
+
+#### Scenario: A projection that cannot say leaves the numbers unknown
+
+- **WHEN** sensing is on and the projection does not exist
+- **THEN** the coverage values, `cleared`, `acted` and `open` are `unknown` with reason `projection_unavailable`, and `evidence_complete` is `false`

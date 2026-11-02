@@ -86,9 +86,10 @@
 
 - [ ] 9.1 Slice 2: `mention.same_referent` (same, different, abstain) on an open-weight 3–8B instruct model chosen by a fixture spike. The generative template runtime has delimited slots and label-token logits, never sampled text (R1). Local GPU placement comes only after `detect-co-tenant-gpu-pressure` ships (R5).
 - [ ] 9.2 Slice 3:
-  - Tensions on active or recent work become sensed upkeep families (`upkeep_sensed_*`) under the existing carrier caps and S6. They never touch structural families.
-  - The relation writer cites the reading id (R2).
-  - The audit's in-request NLI enrichment (`audit.py:6218-6268`) moves onto the ledger with extractor `page-claim-v1`, per the `contradiction-queue` delta.
+  - [x] 9.2.1 The sensed upkeep family mechanism: a second row source beside the sidecar, ranked after every structural family, with dispositions and effect counts, and no structural row, count or order moved (R2). Evidence: `upkeep_sensed_compile` (D11), `tests/test_sensed_compile_delivery.py` and `tests/test_sensed_compile_effect.py`.
+  - [ ] 9.2.2 Tensions on active or recent work become `upkeep_sensed_*` families over `pair.relation` pairs, on the same source, under the existing carrier caps and S6. Only the compile family exists so far.
+  - [ ] 9.2.3 The relation writer cites the reading id (R2).
+  - [ ] 9.2.4 The audit's in-request NLI enrichment (`audit.py:6218-6268`) moves onto the ledger with extractor `page-claim-v1`, per the `contradiction-queue` delta.
 - [ ] 9.3 Slice 5:
   - Cells now start the Dreamer (`run-upkeep-on-a-busy-vault`); cell sensing still waits for this placement, and the supervisor launches no child in a cell until then.
   - The Cloud placement: cells run the dreamer, each cell senses with its own instruments on shared read-only model weights, and no third-party API sees vault text by default. Measure it against the hosted-inference acceptance measures, which include per-cell activation memory and CPU contention between cells.
@@ -97,7 +98,8 @@
   - The per-vault and per-tenant API placement opt-in, with `unpinned_weights` identity and retirement migration (R7).
   - The ledger registered as a portable-derived external-state family for hosted export and restore (R3).
   - Update `tests/test_dreamer_hosted_boundary.py` and `tests/test_frozen_verifier_hosted_boundary.py` to the new contract.
-- [ ] 9.4 Slice 4: `recap.covered_by` (entailed, partial, absent, abstain; admitted by error cost, so an expected-entailed miss is recorded and a false entailed refuses); supersession direction, relation typing and `term.same_meaning`; convergence across independent origins and emerging connections to recent work.
+- [x] 9.4 Slice 4: `recap.covered_by` (entailed, partial, absent, abstain; admitted by error cost, so an expected-entailed miss is recorded and a false entailed refuses). Evidence: the question, instrument and fixture set in `tests/test_sensing_registry.py` and the real-pin run in "Measured"; the projection and the worker loop in `tests/test_sensed_coverage.py`; delivery and effect in D11 and the two requirements it names, `tests/test_sensed_compile_delivery.py` and `tests/test_sensed_compile_effect.py`. Cloud cells wait for task 9.3.
+- [ ] 9.5 Slice 4, the rest: supersession direction, relation typing and `term.same_meaning`; convergence across independent origins and emerging connections to recent work. A successor change carries it.
 
 ## 10. Verification and closure
 
