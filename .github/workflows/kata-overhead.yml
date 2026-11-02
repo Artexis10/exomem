@@ -32,12 +32,15 @@ env:
   PHASES: "measure"
   # kata-blk: the shipped QEMU configuration (plus the block-device key). kata-blk-tuned: the same arm with the
   # configuration built below from the shipped file of KATA_HYPERVISOR plus KATA_CONFIG_EDITS.
-  ARMS: "runc,kata-blk,kata-blk-tuned"
+  ARMS: "runc,kata-blk-tuned"
   # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line).
-  KATA_HYPERVISOR: "clh"
+  KATA_HYPERVISOR: "qemu"
   KATA_CONFIG_EDITS: ""
   # "1" also boots a cell with and without psi=1 on the guest kernel command line and prints the PSI files.
   PSI_PROBE: "0"
+  # "1" moves Docker's image store onto containerd's devmapper snapshotter, so a container's root filesystem is a
+  # block device that Kata can hot-plug instead of a directory it shares with virtiofsd.
+  ROOTFS_BLOCK: "1"
 
 jobs:
   measure:
@@ -106,6 +109,48 @@ jobs:
           cat /etc/docker/daemon.json
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}'
+
+      - name: Docker image store on the devmapper snapshotter (rootfs as a block device)
+        if: env.ROOTFS_BLOCK == '1'
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/kv-out/diagnostics"
+          out="$RUNNER_TEMP/kv-out/diagnostics/devmapper_setup.txt"
+          {
+            set -x
+            uname -r; sudo modprobe dm_thin_pool; lsmod | grep -E 'dm_thin_pool|dm_persistent_data|dm_bufio' || true
+            sudo mkdir -p /var/lib/containerd/devmapper
+            sudo truncate -s 24G /var/lib/containerd/devmapper/data
+            sudo truncate -s 1G /var/lib/containerd/devmapper/meta
+            data="$(sudo losetup --find --show /var/lib/containerd/devmapper/data)"
+            meta="$(sudo losetup --find --show /var/lib/containerd/devmapper/meta)"
+            sectors=$(( 24 * 1024 * 1024 * 1024 / 512 ))
+            sudo dmsetup create kata-thin-pool --table "0 $sectors thin-pool $meta $data 128 32768 1 skip_block_zeroing"
+            sudo dmsetup status kata-thin-pool
+            sudo mkdir -p /etc/containerd
+            test -f /etc/containerd/config.toml && cat /etc/containerd/config.toml || echo "(no containerd config yet)"
+            sudo tee -a /etc/containerd/config.toml > /dev/null <<'TOML'
+
+          [plugins."io.containerd.snapshotter.v1.devmapper"]
+            pool_name = "kata-thin-pool"
+            root_path = "/var/lib/containerd/devmapper"
+            base_image_size = "8GB"
+            discard_blocks = true
+          TOML
+            sudo systemctl restart containerd
+            sleep 3
+            sudo ctr plugins ls | grep -E 'snapshotter|TYPE' || true
+            sudo python3 - <<'PY'
+          import json
+          path = "/etc/docker/daemon.json"
+          config = json.load(open(path))
+          config["storage-driver"] = "devmapper"
+          json.dump(config, open(path, "w"), indent=2)
+          PY
+            cat /etc/docker/daemon.json
+            sudo systemctl restart docker
+            docker info --format 'driver={{.Driver}} status={{json .DriverStatus}}'
+          } 2>&1 | tee "$out"
 
       - name: Pull the Cloud cell image
         run: |
