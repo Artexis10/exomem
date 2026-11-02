@@ -4,6 +4,8 @@
 
 When a read-only assessment proves incompatibility or compatible staleness, the standby SHALL prepare a complete replacement. Compatible staleness SHALL require target schema, semantic identity and well-formed stored checkpoints that differ from captured current projections. The assessment SHALL read schema, semantic identity and stored checkpoints from one SQLite snapshot. It SHALL compare stored checkpoints against explicitly captured candidate projections and revalidate the candidate's semantic identity, access identity and projections. Missing, malformed, unreadable, busy or unsampled observations SHALL NOT establish compatible staleness. The standby SHALL reconsider preparation after a transient observation, even when the serving worker publishes nothing.
 
+The standby SHALL also prepare a complete replacement when the assessment proves the live catalogue compatible but its release stamp names another release. Until that build has run, the standby SHALL NOT prove the live catalogue current. A build that ran and failed SHALL leave the ordinary proof. An unreadable release stamp SHALL NOT authorize preparation.
+
 A missing live catalogue SHALL retain the existing serving-owner repair behavior.
 
 The standby SHALL hold its rebuild temporary under the temporary's advisory lock for its whole life. The build SHALL take no publication barrier and make no source proof. Before promotion, the standby SHALL NOT mutate live catalogue rows, schema, committed WAL frames, source files or owner publication state. It SHALL change neither the live catalogue path nor any reserved-path descriptor. The assessment SHALL open the existing catalogue read-only and use one SQLite read transaction. SQLite-native coordination MAY initialize and update only the live catalogue's exact SHM path and its locks.
@@ -28,6 +30,16 @@ Final runtime admission SHALL retain the existing strict source and access check
 - **THEN** the standby builds a complete held temporary without writing live catalogue content or admitting retrieval
 - **AND** ordinary source edits during preparation do not discard that complete build
 - **AND** promotion adopts it after ownership and heals changed, new, deleted and excluded material before runtime admission
+
+#### Scenario: A release change without a schema change cuts over through the standby's catalogue
+- **WHEN** a managed upgrade targets a release whose catalogue schema and semantic identity match the live catalogue, and the live catalogue's release stamp names the serving release
+- **THEN** the standby builds a complete held temporary instead of proving the live catalogue current
+- **AND** promotion adopts that catalogue and records `lexical_catalogue: adopted`
+- **AND** a save that landed after the build is searchable once retrieval is admitted, with no whole-catalogue rebuild
+
+#### Scenario: A same-release restart proves the live catalogue
+- **WHEN** the live catalogue's release stamp names the running release and its stored checkpoints are current
+- **THEN** the standby proves the live catalogue current without a detached build
 
 #### Scenario: A transient observation recovers without a live publication
 - **WHEN** the initial assessment cannot read the live catalogue and a later assessment proves compatible staleness
