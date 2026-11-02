@@ -953,7 +953,9 @@ def test_a_heal_that_raises_falls_back_to_the_proof_and_the_repair(
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch, fail=True)
     repairs: list[Path] = []
-    monkeypatch.setattr(lexstore, "request_repair", lambda vault_root: repairs.append(vault_root))
+    monkeypatch.setattr(
+        lexstore, "request_lag_repair", lambda vault_root: repairs.append(vault_root)
+    )
 
     assert _promoted_warm(root) is False
 
@@ -968,7 +970,7 @@ def test_a_targeted_retry_in_flight_does_not_skip_the_heal(
     root = older_catalogue
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch)
-    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "request_lag_repair", lambda _root: None)
     key = root.resolve()
     lexstore._REPAIRS_IN_FLIGHT.add(key)
     lexstore._DEFERRED_UPSERTS[key] = {root / next(iter(NOTES))}
@@ -989,7 +991,7 @@ def test_a_full_rebuild_in_flight_skips_the_heal(
     root = older_catalogue
     _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
     heals = _heal_spy(monkeypatch)
-    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "request_lag_repair", lambda _root: None)
     key = root.resolve()
     lexstore._FULL_REBUILDS_IN_FLIGHT.add(key)
     try:
@@ -1062,3 +1064,117 @@ def test_the_registry_is_reseeded_after_the_build_before_the_graph_proof(
     service_standby.warm(root)
 
     assert order == ["rebaseline", "build", "rebaseline", "graph_proof"], order
+
+
+# -- a release change without a schema bump --
+
+
+@pytest.fixture
+def earlier_release_catalogue(older_catalogue: Path) -> Path:
+    """A current-schema catalogue that the serving worker of an earlier release built.
+
+    Its checkpoints carry that worker's registry instance; `freshness.clear()`
+    makes this process the new one, as an upgrade does.
+    """
+    lexstore.ensure_fresh(older_catalogue)
+    connection = sqlite3.connect(lexstore.lexical_path(older_catalogue))
+    try:
+        connection.execute(
+            "UPDATE meta SET value = 'an-earlier-release' WHERE key = 'catalog_release'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    lexstore.clear_stores()
+    freshness.clear()
+    return older_catalogue
+
+
+def _editor_save(path: Path, text: str) -> None:
+    """What an editor's atomic save does: write a sibling, then rename it over the page."""
+    sibling = path.with_name(f".{path.name}.saving")
+    sibling.write_text(text, encoding="utf-8")
+    os.replace(sibling, path)
+
+
+def test_an_upgrade_heals_this_releases_catalogue_instead_of_rebuilding_the_old_one(
+    earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old worker's last save is unpublished at shutdown; ingress waits on retrieval.
+
+    Proving the earlier release's catalogue current left the promoted worker
+    a lag repair whose catch-up declined the foreign registry stamp, so a
+    whole rebuild ran while ingress stayed paused.
+    """
+    root = earlier_release_catalogue
+    saved = root / "Knowledge Base/Notes/Insights/handoff-1.md"
+
+    _promote_over_older_catalogue(
+        root,
+        monkeypatch,
+        between=lambda _root: _editor_save(
+            saved, NOTES["Knowledge Base/Notes/Insights/handoff-1.md"] + "\nquokkalastsave.\n"
+        ),
+    )
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    admitted_now = _promoted_warm(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == [], rebuilds
+    assert admitted_now is True
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, "quokkalastsave", k=3, scope="kb")
+
+
+def test_a_failed_release_change_build_falls_back_to_proving_the_live_catalogue(
+    earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every upgrade now builds in the standby; a build that fails must not hold `lexical`.
+
+    Without the fallback the component waits until the warm budget expires,
+    and the supervisor refuses the upgrade the old path would have completed.
+    """
+    root = earlier_release_catalogue
+    _stub_graph_and_models(monkeypatch)
+
+    def build_fails(vault_root: Path, *, cancel=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lexstore, "build_detached_catalog", build_fails)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+
+    assert service_standby.cutover_components()["lexical"] == "ready"
+
+
+def test_a_save_between_the_heal_and_the_proof_is_caught_up_not_rebuilt(
+    earlier_release_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promoted worker's watcher runs during its warm; a save then leaves one page behind.
+
+    The proof schedules the lag repair that one page needs. The warm used to
+    add a full repair request on top, which cancelled the catch-up.
+    """
+    root = earlier_release_catalogue
+    _promote_over_older_catalogue(root, monkeypatch)
+    saved = root / "Knowledge Base/Notes/Insights/handoff-2.md"
+    real_heal = lexstore.heal_adopted_catalog
+
+    def heal_then_save(vault_root: Path) -> bool:
+        healed = real_heal(vault_root)
+        _editor_save(
+            saved, NOTES["Knowledge Base/Notes/Insights/handoff-2.md"] + "\nquokkasavedinwarm.\n"
+        )
+        freshness.on_files_changed(vault_root, changed=[saved])
+        return healed
+
+    monkeypatch.setattr(lexstore, "heal_adopted_catalog", heal_then_save)
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    assert _promoted_warm(root) is False
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == [], rebuilds
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, "quokkasavedinwarm", k=3, scope="kb")

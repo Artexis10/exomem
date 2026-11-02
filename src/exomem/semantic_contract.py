@@ -1153,7 +1153,7 @@ class SemanticCorpusContext:
     resolver_kb_stripped: frozenset[str]
     resolver_stems: Mapping[str, tuple[str, ...]]
     resolver_titles: Mapping[str, tuple[str, ...]]
-    resolver_candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]] = field(init=False)
+    resolver_candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
     raw_target_dependencies: Mapping[str, tuple[str, ...]]
     relation_facts: tuple[RelationFact, ...]
     eligible_governed_paths: frozenset[str]
@@ -1173,10 +1173,10 @@ class SemanticCorpusContext:
             MappingProxyType({key: self.pages[key] for key in sorted(self.pages)}),
         )
         object.__setattr__(self, "resolver_entries", tuple(self.resolver_entries))
-        resolver = vault.WikilinkResolver.from_entries(self.vault_root, self.resolver_entries)
+        # The constructor's resolver already holds these; a second build from the entries cost a full pass per commit.
         object.__setattr__(
             self, "resolver_candidates_by_key",
-            _mapping_of_tuples(resolver.candidates_by_key),
+            _mapping_of_tuples(self.resolver_candidates_by_key),
         )
         object.__setattr__(self, "resolver_full_paths", frozenset(self.resolver_full_paths))
         object.__setattr__(self, "resolver_kb_stripped", frozenset(self.resolver_kb_stripped))
@@ -4289,6 +4289,7 @@ def _context_from_resolved_state(
         resolver_kb_stripped=kb_stripped,
         resolver_stems=stems,
         resolver_titles=titles,
+        resolver_candidates_by_key=resolver.candidates_by_key,
         raw_target_dependencies=_mapping_of_tuples(
             {key: tuple(sorted(values)) for key, values in dependencies.items()}
         ),

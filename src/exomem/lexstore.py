@@ -1024,6 +1024,10 @@ class RepairCause(enum.StrEnum):
     # registry, or a bounded apply met a source that moved before its commit.
     CATALOGUE_LAG = "catalogue_lag"
     SOURCE_MOVED = "source_moved"
+    # A strict recall resolver refused: no admitted checkpoint names its
+    # request, or the catalogue holds no rows for the checkpoint it names.
+    RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
+    RESOLVER_ENTRIES_UNAVAILABLE = "resolver_entries_unavailable"
 
 
 class DeclineCause(enum.StrEnum):
@@ -2188,6 +2192,11 @@ def live_catalog_compatible(vault_root: Path) -> bool:
     return get_store(vault_root).live_catalog_compatible()
 
 
+def live_catalog_release_current(vault_root: Path) -> bool | None:
+    """Whether the running release built the live catalogue, or None when unknown."""
+    return get_store(vault_root).live_catalog_release_current()
+
+
 def assess_live_catalog(
     vault_root: Path, *, require_live_projection: bool = True
 ) -> CatalogAssessment:
@@ -2293,14 +2302,18 @@ def request_repair(
     vault_root: Path,
     *,
     deferred_paths: list[Path] | None = None,
+    lag_only: bool = False,
     cause: RepairCause | None = None,
 ) -> None:
     """Non-walking retry seam for a request refused by runtime admission.
 
     `deferred_paths` narrows the repair to a targeted retry of those paths (see
-    `_schedule_repair`); `cause` is the token the worker logs. A narrow
-    request that names nothing the catalogue indexes is dropped, never widened
-    into the whole-catalogue pass that an empty path list would request.
+    `_schedule_repair`); `lag_only` asks for the catch-up of the registry delta,
+    which moves up to the full pass on any decline; `cause` is the token the
+    worker logs. A narrow request that names nothing the catalogue indexes is
+    dropped, never widened into the whole-catalogue pass that an empty path
+    list would request. Unlike `request_lag_repair`, this seam leaves runtime
+    admission as it is: a refused request proves nothing about the catalogue.
     """
     if not maintained_content_index_enabled():
         return
@@ -2308,7 +2321,7 @@ def request_repair(
         deferred_paths = _lexical_markdown(deferred_paths)
         if not deferred_paths:
             return
-    _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
+    _schedule_repair(vault_root, deferred_paths=deferred_paths, lag_only=lag_only, cause=cause)
 
 
 def request_lag_repair(vault_root: Path) -> None:
@@ -6071,6 +6084,11 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _catalog_release_current(self, conn: sqlite3.Connection) -> bool:
+        """Whether the running release built the rows behind `conn` (see `_stamp_whole_build`)."""
+        row = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        return row is not None and row[0] == __version__
+
     def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
         """Record the schema and the release that derived every page row (caller owns the txn).
 
@@ -8366,8 +8384,7 @@ class LexicalStore:
             return "schema"
         if self._meta_catalog_identity(conn) != identity:
             return "identity"
-        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
-        if release is None or release[0] != __version__:
+        if not self._catalog_release_current(conn):
             return "release"
         # A whole-corpus build reads nothing from the live file; a copy would
         # carry its damage into every later repair, so check the copy once.
@@ -8594,6 +8611,26 @@ class LexicalStore:
             # so a standby waits on the serving worker rather than building a
             # whole catalogue beside one it merely found busy.
             return classify_sqlite_error(error) == "transient"
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def live_catalog_release_current(self) -> bool | None:
+        """Whether the running release built the live catalogue, or None when unknown.
+
+        Read-only and O(1), like `live_catalog_compatible`. False means another
+        release's whole build derived every row, so `_seed_from_live` would not
+        reuse them; None (no maintained store, no file, a failed read) decides
+        nothing.
+        """
+        if backend() == "python" or self._failed or not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            return self._catalog_release_current(conn)
+        except sqlite3.Error:
+            return None
         finally:
             if conn is not None:
                 conn.close()

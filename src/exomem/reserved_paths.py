@@ -3525,7 +3525,9 @@ def _publish_sqlite_owner_family(
                 wal_or_shm_reachable = False
                 for suffix in ("-wal", "-shm"):
                     probe = filesystem.file(
-                        parent, f"{route.logical_relative.name}{suffix}"
+                        parent,
+                        f"{route.logical_relative.name}{suffix}",
+                        access="identity",
                     )
                     if probe.ok:
                         probe.require().close()
@@ -3574,7 +3576,7 @@ def _publish_sqlite_owner_family(
             family: dict[str, held_fs.StableIdentity] = {}
             for suffix in ("", "-journal", "-wal", "-shm"):
                 name = f"{route.logical_relative.name}{suffix}"
-                file_result = filesystem.file(parent, name)
+                file_result = filesystem.file(parent, name, access="identity")
                 if not file_result.ok:
                     if suffix and file_result.error is not None and file_result.error.code == "MISSING":
                         continue
@@ -3866,10 +3868,12 @@ def _sqlite_owner_target_scope(
         with parent_result.require() as parent:
             # Retain identity without DELETE access: a live Windows SQLite
             # handle does not necessarily share DELETE with another opener.
+            # Identity access opens no lockable POSIX descriptor, whose close
+            # would drop every lock this process holds on the database.
             existing_result = filesystem.file(
                 parent,
                 route.held_relative.name,
-                access="read",
+                access="identity",
             )
             existing: held_fs.HeldFile | None = None
             expected: held_fs.StableIdentity | None = None
@@ -3905,7 +3909,7 @@ def _sqlite_owner_target_scope(
                     current_result = filesystem.file(
                         parent,
                         route.held_relative.name,
-                        access="read",
+                        access="identity",
                     )
                     if not current_result.ok:
                         raise RuntimeError("private SQLite target changed during open")

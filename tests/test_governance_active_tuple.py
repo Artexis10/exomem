@@ -6966,6 +6966,12 @@ def test_scene_frame_bytes_and_companion_publish_one_v4_catalog_successor(
         now=now,
     )
 
+    # A frame is governed with its video, so the video's Source page must exist (#2375).
+    (vault / "Knowledge Base/Evidence/Video/demo.mp4.md").write_text(
+        "---\ntitle: Demo video\ntype: source\nmedia_type: video\n---\n\nVideo evidence.\n",
+        encoding="utf-8",
+    )
+
     pairs = scene_frames.write_scene_frames(
         vault,
         video,

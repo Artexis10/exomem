@@ -1264,9 +1264,14 @@ def _is_governed_for_restore(vault_root: Path, manifest: tuple[ManifestItem, ...
             return True
         if page is None:
             return True
-        scope_ids = membership.evaluate_snapshot(
-            page, policy, content_hash=item.content_hash
-        )
+        try:
+            scope_ids = membership.evaluate_snapshot(
+                page, policy, content_hash=item.content_hash
+            )
+        except membership.MembershipUnresolved:
+            # A part or a frame is governed through its parent page, which is still in the trash
+            # here; as on deletion, an item whose membership cannot be decided is governed.
+            return True
         if restricting.intersection(scope_ids):
             return True
     return False
