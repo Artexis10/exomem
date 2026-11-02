@@ -184,11 +184,9 @@ class ReviewFieldCheck:
         return {name: list(fields) for name, fields in found.items() if fields}
 
 
-#: The one warning a commit returns when it drops the review fields of a page that needs none.
-IGNORED_REVIEW_FIELDS_WARNING = (
-    "This page needs no relation review; "
-    "relation_disposition and relation_review_reason were ignored."
-)
+def ignored_review_fields_warning(ignored: tuple[str, ...]) -> str:
+    """The one warning a commit returns when it drops the review fields of a page that needs none."""
+    return f"This page needs no relation review, so these fields were ignored: {', '.join(ignored)}."
 
 
 def review_applies(disposition_kind: str) -> bool:

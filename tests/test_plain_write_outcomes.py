@@ -22,8 +22,8 @@ from exomem.governance import principal as principal_module
 
 REASON = "No honest relation exists for this fixture."
 IGNORED_WARNING = (
-    "This page needs no relation review; "
-    "relation_disposition and relation_review_reason were ignored."
+    "This page needs no relation review, so these fields were ignored: "
+    "relation_disposition, relation_review_reason."
 )
 _PAGE = "## Observations\n\n- [finding] The page keeps one finding. ^one\n"
 
@@ -83,6 +83,24 @@ def test_a_page_that_needs_no_review_commits_and_drops_the_review_fields(vault: 
     receipt = relation_review.load_creation_receipt(vault, validation["draft_id"])
     assert receipt is not None and receipt.kind == "qualifying"
     assert relation_review.load_relation_reviews(vault) == reviews_before
+
+
+def test_the_ignored_fields_warning_names_each_field_the_caller_sent(vault: Path) -> None:
+    arguments = _connected_page(_seed_peer(vault))
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+
+    result = commands.op_remember(
+        vault,
+        **_commit_arguments(arguments, validation),
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation["draft_hash"],
+        relation_review_reason=REASON,
+    )
+
+    assert [w for w in result["warnings"] if "ignored" in w] == [
+        "This page needs no relation review, so these fields were ignored: "
+        "relation_disposition, relation_review_hash, relation_review_reason."
+    ]
 
 
 def test_a_page_that_needs_review_refuses_a_commit_that_lacks_the_hash(vault: Path) -> None:

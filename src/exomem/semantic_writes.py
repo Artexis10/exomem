@@ -1035,7 +1035,9 @@ class CreationCommit:
 
     def review_field_warnings(self) -> list[str]:
         """The one warning a commit owes for the review fields it dropped, if any."""
-        return [relation_review.IGNORED_REVIEW_FIELDS_WARNING] if self.ignored_review_fields else []
+        if not self.ignored_review_fields:
+            return []
+        return [relation_review.ignored_review_fields_warning(self.ignored_review_fields)]
 
     def as_dict(self) -> dict[str, Any]:
         value = {
