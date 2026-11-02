@@ -4077,6 +4077,27 @@ class DirectoryCensusGuard:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
 
 
+def _unbounded_leaf_reason(info: os.stat_result, limit: int) -> str | None:
+    """Which bounded-regular-file condition a guarded leaf fails, or None."""
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_nlink != 1:
+        return f"has {info.st_nlink} hard links; only a file with one link is read"
+    if info.st_size > limit:
+        return f"is {info.st_size} bytes, over the {limit}-byte read limit"
+    return None
+
+
+def _refuse_unbounded_leaf(target: str, reason: str) -> PathGuardError:
+    """The refusal for a guarded leaf that is not a bounded regular file.
+
+    The error text names the failed condition and not the path: this read also covers pages
+    that are withheld from a restricted caller, so the path would name one. The server log has it.
+    """
+    log.warning("guarded read refused: %s %s", target, reason)
+    return PathGuardError("PATH_GUARD_UNSAFE", f"guarded content {reason}")
+
+
 def _read_bounded_guarded_snapshot(
     vault_root: Path, target: str, limit: int
 ) -> tuple[bytes, PathGuard]:
@@ -4116,14 +4137,9 @@ def _read_bounded_guarded_snapshot(
         leaf = os.open(parts[-1], flags | getattr(os, "O_NONBLOCK", 0), dir_fd=descriptor)
         descriptors.append(leaf)
         before = os.fstat(leaf)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_size > limit
-        ):
-            raise PathGuardError(
-                "PATH_GUARD_UNSAFE", "guarded content is not a bounded regular file"
-            )
+        unbounded = _unbounded_leaf_reason(before, limit)
+        if unbounded is not None:
+            raise _refuse_unbounded_leaf(target, unbounded)
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
@@ -4232,16 +4248,13 @@ def _read_bounded_windows_snapshot(
             ancestors.append(_identity("/".join(parts[: index + 1]), opened))
         leaf_path = root.joinpath(*parts)
         before = leaf_path.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(before.st_mode)
-            or _is_reparse(before)
-            or before.st_nlink != 1
-            or before.st_size > limit
-        ):
-            raise PathGuardError(
-                "PATH_GUARD_UNSAFE", "guarded content is not a bounded regular file"
-            )
+        unbounded = (
+            "is a link, not a regular file"
+            if stat.S_ISLNK(before.st_mode) or _is_reparse(before)
+            else _unbounded_leaf_reason(before, limit)
+        )
+        if unbounded is not None:
+            raise _refuse_unbounded_leaf(target, unbounded)
         leaf = _open_windows_path_descriptor(
             leaf_path,
             desired_access=0x80000000,

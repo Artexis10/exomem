@@ -2,8 +2,8 @@
 
 ### Requirement: Compact Success Is The Default Projection
 
-Committed product mutations SHALL return a compact default projection led by
-`ok`, `status`, `mutated`, primary `path`, original `request_id`, stable receipt
+Committed and replayed product mutations SHALL return a compact default projection led by
+`user_summary`, then `ok`, `status`, `mutated`, primary `path`, original `request_id`, stable receipt
 identity, `warnings_count`, and a closed `derived_sync` outcome. The outcome
 SHALL be `completed`, `pending`, or `failed`; pending SHALL carry only bounded
 component names and stable remediation, and failed SHALL remain distinguishable
@@ -18,7 +18,16 @@ result reference. Failure MAY add only a closed code and fixed bounded next
 action. These advisory fields SHALL remain outside the mutation-outcome key set
 and SHALL NOT embed advisory content. A referenced result SHALL remain exactly
 resolvable for at least as long as the corresponding mutation terminal remains
-replayable; cleanup MUST NOT strand a replayed reference. `response_detail="full"`
+replayable; cleanup MUST NOT strand a replayed reference. `user_summary` SHALL be
+one plain sentence built only from fields the stored terminal holds, so a repeat
+request with the same idempotency key returns the same text: a verb, then the
+path, or the first path and the count of the others. Every write operation SHALL
+declare its verb from a closed set (saved, updated, moved, deleted, replaced,
+discarded or restored), and a write that declares none SHALL carry no
+`user_summary`. A replacement leads with the new page and names the old one. A
+result whose status is `replayed` (the effect was already in place) SHALL read
+"Already" plus the lower-cased verb. A refusal or a validation result SHALL carry
+no `user_summary`. `response_detail="full"`
 SHALL add the complete leaf result under `diagnostics`;
 `response_detail="legacy"` SHALL return the pre-change raw leaf result during
 the compatibility window.
@@ -35,6 +44,13 @@ the compatibility window.
 - **WHEN** the same mutation is requested with `response_detail="full"`
 - **THEN** the compact terminal fields and derived outcome are unchanged
 - **AND** the complete existing leaf payload and bounded component diagnostics are available under `diagnostics`
+
+#### Scenario: A committed save leads with a plain summary
+
+- **WHEN** a governed product mutation saves one file without an explicit response detail
+- **THEN** the first key of the response is `user_summary`, reading "Saved -> <path>"
+- **AND** a delete reads "Deleted -> <path>", a move reads "Moved <from> -> <to>", a supersede reads "Replaced -> <new path> (was <old path>)", and a result whose status is `replayed` reads "Already saved -> <path>"
+- **AND** a repeat request with the same idempotency key returns the first call's text, because it returns the stored terminal
 
 #### Scenario: Pending is not failed
 

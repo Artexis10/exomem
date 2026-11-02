@@ -1,0 +1,108 @@
+{
+  "id": "05-debug-wants-request-id",
+  "title": "The person asks for the request id of a write",
+  "suite": "write-narration",
+  "prompt": "I'm debugging a flaky write in this tool. Please save a note in my memory called 'Cache warmup order' saying that the warmup job runs before the first health check and never after a deploy rollback. Once it's saved, give me the request id the tool returned for that write.",
+  "served_tools": [
+    "bootstrap",
+    "create_note"
+  ],
+  "builtin_tools": [],
+  "record": {
+    "steps": [
+      {
+        "settle_graph": true
+      },
+      {
+        "as": "bootstrap",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "compact"
+          }
+        }
+      },
+      {
+        "as": "validate",
+        "tool": "create_note",
+        "arguments": {
+          "title": "Cache warmup order",
+          "slug": "cache-warmup-order",
+          "content": "## Observations\n\n- [finding] The warmup job runs before the first health check and never after a deploy rollback. ^one\n\n## Connections\n\n- [[Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout]]\n",
+          "validate_only": true
+        },
+        "expect": {
+          "mutated": false,
+          "relation_review_hash": null
+        }
+      },
+      {
+        "as": "committed",
+        "tool": "create_note",
+        "arguments_from": "validate",
+        "arguments": {
+          "draft_id": {
+            "$ref": "validate.draft_id"
+          },
+          "draft_hash": {
+            "$ref": "validate.draft_hash"
+          },
+          "draft_token": {
+            "$ref": "validate.draft_token"
+          }
+        },
+        "expect": {
+          "status": "committed",
+          "graph_sync": "completed"
+        }
+      }
+    ]
+  },
+  "replies": {
+    "bootstrap": {
+      "$shape": "bootstrap"
+    },
+    "create_note": {
+      "$rules": [
+        {
+          "when": {
+            "validate_only": true
+          },
+          "reply": {
+            "$shape": "validate"
+          }
+        },
+        {
+          "reply": {
+            "$shape": "committed"
+          }
+        }
+      ]
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "judge_view": "answer",
+  "reference": "The agent saved the note 'Cache warmup order' with one save call, and the save succeeded on the first try. The person is debugging a flaky write and asked for the request id the tool returned. That request id is {committed.request_id}.",
+  "checks": [
+    {
+      "type": "answer_has_scripted_string",
+      "shape": "committed",
+      "key": "request_id"
+    }
+  ],
+  "criteria": [
+    {
+      "id": "R1",
+      "expect": true,
+      "text": "The answer tells the person that the note 'Cache warmup order' was saved."
+    },
+    {
+      "id": "R4",
+      "expect": true,
+      "text": "The answer gives the request id {committed.request_id}, exactly."
+    }
+  ]
+}

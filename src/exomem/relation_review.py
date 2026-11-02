@@ -154,12 +154,74 @@ _V2_RECORD_KEYS = _V1_RECORD_KEYS | frozenset(
 class RelationReviewError(ValueError):
     code: str
     reason: str
+    #: The request fields the caller must add, for a refusal that names them.
+    missing: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
     def as_dict(self) -> dict[str, str]:
         return {"code": self.code, "reason": self.reason}
+
+
+# The three request parameters of a relation review, fixed by the tool schema
+# (a closed protocol set, not a vocabulary a vault or customer defines).
+# nosemgrep: ep-word-set -- the three tool-schema parameter names of a relation review; a closed API token set, not vocabulary.
+REVIEW_FIELDS = ("relation_disposition", "relation_review_hash", "relation_review_reason")
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewFieldCheck:
+    """What a write finds wrong with the review fields a caller sent."""
+
+    #: Fields the page needs and the caller left out.
+    missing: tuple[str, ...] = ()
+    #: Fields the caller sent for a page that needs no review.
+    ignored: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, list[str]]:
+        found = {"missing": self.missing, "ignored": self.ignored}
+        return {name: list(fields) for name, fields in found.items() if fields}
+
+
+def ignored_review_fields_warning(ignored: tuple[str, ...]) -> str:
+    """The one warning a commit returns when it drops the review fields of a page that needs none."""
+    return f"This page needs no relation review, so these fields were ignored: {', '.join(ignored)}."
+
+
+def review_applies(disposition_kind: str) -> bool:
+    """Whether a page in this disposition state takes a reviewed-none decision."""
+    # nosemgrep: ep-word-membership -- the closed disposition kinds the semantic write contract defines.
+    return disposition_kind in {"missing", "stale", "reviewed_none"}
+
+
+def check_review_fields(
+    supplied: Mapping[str, object | None], review_applicable: bool
+) -> ReviewFieldCheck:
+    """Name the review fields a commit would find missing or ignored.
+
+    Validation reports this result and a commit acts on it, so both read the same
+    answer. It never compares the hash: validation produces the hash.
+    """
+    sent = tuple(name for name in REVIEW_FIELDS if supplied.get(name) is not None)
+    if not sent:
+        return ReviewFieldCheck()
+    if not review_applicable:
+        return ReviewFieldCheck(ignored=sent)
+    return ReviewFieldCheck(missing=tuple(n for n in REVIEW_FIELDS if supplied.get(n) is None))
+
+
+def missing_review_fields_error(
+    missing: tuple[str, ...], *, hash_source: str = "the validate_only result"
+) -> RelationReviewError:
+    """The refusal for a page that needs a review and lacks `missing` fields."""
+    return RelationReviewError(
+        "INVALID_RELATION_REVIEW",
+        f"this write needs a relation review and lacks {', '.join(missing)}; "
+        f"send relation_disposition=reviewed_none with relation_review_reason, "
+        f"and copy relation_review_hash from {hash_source}",
+        missing,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +308,8 @@ class CreationDraftCommit:
     resumed_prepared: bool
     written_paths: tuple[str, ...]
     contract_result: semantic_contract.SemanticContractResult
+    #: Review fields the commit dropped because the page needs no review.
+    ignored_review_fields: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -538,6 +602,8 @@ class _PreparedCreationDraft:
     preliminary_commit_result: semantic_contract.SemanticContractResult
     preliminary_outcome: str
     provenance_server_at: str | None = None
+    #: Review fields the caller sent for a page that needs no review; the commit drops them.
+    ignored_review_fields: tuple[str, ...] = ()
 
 
 class _DuplicateJsonKey(ValueError):
@@ -3254,7 +3320,13 @@ def _attempt(
         )
         expected_artifact = expected_kind in _KINDS
         receipt_expected_kind = expected_kind
-        if commit_disposition == "reviewed_none":
+        if (
+            commit_disposition == "reviewed_none"
+            and artifact is not None
+            and artifact.kind == "reviewed_none"
+        ):
+            # Re-sent review fields match only a stored review. A page that needed
+            # none dropped them and stored another kind, so its own kind decides.
             receipt_expected_kind = "reviewed_none"
         elif (
             expected_kind not in {"bootstrap", "qualifying"}
@@ -3673,11 +3745,7 @@ def _commit_plan(
     result = attempt.result
     record: RelationReviewRecord | None = None
     if requested_review:
-        if result.relation_disposition.kind not in {
-            "missing",
-            "stale",
-            "reviewed_none",
-        }:
+        if not review_applies(result.relation_disposition.kind):
             raise RelationReviewError(
                 "RELATION_REVIEW_NOT_APPLICABLE", "reviewed-none is not applicable"
             )
@@ -3851,37 +3919,13 @@ def prepare_commit_creation_draft(
         available = {(item.path, item.content) for item in auxiliaries}
         if any((item.path, item.content) not in available for _role, item in derived_auxiliary_writes):
             raise RelationReviewError("INVALID_AUXILIARY_WRITE", "derived auxiliary is not committed")
-        review_fields = (
-            relation_disposition is not None,
-            relation_review_hash is not None,
-            relation_review_reason is not None,
-        )
-        if any(review_fields) and not all(review_fields):
-            raise RelationReviewError(
-                "INVALID_RELATION_REVIEW", "relation review fields must be supplied together"
-            )
         if relation_disposition not in {None, "reviewed_none"}:
             raise RelationReviewError(
                 "INVALID_RELATION_REVIEW",
                 "relation disposition must be 'reviewed_none' or 'reviewed-none'",
             )
-        reason = (
-            _review_reason(relation_review_reason)
-            if relation_disposition == "reviewed_none"
-            else None
-        )
-        normalized_preview = _normalize_source(source)
-        _validate_identity(normalized_preview, identity)
-        preview_hash = _draft_hash(
-            identity,
-            destination,
-            semantic_contract.review_content_fingerprint(identity, normalized_preview),
-            token_hash,
-        )
-        if relation_disposition == "reviewed_none" and relation_review_hash != preview_hash:
-            raise RelationReviewError("DRAFT_HASH_MISMATCH", "draft hash requires fresh validation")
+        _validate_identity(_normalize_source(source), identity)
         auxiliary_digest = _auxiliary_hash(auxiliaries, root)
-        requested_review = relation_disposition == "reviewed_none"
         preliminary = _attempt(
             root,
             path=path,
@@ -3890,12 +3934,28 @@ def prepare_commit_creation_draft(
             operation=operation,
             commit_auxiliaries=auxiliaries,
             commit_disposition=relation_disposition,
-            commit_reason=reason,
+            commit_reason=(
+                relation_review_reason.strip() if type(relation_review_reason) is str else None
+            ),
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
             reuse=prevalidated,
         )
+        # Whether the page needs a review is only known once it is evaluated, so the
+        # field check follows the attempt: a page that needs none drops the fields.
+        fields = check_review_fields(
+            {
+                "relation_disposition": relation_disposition,
+                "relation_review_hash": relation_review_hash,
+                "relation_review_reason": relation_review_reason,
+            },
+            review_applies(preliminary.result.relation_disposition.kind),
+        )
+        if fields.missing:
+            raise missing_review_fields_error(fields.missing)
+        requested_review = relation_disposition == "reviewed_none" and not fields.ignored
+        reason = _review_reason(relation_review_reason) if requested_review else None
         preliminary_commit_result, _preliminary_record = _commit_plan(
             preliminary,
             operation=operation,
@@ -3955,6 +4015,7 @@ def prepare_commit_creation_draft(
             preliminary_commit_result,
             _reuse_outcome(prevalidated, preliminary),
             provenance_server_at,
+            fields.ignored,
         )
     except RelationReviewError:
         raise
@@ -4017,7 +4078,7 @@ def commit_prepared_creation_draft(
                     draft_id=identity,
                     operation=operation,
                     commit_auxiliaries=auxiliaries,
-                    commit_disposition=relation_disposition,
+                    commit_disposition=relation_disposition if requested_review else None,
                     commit_reason=reason,
                     draft_token_hash=token_hash,
                     predecessor_path=predecessor_path,
@@ -4201,6 +4262,7 @@ def commit_prepared_creation_draft(
                 resumed,
                 written_paths,
                 result,
+                prepared.ignored_review_fields,
             )
     except RelationReviewError:
         raise

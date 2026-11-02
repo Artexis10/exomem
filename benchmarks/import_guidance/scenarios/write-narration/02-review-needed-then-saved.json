@@ -1,0 +1,149 @@
+{
+  "id": "02-review-needed-then-saved",
+  "title": "The first commit is refused for a missing review field, then the retry saves",
+  "suite": "write-narration",
+  "prompt": "Please save a note in my memory called 'Billing retry policy'. It should say that payment retries use exponential backoff capped at one hour, and that after five failed attempts the invoice goes to manual review. Tell me once it's saved.",
+  "served_tools": [
+    "bootstrap",
+    "create_note"
+  ],
+  "builtin_tools": [],
+  "record": {
+    "steps": [
+      {
+        "settle_graph": true
+      },
+      {
+        "as": "bootstrap",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "compact"
+          }
+        }
+      },
+      {
+        "as": "validate",
+        "tool": "create_note",
+        "arguments": {
+          "title": "Billing retry policy",
+          "slug": "billing-retry-policy",
+          "content": "## Observations\n\n- [finding] Payment retries use exponential backoff capped at one hour. ^one\n",
+          "validate_only": true
+        },
+        "expect": {
+          "mutated": false
+        }
+      },
+      {
+        "as": "refused",
+        "tool": "create_note",
+        "arguments_from": "validate",
+        "arguments": {
+          "draft_id": {
+            "$ref": "validate.draft_id"
+          },
+          "draft_hash": {
+            "$ref": "validate.draft_hash"
+          },
+          "draft_token": {
+            "$ref": "validate.draft_token"
+          },
+          "relation_disposition": "reviewed_none",
+          "relation_review_reason": "No honest relation exists between this page and the existing pages."
+        },
+        "expect": {
+          "success": false
+        }
+      },
+      {
+        "as": "committed",
+        "tool": "create_note",
+        "arguments_from": "validate",
+        "arguments": {
+          "draft_id": {
+            "$ref": "validate.draft_id"
+          },
+          "draft_hash": {
+            "$ref": "validate.draft_hash"
+          },
+          "draft_token": {
+            "$ref": "validate.draft_token"
+          },
+          "relation_disposition": "reviewed_none",
+          "relation_review_hash": {
+            "$ref": "validate.relation_review_hash"
+          },
+          "relation_review_reason": "No honest relation exists between this page and the existing pages."
+        },
+        "expect": {
+          "status": "committed",
+          "graph_sync": "completed"
+        }
+      }
+    ]
+  },
+  "replies": {
+    "bootstrap": {
+      "$shape": "bootstrap"
+    },
+    "create_note": {
+      "$rules": [
+        {
+          "when": {
+            "validate_only": true
+          },
+          "reply": {
+            "$shape": "validate"
+          }
+        },
+        {
+          "reply": [
+            {
+              "$shape": "refused"
+            },
+            {
+              "$shape": "committed"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "judge_view": "answer",
+  "reference": "The agent tried to save the note 'Billing retry policy'. The first commit was refused with the error code INVALID_RELATION_REVIEW because a relation-review field was missing. The agent corrected the call and the second commit succeeded, so the note is saved. The tool results also carried a request id (a UUID), a draft hash and sync-state fields.",
+  "checks": [
+    {
+      "type": "answer_lacks_scripted_strings",
+      "shapes": [
+        "validate",
+        "refused",
+        "committed"
+      ],
+      "literals": [
+        "graph_sync",
+        "derived_sync",
+        "vocabulary_sync",
+        "relation_review_hash",
+        "request_id",
+        "receipt_id"
+      ]
+    }
+  ],
+  "criteria": [
+    {
+      "id": "R1",
+      "expect": true,
+      "text": "The answer tells the person that the note 'Billing retry policy' was saved."
+    },
+    {
+      "id": "R2",
+      "expect": false,
+      "text": "The answer mentions an error code, a request id, a receipt id, a hash or draft identifier, that a save was refused or had to be retried, or the state of indexing or syncing (for example graph sync, derived sync or vocabulary sync)."
+    }
+  ]
+}

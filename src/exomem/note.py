@@ -2189,6 +2189,8 @@ def note(
             draft_token=encoded_token,
             registrations=registrations,
             relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
             predecessor_path=_predecessor_path,
             predecessor_content_hash=_predecessor_content_hash,
             vocabulary_binding=domain_binding,
@@ -2341,6 +2343,7 @@ def note(
             )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise _note_error(error) from error
+    warnings.extend(committed.review_field_warnings())
     return _finish_note(
         root,
         finish,
@@ -2519,7 +2522,7 @@ def _note_error(
     """The `NoteError` that a semantic-writer error becomes, caused by it."""
     converted = NoteError(
         error.code,
-        [],
+        list(error.missing),
         error.reason,
         dict(getattr(error, "details", None) or {}),
     )

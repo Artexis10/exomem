@@ -358,7 +358,7 @@ def edit(
                 validate_only=True,
             ).as_dict()
         except semantic_writes.SemanticWriteError as error:
-            raise EditError(error.code, [], error.reason) from error
+            raise EditError(error.code, list(error.missing), error.reason) from error
         return EditValidation(
             path=rel_path,
             validate_only=True,
@@ -1001,7 +1001,7 @@ def commit_edit(
                 timings=timings,
             )
     except semantic_writes.SemanticWriteError as error:
-        raise EditError(error.code, [], error.reason) from error
+        raise EditError(error.code, list(error.missing), error.reason) from error
     except OpError:
         # Ordinary boundary contention (MUTATION_BUSY/MUTATION_WARMING) from
         # the commit seam's own guard is not a partial write — nothing was

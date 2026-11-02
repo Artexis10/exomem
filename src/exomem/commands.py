@@ -107,6 +107,7 @@ from . import memory_refs as memory_refs_module
 from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
+from . import mutation_terminal as mutation_terminal_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
@@ -1815,13 +1816,13 @@ def op_bootstrap(
                     "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
-                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')} as appropriate",
+                f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')}",
                 (
                     "inspect write warnings; response_detail='full' reveals write_feedback; "
                     "create_note(suggestions=true) also reveals suggestions"
                 ),
                 "apply any accepted links through edit_note",
-                "report the written path",
+                mutation_terminal_module.NARRATION_RULE,
             ],
             "route_by_intent": {
                 "raw_material": "capture_source",
@@ -3793,7 +3794,7 @@ def _add_source(
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if result.capture_outcome != "reused":
         query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
     return result.as_dict()
@@ -4799,9 +4800,7 @@ def op_edit(
         set_take_module.SetTakeError,
         set_frontmatter_field_module.SetFrontmatterError,
     ) as e:
-        msg = f"{e.code}: {e.reason}"
-        if getattr(e, "missing", None):
-            msg += f" (missing: {e.missing})"
+        msg = _leaf_error_message(e)
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
         raise ValueError(msg) from e
@@ -5003,10 +5002,10 @@ def op_replace(
             relation_review_hash=effective_relation_review_hash,
         )
     except replace_module.ReplaceError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     except note_module.NoteError as e:
         # New-page validation failed before the supersession could land.
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if written_path := getattr(result, "new_path", None):
         query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
         working_set_heat_module.note_citations(vault_root, sources or ())
@@ -5042,6 +5041,14 @@ def _replacement_review_hash(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _leaf_error_message(error: Any) -> str:
+    """`CODE: reason`, plus the request fields the caller must add when the error names any."""
+    message = f"{error.code}: {error.reason}"
+    if missing := getattr(error, "missing", None):
+        message += f" (missing: {list(missing)})"
+    return message
 
 
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
@@ -5182,12 +5189,12 @@ def op_link(
             origin=_creation_origin(vault_root, ref),
         )
     except link_module.LinkError as e:
-        suffix = f" (missing: {e.missing})"
+        msg = _leaf_error_message(e)
         if e.candidates:
-            suffix += f" (candidates: {e.candidates})"
+            msg += f" (candidates: {e.candidates})"
         if e.candidate_fingerprint is not None:
-            suffix += f" (candidate_fingerprint: {e.candidate_fingerprint})"
-        raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
+            msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
+        raise ValueError(msg) from e
     return result.as_dict()
 
 
@@ -5285,7 +5292,7 @@ def op_preserve(
             filename, destination=str(Path(scope) / category), raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     # Same destination-scoped lookup the batch command uses, run before the
     # write: Evidence is append-only, so the same bytes under the same family
     # are one fact, and reporting the copy that is already there beats adding a
@@ -5322,7 +5329,7 @@ def op_preserve(
             raw_protection=raw_protection,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     payload = result.as_dict()
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
@@ -5587,7 +5594,7 @@ def _invoke_note(
     try:
         result = note_module.note(**arguments.arguments)
     except note_module.NoteError as e:
-        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
+        raise ValueError(_leaf_error_message(e)) from e
     if written_path := getattr(result, "path", None):
         sources = arguments.arguments["sources"]
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
@@ -5807,7 +5814,7 @@ def op_create_file(
             relation_review_reason=relation_review_reason,
         )
     except create_file_module.CreateFileError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise ValueError(_leaf_error_message(e)) from e
     return result.as_dict()
 
 
@@ -10501,9 +10508,7 @@ def op_connect_memory(
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
-                msg = f"{e.code}: {e.reason}"
-                if getattr(e, "missing", None):
-                    msg += f" (missing: {e.missing})"
+                msg = _leaf_error_message(e)
                 if getattr(e, "candidates", None):
                     msg += f" (candidates: {e.candidates})"
                 raise ValueError(msg) from e
@@ -13607,6 +13612,18 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "episode_memory": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
 }
+#: What each write command reports on success. A grouped command declares its verbs on its operation
+#: rows (`operation_entries`) instead. A write in neither place gets no `user_summary`, and
+#: tests/test_plain_write_outcomes.py fails until it declares one. The keys are command names.
+_COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingProxyType({  # nosemgrep: ep-word-dict -- the registry's own command names, each mapped to a closed contract verb.
+    "add": "saved", "adopt": "saved", "audit_fix": "updated", "reconcile": "updated",
+    "edit": "updated", "replace": "replaced", "link": "saved", "preserve": "saved",
+    "note": "saved", "create_file": "saved", "move_file": "moved", "delete": "deleted",
+    "append_to_file": "updated", "recover_from_trash": "restored",
+    "remember": "saved", "edit_memory": "updated", "replace_memory": "replaced",
+    "capture_source": "saved", "preserve_evidence": "saved", "preserve_artifacts": "saved",
+    "transfer_artifact": "saved", "transfer_memory": "saved",
+})
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -13696,6 +13713,7 @@ def _build_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
                 restricted_refusal_floor=name in floored,
+                outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
             )
         )
     return tuple(cmds)
@@ -14380,6 +14398,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
+                outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
             )
         )
     return tuple(cmds)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 import stat
 import threading
@@ -821,6 +822,30 @@ def test_preparing_a_bounded_content_guard_preserves_its_read_limit(
     target.write_bytes(b"bounded bytes grew")
     with pytest.raises(vault.PathGuardError, match="PATH_GUARD"):
         prepared[0].recheck(tmp_path)
+
+
+def test_a_refused_guarded_read_names_the_condition_and_logs_the_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A bare "not a bounded regular file" left a transient refusal undiagnosable. The caller
+    # may be one that cannot see the page, so only the server log carries the path.
+    (tmp_path / "Episodes").mkdir()
+    target = tmp_path / "Episodes" / "linked.md"
+    target.write_bytes(b"episode bytes")
+    os.link(target, tmp_path / "outside-copy.md")
+    with caplog.at_level(logging.WARNING, logger="exomem.vault"):
+        with pytest.raises(vault.PathGuardError) as linked:
+            vault.read_bounded_guarded_bytes(tmp_path, "Episodes/linked.md", limit=64)
+    assert linked.value.code == "PATH_GUARD_UNSAFE"
+    assert "has 2 hard links" in linked.value.reason
+    assert "linked.md" not in linked.value.reason
+    assert any("Episodes/linked.md" in record.getMessage() for record in caplog.records)
+
+    (tmp_path / "outside-copy.md").unlink()
+    with pytest.raises(vault.PathGuardError) as oversized:
+        vault.read_bounded_guarded_bytes(tmp_path, "Episodes/linked.md", limit=4)
+    assert "is 13 bytes, over the 4-byte read limit" in oversized.value.reason
+    assert "linked.md" not in oversized.value.reason
 
 
 def test_guarded_reader_retries_a_transient_windows_sharing_refusal_from_root(
