@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: ffabbfb2fc6d7986983c0873099881b8b8a8f94f1cfda76e735f9dc42ebcc205
+  skill_contract: 06c52c83a4c005d66782006b3b668a60448181c38c6c039b69cc5d80bd23812b
   version: "0.32.0"
 ---
 
@@ -144,8 +144,10 @@ or permitted by the live proactive-capture disposition. First update each page w
 knowledge this session changed (entity facets, decisions, workflow contracts) with
 `edit_note`, `change_observations` or `supersede_note`. Then record one bounded recap
 with `record_episode/read_episode`: link each Decided item to its page with `[[...]]`
-and set `about` to the pages you updated. The recap is what the next session on any
-client sees first. Nothing durable happened: record nothing.
+(the file name works when a title is long; an item holds 200 characters) and set
+`about` to the pages you updated. At `off`, or when the user asked only for a recap,
+a recap request alone does not authorize page edits. The recap is what the next
+session on any client sees first. Nothing durable happened: record nothing.
 
 ## Recall loop
 

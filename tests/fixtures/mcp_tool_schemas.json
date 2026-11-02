@@ -7897,7 +7897,7 @@
     }
   },
   "record_episode": {
-    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. Update the pages this session changed first; the record response's compile block lists the pages the recap names. Select one operation.kind.",
+    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. The record response's compile block lists the pages the recap names. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
