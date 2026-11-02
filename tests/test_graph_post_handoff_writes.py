@@ -1798,6 +1798,45 @@ if phase in {{"outgoing", "outgoing_fenced"}}:
     print(json.dumps({{"available": EpistemicGraphIndex(root).available()}}))
     raise SystemExit(0)
 
+if phase == "outgoing_live":
+    # A serving worker that adopted the published snapshot when it started and
+    # keeps publishing incrementally. It links a page that does not exist yet,
+    # then creates it, so its last publications move the resolver topology.
+    from types import SimpleNamespace
+
+    from exomem import graph_sync, index_sync  # noqa: E402
+    from exomem import vault as vault_module  # noqa: E402
+    from exomem.writer_lease import get_manager, mark_active_mutation_committed  # noqa: E402
+    from test_graph_post_handoff_writes import _note  # noqa: E402
+
+    _seed_live_freshness(root)
+    assert EpistemicGraphIndex(root).adopt_published_snapshot().adopted
+    created = generated / "created-by-the-serving-worker.md"
+    _governed_write(
+        root,
+        generated / "generated-note-0060.md",
+        "[[" + GENERATED + "/created-by-the-serving-worker]]",
+    )
+
+    def create(vault_root, **_kwargs):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, _note(9001, ["generated-note-0001"]))],
+            vault_root=vault_root,
+        )
+        mark_active_mutation_committed()
+        return {{"status": "committed", "mutated": True}}
+
+    get_manager().invoke(
+        SimpleNamespace(name="remember", read_only=False, leaf=create), (root,), {{}}
+    )
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(root):
+            break
+        index_sync.drain_graph_work(root, limit=64)
+    graph_sync.drain_active_rebuilds(timeout=60.0)
+    print(json.dumps({{"available": EpistemicGraphIndex(root).available()}}))
+    raise SystemExit(0)
+
 victim = generated / "generated-note-0042.md"
 if phase == "racing_edit":
     # An unattributed event published by the watcher *while the adoption proof is

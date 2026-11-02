@@ -21,6 +21,7 @@ Pure process state.  Nothing here reasons over notes.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import threading
@@ -103,6 +104,13 @@ REPROVE_INTERVAL_SECONDS = 30.0
 #: How often the standby looks at the graph for movement: a stat of the durable
 #: checkpoint and of the sidecar, and a sidecar read only when one moved.
 REPROVE_POLL_SECONDS = 1.0
+#: The share of the supervisor's promotion request
+#: (`service_manager.PROMOTE_REQUEST_SECONDS`) that promotion may spend
+#: re-proving a snapshot published after the held proof. Ownership, the
+#: catalogue and the residue still run inside the same request, and a request
+#: that times out fails the upgrade after the old worker has stopped. A
+#: re-proof that runs out of time records `advanced`, as before it existed.
+PROMOTION_REPROOF_SHARE = 0.4
 #: The re-proof clock; a seam for tests.
 _clock = time.monotonic
 
@@ -355,7 +363,7 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     # The token the proof read in its own transaction names the snapshot it
     # proved. A snapshot the serving worker publishes during or after the
     # proof is never named as proved: promotion finds the token moved and
-    # records `advanced`, and the promoted worker runs the handoff in full.
+    # re-proves the snapshot on disk from this proof's page reads.
     token = adoption.proved_token if adoption.adopted else None
     with _lock:
         _attempt_ended_at = _clock()
@@ -478,7 +486,8 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     again, so the cutover waited out its whole budget on a proof that could not
     change. After a proof succeeds it re-proves only for a generation that
     landed without a publication: a publication since the held proof is left
-    to promotion, which records it as `advanced`.
+    to promotion, which finds it `advanced` and re-proves it from the held
+    proof's page reads.
 
     A held proof stays held while it is re-proved, and the re-proof replaces
     it only when it succeeds. Withdrawing it first, as this did through
@@ -513,10 +522,10 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     if held is not None:
         if signal[1] != held:
             # A snapshot published since the one the held proof names.
-            # Promotion records it as `advanced` and the promoted worker runs
-            # the handoff in full, so a re-proof here would buy nothing. A
-            # generation that lands without a publication is the movement a
-            # re-proof is for.
+            # Promotion re-proves it from the held proof's page reads once the
+            # serving worker has exited and can publish no later one, so a
+            # re-proof here would buy nothing. A generation that lands without
+            # a publication is the movement a re-proof is for.
             return False
         # Re-prove over the held lineage: no reseed, no resolver eviction.
         # Reseeding pops the adopted origin the held proof relies on, which is
@@ -859,12 +868,15 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     one fact, one place to read it.
 
     `graph_snapshot` is carried only on a `current` verdict. That is the one
-    where promotion re-proved that the checkpoint the standby adopted is still
-    the checkpoint on disk, so re-adopting would buy nothing -- 19.5 s of it on
-    the 0.85.0 cutover. `advanced`, `unproven` and `rebuild-after-promotion` all
-    mean the opposite, and each leaves the component out so `warm_all` runs the
-    handoff in full. (A residue failure rewrites the verdict to
-    `rebuild-after-promotion`, so it is covered by the same test.)
+    where the checkpoint this process adopted is the checkpoint on disk: the
+    held proof's, or the one promotion re-proved after the serving worker
+    published past it. Re-adopting would buy nothing -- 19.5 s of it on the
+    0.85.0 cutover, and every write refused for the length of the handoff.
+    `advanced` (a moved snapshot whose re-proof declined), `unproven` and
+    `rebuild-after-promotion` all mean the opposite, and each leaves the
+    component out so `warm_all` runs the handoff in full. (A residue failure
+    rewrites the verdict to `rebuild-after-promotion`, so it is covered by the
+    same test.)
     """
     from . import readiness
 
@@ -980,13 +992,15 @@ def _warm_then_reprove(vault_root: Path) -> None:
         log.warning("standby graph snapshot re-proof loop crashed", exc_info=True)
 
 
-def _reprove(vault_root: Path) -> Any:
-    """Re-run the source proof after the migrator wrote state."""
+def _reprove(
+    vault_root: Path, *, prior_reads: Any = None, deadline: float | None = None
+) -> Any:
+    """Re-run the source proof at promotion, from the held proof's reads when given."""
     from . import epistemic_graph
 
     try:
         return epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot(
-            apply_residue=False
+            apply_residue=False, prior_reads=prior_reads, deadline=deadline
         )
     except Exception:  # noqa: BLE001 - a failed re-proof rebuilds after promotion
         log.warning("standby snapshot re-proof failed", exc_info=True)
@@ -1078,8 +1092,10 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     """Take ownership after the previous worker and its descendants have exited.
 
     Re-validates the proved checkpoint against disk first.  A checkpoint that
-    advanced is recorded as such; a proof that now fails is recorded and
-    promotion proceeds anyway, leaving the repair to the coalesced rebuild path.
+    advanced is re-proved from the held proof's page reads, within a share of
+    the supervisor's promotion request; one whose re-proof declines is recorded
+    as `advanced`. A proof that now fails is recorded and promotion proceeds
+    anyway, leaving the repair to the coalesced rebuild path.
     """
     global _promoting
     with _lock:
@@ -1116,12 +1132,13 @@ def _promote_owned(
     proof_generation: Any,
 ) -> dict[str, Any]:
     """`promote` once it has claimed the standby; see there."""
-    global _promoted, _standby, _adoption, _carried
+    global _promoted, _standby, _adoption, _carried, _proved_token
     # `revalidated` says promotion re-checked the snapshot at all; `reproved`
-    # says it re-ran the whole SOURCE proof, which only the migrated branch
-    # does. The other branch compares the checkpoint pair -- a real
-    # re-validation, and deliberately cheaper, but not a proof, and calling it
-    # one overstated what the handoff record was attesting to.
+    # says it re-ran the SOURCE proof: the migrated branch always does, and the
+    # other branch only when the checkpoint pair moved under the held proof.
+    # Comparing the pair is a real re-validation, and deliberately cheaper, but
+    # not a proof, and calling it one overstated what the handoff record was
+    # attesting to.
     record: dict[str, Any] = {
         "ok": True,
         "migrated": bool(migrated),
@@ -1159,6 +1176,38 @@ def _promote_owned(
             record["snapshot"] = "rebuild-after-promotion"
         elif current != proved:
             record["snapshot"] = "advanced"
+            reads = getattr(adoption, "proof_reads", None)
+            if reads is not None:
+                # The serving worker published after the held proof, which under
+                # live writes is the usual case. Prove the snapshot on disk now,
+                # from the pages the held proof read: only the pages that moved
+                # since are read again, and the old worker has exited, so
+                # nothing publishes during it. The promoted worker then holds an
+                # adoption of the snapshot it inherits, and its warm need not
+                # run the handoff in full with every write refused meanwhile.
+                # A decline keeps `advanced` and the held adoption, and the
+                # promoted worker's warm runs the handoff in full as before.
+                from .service_manager import PROMOTE_REQUEST_SECONDS
+
+                # Generation before marker, the order the warm-time proof samples in.
+                generation = _durable_generation(Path(vault_root))
+                marker = _observe_full_marker(Path(vault_root))
+                reproof = _reprove(
+                    Path(vault_root),
+                    prior_reads=reads,
+                    deadline=started + PROMOTE_REQUEST_SECONDS * PROMOTION_REPROOF_SHARE,
+                )
+                record["reproved"] = True
+                if reproof.adopted:
+                    adoption = reproof
+                    with _lock:
+                        _adoption = adoption
+                        _proved_token = reproof.proved_token
+                    record["snapshot"] = "current"
+                    covered_marker = marker
+                    covered_generation = generation
+                else:
+                    record["reproof_declined"] = reproof.reason
         else:
             record["snapshot"] = "current"
             covered_marker = proof_marker
@@ -1209,6 +1258,10 @@ def _promote_owned(
         _standby = False
         _carried = carried
         activation = _activation
+        if getattr(_adoption, "proof_reads", None) is not None:
+            # Only a standby's next proof starts from the page reads; a
+            # promoted worker would hold one entry per page for nothing.
+            _adoption = dataclasses.replace(_adoption, proof_reads=None)
         # Under the same lock as the flip: a readiness proof that reads
         # `standby: false` measured part of its state as a standby, and the
         # supervisor reads readiness as soon as this POST returns.

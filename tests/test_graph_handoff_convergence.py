@@ -624,18 +624,19 @@ def test_the_edge_oracle_sees_a_drain_that_does_not_widen(
         _assert_matches_a_fresh_rebuild(root)
 
 
-def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
+def test_a_snapshot_published_during_the_proof_is_held_and_reproved_at_promotion(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """M1: the standby holds the snapshot its proof read, not one published after it.
 
-    The publication shows at promotion as `advanced`, so the promoted worker
-    runs the handoff in full instead of the standby discarding a sound proof.
-    The re-proof loop's next due poll leaves the proof held, for the same reason.
+    The re-proof loop's next due poll leaves the proof held. Promotion finds the
+    publication and re-proves it from the held proof's reads, so the promoted
+    worker inherits an adoption of S2 instead of running the handoff in full.
     """
     # Catches a standby that names S2 as proved, declines a sound proof of S1, or
     # withdraws S1 to re-prove after the publication and reports `graph_snapshot`
-    # waiting for the whole proof.
+    # waiting for the whole proof; and a promotion that carries the graph handoff
+    # only when S1 is still current.
     root = handoff_vault
     _commit_unpublished_page(root)
     _enter_standby(monkeypatch)
@@ -665,9 +666,30 @@ def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
     assert service_standby.proved_checkpoint() == read[0], "the poll must keep S1 held"
     assert service_standby.cutover_components()["graph_snapshot"] == "ready"
 
+    # A page edited after the held proof and never published.
+    edited = f"{GENERATED}/generated-note-0007.md"
+    (root / edited).write_text(
+        (root / edited).read_text(encoding="utf-8") + "\n- unpublished\n", encoding="utf-8"
+    )
+    real_read = vault_module.read_bounded_guarded_bytes_with_generation
+    promotion_reads: list[str] = []
+
+    def counted_read(vault_root, target, **kwargs):
+        promotion_reads.append(target)
+        return real_read(vault_root, target, **kwargs)
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes_with_generation", counted_read, raising=True
+    )
+
     record = service_standby.promote(root, migrated=False)
-    assert record["snapshot"] == "advanced"
-    assert "graph_handoff" not in record["carried_from_standby"]
+    assert record["snapshot"] == "current", record
+    assert record["reproved"] is True
+    assert "graph_handoff" in record["carried_from_standby"]
+    assert service_standby.proved_checkpoint() == service_standby.snapshot_token(root)
+    # It runs inside the supervisor's promotion request, so it reads only what moved.
+    assert promotion_reads == [edited], "the re-proof must start from the held proof's reads"
+    assert record["residue_applied"] == 1, "S2 plus the residue must equal the disk"
 
 
 def _replace_with_identical_bytes(path: Path) -> None:
@@ -697,13 +719,16 @@ def _governed_write(root: Path, writes: dict[Path, str]) -> None:
 
 
 def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
-    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
 ) -> None:
-    """The live upgrade: a governed write, a direct save and a deletion during the proof."""
-    # Catches a proof that declines while writers commit (`proof_raised` on a replaced
-    # page, `snapshot_published_during_proof`), or adopts a residue missing a moved page.
-    from exomem import warmup
+    """The live upgrade: a governed write, a direct save and a deletion during the proof.
 
+    The governed write publishes S2 after the proof read S1, so promotion
+    re-proves S2 and the promoted worker never runs the handoff again.
+    """
+    # Catches a proof that declines while writers commit (`proof_raised` on a replaced
+    # page, `snapshot_published_during_proof`), or adopts a residue missing a moved page;
+    # and a promotion re-proof whose adoption leaves the graph short of a fresh rebuild.
     root = handoff_vault
     _enter_standby(monkeypatch)
     freshness.rebaseline(root)
@@ -755,8 +780,55 @@ def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
     )
     monkeypatch.setattr(vault_module, "read_bounded_guarded_bytes", real_read, raising=True)
 
+    passes_before_promotion = len(whole_vault_passes)
     record = service_standby.promote(root, migrated=False)
-    assert record["snapshot"] == "advanced"
+    assert record["snapshot"] == "current", record
+    assert record["reproved"] is True
+    assert "graph_handoff" in record["carried_from_standby"]
+
+    # The promoted worker's watcher seeds its registry; its warm skips the
+    # carried handoff, and its drain repairs what the re-proof left as residue.
+    _seed_live_freshness(root)
+    _drain_to_empty(root)
+
+    assert whole_vault_passes[passes_before_promotion:] == [], (
+        "the promoted worker paid a whole-vault pass the re-proof should have removed"
+    )
+    assert EpistemicGraphIndex(root).available() is True
+    assert _file_row(root, created)
+    assert not _file_row(root, deleted)
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_promotion_reproof_that_runs_out_of_time_falls_back_to_the_full_handoff(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-proof is bounded inside the supervisor's promotion request.
+
+    One that runs out of time declines. Promotion then records `advanced` and
+    carries no graph handoff, and the promoted worker's warm runs the handoff
+    in full, which still converges to a fresh rebuild.
+    """
+    # Catches a promotion that carries the handoff after its re-proof declined,
+    # and a re-proof with no bound inside the promotion request.
+    from exomem import warmup
+
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    assert service_standby.prove_graph_snapshot(root) is True
+    s1 = service_standby.proved_checkpoint()
+    # The serving worker commits and publishes S2 after the held proof.
+    edited = root / GENERATED / "generated-note-0007.md"
+    _governed_write(root, {edited: edited.read_text(encoding="utf-8") + "\n- after the proof\n"})
+    assert graph_sync.drain_active_rebuilds(timeout=120.0)
+    index_sync.drain_graph_work(root, limit=64)
+    assert service_standby.snapshot_token(root) != s1, "the governed write must publish S2"
+    monkeypatch.setattr(service_standby, "PROMOTION_REPROOF_SHARE", 0.0, raising=True)
+
+    record = service_standby.promote(root, migrated=False)
+    assert record["snapshot"] == "advanced", record
+    assert record["reproof_declined"] == "proof_deadline_passed"
     assert "graph_handoff" not in record["carried_from_standby"]
 
     # The promoted worker seeds its registry, then its warm runs the handoff in full.
@@ -766,8 +838,6 @@ def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
     _drain_to_empty(root)
 
     assert EpistemicGraphIndex(root).available() is True
-    assert _file_row(root, created)
-    assert not _file_row(root, deleted)
     _assert_matches_a_fresh_rebuild(root)
 
 

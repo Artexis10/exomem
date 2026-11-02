@@ -261,6 +261,10 @@ RESTART_WINDOW_SECONDS = 600.0
 #: How long a stopped worker's tree gets to show that every process exited,
 #: in a handoff and after a crash alike.
 STOP_ALLOWANCE_SECONDS = 10.0
+#: How long a promotion request without a migration may take. The standby
+#: bounds its own re-proof of a moved snapshot inside this; see
+#: `service_standby.PROMOTION_REPROOF_SHARE`.
+PROMOTE_REQUEST_SECONDS = 10.0
 
 
 def standby_warm_budget() -> float:
@@ -1900,11 +1904,12 @@ class WorkerRuntime:
         # call gets the cold-start budget this method is handed rather than a
         # fixed ten seconds. Capping it lower would time out the request while
         # the promotion it asked for was still running, and discard a standby
-        # that was about to succeed. Without a migration the POST only acquires
-        # ownership, so it keeps the tight cap that surfaces an unresponsive
-        # candidate quickly; the readiness wait below gets the whole budget
-        # either way.
-        promote_budget = deadline.remaining(timeout if migrated else 10)
+        # that was about to succeed. Without a migration the POST acquires
+        # ownership and, when the snapshot moved, runs a re-proof the standby
+        # bounds inside this cap, so it keeps the tight cap that surfaces an
+        # unresponsive candidate quickly; the readiness wait below gets the
+        # whole budget either way.
+        promote_budget = deadline.remaining(timeout if migrated else PROMOTE_REQUEST_SECONDS)
         async with asyncio.timeout(promote_budget):
             response = await self.client.post(
                 "/control/promote", json={"migrated": bool(migrated)}
