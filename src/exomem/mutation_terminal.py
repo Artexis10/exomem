@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from . import capabilities, operation_entries, relation_registry
 from . import curation as curation_module
+from .kbdir import kb_prefix
 from .operation_entries import OutcomeVerb
 
 log = logging.getLogger(__name__)
@@ -141,6 +142,12 @@ _ADVISORY_FAILURE = (
 #: Bounds the diagnostics carried by one acknowledgement, not one batch: a
 #: multi-batch mutation shares this budget rather than multiplying it.
 _MAX_DERIVED_DIAGNOSTICS = 9
+
+#: Each media operation and the outcome its result reports.
+# nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
+MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+#: The media operations whose result reports how many jobs they requeued.
+MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 
 #: How an agent tells the user about a write. One sentence, carried by the bootstrap
 #: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
@@ -380,7 +387,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         return {}
     operation = result.get("operation")
-    if operation not in {"process", "retry"}:
+    if operation not in MEDIA_OUTCOMES:
         return {}
 
     def integer(value: Any, *, allow_none: bool = False) -> bool:
@@ -409,7 +416,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         return (
             isinstance(value, str)
             and 0 < len(value) <= 2048
-            and value.startswith("Knowledge Base/")
+            and value.startswith(kb_prefix())
             and "\\" not in value
             and "\x00" not in value
         )
@@ -432,7 +439,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
             "sidecar_path": result["sidecar_path"],
             "job_id": result["job_id"],
         }
-        if operation == "retry":
+        if operation in MEDIA_REQUEUE_OPERATIONS:
             if not integer(result.get("requeued")):
                 return {}
             projected["requeued"] = result["requeued"]
@@ -467,7 +474,8 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
                 }
             )
             continue
-        if outcome not in {"processed", "retried"} or state not in {
+        # nosemgrep: ep-word-membership -- the media job's closed states, which this projection reports.
+        if outcome not in MEDIA_OUTCOMES.values() or state not in {
             "pending",
             "running",
             "blocked",
@@ -1919,16 +1927,88 @@ def split_response_detail(
     return payload, cast(ResponseDetail, detail)
 
 
-def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | None:
+def _batch_rows(
+    leaf: Any, artifact_receipt: Mapping[str, Any], media: Mapping[str, Any]
+) -> list[tuple[str, str]]:
+    """One (state, path) pair per attempted file of a batch, read from the projected rows.
+
+    The projections, never the raw leaf: a malformed row is already a `failed` row there, so the
+    sentence cannot claim more than the rows the agent reads. `replayed` is a file an earlier call
+    committed, so it counts with `already_stored`. `unselected` files were never attempted.
+    A media row is `failed` or it was accepted; the media contract has no duplicate state.
+    One file written alone has no rows; its stored leaf says `already_stored` when the bytes were
+    already there, and names the earlier copy it resolved to.
+    """
+    rows = []
+    for item in artifact_receipt.get("files", ()):
+        state = _artifact_state(item)
+        state = "already_stored" if state == "replayed" else state
+        if state in _ARTIFACT_STATES:
+            rows.append((state, item.get("stored_path", "")))
+    for item in media.get("media_results", ()):
+        rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
+    if (
+        not rows
+        and isinstance(leaf, Mapping)
+        and leaf.get("state") == "already_stored"
+        and isinstance(leaf.get("stored_path"), str)
+        and isinstance(leaf.get("duplicate_of"), Mapping)
+    ):
+        rows.append(("already_stored", leaf["stored_path"]))
+    return rows
+
+
+def _lead(head: str, names: Sequence[str], *, of: int | None = None) -> str:
+    """`head -> first`, or `head N files -> first and N-1 more`; `of` makes it `N of T files`."""
+    if len(names) == 1 and of is None:
+        return f"{head} -> {names[0]}"
+    count = f"{len(names)} of {of}" if of is not None else str(len(names))
+    more = f" and {len(names) - 1} more" if len(names) > 1 else ""
+    return f"{head} {count} files -> {names[0]}{more}"
+
+
+def _partial_batch_summary(verb: OutcomeVerb, rows: Sequence[tuple[str, str]]) -> str | None:
+    """The sentence for a batch in which some file was not newly stored, else None.
+
+    Never says "Saved" unless a file was stored by this call. No codes, ids or reasons: the
+    agent reads those from the `files` rows.
+    """
+    stored = [path for state, path in rows if state == "stored"]
+    already = [path for state, path in rows if state == "already_stored"]
+    failed = sum(state == "failed" for state, _ in rows)
+    if not failed and not already:
+        return None
+    lost = f"{failed} {'file' if failed == 1 else 'files'} could not be {verb}"
+    if stored:
+        parts = [_lead(verb.capitalize(), stored, of=len(stored) + len(already) + failed)]
+        if failed:
+            parts.append(lost)
+        if already:
+            parts.append(f"{len(already)} already {verb}")
+        return "; ".join(parts)
+    if not failed:
+        return _lead(f"Already {verb}", already)
+    if not already:
+        return f"Nothing {verb}; {lost}"
+    return f"Nothing new {verb}; {len(already)} already {verb}, {lost}"
+
+
+def _user_summary(
+    result: Mapping[str, Any], verb: OutcomeVerb | None, batch: Sequence[tuple[str, str]] = ()
+) -> str | None:
     """One plain sentence for the person, built only from fields the terminal stores.
 
-    A replay stores the same `path` or `paths`, so it yields the same sentence.
+    A replay stores the same `path` or `paths`, so it yields the same sentence. A batch
+    passes its per-file states (`batch`, from the projected rows) so that a file which
+    failed or was already there is never reported as saved.
     A refusal, a call that awaits review, or a write that declares no verb has no outcome to state.
     """
     if verb is None or result.get("ok") is not True:
         return None
     if result.get("status") == "committed":
         head = verb.capitalize()
+        if (partial := _partial_batch_summary(verb, batch)) is not None:
+            return partial
     elif result.get("status") == "replayed":
         head = f"Already {verb}"
     else:
@@ -1943,15 +2023,13 @@ def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | 
         names = []
     if not names:
         return head
-    if len(names) == 1:
-        return f"{head} -> {names[0]}"
     if verb == "moved" and len(names) == 2:
         # A move stores its two ends as `paths`: [from, to].
         return f"{head} {names[0]} -> {names[1]}"
     if verb == "replaced" and len(names) == 2:
         # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
         return f"{head} -> {names[1]} (was {names[0]})"
-    return f"{head} {len(names)} files -> {names[0]} and {len(names) - 1} more"
+    return _lead(head, names)
 
 
 def project_terminal(
@@ -1983,7 +2061,23 @@ def project_terminal(
     if detail == "legacy":
         return leaf
     compact: dict[str, Any] = {}
-    user_summary = _user_summary(result, outcome_verb)
+    artifact_receipt = _artifact_receipt_projection(leaf)
+    media_projection = _media_result_projection(leaf)
+    # A media batch whose rows did not project gives no per-file states, and its `paths`
+    # include failed files, so no sentence is safer than one that claims them all.
+    unread_media_batch = (
+        isinstance(leaf, Mapping)
+        and leaf.get("operation") in MEDIA_OUTCOMES
+        and leaf.get("results") is not None
+        and not media_projection
+    )
+    user_summary = (
+        None
+        if unread_media_batch
+        else _user_summary(
+            result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
+        )
+    )
     if user_summary is not None:
         compact["user_summary"] = user_summary
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
@@ -2092,7 +2186,6 @@ def project_terminal(
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
             compact["plan_id"] = plan["plan_id"]
         compact.update(_adoption_control_projection(leaf))
-    artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
     if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):
         # Closed text capture outcomes belong to the durable capture protocol.
@@ -2108,7 +2201,7 @@ def project_terminal(
             }
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
-    compact.update(_media_result_projection(leaf))
+    compact.update(media_projection)
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the
     # registered derived-graph rebuild has not converged yet. It has to survive
     # into `compact` -- the default detail -- or a bounded write would be

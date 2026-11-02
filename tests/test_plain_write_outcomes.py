@@ -250,6 +250,169 @@ def test_a_write_that_stores_several_files_names_the_first_and_counts_the_rest()
     assert summary == "Saved 3 files -> Sources/a.md and 2 more"
 
 
+def _preserve_batch(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: dict[str, bytes | None],
+    *,
+    idempotency_key: str,
+) -> dict:
+    """Run one real `preserve_artifacts` call. A file mapped to `None` fails at its fetch."""
+    import hashlib
+
+    from exomem import client_artifacts
+
+    def stage_artifact(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        name = file["file_id"]
+        payload = files[name]
+        if payload is None:
+            raise client_artifacts.SafeFetchError(
+                "SAFE_FETCH_FAILED", "download could not be retrieved"
+            )
+        staged = tmp_path / f"staged-{name}-{idempotency_key}"
+        staged.write_bytes(payload)
+        return client_artifacts.StagedArtifact(
+            file_id=name,
+            path=staged,
+            size=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            content_type="application/octet-stream",
+            filename=name,
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "preserve_artifacts")
+    return writer_lease.invoke_command(
+        command,
+        vault,
+        scope="case",
+        category="raw",
+        files=[
+            {"download_url": f"https://files.example/{name}", "file_id": name} for name in files
+        ],
+        idempotency_key=idempotency_key,
+    )
+
+
+_RAW = "Knowledge Base/Evidence/case/raw"
+
+
+def test_a_batch_that_stored_two_files_and_lost_one_says_so(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _preserve_batch(
+        vault,
+        tmp_path,
+        monkeypatch,
+        {"a.bin": b"a", "b.bin": b"b", "c.bin": None},
+        idempotency_key="stored-and-failed",
+    )
+
+    assert [row["state"] for row in out["files"]] == ["stored", "stored", "failed"]
+    assert next(iter(out)) == "user_summary"
+    assert out["user_summary"] == (
+        f"Saved 2 of 3 files -> {_RAW}/a.bin and 1 more; 1 file could not be saved"
+    )
+
+
+def test_a_batch_that_found_a_copy_and_lost_a_file_never_says_saved(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _preserve_batch(vault, tmp_path, monkeypatch, {"a.bin": b"a"}, idempotency_key="seed")
+
+    out = _preserve_batch(
+        vault,
+        tmp_path,
+        monkeypatch,
+        {"again.bin": b"a", "lost.bin": None},
+        idempotency_key="duplicate-and-failed",
+    )
+
+    assert [row["state"] for row in out["files"]] == ["already_stored", "failed"]
+    assert out["user_summary"] == "Nothing new saved; 1 already saved, 1 file could not be saved"
+
+
+def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _preserve_batch(vault, tmp_path, monkeypatch, {"a.bin": b"a"}, idempotency_key="seed")
+
+    out = _preserve_batch(
+        vault,
+        tmp_path,
+        monkeypatch,
+        {"new.bin": b"new", "again.bin": b"a", "lost.bin": None},
+        idempotency_key="stored-duplicate-failed",
+    )
+
+    assert [row["state"] for row in out["files"]] == ["stored", "already_stored", "failed"]
+    assert out["user_summary"] == (
+        f"Saved 1 of 3 files -> {_RAW}/new.bin; 1 file could not be saved; 1 already saved"
+    )
+
+
+def test_a_batch_of_copies_says_already_saved_and_names_the_first(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _preserve_batch(vault, tmp_path, monkeypatch, {"a.bin": b"a"}, idempotency_key="seed")
+
+    out = _preserve_batch(
+        vault, tmp_path, monkeypatch, {"again.bin": b"a"}, idempotency_key="copies-only"
+    )
+
+    assert [row["state"] for row in out["files"]] == ["already_stored"]
+    assert out["user_summary"] == f"Already saved -> {_RAW}/a.bin"
+
+
+def test_a_batch_that_stored_every_file_keeps_its_summary(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _preserve_batch(
+        vault,
+        tmp_path,
+        monkeypatch,
+        {"a.bin": b"a", "b.bin": b"b", "c.bin": b"c"},
+        idempotency_key="all-stored",
+    )
+
+    assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more"
+
+
+def test_preserving_bytes_that_are_already_stored_says_already_saved(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "preserve_evidence")
+    letter = {"scope": "case", "category": "letters", "content": "Please withdraw the notice."}
+    first = writer_lease.invoke_command(
+        command, vault, filename="letter.txt", idempotency_key="letter-first", **letter
+    )
+
+    again = writer_lease.invoke_command(
+        command, vault, filename="letter-copy.txt", idempotency_key="letter-again", **letter
+    )
+
+    assert first["user_summary"] == f"Saved -> {first['path']}"
+    assert not (vault / "Knowledge Base/Evidence/case/letters/letter-copy.txt").exists()
+    assert again["user_summary"] == f"Already saved -> {first['path']}"
+
+
+def test_a_repeated_partial_batch_returns_the_same_summary_as_the_first(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"a.bin": b"a", "b.bin": b"b", "c.bin": None}
+
+    first = _preserve_batch(vault, tmp_path, monkeypatch, files, idempotency_key="repeat-partial")
+    again = _preserve_batch(vault, tmp_path, monkeypatch, files, idempotency_key="repeat-partial")
+
+    assert first["user_summary"].startswith("Saved 2 of 3 files")
+    assert again["user_summary"] == first["user_summary"]
+
+
 def test_a_repeated_request_returns_the_same_summary_as_the_first(vault: Path) -> None:
     request = {
         "operation": "create",
