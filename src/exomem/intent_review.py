@@ -72,28 +72,39 @@ def _reader() -> tuple[str, bool]:
     return audience, audience == OWNER_AUDIENCE
 
 
-def _same_client(intent: write_intents.Intent) -> bool:
-    """Whether the intent was accepted for the reader's own authenticated client binding."""
+def _same_door(intent: write_intents.Intent) -> bool:
+    """Whether the intent came in through the reader's own door.
+
+    With a client binding on either side, the door is the binding. With none on either side, it is the audience,
+    surface and issuer family together: the vault's REST key is one credential, so its own writes stay its own.
+    """
     from .governance.principal import effective_principal
 
-    binding = effective_principal().client_binding
-    stored = (intent.principal or {}).get("client_binding") if isinstance(intent.principal, dict) else None
-    return (
-        binding is not None
-        and isinstance(stored, dict)
-        and (stored.get("issuer"), stored.get("client_id")) == (binding.issuer, binding.client_id)
+    reader = effective_principal()
+    stored = intent.principal if isinstance(intent.principal, dict) else {}
+    stored_binding = stored.get("client_binding")
+    if reader.client_binding is not None or stored_binding is not None:
+        return (
+            reader.client_binding is not None
+            and isinstance(stored_binding, dict)
+            and (stored_binding.get("issuer"), stored_binding.get("client_id"))
+            == (reader.client_binding.issuer, reader.client_binding.client_id)
+        )
+    return (stored.get("audience_id"), stored.get("surface"), stored.get("issuer_family")) == (
+        reader.audience_id,
+        reader.surface,
+        reader.issuer_family,
     )
 
 
 def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
     """Whether this reader may see or decide the intent.
 
-    The audience must match (the owner sees all). The owner audience spans every client, so an owner-audience
-    reader with any denied scope sees another client's intent only when the client binding is the same: an intent
-    with no planned page (a creation) has no path to check. A non-owner audience already names the caller, so an
-    unbound restricted caller keeps sight of its own intents.
-    For the planned pages it then runs the check a synchronous write runs (`connector_boundary.require_write`),
-    for the reader and not the caller who made the intent.
+    The audience must match (the owner sees all). A reader with any denied scope sees only intents that came in
+    through its own door (`_same_door`): one subject or the owner can reach the vault through clients with different
+    denied scopes, and an intent with no planned page (a creation) has no path to check. For the planned pages it
+    then runs the check a synchronous write runs (`connector_boundary.require_write`), for the reader and not the
+    caller who made the intent.
     """
     from .governance import connector_boundary
     from .governance.principal import effective_principal
@@ -102,7 +113,7 @@ def _admitted(vault_root: Path, intent: write_intents.Intent) -> bool:
     if not (owner or intent.audience == audience):
         return False
     current = connector_boundary.snapshot(vault_root)
-    if owner and current is not None and current.denied_scopes(effective_principal()) and not _same_client(intent):
+    if current is not None and current.denied_scopes(effective_principal()) and not _same_door(intent):
         return False
     try:
         for path in intent.planned_paths or ():

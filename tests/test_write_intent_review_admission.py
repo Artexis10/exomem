@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from test_connector_boundary import configured_boundary as configured_boundary  
 from test_write_intent_accept import _journal, _manager
 
 from exomem import commands, intent_accept, intent_applier, intent_disclosure, writer_lease
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 
 @pytest.fixture(autouse=True)
@@ -192,4 +193,42 @@ def test_an_unbound_restricted_caller_still_polls_its_own_accepted_write(
     with request_scope(caller):
         assert commands.op_review_memory(vault, mode="write-intent", ref=ref)["state"] == "accepted"
         assert [row["ref"] for row in commands.op_review_memory(vault, mode="write-intent")["writes"]] == [ref]
+        assert intent_disclosure.status(vault)["refs"] == [ref]
+
+
+def _accepted_remember(vault: Path, who, key: str, project: str | None = None) -> str:
+    arguments = {"content": "protected canary"} | ({"project": project} if project else {})
+    intent, _ = _journal(_manager(), vault).accept(
+        audience=who.audience_id, command="remember", arguments=arguments, surface=who.surface,
+        principal=intent_accept.principal_snapshot(who), digest=key, retry_key=key,
+        window_seconds=600.0, validation="complete", planned_paths=[], target_hashes={},
+    )
+    return f"exomem://write/{intent.intent_id}"
+
+
+def test_one_subject_through_a_limited_client_cannot_see_its_creation_through_a_full_client(
+    configured_boundary, vault: Path  # noqa: F811
+) -> None:
+    """A non-owner subject reaches the vault through two clients; the limited one must not read the full one's write."""
+    _, authenticate = configured_boundary
+    limited = dataclasses.replace(authenticate("limited"), audience_id="principal:subject")
+    full = dataclasses.replace(authenticate("full"), audience_id="principal:subject")
+    ref = _accepted_remember(vault, full, "subject-private", project="private-project")
+    with request_scope(limited):
+        assert commands.op_review_memory(vault, mode="write-intent")["writes"] == []
+        with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+            commands.op_review_memory(vault, mode="write-intent", ref=ref)
+        assert intent_disclosure.status(vault) is None
+    with request_scope(full):
+        assert commands.op_review_memory(vault, mode="write-intent", ref=ref)["state"] == "accepted"
+
+
+def test_the_vaults_rest_key_still_polls_its_own_accepted_write(
+    configured_boundary, vault: Path  # noqa: F811
+) -> None:
+    """The owner's REST key is unbound and gets the default denied scopes; its own 202 must stay pollable."""
+    rest_key = owner_principal(surface="rest")
+    ref = _accepted_remember(vault, rest_key, "rest-own")
+    with request_scope(rest_key):
+        assert commands.op_review_memory(vault, mode="write-intent", ref=ref)["state"] == "accepted"
         assert intent_disclosure.status(vault)["refs"] == [ref]
