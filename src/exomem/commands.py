@@ -8825,7 +8825,7 @@ def op_episode_memory(
         subject: One line, max 120 characters.
         summary: One line, max 180.
         worked_on: Max 5 items, 200 characters each.
-        decided: Max 5 items, 200 characters each.
+        decided: Max 5 items, 200 characters each. Link each to its page as [[Page]].
         open: Max 5 items, 200 characters each. One of the three lists is required.
         said: Max 3 verbatim user statements, 300 characters.
         about: Max 3 `exomem://` refs.
