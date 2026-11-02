@@ -25,7 +25,7 @@ The system SHALL construct a versioned canonical terminal record after the canon
 
 ### Requirement: Compact Success Is The Default Projection
 
-Committed and replayed product mutations SHALL return a compact default projection led by `user_summary`, then `ok`, `status`, `mutated`, primary `path`, original `request_id`, stable receipt identity, and `warnings_count`. `user_summary` SHALL be one plain sentence built only from fields the stored terminal holds, so a replay yields the same text: a verb from the command's closed `outcome_verb` (saved, updated, moved or deleted), then the path, or the first path and the count of the others. A governed replay SHALL read "Already" plus the lower-cased verb. A refusal or a validation result SHALL carry no `user_summary`. `response_detail="full"` SHALL add the complete leaf result under `diagnostics`; `response_detail="legacy"` SHALL return the pre-change raw leaf result during the compatibility window.
+Committed and replayed product mutations SHALL return a compact default projection led by `user_summary`, then `ok`, `status`, `mutated`, primary `path`, original `request_id`, stable receipt identity, and `warnings_count`. `user_summary` SHALL be one plain sentence built only from fields the stored terminal holds, so a repeat request with the same idempotency key returns the same text: a verb, then the path, or the first path and the count of the others. Every write operation SHALL declare its verb from a closed set (saved, updated, moved, deleted, replaced, discarded or restored), and a write that declares none SHALL carry no `user_summary`. A replacement leads with the new page and names the old one. A result whose status is `replayed` (the effect was already in place) SHALL read "Already" plus the lower-cased verb. A refusal or a validation result SHALL carry no `user_summary`. `response_detail="full"` SHALL add the complete leaf result under `diagnostics`; `response_detail="legacy"` SHALL return the pre-change raw leaf result during the compatibility window.
 
 #### Scenario: Default committed response is decisive
 - **WHEN** a governed product mutation succeeds without an explicit response detail
@@ -40,7 +40,8 @@ Committed and replayed product mutations SHALL return a compact default projecti
 #### Scenario: A committed save leads with a plain summary
 - **WHEN** a governed product mutation saves one file without an explicit response detail
 - **THEN** the first key of the response is `user_summary`, reading "Saved -> <path>"
-- **AND** a delete reads "Deleted -> <path>", a move reads "Moved <from> -> <to>", and a replay reads "Already saved -> <path>"
+- **AND** a delete reads "Deleted -> <path>", a move reads "Moved <from> -> <to>", a supersede reads "Replaced -> <new path> (was <old path>)", and a result whose status is `replayed` reads "Already saved -> <path>"
+- **AND** a repeat request with the same idempotency key returns the first call's text, because it returns the stored terminal
 
 ### Requirement: Pre-Commit And Uncertain Errors Remain Unambiguous
 The terminal projector MUST NOT convert rejected, busy, pending, committed-failure, or committed-uncertain outcomes into successful result dictionaries. `MUTATION_BUSY` SHALL remain retryable only when no commit occurred, and post-commit uncertainty SHALL retain its committed semantics and same-identity remediation. Committed-uncertain SHALL be returned only when the canonical commit is proven and persisting the terminal record itself failed; a failure in derived-state acknowledgement after a persisted terminal is not uncertainty and SHALL NOT produce this error.

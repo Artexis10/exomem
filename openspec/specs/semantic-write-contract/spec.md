@@ -572,7 +572,7 @@ explicit audit/cleanup. This protocol SHALL NOT claim cross-file all-or-none
 power-loss atomicity. A qualifying typed relation or genuinely empty-corpus
 bootstrap SHALL not require a reviewed-none decision from the caller.
 
-Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning: "This page needs no relation review; relation_disposition and relation_review_reason were ignored." When the page needs a review, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result. Validation SHALL NOT compare the hash. When the caller supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
+Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning that names the review fields it dropped When the page needs a review, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result. Validation SHALL NOT compare the hash. When the caller supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
 
 #### Scenario: Second disconnected page can be created after review
 - **WHEN** validation for a second page returns no qualifying candidate and the commit repeats the draft with matching reviewed-none fields
@@ -598,6 +598,10 @@ Review fields SHALL be checked against whether the page needs a relation review,
 - **WHEN** a commit for a page with a qualifying connectivity signal carries `relation_disposition="reviewed_none"` and a reason but no hash
 - **THEN** the page commits with a receipt of kind `qualifying` and no review artifact
 - **AND** the result carries one warning that the review fields were ignored
+
+#### Scenario: A retry that re-sends dropped review fields reports the page as already committed
+- **WHEN** a caller repeats the commit of a page that needed no review, with the same review fields it sent the first time
+- **THEN** the write is refused with `DRAFT_ALREADY_COMMITTED`, as a repeat without the fields is
 
 #### Scenario: A page that needs review names the missing hash
 - **WHEN** a commit for a page that needs review carries the disposition and reason but no `relation_review_hash`
