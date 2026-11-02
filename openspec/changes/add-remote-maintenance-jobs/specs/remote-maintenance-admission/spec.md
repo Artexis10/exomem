@@ -19,6 +19,23 @@ boundary while the job runs.
 - **THEN** the system returns `MAINTENANCE_PLAN_REQUIRED` as not committed
 - **AND** it creates no job and acquires no vault mutation boundary
 
+### Requirement: A remote preview of a job mode runs as a read-only job
+
+On a request-bound remote surface, an owner's preview of `fix`, `backfill-ids`
+or `reconcile` SHALL start a read-only maintenance job and SHALL return its
+handle at once. The job SHALL take no mutation boundary. Its receipt SHALL hold
+the preview report, including the `plan_id`, and SHALL serve the planned pages
+by cursor. A start with that `plan_id` SHALL run the previewed plan. A caller
+other than the owner and the local CLI SHALL keep the synchronous preview.
+
+#### Scenario: Remote owner previews a large backfill
+- **WHEN** the owner previews `backfill-ids` through a remote surface
+- **THEN** the call returns a job handle, and the finished job's receipt holds the `plan_id` and pages the planned pages by cursor
+
+#### Scenario: A preview job's plan starts the write job
+- **WHEN** the owner starts `backfill-ids` with the `plan_id` from a finished preview job's receipt and a `why`
+- **THEN** the write job runs the previewed plan
+
 ### Requirement: Remote adopt-local applies through its sealed preview
 
 On a request-bound surface, the system SHALL admit
