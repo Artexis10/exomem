@@ -14,7 +14,7 @@ The sensor child inherits the tick gate: `dreamer._loop_once` and `_regate_senso
 
 ### D2. The idle and settle preferences end at `MAX_DEFER_SECONDS`
 
-`TickSignals.seconds_since_tick` carries the time since the last completed tick, or since the worker started before the first. A tick counts as completed when `run_once` returns, whatever its stop reason.
+`TickSignals.seconds_since_tick` carries the time since the last completed tick, or since the worker started before the first. A tick counts as completed when `run_once` returns, except one cut off at page 0 by a request or a vault change. That tick did no upkeep, so it does not restart the bound.
 
 The rule order in `decide` is: off, paused, standby, pressure, then:
 
@@ -29,25 +29,29 @@ The bound is 60 seconds, the same as `IDLE_SECONDS`. At the worker's 30-second p
 
 ### D3. The tick yields per page, so a request does not wait for a tick
 
-The latency risk of starting a tick on a busy vault is the page in flight when a request arrives. A page is one transaction in the Dreamer's own sidecar. The tick checks the foreground request, the vault generation and its budgets before each page, so it stops before the next page. The reviewer checks that this per-page bound overlaps with foreground requests; no latency probe is added.
+The latency risk of starting a tick on a busy vault is the page in flight when a request arrives. A page is one transaction in the Dreamer's own sidecar. The tick checks the foreground request, the vault generation and its budgets before each page, so it stops before the next page.
+
+After a stop the tick still does its tail: the sensed tick, the delivery record, `precompute_deliverable` when due, `reclaim` and the health write. A 400-page fixture measured 65-116 ms of setup before the first page and 50-71 ms after the stop. The bound is at most one tick about every 60 seconds on a busy vault, which is under the hourly budget of 60 CPU-seconds. The reviewer checks that this per-page bound overlaps with foreground requests; no latency probe is added.
 
 ### D4. The sensor child has its own gate
 
-`dreamer_policy.sensor_gate` is a pure function over the same signals. It waits for the setting off, paused, standby and `pressure is True`. It does not wait for quiet mode, foreground activity, a settling vault, graph debt, an index backlog or the tick's CPU budget. The child has its own budgets: 300 CPU-seconds and 600 judgements per rolling hour, one thread, the lowest priority, and an exit after 60 seconds without work.
+`dreamer_policy.sensor_gate` is a pure function over the same signals. It waits for the setting off, paused and standby, through the posture check that `decide` also uses. It does not wait for quiet mode, foreground activity, a settling vault, graph debt, an index backlog or the tick's CPU budget. The child has its own budgets: 300 CPU-seconds and 600 judgements per rolling hour, one thread, the lowest priority, and an exit after 60 seconds without work.
 
-The pressure probe is gathered only when the tick's cheap gate passes, as before. When it was not gathered, `pressure` is `None` and the sensor gate reads that as no pressure. The probe measures GPU headroom, and the child never uses the GPU.
+The sensor gate does not read pressure. The pressure probe measures GPU headroom, and the child runs with `CUDA_VISIBLE_DEVICES=""` and never uses the GPU.
+
+A Cloud cell never launches the child: `Supervisor.step` terminates it and acts `cloud_placement`. Until add-sensed-epistemic-model task 9.3's Cloud placement, cells write no readings. At start the child also raises its own `oom_score_adj` to 1000, best effort on Linux, so the kernel's OOM killer picks the child before the service.
 
 ### D5. Memory admission before launch
 
 `Supervisor.step` refuses to launch with the action `memory` when a peak is recorded and `runtime_resources.available_memory()` is not above it. With no recorded peak it launches, and the child records its peak. A host that cannot report available memory also launches, as an unmeasurable host builds in `embedding_backend`. A running child is never killed for memory.
 
-The child records `VmHWM` where the host reports it, else `ru_maxrss` in the platform's unit, else nothing, in its spend report. The supervisor keeps the last peak in its own file (`peak-rss.json`) beside the ledger. Each child overwrites `spend.json` from its first report, which would erase a peak kept there. A final report replaces the recorded peak. A report from a child cut off mid-load can only raise it. A refused child records nothing, because it never loaded the instrument.
+The child records `VmHWM` where the host reports it, else `ru_maxrss` in the platform's unit, else nothing, in its spend report. The supervisor keeps the last peak in its own file (`peak-rss.json`) beside the ledger. Each child overwrites `spend.json` from its first report, which would erase a peak kept there. A final report replaces the recorded peak. A report from a child cut off mid-load can only raise it. A refused child records nothing, because it never loaded the instrument. The file stores the instrument key with the peak: the key that a refusal already uses, which is the sensing setting and the active instruments. A peak recorded under another key is ignored. The `memory` refusal is logged once each time it begins, with the peak and the available bytes.
 
 `available_memory()` moves from `embedding_backend` to `runtime_resources`, and both import the one reader.
 
 ### D6. A Cloud cell starts the Dreamer
 
-`server_runtime._start_dreamer` drops its cloud-mode early return. A cell starts the Dreamer when `EXOMEM_DREAMER` is on. The sidecar and checkpoint resolve through `vault_state_dir`, under the cell's state root, and `reconcile_setting` has no cell branch.
+`server_runtime._start_dreamer` drops its cloud-mode early return. A cell starts the Dreamer when `EXOMEM_DREAMER` is on. The sidecar and checkpoint resolve through `vault_state_dir`, under the cell's state root, and `reconcile_setting` has no cell branch. A cell does not launch the sensor child (D4).
 
 ## Risks
 

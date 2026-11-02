@@ -13,7 +13,7 @@ A Cloud cell never starts the Dreamer, even with `EXOMEM_DREAMER=on`, because `_
 
 - Quiet mode no longer stops a tick. Quiet keeps GPU use and model preload off.
 - A live foreground request still stops a tick from starting, and a tick still yields to any request between pages. The idle and settle preferences hold a tick at most `MAX_DEFER_SECONDS` (60 seconds) since the last completed tick. Graph debt, an index backlog, the freshness registry, the CPU budgets and the failure backoff stay hard gates.
-- The sensor child gets its own gate: the setting, standby and auto-quiet pressure. Quiet mode, foreground activity, a settling vault, graph debt, an index backlog and the tick's CPU budget no longer stop it.
+- The sensor child gets its own gate: the setting and standby. A Cloud cell never launches it. Quiet mode, foreground activity, a settling vault, graph debt, an index backlog and the tick's CPU budget no longer stop it.
 - The supervisor launches the sensor child only while the host's available memory is above the peak resident memory the last child recorded. It never kills a running child for memory.
 - A Cloud cell starts the Dreamer when its setting is on.
 

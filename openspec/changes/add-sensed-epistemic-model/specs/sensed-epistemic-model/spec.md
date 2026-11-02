@@ -91,8 +91,8 @@ When the active instrument changes (a new pin, a new runtime version, or a retir
 
 Model inference SHALL run only in a disposable child process supervised from the dreamer's loop. The dreamer thread and request threads SHALL NOT load or run a model.
 
-- **Launch.** The supervisor SHALL launch a child only when all of these hold: sensing is `on` (`EXOMEM_SENSING`, else the per-machine config key `sensing`, default `off`, effective only while the dreamer runs); the child's own gate is open (setting on, not in standby, no auto-quiet pressure); the sense queue is not empty; the worker's hourly budgets have room; and the host's available memory is above the peak resident memory the last child recorded. With no peak on record the first child launches and records one.
-- **Termination.** The child SHALL have its own gate: the setting, standby and auto-quiet pressure. The supervisor SHALL terminate the child when that gate closes, so its memory returns to the host. Quiet mode, a foreground request, a settling vault, graph debt, an index backlog and the dreamer's own CPU budget SHALL NOT stop it. The supervisor SHALL NOT kill a running child for memory.
+- **Launch.** The supervisor SHALL launch a child only when all of these hold: sensing is `on` (`EXOMEM_SENSING`, else the per-machine config key `sensing`, default `off`, effective only while the dreamer runs); the child's own gate is open (setting on, not in standby) and the service is not a Cloud cell; the sense queue is not empty; the worker's hourly budgets have room; and the host's available memory is above the peak resident memory the last child recorded for the active instrument. With no such peak the first child launches and records one.
+- **Termination.** The child SHALL have its own gate: the setting and standby. The supervisor SHALL terminate the child when that gate closes, so its memory returns to the host, and SHALL NOT launch it in a Cloud cell until the Cloud placement ships (task 9.3). Quiet mode, a foreground request, a settling vault, graph debt, an index backlog and the dreamer's own CPU budget SHALL NOT stop it. The supervisor SHALL NOT kill a running child for memory.
 - **Budgets and priority.** The worker SHALL spend at most 300 CPU-seconds and 600 judgements per rolling hour, including model load. It SHALL run at the lowest OS priority on CPU until co-tenant GPU pressure detection ships, and SHALL exit after 60 seconds without work.
 - **Isolation.** The child SHALL read only the sense queue and the ledger, SHALL append only to the ledger, and SHALL NOT read or write the vault, take the writer lease, or schedule index work.
 - **Refusal.** A child that cannot admit its instrument SHALL exit with a named refusal. The supervisor SHALL NOT relaunch it until the setting or pin changes.
@@ -101,7 +101,7 @@ Model inference SHALL run only in a disposable child process supervised from the
 
 - **WHEN** a sensor child is running and the compute mode becomes `quiet`, or a foreground request arrives
 - **THEN** the child keeps running
-- **AND** the supervisor terminates it within one poll only when the setting turns off or pauses, the service enters standby, or auto-quiet pressure starts
+- **AND** the supervisor terminates it within one poll only when the setting turns off or pauses, or the service enters standby
 
 #### Scenario: A launch waits for memory
 
@@ -234,7 +234,7 @@ At request time, an edge SHALL be dropped when either page's live signature diff
 
 Personal vaults SHALL sense with local instruments by default. An API instrument SHALL be an opt-in placement per vault, enabled by the owner for personal vaults and by an explicit per-tenant grant for Cloud (off by default). Its identity SHALL be provider, model id and version or snapshot date, flagged `unpinned_weights`. It SHALL obey the same template, closed-label, abstain and fixture-admission contract. Its request SHALL carry only delimited slot texts. A vendor's retirement of the model SHALL trigger the ordinary instrument migration.
 
-Cloud cells SHALL run the dreamer, and each cell SHALL sense with its own local instruments in a process inside the cell. Cells SHALL have only the shared read-only model weights in common, never a process, writable memory, or a cache of inputs or results. No third-party API SHALL receive vault text unless the tenant opted in. The Cloud placement SHALL be measured against the acceptance measures in `docs/hosted-inference-boundary.md`.
+Cloud cells SHALL run the dreamer, and each cell SHALL sense with its own local instruments in a process inside the cell. Until that placement ships (task 9.3), the supervisor SHALL launch no child in a cell. Cells SHALL have only the shared read-only model weights in common, never a process, writable memory, or a cache of inputs or results. No third-party API SHALL receive vault text unless the tenant opted in. The Cloud placement SHALL be measured against the acceptance measures in `docs/hosted-inference-boundary.md`.
 
 #### Scenario: One process never holds two tenants' text
 

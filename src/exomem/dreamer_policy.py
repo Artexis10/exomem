@@ -1,4 +1,4 @@
-"""The dreamer's idle gate and budgets, as a pure decision.
+"""The dreamer's tick gate and budgets, as a pure decision.
 
 The dreamer is a background worker that proposes bounded upkeep (the product
 noun for what it hands the agent) off the interactive path. This module decides
@@ -41,7 +41,7 @@ DEFAULT_SETTING = "off"
 IDLE_SECONDS = 60.0
 
 #: The longest the idle and settle preferences may hold a tick, counted from the
-#: last completed tick (the worker's start before the first). Prevents upkeep
+#: last tick that did upkeep or found none (the worker's start before the first). Prevents upkeep
 #: from going stale without bound on a vault that is never idle; a live request
 #: and every hard gate still hold it, and the tick yields to a request per page.
 MAX_DEFER_SECONDS = 60.0

@@ -17,7 +17,7 @@ LLMs are welcome as instruments. The matrix's deterministic measurements keep th
 - **R1 — Generative instruments are admitted.** An instrument uses a versioned template, with vault text only in delimited data slots. Its output is logits or probabilities over a closed label set plus abstain, never sampled text. This amends `openspec/specs/frozen-verifiers/spec.md:29`.
 - **R2 — Readings may originate sensed families.** They never suppress, reorder or alter structural families. They never enter canon except through a write the agent authors (the existing relation writer, citing the reading id). This replaces close-memory-loop `design.md:212` condition 4 and its scenario "Verifier labels do not reach upkeep" (`specs/adaptive-memory-maintenance/spec.md:250-253`).
 - **R3 — The ledger is durable.** It is an append-only, per-vault readings ledger in the state root. It is not in the vault and not in the disposable `dreamer.sqlite`, and it is included in backup and export.
-- **R4 — Cloud runs the dreamer.** The dreamer runs in cells, reversing close-memory-loop `design.md:705`. Each cell senses with its own local instruments on shared read-only model weights. No third-party API sees vault text by default. `docs/hosted-inference-boundary.md` keeps its thresholds, rewritten as acceptance measures rather than permission gates. In the owner's words: "i dont see why we need to compromise". This slice specifies the Cloud placement and does not build it.
+- **R4 — Cloud runs the dreamer.** The dreamer runs in cells, reversing close-memory-loop `design.md:705`. Each cell senses with its own local instruments on shared read-only model weights. No third-party API sees vault text by default. `docs/hosted-inference-boundary.md` keeps its thresholds, rewritten as acceptance measures rather than permission gates. In the owner's words: "i dont see why we need to compromise". This slice specifies the Cloud placement and does not build it. Cells now start the Dreamer (`run-upkeep-on-a-busy-vault`); cell sensing still waits for the Cloud placement.
 - **R5 — Local GPU waits.** The LLM instrument senses on CPU at idle until `detect-co-tenant-gpu-pressure` ships. That change is not reordered.
 - **R6 — Authored pairs stay unlabelled.** "Asserted pairs carry no model label" (`openspec/specs/contradiction-queue/spec.md:343`) holds for v1.
 - **R7 — Local models are preferred.** Local models are the default. An API instrument is an allowed opt-in placement per vault. Its identity is provider + model id + version or snapshot date, and it is flagged `unpinned_weights`; a vendor retirement triggers the normal instrument-migration re-sense. Personal vaults opt in by the owner. Cloud tenants opt in explicitly per tenant, and are off by default. The same closed-label contract applies. In the owner's words: "i prefer using local models instead of api but whatever works. api can be very cheap … saves on resources".
@@ -163,11 +163,11 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
 - **Supervision.** The dreamer loop drives the supervisor once per poll. While a child is alive, the loop re-reads the gate every 2 seconds between ticks, without running a tick, so the dreamer's own schedule and CPU budget are unchanged.
 - **Launch.** The supervisor launches a child only when all of these hold:
   - the sensing setting is `on`;
-  - the child's own gate is open (`dreamer_policy.sensor_gate`: setting, standby and auto-quiet pressure);
+  - the child's own gate is open (`dreamer_policy.sensor_gate`: setting on and not in standby), and the service is not a Cloud cell;
   - the sense queue is not empty;
   - the worker's own hourly budgets have room;
-  - the host's available memory is above the peak resident memory the last child recorded (the action `memory`). With no peak on record the first child launches and records one.
-- **Termination.** The supervisor terminates the child when its own gate closes, with a 5-second grace before a kill. The setting off or paused, auto-quiet pressure and standby stop it, so its RAM returns to the host. Quiet mode, foreground activity and the dreamer's tick holds do not, and a running child is never killed for memory. `run-upkeep-on-a-busy-vault` amended this.
+  - the host's available memory is above the peak resident memory the last child recorded for the active instrument (the action `memory`). With no such peak the first child launches and records one.
+- **Termination.** The supervisor terminates the child when its own gate closes, with a 5-second grace before a kill. The setting off or paused and standby stop it, so its RAM returns to the host. A Cloud cell never launches it until the Cloud placement (task 9.3). Quiet mode, foreground activity and the dreamer's tick holds do not, and a running child is never killed for memory. `run-upkeep-on-a-busy-vault` amended this.
 - **Budgets.**
   - 300 CPU-seconds per rolling hour (about 8% of one core), counting model load.
   - 600 judgements per rolling hour.
@@ -285,7 +285,7 @@ What slice 1 serves (review of slice 1, 2026-09-28):
   - the supervisor's gates, budgets and kill.
 
   The real pin runs only in the dedicated `nli` lane (`EXOMEM_RUN_REAL_NLI=1`), as the stance verifier's gate does.
-- **Resource probes.** A supervised child's CPU seconds per judgement, peak RSS and kill-to-exit time are measured and recorded below. Quiet mode must end the child within one supervisor poll.
+- **Resource probes.** A supervised child's CPU seconds per judgement, peak RSS and kill-to-exit time are measured and recorded below. Standby or the setting off must end the child within one supervisor poll.
 - LongMemEval is not used.
 
 ## Slices

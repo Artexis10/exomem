@@ -561,7 +561,7 @@ def run_once(
     budget: Budget | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> TickResult:
-    """One bounded tick over the next pages, ignoring the idle gate.
+    """One bounded tick over the next pages, ignoring the tick gate.
 
     Progress commits per page: one transaction records the page's `seen`
     signature, its contribution and its removal from `pending`, so a tick cut

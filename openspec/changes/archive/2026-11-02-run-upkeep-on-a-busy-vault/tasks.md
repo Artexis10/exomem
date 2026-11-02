@@ -24,3 +24,8 @@
   - `add-sensed-epistemic-model` `design.md` Launch and Termination, and tasks 4.1 and 4.3.
 - [x] 4.3 Correct text that says quiet stops the Dreamer or that it runs only when idle.
 - [x] 4.4 Validate with `openspec validate --all --strict`, archive with `openspec archive run-upkeep-on-a-busy-vault`, and validate again.
+
+## 5. Review corrections
+
+- [x] 5.1 A tick cut off at page 0 does not restart the bound. The sensor gate drops pressure. The supervisor keeps the peak by instrument key. A Cloud cell never launches the child. The child raises its own `oom_score_adj`. The posture checks live in one helper.
+- [x] 5.2 Correct text in `close-memory-loop` and `add-sensed-epistemic-model` that said quiet kills the child, that the Dreamer waits for an idle service with no maximum, or that cells do not run it.
