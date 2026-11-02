@@ -14,7 +14,6 @@ import pytest
 import test_adoption_consume as consume
 
 from exomem import (
-    _held_fs_posix,
     adoption_run,
     client_artifacts,
     cloud_import_job,
@@ -226,8 +225,8 @@ def test_a_continuation_that_stopped_before_removing_a_chunk_s_staged_copies_rem
     # A rename leaves no staged copy to remove, so these files sit on another device and file by copy,
     # which the space check prices at their full size.
     monkeypatch.setattr(
-        _held_fs_posix, "_rename_noreplace",
-        consume._rename_across_devices(_held_fs_posix._rename_noreplace, "0.bin", "1.bin"))
+        consume.posix_backend(), "_rename_noreplace",
+        consume._rename_across_devices(consume.posix_backend()._rename_noreplace, "0.bin", "1.bin"))
     monkeypatch.setattr(adoption_run.import_rename, "_device_of", lambda _root, _relative_path: -1)
     run = adoption_run.start(vault, path=stage, today=TODAY)
     plan_id = _plan(vault, run, stage)
