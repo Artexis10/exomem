@@ -1159,48 +1159,38 @@ def test_legacy_identity_does_not_change_nonidentity_membership(vault: Path, sel
     assert membership.evaluate(parsed, policy.load(vault)) == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
 
 
-def _video_with_a_frame(vault: Path) -> tuple[Path, Path]:
+_VIDEO_FRAME = "Knowledge Base/Evidence/Video/clip.mp4.frames/scene-001.jpg.md"
+
+
+def _video_with_a_frame(vault: Path) -> None:
     """A video page and one scene-frame page in that video's own frames folder."""
-    folder = vault / "Knowledge Base" / "Evidence" / "Video"
-    (folder / "clip.mp4.frames").mkdir(parents=True)
-    video = folder / "clip.mp4.md"
-    video.write_text(
-        "---\ntype: source\nexomem_id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n---\nA recorded walkthrough.\n", encoding="utf-8"
+    _write_page(vault, "Knowledge Base/Evidence/Video/clip.mp4.md", "type: source\nexomem_id: 4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607")
+    _write_page(
+        vault, _VIDEO_FRAME, "type: source\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\nframe_ts: 12.0",
+        body="Whiteboard text from the frame.",
     )
-    frame = folder / "clip.mp4.frames" / "scene-001.jpg.md"
-    frame.write_text(
-        "---\ntype: source\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\nframe_ts: 12.0\n---\n"
-        "Whiteboard text from the frame.\n",
-        encoding="utf-8",
-    )
-    return video, frame
-
-
-def _scope(vault: Path, name: str, body: str) -> None:
-    scopes = vault / "Knowledge Base" / "_Governance" / "scopes"
-    scopes.mkdir(parents=True, exist_ok=True)
-    (scopes / f"{name}.yaml").write_text(f"governance_version: 1\n{body}", encoding="utf-8")
 
 
 def test_a_scene_frame_belongs_to_the_scopes_of_its_video(vault: Path) -> None:
-    _video, frame = _video_with_a_frame(vault)
-    _scope(vault, "client", 'id: 01ARZ3NDEKTSV4RRFFQ69G5FB2\nrefs: ["exomem://memory/01ARZ3NDEKTSV4RRFFQ69G5FB1"]\n')
+    _video_with_a_frame(vault)
+    _write_scope(
+        vault, "client",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\nrefs: ["exomem://memory/4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607"]\n',
+    )
 
-    scopes = membership.evaluate(find_corpus.parse_page(frame, frame.stat().st_mtime, vault), policy.load(vault))
+    scopes = membership.evaluate(_parse(vault, _VIDEO_FRAME), policy.load(vault))
 
     assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB2"})
 
 
 def test_a_page_that_only_claims_a_video_parent_is_governed_as_itself(vault: Path) -> None:
     _video_with_a_frame(vault)
-    planted = vault / "Knowledge Base" / "Notes" / "salary-review.md"
-    planted.parent.mkdir(parents=True)
-    planted.write_text(
-        "---\ntype: insight\ntags: [secret]\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\n---\nConfidential.\n",
-        encoding="utf-8",
+    _write_page(
+        vault, "Knowledge Base/Notes/salary-review.md",
+        "type: insight\ntags: [secret]\nparent_media: Knowledge Base/Evidence/Video/clip.mp4",
     )
-    _scope(vault, "secret", 'id: 01ARZ3NDEKTSV4RRFFQ69G5FB3\ntags: ["secret"]\n')
+    _write_scope(vault, "secret", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB3\ntags: ["secret"]\n')
 
-    scopes = membership.evaluate(find_corpus.parse_page(planted, planted.stat().st_mtime, vault), policy.load(vault))
+    scopes = membership.evaluate(_parse(vault, "Knowledge Base/Notes/salary-review.md"), policy.load(vault))
 
     assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB3"})
