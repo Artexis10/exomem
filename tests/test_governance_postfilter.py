@@ -1,8 +1,7 @@
 """Terminal secret scrubber + withheld cross-check at the shared dispatcher.
 
 Design decisions D1 (the postfilter lives in `writer_lease.invoke_command`,
-the ONE dispatcher shared by MCP/REST/hosted/CLI, with a second pass in the
-MCP-only `bind_vault` wrapper) and D7 (the credential scrubber is always on —
+the ONE dispatcher shared by MCP/REST/hosted/CLI) and D7 (the credential scrubber is always on —
 it runs even on the empty-policy fast path, which is this change's single
 intentional behavior change for an ungoverned vault).
 
@@ -662,7 +661,7 @@ def test_live_success_and_control_envelopes_never_receive_issuance_exception(
     assert scrubber.NOTICE in json.dumps(cleaned)
 
 
-def test_dispatcher_marked_issuance_survives_both_mcp_postfilter_passes(
+def test_dispatcher_marked_issuance_survives_a_repeated_postfilter_pass(
     vault: Path,
 ) -> None:
     _govern_patterns_shut(vault)
@@ -851,10 +850,9 @@ def test_postfilter_leaves_a_clean_ungoverned_result_identical(vault: Path) -> N
 
 
 def test_postfilter_is_idempotent(vault: Path) -> None:
-    """`invoke_command` runs the filter and `bind_vault` runs it again on the
-    MCP path. The second pass must be a no-op — an already-replaced credential
-    is `NOTICE` text and matches nothing, so defense in depth costs a walk,
-    not a double rewrite."""
+    """Filtering an already filtered result is a no-op: an already-replaced
+    credential is `NOTICE` text and matches nothing, so a repeated pass costs
+    a walk, not a double rewrite."""
     result = {"hits": [{"path": "a.md", "excerpt": f"key={AWS_KEY}"}]}
     once = egress.postfilter("find", result, vault)
     twice = egress.postfilter("find", json.loads(json.dumps(once)), vault)
@@ -923,14 +921,6 @@ def test_postfilter_is_registered_at_the_shared_dispatcher() -> None:
         "the terminal postfilter is missing from the one dispatcher shared by "
         "MCP, REST, hosted, and CLI"
     )
-
-
-def test_postfilter_second_pass_registered_at_bind_vault() -> None:
-    import inspect
-
-    from exomem import command_surface
-
-    assert "postfilter" in inspect.getsource(command_surface)
 
 
 def test_every_product_command_resolves_to_a_registered_projector() -> None:

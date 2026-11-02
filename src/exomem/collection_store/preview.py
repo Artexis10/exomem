@@ -137,6 +137,28 @@ def pages_unavailable(vault_root):
     return decisions is not None and decisions.refused() and store_notice(vault_root, lambda _path: False)(None)
 
 
+def note_withheld_pages(command_name, result, vault_root):
+    """Tell the owner that the dispatcher's terminal pass withheld the collection store's pages because the store refused it.
+
+    The two answers that carry the dispatcher's notice carry this one in the same fields. Any other
+    caller, and any other command, is told nothing, so a withheld store's existence never leaks.
+    """
+    if not pages_unavailable(vault_root):
+        return result
+    if command_name == "ask_memory" and isinstance(result, (list, dict)):
+        from .. import find
+
+        out = {"hits": result} if isinstance(result, list) else dict(result)
+        warming = dict(out.get("warming") or {})
+        warming["components"] = sorted({*warming.get("components", ()), find._STORE_UNAVAILABLE_COMPONENT})
+        return {**out, "warming": warming}
+    if command_name == "activate_context" and isinstance(result, dict) and isinstance(result.get("generation"), dict):
+        from .. import activation_result
+
+        return {**result, "generation": {**result["generation"], "collection_store": activation_result.UNAVAILABLE}}
+    return result
+
+
 def require_file_collection(vault_root, selector, *, authorize_path, notice_path=None):
     """Refuse a file-mode mutation of a collection that the vault's marker routes to the store.
 

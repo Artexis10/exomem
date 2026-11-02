@@ -837,30 +837,6 @@ def _published_parameters(
     return sig, visible, resolved
 
 
-def _note_withheld_store_pages(command_name: str, result: typing.Any, vault_root: typing.Any) -> typing.Any:
-    """Tell the owner that this pass withheld the collection store's pages because the store refused it.
-
-    The two answers that carry the dispatcher's notice carry this one in the same fields. Any other
-    caller, and any other command, is told nothing, so a withheld store's existence never leaks.
-    """
-    from .collection_store import preview as store_preview
-
-    if not store_preview.pages_unavailable(vault_root):
-        return result
-    if command_name == "ask_memory" and isinstance(result, (list, dict)):
-        from . import find
-
-        out = {"hits": result} if isinstance(result, list) else dict(result)
-        warming = dict(out.get("warming") or {})
-        warming["components"] = sorted({*warming.get("components", ()), find._STORE_UNAVAILABLE_COMPONENT})
-        return {**out, "warming": warming}
-    if command_name == "activate_context" and isinstance(result, dict) and isinstance(result.get("generation"), dict):
-        from . import activation_result
-
-        return {**result, "generation": {**result["generation"], "collection_store": activation_result.UNAVAILABLE}}
-    return result
-
-
 def bind_vault(
     leaf: Callable,
     *injected: object,
@@ -894,8 +870,7 @@ def bind_vault(
         # Resolve the canonical audience at the MCP boundary, beside the
         # existing `mcp_retry_scope()` identity derivation (design D5). Bound
         # for the whole invocation so every read leaf under it decides against
-        # the same principal; stdio resolves to `owner`. The invocation's
-        # record of what it served also covers the second pass below.
+        # the same principal; stdio resolves to `owner`.
         with context, principal_module.request_scope(principal), principal_module.invocation_scope():
             if command is None:
                 return leaf(*injected, **kwargs)
@@ -954,11 +929,11 @@ def bind_vault(
             t0 = time.perf_counter()
             returned_from_invoke = False
             try:
-                from . import published_admission
-                from .collection_store import connection, ownership
+                from .collection_store import connection
                 from .collection_store.governance import _StaleQueryHistoryProjection
-                from .governance.egress import is_vault_root, postfilter
 
+                # The dispatcher's terminal filter released this result: every return of
+                # `invoke_command` over a vault passes it, so a second pass here only redecided it.
                 # One whole reread handles ordinary movement without holding old authority or retrying writes.
                 for refreshed in (False, True):
                     try:
@@ -972,24 +947,16 @@ def bind_vault(
                             **kwargs,
                         )
                         returned_from_invoke = True
-                        # Measure the dispatcher and MCP's independent terminal pass separately.
+                        # Measure the dispatcher and MCP's own work after it separately.
                         call_spans.record_span_since("command.leaf", "command.leaf_start")
                         call_spans.mark("command.leaf_done")
-                        if injected and is_vault_root(injected[0]):
-                            # This pass decides on its own: it asks the store once for the pages the
-                            # result names, and shares no answer with the dispatcher's pass.
-                            with ownership.read_scope(injected[0]) as ownership_scope, \
-                                    published_admission.deciding():
-                                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
-                                ownership_scope.finish()
-                                result = _note_withheld_store_pages(command.name, result, injected[0])
                     except _StaleQueryHistoryProjection:
                         if not invocation_read_only:
                             raise
                         budget = request_budget.current()
                         if refreshed or (budget is not None and budget.remaining() <= 0):
                             raise connection.busy("the collection changed during its release checks") from None
-                        # Discard every old field; both passes must admit the original read again.
+                        # Discard every old field; the reread must admit the original read again.
                     else:
                         break
                 from .governance import scrubber as governance_scrubber
@@ -1046,7 +1013,7 @@ def bind_vault(
                 if refusal is None:
                     raise
                 if returned_from_invoke and not invocation_read_only:
-                    # The leaf returned before this second pass over its result refused.
+                    # The leaf returned before this surface's own handling of its result refused.
                     from .writer_lease import post_leaf_refusal
 
                     refusal = cli_ops.public_refusal(post_leaf_refusal(error)) or refusal

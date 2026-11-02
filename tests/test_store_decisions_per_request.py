@@ -147,7 +147,11 @@ def _refs(packet: dict) -> list[str]:
 def test_a_command_asks_the_store_once_for_all_its_pages(
     service, store_requests: StoreRequests, caller: str  # noqa: F811
 ) -> None:
-    """Each command of the workflow makes at most one store request, read-only and without waking maintenance."""
+    """A command asks the store once for its body and once for the dispatcher's terminal pass, never once per page.
+
+    The terminal pass decides the store's pages live, in a scope of its own, so a command whose result names
+    them asks twice; an activation's result names none of them, so it asks once.
+    """
     root, who = service.root, _who(caller)
     pages = _seed(root, caller)
     counts: dict[str, int] = {}
@@ -173,13 +177,14 @@ def test_a_command_asks_the_store_once_for_all_its_pages(
         spans = call_spans.pop_call_spans("store-decisions")
         call_spans.MCP_CALL_TOKEN.reset(handle)
 
-    assert {label: count for label, count in counts.items() if count > 1} == {}, "a command asked per page"
+    assert {label: count for label, count in counts.items() if count > (2 if label == "ask_memory" else 1)} == {}, \
+        "a command asked per page"
     assert unexpected == [], "a projection read must not write or wake maintenance"
     assert _refs(unresolved) == []
     assert _refs(phrase) == [SHARED]
     store_spans = [span for span in spans if span["name"].startswith("store.call@")]
     assert [(span["count"], span["fields"]["pages"], span["fields"]["refused"], span["fields"]["wake"])
-            for span in store_spans] == [(1, PAGE_COUNT, 0, 0)]
+            for span in store_spans] == [(2, 2 * PAGE_COUNT, 0, 0)]  # the body's request and the terminal pass's, each deciding every page
     # The site is the code that asked, not the plumbing between it and the store.
     assert not store_spans[0]["name"].removeprefix("store.call@").startswith(
         ("collection_store.", "published_admission", "functools", "contextlib", "unknown")
@@ -222,10 +227,10 @@ def test_a_refused_store_request_withholds_the_store_pages_once_and_says_so(
 
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize("caller", ["owner", "owner_with_policy", "external"])
-def test_an_mcp_call_asks_the_store_once_per_pass(
+def test_an_mcp_call_asks_the_store_once_for_the_body_and_once_for_the_terminal_pass(
     service, store_requests: StoreRequests, caller: str  # noqa: F811
 ) -> None:
-    """The MCP binding adds its own independent terminal pass: one request more, never one per page."""
+    """An MCP call runs the one dispatcher pass: the body asks once and the terminal pass asks once, never per page."""
     root, who = service.root, _who(caller)
     pages = _seed(root, caller)
 
@@ -236,7 +241,8 @@ def test_an_mcp_call_asks_the_store_once_per_pass(
     activation = _mcp(root, who, "activate_context", turn=PHRASE)
     activated = list(store_requests.kwargs)
 
-    assert len(asked) <= 2, "the dispatcher pass and the MCP pass each ask once"
+    # The policy withholds every store page from the external caller before the terminal pass sees one.
+    assert len(asked) == (1 if caller == "external" else 2), "the body and the terminal pass each ask once"
     assert len(activated) <= 2
     assert all(kwargs == READ_ONLY_NO_WAKE for kwargs in asked + activated)
     assert SHARED in found and "collection_store" not in warming
@@ -248,10 +254,10 @@ def test_an_mcp_call_asks_the_store_once_per_pass(
 
 
 @pytest.mark.timeout(180)
-def test_a_store_that_refuses_the_mcp_pass_withholds_the_store_pages_once_and_says_so(
+def test_a_store_that_refuses_the_terminal_pass_withholds_the_store_pages_once_and_says_so(
     service, store_requests: StoreRequests  # noqa: F811
 ) -> None:
-    """The pass that decides last refuses once; its store pages are withheld, and the owner is told."""
+    """The store refuses the terminal pass, which decides live after the body: the pages are withheld, the owner is told."""
     root = service.root
     pages = _seed(root, "owner")
 

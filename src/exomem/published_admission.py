@@ -131,14 +131,15 @@ def announce(paths: Iterable[str]) -> None:
 
 
 @contextmanager
-def deciding(paths: Iterable[str] = ()) -> Iterator[RequestDecisions]:
+def deciding(paths: Iterable[str] = (), *, own: bool = False) -> Iterator[RequestDecisions]:
     """Name the pages a block will decide, for as long as it decides them.
 
     The command's dispatcher opens the scope, and the block adds its pages to that scope.
-    Outside a dispatcher the block opens a scope of its own.
+    Outside a dispatcher the block opens a scope of its own. `own` opens a scope that shares no
+    answer and no refusal with the enclosing one, for a pass that must decide live.
     """
     current = _REQUEST.get()
-    if current is not None:
+    if current is not None and not own:
         current.announce(paths)
         yield current
         return

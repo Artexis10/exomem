@@ -4800,7 +4800,7 @@ def guard_view_response(
     The view is computed over the caller's own view, so this is the second line. No item is taken
     from the response: the items are the ones this request's compile served this caller for the
     response's ref, generation and page (`context_views.pinned_items`), and a response that no
-    compile in this request served gets none. So both passes serve the text the generation was
+    compile in this request served gets none. So every pass serves the text the generation was
     computed from. Then every path the items name is decided under the authorization that stands
     now, and an item that names a withheld or invalid one is dropped. The same three states as every other consumer: no
     governance and nothing withheld -> no decision; `blocked` or an unresolved-but-expected
@@ -5861,9 +5861,9 @@ def postfilter(
     """The terminal egress filter: always-on scrubber + withheld cross-check.
 
     Called from `writer_lease.invoke_command` — the ONE dispatcher shared by
-    MCP, REST, hosted, and CLI, which is why `bind_vault` (MCP-only) is a
-    second pass rather than the primary site: the `EXOMEM_RETRIEVE_INJECT`
-    hook reaches memory over REST-then-CLI, both of which skip `bind_vault`.
+    MCP, REST, hosted, and CLI, which is why `bind_vault` (MCP-only) is not
+    the site: the `EXOMEM_RETRIEVE_INJECT` hook reaches memory over
+    REST-then-CLI, both of which skip `bind_vault`.
 
     `request_kwargs` are the arguments the command was called with. A derived
     view is decided under the `purpose` they declare, the one its compile used.
@@ -8349,7 +8349,7 @@ def filter_withheld_entries(
             server = store_runtime.projection_route(vault_root, metadata_evidence.contributors[0][2])
             if server is None:
                 canonical_governance.OperationAuthorization.refuse()
-            # The MCP second pass gets fresh canonical authority, without waking publication work.
+            # A pass outside the store thread gets fresh canonical authority, without waking publication work.
             return server.call(lambda: filter_withheld_entries(
                 vault_root, payload, principal=principal, purpose=purpose,
                 _artifact_scan_demand=_artifact_scan_demand,

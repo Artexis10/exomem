@@ -383,6 +383,49 @@ class Arm:
         """Write the empty vault's external state manifest, as `init_vault` does for a new vault."""
         self.run_python(INIT_STATE, str(self.vault))
 
+    async def _start_coordinator(self) -> None:
+        coordinator_log = (self.logs / "coordinator.log").open("ab")
+        self.coordinator = subprocess.Popen(
+            [self.python, "-I", "-m", "exomem.lease_coordinator", "--host", "127.0.0.1",
+             "--port", str(self.coordinator_port), "--database", str(self.root / "coordinator.sqlite")],
+            env=self.env, stdout=coordinator_log, stderr=subprocess.STDOUT, cwd=self.root)
+        await self._wait("coordinator-start", 30, lambda: self._port_open(self.coordinator_port, self.coordinator))
+
+    async def adopt_store(self) -> None:
+        """Enroll a copied vault's collection store with this arm's own coordinator, as its owner would.
+
+        A copy meets a coordinator that never enrolled its store, so the worker refuses every
+        collection read until the owner's offline `collections adopt-local` previews and applies.
+        """
+        from exomem.collection_store.connection import STORE_FILENAME
+
+        if not any(self.state.glob(f"*/{STORE_FILENAME}")):
+            progress(f"arm-store-adoption arm={self.name} skipped=no-collection-store")
+            return
+
+        def adopt(*mode: str) -> dict:
+            done = subprocess.run(
+                [self.python, "-I", "-m", "exomem", "collections", "adopt-local", "--vault", str(self.vault),
+                 "--why", "private latency sandbox copy", *mode],
+                env=self.env, cwd=self.root, capture_output=True, text=True, timeout=1800)
+            if done.returncode != 0:
+                # The product's refusal goes to the log only; the summary keeps the runner's closed code.
+                print(f"{self.name} arm: collections adopt-local failed: {done.stderr.strip()[-500:]}", file=sys.stderr)
+                raise MeasurementRefused("arm-store-adoption-failed", phase="arm-preparation")
+            return json.loads(done.stdout)
+
+        try:
+            await self._start_coordinator()
+            applied = adopt("--preview-id", adopt("--dry-run")["preview_id"])
+            # The command exits 0 for a pending publication or an unresolved store too; its route reports
+            # in_sync only once the store is admitted.
+            if applied.get("status") not in ("adopted", "in_sync"):
+                print(f"{self.name} arm: collections adopt-local left status={applied.get('status')}", file=sys.stderr)
+                raise MeasurementRefused("arm-store-adoption-failed", phase="arm-preparation")
+            progress(f"arm-store-adoption arm={self.name} status={applied['status']}")
+        finally:
+            await self.stop()
+
     async def start(self, *, quiescence_limit: float) -> dict[str, float]:
         """Start the coordinator and the worker, join the worker as a local client and wait for quiet."""
         import httpx2 as httpx
@@ -391,12 +434,7 @@ class Arm:
 
         environment = self.env
         self.state_before = state_keys(self.state)
-        coordinator_log = (self.logs / "coordinator.log").open("ab")
-        self.coordinator = subprocess.Popen(
-            [self.python, "-I", "-m", "exomem.lease_coordinator", "--host", "127.0.0.1",
-             "--port", str(self.coordinator_port), "--database", str(self.root / "coordinator.sqlite")],
-            env=environment, stdout=coordinator_log, stderr=subprocess.STDOUT, cwd=self.root)
-        await self._wait("coordinator-start", 30, lambda: self._port_open(self.coordinator_port, self.coordinator))
+        await self._start_coordinator()
         worker_log = (self.logs / "worker.log").open("ab")
         self.worker = subprocess.Popen(
             [self.python, "-I", "-c", WORKER_GUARD, "worker", "--socket", str(self.socket),
@@ -840,6 +878,30 @@ def run_paired(args: argparse.Namespace) -> dict:
         "base_commit": base_commit, "reduced": reduced})
 
 
+def place_arm_state(golden_state: Path, root: Path) -> None:
+    """Copy the golden's one vault-state leaf under the key of this arm's own vault.
+
+    A vault's state lives under a key derived from the vault's absolute path, so each arm's copy
+    of the golden vault finds no state under the golden's key. Rename the leaf to the arm's key and
+    match the migration manifest's vault identity, as a rehearsal copy does.
+    """
+    from exomem.state_paths import vault_state_key
+
+    leaves = [path for path in golden_state.iterdir() if path.is_dir()]
+    if len(leaves) != 1:
+        raise MeasurementRefused("golden-state-not-one-vault", phase="arm-preparation")
+    key = vault_state_key(root / "vault")
+    leaf = root / "state" / key
+    shutil.copytree(leaves[0], leaf, symlinks=True)
+    from exomem.state_migration import MANIFEST_NAME
+
+    manifest = leaf / MANIFEST_NAME
+    if manifest.is_file():
+        record = json.loads(manifest.read_text())
+        record["vault_identity"] = key
+        manifest.write_text(json.dumps(record))
+
+
 def run_private(args: argparse.Namespace) -> dict:
     """Time a private prepared vault on both arms; its inputs never leave the operator's host."""
     from exomem.recall_canary import load_cases
@@ -859,9 +921,13 @@ def run_private(args: argparse.Namespace) -> dict:
                 if root.exists():
                     raise MeasurementRefused("arm-root-exists", phase="arm-preparation")
                 root.mkdir(parents=True)
-                for part in ("vault", "state", "lease"):
-                    shutil.copytree(args.golden / part, root / part, symlinks=True)
-                shutil.copy2(args.golden / "coordinator.sqlite", root / "coordinator.sqlite")
+                shutil.copytree(args.golden / "vault", root / "vault", symlinks=True)
+                place_arm_state(args.golden / "state", root)
+                # A golden copied from a live vault has no gate lease or coordinator; the arm starts its own.
+                if (args.golden / "lease").is_dir():
+                    shutil.copytree(args.golden / "lease", root / "lease", symlinks=True)
+                if (args.golden / "coordinator.sqlite").is_file():
+                    shutil.copy2(args.golden / "coordinator.sqlite", root / "coordinator.sqlite")
         elif not all((root / "prepared.json").is_file() for root in roots.values()):
             raise MeasurementRefused("arm-not-prepared", phase="arm-preparation")
         arms = build_arms(roots, {"head": sys.executable, "base": base_python},
@@ -869,6 +935,7 @@ def run_private(args: argparse.Namespace) -> dict:
                                           passthrough=json.loads((RECALL_BENCHMARK / "profile.json").read_text())
                                           ["worker_environment"]))
         if args.prepare:
+            asyncio.run(adopt_stores(arms))
             asyncio.run(warm(arms))
             for root in roots.values():
                 (root / "prepared.json").write_text(json.dumps({"prepared": True}))
@@ -878,6 +945,15 @@ def run_private(args: argparse.Namespace) -> dict:
     return fragment_of(result, cases=cases, total=len(cases), shard=0, shards=1, header={
         "profile_sha256": None, "cases_sha256": hashlib.sha256(raw).hexdigest(), "tag": tag,
         "base_commit": base_commit, "reduced": False})
+
+
+async def adopt_stores(arms: dict[str, Arm]) -> None:
+    """Enroll each arm's copied store in turn; stop every arm however one of them ends."""
+    try:
+        for arm in arms.values():
+            await arm.adopt_store()
+    finally:
+        await stop_arms(arms)
 
 
 async def warm(arms: dict[str, Arm]) -> None:
