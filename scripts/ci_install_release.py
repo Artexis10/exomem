@@ -38,7 +38,7 @@ def _download(url: str, target: Path) -> None:
         except OSError:
             if attempt == 3:
                 raise
-            time.sleep(2**attempt)
+        time.sleep(2**attempt)
 
 
 def main(version: str, venv: str, sha: str, env_name: str) -> None:
