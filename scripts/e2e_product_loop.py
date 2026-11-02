@@ -411,7 +411,7 @@ def _remote_maintenance_preview(handle: Any, job: Any) -> dict[str, Any]:
         or handle.get("state") not in {"running", "completed"}
     ):
         raise RuntimeError(f"maintain_memory did not start a preview job: {handle!r}")
-    # `_call` unwraps every `result` field, so the receipt read here is already the preview's report.
+    # `_call` unwraps every `result` field, so this receipt is already the preview's report.
     report = job.get("receipt") if isinstance(job, dict) else None
     if (
         not isinstance(job, dict)
