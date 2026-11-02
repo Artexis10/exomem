@@ -504,7 +504,7 @@ CLOUD_DISCOVERY_POLICY_COMMAND = (
     "from exomem.command_surface import listed_names;from exomem.server import _tool_shape_from_environment;"
     "from exomem import cloud_origin;shape=_tool_shape_from_environment();tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
     "personal=product_commands_for('mcp',expose_tier2=tier2);"
-    "cloud=product_commands_for('mcp',expose_tier2=tier2,cloud=True,upload_bridge=cloud_origin.enabled());"
+    "cloud=product_commands_for('mcp',expose_tier2=tier2,cloud=True,upload_bridge=cloud_origin.upload_enabled());"
     "names=lambda commands:{name for command in commands for name in listed_names(command,shape)};"
     "print(json.dumps({'excluded':sorted(names(personal)-names(cloud)),"
     "'adoption':sorted(names(command for command in cloud if command.name=='adopt_vault'))}))"

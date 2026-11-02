@@ -352,6 +352,18 @@ async def write_capacity_snapshot(
         await zero_absent_capacity(connection, present_nodes=list(capacities), observed_at=observed_at)
 
 
+# Substrate migration 0082: the signed grant of an export and an import. Substrate writes it and cellctl only
+# reads it, so a request row read with `SELECT *` from a control database that predates the migration has no
+# such column; the grant then reads as absent and the Job runs without one.
+OPERATION_GRANT_COLUMN = "operation_grant"
+
+
+def _request_fields(record: asyncpg.Record, row_type: type) -> dict:
+    fields = {name: record[name] for name in row_type.__dataclass_fields__ if name != OPERATION_GRANT_COLUMN}
+    fields[OPERATION_GRANT_COLUMN] = record.get(OPERATION_GRANT_COLUMN)
+    return fields
+
+
 async def read_import(connection: asyncpg.Connection, cell_id: str):
     from .imports import ImportRow
 
@@ -366,7 +378,7 @@ async def read_import(connection: asyncpg.Connection, cell_id: str):
     )
     if record is None:
         return None
-    fields = {name: record[name] for name in ImportRow.__dataclass_fields__}
+    fields = _request_fields(record, ImportRow)
     fields["import_id"] = str(fields["import_id"])
     for name in ("part_etags", "part_urls"):
         if isinstance(fields[name], str):
@@ -445,7 +457,7 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
     )
     rows = []
     for record in records:
-        fields = {name: record[name] for name in ExportRow.__dataclass_fields__}
+        fields = _request_fields(record, ExportRow)
         fields["export_id"] = str(fields["export_id"])
         rows.append(ExportRow(**fields))
     return rows

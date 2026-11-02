@@ -11,8 +11,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
+from contextlib import contextmanager
 
 import httpx
 import jwt
@@ -91,11 +93,29 @@ def _configure_cell(monkeypatch):
 
 @pytest.fixture
 def cell(vault, monkeypatch):
+    """An upload cell as a cellctl that predates the proof key renders it: the upload key alone."""
     key = _configure_cell(monkeypatch)
     mcp = server.build_server(require_auth=True)
     app = mcp.http_app(stateless_http=True, json_response=True, middleware=server.http_middleware(mcp))
     try:
         yield key, app, vault
+    finally:
+        mcp._exomem_local_runtime_activation._shutdown.set()
+
+
+@contextmanager
+def _cell_with_keys(monkeypatch, *, upload_key: bool, proof_key: bool):
+    """A cell given the gateway's public key under the upload name, the proof name, or both."""
+    key = _configure_cell(monkeypatch)
+    pem = os.environ["EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY"]
+    if not upload_key:
+        monkeypatch.delenv("EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
+    if proof_key:
+        monkeypatch.setenv("EXOMEM_CLOUD_PROOF_PUBLIC_KEY", pem)
+    mcp = server.build_server(require_auth=True)
+    app = mcp.http_app(stateless_http=True, json_response=True, middleware=server.http_middleware(mcp))
+    try:
+        yield key, app
     finally:
         mcp._exomem_local_runtime_activation._shutdown.set()
 
@@ -287,6 +307,76 @@ def test_handoff_needs_the_route_capsule_for_the_same_login(cell):
     assert "no verified gateway origin" in json.dumps(unverified)
     # A download of a path that is no readable original is refused without saying whether it exists.
     assert "ORIGINAL_UNAVAILABLE" in json.dumps(download)
+
+
+def test_a_proof_without_a_route_capsule_binds_the_login_and_publishes_no_handoff(cell, caplog):
+    """The gateway sends the capsule only to a cell that serves upload handoffs; every cell gets the proof."""
+    key, app, _ = cell
+    caplog.set_level(logging.INFO)
+    proof_only = {"x-exomem-cloud-origin": _mcp_origin(key, LOGIN_A)["x-exomem-cloud-origin"]}
+
+    async def scenario(client):
+        listed = await _list_tools(client, headers=proof_only)
+        return listed, await _tool(client, "transfer_artifact", _prepare_arguments(), proof_only)
+
+    listed, handoff = _run(app, scenario)
+
+    assert listed.status_code == 200
+    # Each of the two MCP requests reports a valid proof alongside its bearer.
+    assert [record.fields for record in _credential_events(caplog)] == [
+        {"credential": "both", "proof": "valid", "verdict": "pass", "cell_id": CELL_ID}] * 2
+    # Refused as an unavailable handoff, not as a missing login: the proof bound the origin, and no ticket was issued.
+    assert "no usable upload handoff" in json.dumps(handoff) and "no verified gateway origin" not in json.dumps(handoff)
+    assert cloud_origin.verify_request(proof_only) == cloud_origin.RequestOrigin(cloud_origin.Origin(**LOGIN_A), None)
+
+
+def test_a_cell_with_only_the_proof_key_verifies_proofs_and_serves_no_upload_route(vault, monkeypatch, caplog):
+    """Every cell gets the proof key; only an upload cell gets the upload key, which stays the route switch."""
+    caplog.set_level(logging.INFO)
+    with _cell_with_keys(monkeypatch, upload_key=False, proof_key=True) as (key, app):
+        proof_only = {"x-exomem-cloud-origin": _mcp_origin(key, LOGIN_A)["x-exomem-cloud-origin"]}
+
+        async def scenario(client):
+            return (await _list_tools(client, headers=proof_only), await client.post("/upload"),
+                    await client.get("/download", params={"path": "x.pdf"}))
+
+        listed, upload, download = _run(app, scenario)
+
+    assert listed.status_code == 200
+    assert _one_credential_event(caplog) == {
+        "credential": "both", "proof": "valid", "verdict": "pass", "cell_id": CELL_ID}
+    assert (upload.status_code, download.status_code) == (404, 404)
+
+
+def test_an_upload_cell_with_both_keys_publishes_a_handoff_and_serves_the_upload_route(vault, monkeypatch):
+    with _cell_with_keys(monkeypatch, upload_key=True, proof_key=True) as (key, app):
+        async def scenario(client):
+            return (await _tool(client, "transfer_artifact", _prepare_arguments(), _mcp_origin(key, LOGIN_A)),
+                    await client.post("/upload"))
+
+        descriptor, upload = _run(app, scenario)
+
+    assert descriptor["upload_url"] == UPLOAD_URL and descriptor["committed"] is False
+    assert upload.status_code == 401  # registered, and refused for want of the cell bearer
+
+
+def test_two_different_keys_verify_with_the_proof_key_and_never_try_both(vault, monkeypatch):
+    with _cell_with_keys(monkeypatch, upload_key=True, proof_key=True) as (upload_signer, _app):
+        proof_signer = Ed25519PrivateKey.generate()
+        monkeypatch.setenv("EXOMEM_CLOUD_PROOF_PUBLIC_KEY", proof_signer.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode())
+
+        assert cloud_origin.verify_request(_mcp_origin(proof_signer, LOGIN_A)) is not None
+        assert cloud_origin.verify_request(_mcp_origin(upload_signer, LOGIN_A)) is None
+
+
+@pytest.mark.parametrize("capsule", ["not.a.jwt", ""])
+def test_a_route_capsule_that_is_present_but_invalid_still_rejects_the_proof(cell, capsule):
+    """A bad capsule is never dropped to serve the request as capsule-less."""
+    key, _, _ = cell
+    headers = {**_mcp_origin(key, LOGIN_A), "x-exomem-cloud-upload-route": capsule}
+
+    assert cloud_origin.verify_request(headers) is None
 
 
 @pytest.mark.parametrize("change", ["expired", "route_audience", "other_cell", "long_life", "extra_claim",

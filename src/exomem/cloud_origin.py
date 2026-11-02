@@ -7,7 +7,12 @@ with the gateway's public key verifies that proof once, when the request
 starts, and binds it to the request. The principal then carries a stable
 client binding and origin session, so the existing upload ticket, held file and
 capture checks apply unchanged. Without the key, the cell keeps its fixed
-owner principal and publishes no upload handoff.
+owner principal and publishes no upload handoff. A request with no route
+capsule is bound the same way and publishes no handoff either.
+
+Every cell receives the key as its proof key; only a cell that serves upload
+handoffs also receives it as its upload key, which registers the upload and
+download routes.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from . import cloud_cell, cloud_containment
 
 # Version 1 of the protocol; the Substrate gateway signs the same names and formats.
 PUBLIC_KEY_ENV = "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY"
+PROOF_PUBLIC_KEY_ENV = "EXOMEM_CLOUD_PROOF_PUBLIC_KEY"
 ORIGIN_HEADER = "x-exomem-cloud-origin"
 ROUTE_HEADER = "x-exomem-cloud-upload-route"
 TICKET_HEADER = "x-exomem-cloud-upload-ticket"
@@ -111,20 +117,38 @@ def load_public_key(
     return key
 
 
-def _public_key() -> Ed25519PublicKey | None:
+def _upload_key() -> Ed25519PublicKey | None:
     pem = os.environ.get(PUBLIC_KEY_ENV, "").strip()
     return load_public_key(pem) if pem else None
 
 
-def enabled() -> bool:
-    """Whether this Cloud cell is configured to accept gateway upload handoffs."""
-    return cloud_cell.cloud_mode_enabled() and _public_key() is not None
+def _proof_key() -> Ed25519PublicKey | None:
+    """The key that verifies the gateway's proofs: the proof key, else the upload key.
+
+    The upload key is the fallback so that a cellctl that predates the proof key still verifies on its
+    upload cells; task 7.1 of contain-cloud-controller-compromise removes it with the bearer. When both are
+    set and differ, only the proof key verifies: trying both would accept a proof signed by a key that the
+    operator replaced.
+    """
+    pem = os.environ.get(PROOF_PUBLIC_KEY_ENV, "").strip()
+    return load_public_key(pem, PROOF_PUBLIC_KEY_ENV, "CLOUD_PROOF_KEY_INVALID") if pem else _upload_key()
+
+
+def verification_enabled() -> bool:
+    """Whether this Cloud cell verifies the gateway's proofs, which every cell does once it holds the key."""
+    return cloud_cell.cloud_mode_enabled() and _proof_key() is not None
+
+
+def upload_enabled() -> bool:
+    """Whether this Cloud cell serves gateway upload handoffs, which only the upload key selects."""
+    return cloud_cell.cloud_mode_enabled() and _upload_key() is not None
 
 
 def validate_configuration() -> None:
-    """Fail startup on a malformed key instead of on the first upload."""
+    """Fail startup on a malformed key instead of on the first request."""
     if cloud_cell.cloud_mode_enabled():
-        _public_key()
+        _upload_key()
+        _proof_key()
 
 
 def signed_claims(
@@ -166,7 +190,7 @@ def _serving_cell_id() -> str | None:
 
 
 def _claims(token: object, *, audience: str, fields: frozenset[str], lifetime: int) -> dict | None:
-    claims = signed_claims(token, key=_public_key(), cell_id=_serving_cell_id(), audience=audience,
+    claims = signed_claims(token, key=_proof_key(), cell_id=_serving_cell_id(), audience=audience,
                            fields=fields, lifetime=lifetime)
     if (claims is None or claims["v"] != 1 or claims["iss"] != claims["resource"]
             or not all(cloud_cell.canonical_app_id(claims[name]) for name in ("tenant_id", "grant_id", "family_id"))
@@ -184,8 +208,10 @@ def verify_request(
 ) -> RequestOrigin | None:
     """Verify the gateway's proof for this request, or None.
 
-    An MCP request needs a proof for MCP and the route capsule for the same
-    login. An upload needs a proof that names the exact ticket it carries. A
+    An MCP request needs a proof for MCP. It may also carry the route capsule
+    for the same login, which makes the origin publish upload handoffs; a
+    capsule that is present must verify and match, or the whole origin is
+    refused. An upload needs a proof that names the exact ticket it carries. A
     download needs a proof that names the exact path it requests; there is no
     ticket, so each GET carries its own proof.
     """
@@ -210,6 +236,9 @@ def verify_request(
     if proof["purpose"] != "mcp":
         return None
     capsule = headers.get(ROUTE_HEADER)
+    if capsule is None:
+        # The gateway signs the proof for every cell and the capsule only for a cell that serves upload handoffs.
+        return RequestOrigin(_origin(proof), None)
     route = _claims(capsule, audience=_ROUTE_AUDIENCE, fields=_ROUTE_FIELDS, lifetime=_ROUTE_LIFETIME)
     if route is None or _origin(route) != _origin(proof) or not isinstance(route["upload_url"], str):
         return None
@@ -298,7 +327,7 @@ class CloudOriginMiddleware:
 
         headers = Headers(scope=scope)
         path = scope.get("path", "")
-        configured = enabled()
+        configured = verification_enabled()
         # The upload and download receivers verify their own request-bound proofs.
         request_origin = None if not configured or path in ("/upload", "/download") else verify_request(headers)
         if (path.rstrip("/") or "/") == self.path and not await self._admits(scope, headers, configured, request_origin):

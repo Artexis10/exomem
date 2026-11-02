@@ -65,10 +65,18 @@ Today the static per-cell bearer is the cell's gate, and the gateway's Ed25519 p
 
 Why not keep a per-cell random bearer? `cellctl` would still render it. A signed proof needs a private key that only the gateway holds, and a fixed public key that the admission policy pins (D2).
 
+**Which cells receive which signed object.** The gateway signs an `mcp` proof for every cell once its signing key is present. It signs the route capsule, the object that lets a cell publish an upload handoff, only for a cell that serves upload handoffs. A cell therefore verifies an `mcp` proof with no capsule, binds the login from the proof alone, and publishes no handoff. A capsule that is present must still verify and name the proof's login, or the cell refuses the whole origin. A bad capsule is never dropped to serve the request as capsule-less.
+
+**Decided: a separate proof key name, and the upload key stays the upload switch.** A cell would otherwise register its `/upload` and `/download` routes whenever it holds the gateway's key, and the D1 migration needs the key in every cell. So the cell reads two names:
+- `EXOMEM_CLOUD_PROOF_PUBLIC_KEY` verifies the proofs. `cellctl` renders it into every cell whenever it holds the gateway key, as the value that it already holds for `CELLCTL_UPLOAD_PUBLIC_KEY`.
+- `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY` is the upload switch. `cellctl` renders it only into the cells that `CELLCTL_UPLOAD_CELL_IDS` lists, and only a cell that holds it registers `/upload` and `/download`.
+
+A cell verifies with the proof key and falls back to the upload key when the proof key is absent, so a `cellctl` that predates the proof key still verifies on its upload cells. When both are set and differ, only the proof key verifies, and the cell never tries both. Rolling the proof key out restarts every cell once, because the render digest changes. The operator runs that rollout. Both names carry the gateway's verifying key, so the D2 policy pins both. The fallback ends with task 7.1: once the bearer retires, every `cellctl` renders the proof key and the cell stops reading the upload key for verification.
+
 ### D2. The admission policy pins every trust anchor that a cell reads
 
 A cell trusts four values:
-- the gateway's request-verifying key;
+- the gateway's request-verifying key, which the cell reads from both `EXOMEM_CLOUD_PROOF_PUBLIC_KEY` and `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, and the proof key wins when both are set (D1);
 - Substrate's grant-verifying key;
 - the object-store endpoint and bucket;
 - the escrow recipient.
@@ -145,7 +153,7 @@ Why pin the environment names? An unpinned environment could set `PYTHONPATH`, `
 - for a restore, the snapshot ID;
 - `iat`, `exp` and `jti`.
 
-`cellctl` relays the grant from the request row to the Job, as an argument.
+`cellctl` relays the grant from the request row to the Job, as an argument. For exports and imports the relay is in place. Substrate writes the grant to the nullable column `operation_grant` of `exomem_cloud_exports` at creation and of `exomem_cloud_imports` when the upload completes. `cellctl`'s role can read the column and cannot write it. When the column is non-NULL, `cellctl` passes `--grant=<token>` to the export Job (including its `--verify` form) and to the `import` phase of the import Job. The token is one argument that the Job's `exec "$@"` receives as a positional, never part of the `sh -c` string. `cellctl` checks only that the token is printable ASCII within the cell's length limit, and it never logs the token. Restore grants wait for a Substrate restore request flow and for `cell-restore` (task 4.1).
 
 **The cell checks before it moves data.**
 1. It verifies the grant against the pinned grant key (D2).
@@ -336,12 +344,12 @@ Every container command is `sh -c` with a preamble. The preamble is `ulimit -c 0
 | Kind | Process and arguments | Environment names |
 |---|---|---|
 | StatefulSet init container | `command`: `exomem cell-init`. `args`: `--vault /data/vault --json` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`; with a local volume, also `EXOMEM_CLOUD_CELL_BACKED_UP` (optional `secretKeyRef`) |
-| StatefulSet serving container | `exomem --transport http --host 0.0.0.0 --port 8765` | Fixed: `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `EXOMEM_CLOUD_CELL_TOKEN` (`secretKeyRef`), `EXOMEM_CLOUD_HEALTH_PORT`, `EXOMEM_VAULT_PATH`, `TMPDIR`, `EXOMEM_LOG_DIR`. Conditional: `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS` (optional `secretKeyRef`), `EXOMEM_CLOUD_READ_ONLY`, `EXOMEM_CLOUD_ARTIFACT_BROKER_URL`, `EXOMEM_CLOUD_MEDIA_SLOT_URL`, `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, `EXOMEM_MEDIA_STORE_CONFIG`, `EXOMEM_MEDIA_EDGE_URL`, `EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE`, `EXOMEM_MEDIA_ENGINES`. Then every `model_env` entry |
+| StatefulSet serving container | `exomem --transport http --host 0.0.0.0 --port 8765` | Fixed: `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `EXOMEM_CLOUD_CELL_TOKEN` (`secretKeyRef`), `EXOMEM_CLOUD_HEALTH_PORT`, `EXOMEM_VAULT_PATH`, `TMPDIR`, `EXOMEM_LOG_DIR`. Conditional: `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS` (optional `secretKeyRef`), `EXOMEM_CLOUD_READ_ONLY`, `EXOMEM_CLOUD_ARTIFACT_BROKER_URL`, `EXOMEM_CLOUD_MEDIA_SLOT_URL`, `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`, `EXOMEM_CLOUD_PROOF_PUBLIC_KEY`, `EXOMEM_MEDIA_STORE_CONFIG`, `EXOMEM_MEDIA_EDGE_URL`, `EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE`, `EXOMEM_MEDIA_ENGINES`. Then every `model_env` entry |
 | `cell-backup` Job | One shell string: vault check, `restic snapshots \|\| restic init`, `restic backup`, snapshot-ID capture, `restic forget --prune`, the termination message | `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (`secretKeyRef`), `RESTIC_PASSWORD` (`secretKeyRef`), `RESTIC_CACHE_DIR`, `TMPDIR` |
 | `cell-restore` Job | One shell string: `restic restore <64-hex snapshot ID> --target / --delete --include /data/vault --include /data/host` | The same six names as the backup Job |
-| `cell-import` Job | `exomem cell-import <prepare\|import\|discard> --import-id <id>`; `import` adds `--request <json> --url <presigned URL>`; `discard` may add `--keep-adoption` | The init container's names, plus `EXOMEM_IMPORT_MAX_MEMBERS`, `EXOMEM_IMPORT_RESERVE_BYTES` |
-| `cell-export` Job | `exomem cell-export --export-id <id> --part-bytes <n> --max-bytes <n> --part-url <presigned URL>` (repeated) | The init container's names, plus `EXOMEM_LOG_DIR` |
-| `cell-export` verification Job | The same subcommand with `--verify --archive-bytes <n> --archive-sha256 <hex> --archive-version-id <id>` | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`, `EXOMEM_EXPORT_VERIFY_URL` (`secretKeyRef` to the per-export Secret) |
+| `cell-import` Job | `exomem cell-import <prepare\|import\|discard> --import-id <id>`; `import` adds `--request <json> --url <presigned URL>`, and `--grant=<token>` when the request row holds a grant; `discard` may add `--keep-adoption` | The init container's names, plus `EXOMEM_IMPORT_MAX_MEMBERS`, `EXOMEM_IMPORT_RESERVE_BYTES` |
+| `cell-export` Job | `exomem cell-export --export-id <id> --part-bytes <n> --max-bytes <n> --part-url <presigned URL>` (repeated), and `--grant=<token>` when the request row holds a grant | The init container's names, plus `EXOMEM_LOG_DIR` |
+| `cell-export` verification Job | The same subcommand with `--verify --archive-bytes <n> --archive-sha256 <hex> --archive-version-id <id>`, and `--grant=<token>` when the request row holds a grant | `EXOMEM_CLOUD_CELL`, `EXOMEM_CLOUD_CELL_ID`, `TMPDIR`, `EXOMEM_EXPORT_VERIFY_URL` (`secretKeyRef` to the per-export Secret) |
 
 The `cell-import` and `cell-export` Jobs also carry the trust-anchor names of the next section when `cellctl` has the values.
 

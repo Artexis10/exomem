@@ -1223,7 +1223,9 @@ def test_one_upload_list_feeds_the_gateway_and_cellctl_and_only_the_gateway_sign
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_the_chart_env_keys_the_listed_cells_and_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_chart_env_gives_every_cell_the_proof_key_and_only_the_listed_cells_the_upload_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Load the env the chart renders through cellctl's own settings loader, then render cells.
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1244,15 +1246,18 @@ def test_the_chart_env_keys_the_listed_cells_and_no_other(monkeypatch: pytest.Mo
     monkeypatch.setenv("CELLCTL_UPLOAD_PUBLIC_KEY", public_key)
     config = build_cluster_config()
 
-    keyed = {}
+    upload_keyed, proof_keyed = {}, {}
     for cell_id in (*UPLOAD_CELLS, "cccccccccccccccc"):
         spec = CellManifestSpec(cell_id=cell_id, image="registry.example/cell@sha256:" + "0" * 64,
                                 replicas=1, read_only=False,
-                                upload_public_key=config.upload_public_key_for_cell(cell_id))
+                                upload_public_key=config.upload_public_key_for_cell(cell_id),
+                                proof_public_key=config.upload_public_key)
         pod = render_statefulset(spec)["spec"]["template"]["spec"]
-        keyed[cell_id] = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}.get(
-            "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
-    assert keyed == {"aaaaaaaaaaaaaaaa": public_key, "bbbbbbbbbbbbbbbb": public_key, "cccccccccccccccc": None}
+        cell_env = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}
+        upload_keyed[cell_id] = cell_env.get("EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY")
+        proof_keyed[cell_id] = cell_env.get("EXOMEM_CLOUD_PROOF_PUBLIC_KEY")
+    assert upload_keyed == {"aaaaaaaaaaaaaaaa": public_key, "bbbbbbbbbbbbbbbb": public_key, "cccccccccccccccc": None}
+    assert proof_keyed == dict.fromkeys(("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"), public_key)
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

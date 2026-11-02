@@ -34,7 +34,8 @@ list into both consumers, so the two lists cannot differ:
 |---|---|
 | Gateway | `EXOMEM_CLOUD_UPLOAD_ENABLED=true`, `EXOMEM_CLOUD_UPLOAD_CELL_IDS` with the list, and `EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY` from the private signing-key Secret. |
 | cellctl | `CELLCTL_UPLOAD_CELL_IDS` with the same list, and `CELLCTL_UPLOAD_PUBLIC_KEY` from the public-key Secret. |
-| Selected cell | `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`: the PEM public half of the gateway's Ed25519 artifact signing pair. cellctl sets it only on listed cells. |
+| Selected cell | `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY`: the PEM public half of the gateway's Ed25519 artifact signing pair. cellctl sets it only on listed cells, and it is the switch that registers the upload and download routes. |
+| Every cell | `EXOMEM_CLOUD_PROOF_PUBLIC_KEY`: the same PEM public key. cellctl sets it on every cell whenever it holds `CELLCTL_UPLOAD_PUBLIC_KEY`. The cell verifies the gateway's request proofs with it, and registers no route for it. |
 | Ingress | One route for `POST /upload` and one for `GET /download` on the gateway host. Each adds only the trusted-ingress header and sets no body limit or buffering, so the Traefik edge stays a pass-through for large bodies. |
 
 The cell reads the public half from `artifactBroker.publicKeySecretName` /
@@ -48,7 +49,10 @@ delivery.
 
 The gateway has no switch for all cells, so uploads follow the list only. A cell
 in the list restarts once when the list first names it, and again when the
-signing pair rotates. A cell outside the list keeps its pod.
+signing pair rotates. Every cell restarts once when cellctl first renders the
+proof key, and again when the signing pair rotates. The chart sets
+`CELLCTL_UPLOAD_PUBLIC_KEY` only while `cloudGateway.uploadCellIds` is not empty,
+so the proof key follows that condition until the chart changes.
 
 The chart refuses to render a non-empty list unless these hold:
 

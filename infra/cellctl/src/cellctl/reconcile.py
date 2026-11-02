@@ -468,6 +468,8 @@ class ClusterConfig:
     # The cells that serve the upload handoff, and the PEM public key each receives.
     # The chart's one list also feeds the gateway, so the two selections stay equal.
     # The gateway has no all-cells switch for uploads, so there is none here.
+    # Every cell receives the same key as its proof key (contain-cloud-controller-compromise D1);
+    # only a listed cell also receives it as its upload key, which is the upload switch.
     upload_cell_ids: tuple[str, ...] = ()
     upload_public_key: str = ""
     # contain-cloud-controller-compromise D4: the PEM public key that verifies the signed grants of an
@@ -909,9 +911,11 @@ def _compute_render_digest(
     slot_url = cluster_config.media_slot_for_cell(row.cell_id)
     if slot_url:
         material["media_slot_url"] = slot_url
+    if cluster_config.upload_public_key:
+        # Every cell sees its digest move when the key is first configured, and a changed signing pair restarts it.
+        material["proof_public_key"] = cluster_config.upload_public_key
     upload_key = cluster_config.upload_public_key_for_cell(row.cell_id)
     if upload_key:
-        # Only a listed cell sees its digest move, and a changed signing pair restarts it.
         material["upload_public_key"] = upload_key
     engines = cluster_config.media_engines_for_cell(row.cell_id)
     if engines:
@@ -2575,6 +2579,7 @@ async def _reconcile_row(
             artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
             media_slot_url=cluster_config.media_slot_for_cell(row.cell_id),
             upload_public_key=cluster_config.upload_public_key_for_cell(row.cell_id),
+            proof_public_key=cluster_config.upload_public_key,
             # D9: exports and imports are presigned in the staging bucket, so a Job checks its URLs there.
             object_store_endpoint=cluster_config.cell_data_endpoint,
             object_store_bucket=cluster_config.cell_data_staging_bucket,

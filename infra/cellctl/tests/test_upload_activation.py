@@ -20,6 +20,7 @@ from .test_reconcile import FakeClusterGateway, _cluster_config, _secrets_config
 
 UNLISTED_CELL_ID = "cccccccccccccccc"
 KEY_ENV = "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY"
+PROOF_ENV = "EXOMEM_CLOUD_PROOF_PUBLIC_KEY"
 
 
 def _public_pem(private_key=None) -> str:
@@ -97,17 +98,35 @@ def test_a_selected_runtime_gets_the_public_key_and_the_init_container_does_not(
     assert KEY_ENV not in {entry["name"] for entry in unselected}
 
 
-def test_only_listed_cells_move_their_digest_and_a_new_signing_pair_moves_them_again() -> None:
+def test_a_cell_outside_the_upload_list_gets_the_proof_key_and_not_the_upload_key() -> None:
+    public_key = _public_pem()
+    spec = _spec(proof_public_key=public_key)
+    pod = render_statefulset(spec)["spec"]["template"]["spec"]
+    env = {entry["name"]: entry.get("value") for entry in pod["containers"][0]["env"]}
+    assert env[PROOF_ENV] == public_key
+    assert KEY_ENV not in env
+    assert not any("PUBLIC_KEY" in entry["name"] for entry in pod["initContainers"][0]["env"])
+    with pytest.raises(ValueError, match="Ed25519 public key") as raised:
+        _spec(proof_public_key="not a key")
+    assert "not a key" not in str(raised.value)
+
+
+def test_every_cell_moves_its_digest_for_the_proof_key_and_listing_a_cell_moves_only_that_cell() -> None:
     public_key = _public_pem()
     legacy = _cluster_config()
+    proof_only = _uploads(public_key, cell_ids=())
     listed = _uploads(public_key)
+    # The proof key reaches every cell, so rolling it out restarts each cell once.
+    for cell_id in (CELL_ID, OTHER_CELL_ID, UNLISTED_CELL_ID):
+        assert _digest(cell_id, proof_only) != _digest(cell_id, legacy)
+    # Listing a cell adds only the upload key to that cell, so no other pod restarts.
     for cell_id in (CELL_ID, OTHER_CELL_ID):
-        assert _digest(cell_id, listed) != _digest(cell_id, legacy)
-    # The key never reaches a cell the list does not name, so its pod keeps running.
-    assert _digest(UNLISTED_CELL_ID, listed) == _digest(UNLISTED_CELL_ID, legacy)
+        assert _digest(cell_id, listed) != _digest(cell_id, proof_only)
+    assert _digest(UNLISTED_CELL_ID, listed) == _digest(UNLISTED_CELL_ID, proof_only)
+    # A new signing pair restarts every cell.
     rotated = _uploads(_public_pem())
-    assert _digest(CELL_ID, rotated) != _digest(CELL_ID, listed)
-    assert _digest(UNLISTED_CELL_ID, rotated) == _digest(UNLISTED_CELL_ID, legacy)
+    for cell_id in (CELL_ID, OTHER_CELL_ID, UNLISTED_CELL_ID):
+        assert _digest(cell_id, rotated) != _digest(cell_id, listed)
 
 
 def test_uploads_and_the_broker_fleet_switch_select_cells_independently() -> None:
@@ -118,7 +137,7 @@ def test_uploads_and_the_broker_fleet_switch_select_cells_independently() -> Non
     assert config.upload_public_key_for_cell(CELL_ID) == config.upload_public_key
 
 
-async def test_reconcile_gives_only_the_listed_cells_the_public_key(cell_db) -> None:
+async def test_reconcile_gives_every_cell_the_proof_key_and_only_the_listed_cells_the_upload_key(cell_db) -> None:
     public_key = _public_pem()
     cell_ids = (CELL_ID, OTHER_CELL_ID, UNLISTED_CELL_ID)
     for cell_id in cell_ids:
@@ -132,6 +151,7 @@ async def test_reconcile_gives_only_the_listed_cells_the_public_key(cell_db) -> 
         for cell_id in cell_ids:
             pod = cluster.applied[("exo-cell-" + cell_id, "StatefulSet", "cell")]["spec"]["template"]["spec"]
             env = {entry["name"]: entry.get("value") for entry in pod["containers"][0]["env"]}
+            assert env[PROOF_ENV] == public_key
             if cell_id == UNLISTED_CELL_ID:
                 assert KEY_ENV not in env
             else:

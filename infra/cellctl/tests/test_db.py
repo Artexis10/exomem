@@ -281,6 +281,37 @@ async def test_a_cell_id_with_a_trailing_newline_is_skipped_when_the_row_is_read
     assert [row.cell_id for row in rows] == ["aaaaaaaaaaaaaaaa"]
 
 
+async def test_a_request_row_reads_its_grant_and_none_from_a_database_that_predates_the_column() -> None:
+    """Defect: cellctl fails every import and export read while Substrate's migration 0082 is not yet applied."""
+    from cellctl.exports import ExportRow
+    from cellctl.imports import ImportRow
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    imported = {name: None for name in ImportRow.__dataclass_fields__ if name != "operation_grant"}
+    imported.update(import_id=str(uuid.uuid4()), cell_id="aaaaaaaaaaaaaaaa", kind="adopt", declared_bytes=1,
+                    declared_files=1, requested_state="requested", created_at=now)
+    exported = {name: None for name in ExportRow.__dataclass_fields__ if name != "operation_grant"}
+    exported.update(export_id=str(uuid.uuid4()), cell_id="aaaaaaaaaaaaaaaa", requested_state="requested", created_at=now)
+
+    class _Connection:
+        def __init__(self, record: dict) -> None:
+            self.record = record
+
+        async def fetchrow(self, query: str, *arguments):
+            return self.record
+
+        async def fetch(self, query: str, *arguments):
+            return [self.record]
+
+    granted = await db.read_import(_Connection({**imported, "operation_grant": "signed"}), "aaaaaaaaaaaaaaaa")
+    assert granted.operation_grant == "signed" and "signed" not in repr(granted)
+    assert (await db.read_import(_Connection(imported), "aaaaaaaaaaaaaaaa")).operation_grant is None
+    [granted] = await db.read_exports(_Connection({**exported, "operation_grant": "signed"}), "aaaaaaaaaaaaaaaa")
+    assert granted.operation_grant == "signed" and "signed" not in repr(granted)
+    [absent] = await db.read_exports(_Connection(exported), "aaaaaaaaaaaaaaaa")
+    assert absent.operation_grant is None
+
+
 async def test_capacity_snapshot_is_atomic_and_serializes_cutover_with_admission(cell_db: CellDatabase, monkeypatch) -> None:
     import asyncio
 
