@@ -94,13 +94,23 @@ def test_entity_index_includes_extension_folders_and_rebuilds_on_registry_change
 
 
 def test_recent_captures_keeps_the_newest_entries_up_to_the_cap() -> None:
-    """An import of thousands of Sources grew this list without limit, and every capture re-read all of it."""
-    text = "# Sources - Index\n\n## Recent captures\n\n<!-- Most recent first. -->\n\n## Later\n\nkept\n"
-    for number in range(indexes.RECENT_ACTIVITY_CAP + 10):
-        text = indexes._prepend_recent_capture(text, date_iso="2026-11-02", rel_source_path=f"Sources/a/n{number}")
+    """An import of thousands of Sources grew this list without limit.
 
-    bullets = [line for line in text.splitlines() if line.startswith("- ")]
+    Every capture then re-read all of it.
+    """
+    text = (
+        "# Sources - Index\n\n## Recent captures\n\n<!-- Most recent first. -->\n\n"
+        "## Later\n\n- kept\n"
+    )
+    for number in range(indexes.RECENT_ACTIVITY_CAP + 10):
+        text = indexes._prepend_recent_capture(
+            text, date_iso="2026-11-02", rel_source_path=f"Sources/a/n{number}"
+        )
+
+    captures = text.split("## Later")[0]
+    bullets = [line for line in captures.splitlines() if line.startswith("- ")]
     newest = indexes.RECENT_ACTIVITY_CAP + 9
     assert len(bullets) == indexes.RECENT_ACTIVITY_CAP
     assert bullets[0] == f"- 2026-11-02 — [[Sources/a/n{newest}]]"
-    assert "<!-- Most recent first. -->" in text and text.endswith("## Later\n\nkept\n")
+    assert "<!-- Most recent first. -->" in captures
+    assert text.endswith("## Later\n\n- kept\n")

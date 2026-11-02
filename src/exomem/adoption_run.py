@@ -1807,9 +1807,9 @@ class _ApplyPacer:
     A call never starts a chunk whose predicted cost does not fit in the time left
     before the delivery reserve, after the fan-out the call already owes past the
     loop. A chunk costs its items, its bytes and its media requests. Costs are those
-    this call has measured, not a past call's, and each rate is the dearest seen so
-    far: chunk cost swings several-fold with media artifacts and a contended index,
-    so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
+    this call has measured, not a past call's, and the byte and media rates are the
+    dearest seen so far: chunk cost swings several-fold with media artifacts and a
+    contended index, so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
     of this call's chunks and nothing after it. Notes are the exception: `_create_notes`
     sizes a call's first batch of notes on the price that the run's last call recorded.
 
@@ -1896,7 +1896,7 @@ class _ApplyPacer:
         share = max(APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds, 2 * self._commit_seconds)
         limit = APPLY_CHUNK_ITEMS
         timed = {size for size, _ in self._item_chunks}
-        if len(timed) == 1:
+        if len(timed) == 1 and min(APPLY_CHUNK_ITEMS, 2 * next(iter(timed))) not in timed:
             # A second size, twice the first, so the fit can tell the fixed part from the per-item rate.
             limit = min(APPLY_CHUNK_ITEMS, 2 * next(iter(timed)))
             share = float("inf")
@@ -1948,8 +1948,11 @@ class _ApplyPacer:
         spread = sum((size - mean_size) ** 2 for size in sizes)
         slope = sum((size - mean_size) * (seconds - mean_seconds) for size, seconds in self._item_chunks) / spread
         self._item_seconds = max(slope, 0.0)
-        # The dearest fixed part with that rate: no timed chunk is predicted cheaper than it ran.
-        self._commit_seconds = max(seconds - size * self._item_seconds for size, seconds in self._item_chunks)
+        # The dearest fixed part with that rate, never below zero: no timed chunk, and no smaller one, is priced
+        # cheaper than it ran, so the room check still stops a call that has run out of time.
+        self._commit_seconds = max(
+            0.0, *(seconds - size * self._item_seconds for size, seconds in self._item_chunks)
+        )
 
 
 def _custody_batches(chunk: list[dict]) -> int:

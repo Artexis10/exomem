@@ -395,14 +395,18 @@ def _prepend_recent_capture(text: str, *, date_iso: str, rel_source_path: str) -
     if header_idx == -1:
         # No Recent captures section — append one at the end.
         return text.rstrip() + "\n\n" + SOURCES_RECENT_HEADER + "\n\n" + entry + "\n"
-    # Find the blank line after the header.
-    body_start = text.find("\n\n", header_idx)
-    if body_start == -1:
-        return text + "\n\n" + entry + "\n"
-    body_start += 2
-    section_end = text.find("\n## ", body_start)
+    section_end = text.find("\n## ", header_idx + len(SOURCES_RECENT_HEADER))
     if section_end == -1:
         section_end = len(text)
+    # Find the blank line after the header, inside this section only.
+    body_start = text.find("\n\n", header_idx, section_end)
+    if body_start == -1:
+        body_start = text.find("\n", header_idx, section_end)
+        if body_start == -1:
+            return text.rstrip() + "\n\n" + entry + "\n"
+        body_start += 1
+    else:
+        body_start += 2
     # The section is generated here: its list is the lines that start with "- ", as in Recent activity.
     lines = text[body_start:section_end].splitlines()
     kept, _dropped = _capped([entry, *(line for line in lines if line.startswith("- "))])
