@@ -160,19 +160,20 @@ def test_the_compile_block_survives_the_compact_envelope_of_a_real_tool_call(
     with request_scope(OWNER):
         called = asyncio.run(
             mcp.call_tool(
-                "episode_memory",
+                "record_episode",
                 {
-                    "action": "record",
-                    "subject": "Harbor Lamp purchase",
-                    "summary": "Chose the brass lamp.",
-                    "decided": ["Buy the brass lamp, see [[lamp-choice]]"],
+                    "operation": {
+                        "kind": "record",
+                        "subject": "Harbor Lamp purchase",
+                        "summary": "Chose the brass lamp.",
+                        "decided": ["Buy the brass lamp, see [[lamp-choice]]"],
+                    }
                 },
                 run_middleware=True,
             )
         )
     structured = called.structured_content
-    envelope = structured if isinstance(structured, dict) else json.loads(called.content[0].text)
-    data = envelope.get("data", envelope)
+    data = structured if isinstance(structured, dict) else json.loads(called.content[0].text)
 
     assert next(iter(data)) == "user_summary"
     assert [page["title"] for page in data["compile"]["pages"]] == ["lamp-choice"]
