@@ -5430,6 +5430,9 @@ def _page_rule_findings(
     return findings
 
 
+# The disposition kind of a page that needs no review because no other governed page exists.
+RELATION_BOOTSTRAP_KIND = "bootstrap"
+
 # The rule that owns a page's relation disposition; a review answers its findings.
 RELATION_DISPOSITION_RULE: tuple[str, str, str] = ("relations", "*", "disposition")
 

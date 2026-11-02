@@ -387,6 +387,14 @@ such as `why`, count for nothing. The finding is matched by the rule the
 contract resolves it to (`semantic_contract.RELATION_DISPOSITION_RULE`), the same
 rule the leaf uses, not by its code or wording; a truncated finding list is
 refused, because it cannot show that nothing else blocks.
+A page whose validation reports the `bootstrap` disposition needs no review only
+because no other governed page exists. An earlier create can change that, so
+for such a page the unneeded-review refusal (`RELATION_REVIEW_NOT_APPLICABLE`)
+waits for execution when an earlier create may be governed: one whose leaf
+reported a fully governed page, or one that reported nothing, such as an
+entity. A structural create gives no peer. A missing review on such a page is
+not refused at proposal: an earlier step's typed relation to the page can make
+it qualify at commit, which the proposal-time view cannot see.
 
 ## Risks / Trade-offs
 
