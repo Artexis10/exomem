@@ -69,6 +69,35 @@ back as `already_stored` rather than being stored a second time. `scope` and
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
 
+## Accepted and conflicted writes
+
+A busy vault does not refuse a write that the journal accepts. The write answers
+`state: accepted` (`ok: true`, `terminal: false`, `committed: false`) with an
+`intent_id`, an `intent_ref` and `poll_after_ms`. The write is saved and queued,
+and a single applier commits it in order. `accepted` is success pending, not
+failure and not a commit.
+
+- Poll with `review_memory(mode="write-intent", ref=<intent_ref>, wait_seconds=30)`.
+  Once the write ends, the poll returns its compact terminal. Without `ref`, the
+  same mode lists your open and conflicted writes.
+- Resending the identical call under the same identity returns the same intent.
+  Never resend an accepted write under a new identity, never revise its payload,
+  and never apply it by hand: each of those writes it twice.
+- A read of the target page returns its current canonical bytes. A
+  `pending_writes` entry names the queued write. The queued content is not
+  shown as current, because the write can still end in a conflict.
+- If you cannot wait, report the write as pending with its `intent_ref`.
+
+A queued write whose basis changed before it applied ends `state: conflicted`
+with a cause (`basis_changed`, `target_missing`, `outcome_unknown`,
+`authorization_revoked`, `stalled` and others). It changed nothing, except for
+`outcome_unknown`: that write may have committed, so read the page before you
+retry it. Read the item with
+`review_memory(mode="item", ref=<intent_ref>)`. Decide it with
+`triage_memory(ref=<intent_ref>, action="retry-write")` (add `rebase=true` for
+`basis_changed`) or `action="discard-write"`. A retry is a new write under a new
+identity that the decision creates; do not build one yourself.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when

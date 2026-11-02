@@ -101,7 +101,9 @@ _PLAN_RECEIPT_FIELDS = (
 #: MUST NOT infer any other. `needs_review` is explicitly NONTERMINAL: it means the
 #: guarded write is mid-flight and the caller should complete the review step, not that
 #: anything failed. Conflating it with failure is the 2026-08-06 misclassification.
-STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate", "settled")
+#: `accepted` is nonterminal too: the write is durable in the intent journal and will commit or end in an owner decision.
+#: `conflicted` is the nonterminal state that waits for that decision.
+STATES = ("accepted", "conflicted", "needs_review", "committed", "rejected", "retryable", "indeterminate", "settled")
 TERMINAL_STATES = frozenset({"committed", "rejected", "settled"})
 
 #: The closed derived-graph outcome vocabulary a client may branch on. Absent
@@ -1674,6 +1676,11 @@ def receipt_leaf_projection(leaf_result: Any) -> dict[str, Any]:
     # to copying user paths into a synced hidden file.
     del leaf_result
     return {}
+
+
+def marker_fields() -> dict[str, Any]:
+    """The marker and version that identify a mutation-terminal envelope."""
+    return {"_terminal": _TERMINAL_MARKER, "version": _TERMINAL_VERSION}
 
 
 def committed_terminal(

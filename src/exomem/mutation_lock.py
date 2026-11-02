@@ -290,6 +290,50 @@ def absorbing_busy() -> Iterator[None]:
         _ABSORBING_BUSY.reset(token)
 
 
+@dataclass
+class AcceptWindow:
+    """The time an intent-eligible write may spend waiting before it gets an answer.
+
+    `at` is on the monotonic clock. The window is open until the write commits: a wait after the commit
+    (files 2 and later of a capture, housekeeping holds) belongs to a write that already has its answer.
+    """
+
+    at: float
+    is_open: bool = True
+
+    def left(self) -> float:
+        return max(0.0, self.at - time.monotonic())
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+_ACCEPT_WINDOW: ContextVar[AcceptWindow | None] = ContextVar("exomem_accept_window", default=None)
+
+
+@contextmanager
+def accept_window(window: AcceptWindow) -> Iterator[AcceptWindow]:
+    token = _ACCEPT_WINDOW.set(window)
+    try:
+        yield window
+    finally:
+        window.close()
+        _ACCEPT_WINDOW.reset(token)
+
+
+def current_accept_window() -> AcceptWindow | None:
+    """The open window of the write this context serves, or None when it has no accept deadline."""
+    window = _ACCEPT_WINDOW.get()
+    return window if window is not None and window.is_open else None
+
+
+def close_accept_window() -> None:
+    """The write crossed its commit point: no later wait of it is bounded by the window."""
+    window = _ACCEPT_WINDOW.get()
+    if window is not None:
+        window.close()
+
+
 def record_client_visible_busy() -> None:
     """Count one MUTATION_BUSY that actually reached a client.
 
@@ -2404,6 +2448,10 @@ class VaultMutationCoordinator:
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
             raise ValueError("mutation lock timeout must be non-negative")
+        window = current_accept_window()
+        if window is not None:
+            # An intent-eligible write waits no longer than its accept deadline; past it, the write is journaled.
+            timeout = min(timeout, window.left())
         wait_start = time.monotonic()
         # Clear any prior hold's timing so a mutation that fails BEFORE
         # acquiring can never journal a previous mutation's wait/hold values.

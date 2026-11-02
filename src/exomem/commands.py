@@ -81,6 +81,7 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import (
     find_types,
+    intent_disclosure,
     note_types,
     operation_entries,
     query_log,
@@ -837,6 +838,7 @@ def op_configure_memory(
     }
 
 
+@intent_disclosure.discloses_status
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -3995,9 +3997,12 @@ def op_attention(
         limit=limit,
         state=state,
     )
-    from . import vocabulary_entities
+    from . import intent_review, vocabulary_entities
 
-    return vocabulary_entities.annotate_report(vault_root, report.as_dict())
+    annotated = vocabulary_entities.annotate_report(vault_root, report.as_dict())
+    # Undecided write conflicts wait for an owner decision, like the items above, but live in the write journal.
+    annotated["write_conflicts"] = intent_review.conflict_count(vault_root)
+    return annotated
 
 
 def op_evolution(
@@ -6496,6 +6501,7 @@ def op_get_video_frames(
 # ----- product command wrappers: public surface over canonical leaves -----
 
 
+@intent_disclosure.discloses_status
 def op_ask_memory(
     vault_root: Path,
     query: str = "",
@@ -6698,6 +6704,7 @@ def _abstention_reason(packet: dict) -> str:
     return str(abstention.get("reason") or "")
 
 
+@intent_disclosure.discloses_status
 def op_activate_context(
     vault_root: Path,
     turn: str = "",
@@ -7743,6 +7750,7 @@ def _op_activate_context_body(
     return packet
 
 
+@intent_disclosure.discloses_path
 def op_read_memory(
     vault_root: Path,
     path: str,
@@ -7906,6 +7914,7 @@ def op_read_memory(
     return result
 
 
+@intent_disclosure.discloses_status
 def op_browse_memory(
     vault_root: Path,
     path: str = "",
@@ -9383,6 +9392,21 @@ def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
     return path is not None or bool(query) or family is not None
 
 
+def _review_write_intent(
+    vault_root: Path, *, ref: str | None, wait_seconds: float | None, limit: int | None
+) -> dict:
+    """`write-intent`: poll one accepted write by its reference, or list the reader's own open writes."""
+    from . import intent_review
+
+    if ref is None:
+        if wait_seconds is not None:
+            raise ValueError("INVALID_REVIEW_ARGUMENTS: wait_seconds needs the `ref` of one write")
+        return intent_review.listing(vault_root, 25 if limit is None else max(1, min(limit, 100)))
+    if not intent_review.is_write_ref(ref):
+        raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no write intent for {ref!r}")
+    return intent_review.poll(vault_root, ref, wait_seconds or 0.0)
+
+
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -9401,6 +9425,7 @@ def op_review_memory(
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
     family: str | None = None,
+    wait_seconds: float | None = None,
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
@@ -9411,8 +9436,12 @@ def op_review_memory(
     mode="audit", categories=["unresolved_source_citation"] finds citations
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
 
+    A write answered `accepted` is saved and not yet applied: poll it with
+    mode="write-intent", ref=<intent_ref>, wait_seconds, or report it pending. Never resend it
+    under a new identity. `conflicted` needs a decision: triage_memory retry-write or discard-write.
+
     Args:
-        mode: vocabulary records questions; item/write-advisory-result need ref. No authority:
+        mode: write-intent polls one accepted write by ref, or lists open ones; vocabulary records questions; item/write-advisory-result need ref. No authority:
             apply through connect_memory accept-relation, adoption_studio
             apply-proposal or triage_memory. Modes: references/governance.md.
         categories: Category filter (attention, activation, audit) or upkeep family.
@@ -9438,7 +9467,12 @@ def op_review_memory(
             consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
+        wait_seconds: write-intent only: wait this long for the write to end.
     """
+    if mode == "write-intent":
+        return _review_write_intent(vault_root, ref=ref, wait_seconds=wait_seconds, limit=limit)
+    if wait_seconds is not None:
+        raise ValueError("INVALID_REVIEW_ARGUMENTS: wait_seconds is only supported by write-intent review")
     if mode == "vocabulary":
         question_submission = _review_question_submission(path, query, family)
         unrelated = any(
@@ -9530,8 +9564,11 @@ def op_review_memory(
     if mode == "item":
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
+        from . import intent_review
         from . import upkeep as upkeep_module
 
+        if intent_review.is_write_ref(ref):
+            return intent_review.item(vault_root, ref)
         if promotions_module.is_promotion_ref(ref):
             from . import promotion_revert as promotion_revert_module
 
@@ -10084,21 +10121,35 @@ def op_triage_memory(
     expected_fingerprint: str | None = None,
     source_path: _OptionalRelationText = None,
     decision: _VocabularyDecisionArgument = None,
+    rebase: bool = False,
 ) -> dict:
     """Save review decisions or attention settings; use returned refs and fingerprints.
 
     Args:
-        ref: `exomem://review/<id>` (also `adoption/`, `upkeep/`, `family/<family>`).
+        ref: `exomem://review/<id>` (also `adoption/`, `upkeep/`, `family/<family>`),
+            or `exomem://write/<id>` for a write conflict.
         action: dismiss, snooze, reopen (item); quiet, off, normal (family);
-            decide-vocabulary. `off` also drops explicit review; audit is unaffected.
+            decide-vocabulary; retry-write, discard-write (write conflict). `off` also
+            drops explicit review; audit is unaffected.
         until: YYYY-MM-DD; required for snooze.
         why: Rationale led by a code (`intentional:`, `false_positive:`, `handled:`,
             `deferred:`, `too_frequent:`); required for quiet and off.
         expected_fingerprint: Reviewed fingerprint; mismatch refuses.
         source_path: Source page; required for newly returned relation items.
         decision: Payload for decide-vocabulary.
+        rebase: retry-write only: drop the hash guards so the write applies to current content.
     """
+    from . import intent_review
+
     normalized_action = str(action or "").strip().lower()
+    if intent_review.is_write_ref(ref):
+        if any(item is not None for item in (until, expected_fingerprint, source_path, decision)):
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: a write conflict accepts only ref, action, why and rebase"
+            )
+        return intent_review.triage(vault_root, ref, normalized_action, why=why, rebase=rebase)
+    if rebase:
+        raise ValueError("INVALID_REVIEW_ACTION: rebase applies to a write conflict only")
     vocabulary_ref = ref.startswith("exomem://review/vocabulary/")
     if normalized_action == "decide-vocabulary":
         if not vocabulary_ref:
@@ -13661,6 +13712,80 @@ _SPEC: tuple[tuple, ...] = (
 )
 
 
+# Journal eligibility of every write command, declared once beside the registry (design D8). Command
+# names are the registry's own closed set, not vocabulary. A mixed command is declared for its eligible
+# modes; the accept path narrows a call to those modes.
+_TRANCHE_1 = "tranche 1: a contended call is journaled and applied later"
+_TRANCHE_2 = "tranche 2: journaled only after the tranche 1 proof"
+_NEVER_BEARER = "its result carries a bearer credential, which the journal never stores or replays"
+_NEVER_NOT_A_CALLER_WRITE = "not a caller write the journal can order: it returns a job handle or holds the boundary itself"
+_NOT_NAMED = "not named by the journal design; keeps normal serialization"
+_INTENT_ELIGIBILITY: dict[str, tuple[bool, str]] = {
+    "remember": (True, _TRANCHE_1),
+    "replace_memory": (True, _TRANCHE_1),
+    "edit_memory": (True, f"{_TRANCHE_1}, every mode"),
+    "observe_memory": (True, _TRANCHE_1),
+    "episode_memory": (True, f"{_TRANCHE_1}, `record` mode only"),
+    "manage_memory_file": (True, f"{_TRANCHE_1}, create and append only"),
+    "capture_source": (True, f"{_TRANCHE_1}, run inline first and journaled with its staged files"),
+    "preserve_artifacts": (True, f"{_TRANCHE_1}, run inline first and journaled with its staged files"),
+    "note": (True, f"{_TRANCHE_1}: legacy spelling of remember"),
+    "edit": (True, f"{_TRANCHE_1}: legacy spelling of edit_memory"),
+    "replace": (True, f"{_TRANCHE_1}: legacy spelling of replace_memory"),
+    "create_file": (True, f"{_TRANCHE_1}: legacy spelling of manage_memory_file create"),
+    "append_to_file": (True, f"{_TRANCHE_1}: legacy spelling of manage_memory_file append"),
+    "preserve": (True, f"{_TRANCHE_1}: legacy spelling of preserve_artifacts"),
+    "move_file": (False, _TRANCHE_2),
+    "delete": (False, _TRANCHE_2),
+    "recover_from_trash": (False, _TRANCHE_2),
+    "link": (False, _TRANCHE_2),
+    "schema_memory": (False, f"{_TRANCHE_2}, save-relations only"),
+    "maintain_memory": (False, f"{_TRANCHE_2}, tag-variants and curation propose only"),
+    "record_memory": (False, f"{_TRANCHE_2}: collection-store write"),
+    "plan_memory": (False, f"{_TRANCHE_2}: collection-store write"),
+    "transfer_artifact": (False, _NEVER_BEARER),
+    "govern_memory": (False, f"session open and rotate: {_NEVER_BEARER}"),
+    "process_media": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "adopt": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "adopt_vault": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "adoption_studio": (False, _NEVER_NOT_A_CALLER_WRITE),
+    "review_memory": (False, "a write-intent decision is never journaled itself"),
+    "triage_memory": (False, "a write-intent decision is never journaled itself"),
+    "configure_memory": (False, _NOT_NAMED),
+    "connect_memory": (False, _NOT_NAMED),
+    "preserve_evidence": (False, _NOT_NAMED),
+    "transfer_memory": (False, _NOT_NAMED),
+    "audit_fix": (False, _NOT_NAMED),
+    "reconcile": (False, _NOT_NAMED),
+    "add": (False, _NOT_NAMED),
+}
+
+
+# A mixed command is journaled only in the modes named here: the selector argument, then its values. These are
+# the command schemas' own closed selectors, the same ones `_INTENT_ELIGIBILITY` names in its reasons.
+_INTENT_MODES: dict[str, tuple[str, tuple[str, ...]]] = {  # nosemgrep: ep-word-set -- closed command selectors the schemas fix
+    "episode_memory": ("action", ("record",)),
+    "manage_memory_file": ("operation", ("create", "append")),
+}
+# A capture with staged files runs synchronously until the journal stages its inputs (design D2, captures).
+_INTENT_STAGED_ARGUMENT: dict[str, str] = {
+    "capture_source": "files",
+    "preserve_artifacts": "files",
+}
+
+
+def _intent_eligibility(name: str) -> dict[str, Any]:
+    declared = _INTENT_ELIGIBILITY.get(name)
+    if declared is None:
+        return {}
+    return {
+        "intent_eligible": declared[0],
+        "intent_reason": declared[1],
+        "intent_modes": _INTENT_MODES.get(name),
+        "intent_staged_argument": _INTENT_STAGED_ARGUMENT.get(name),
+    }
+
+
 def _build_commands() -> tuple[Command, ...]:
     # A legacy name takes the floor of the product command that absorbs it, so
     # an alias of a floored door cannot drift from it.
@@ -13696,6 +13821,7 @@ def _build_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
                 restricted_refusal_floor=name in floored,
+                **_intent_eligibility(name),
             )
         )
     return tuple(cmds)
@@ -14380,6 +14506,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
+                **_intent_eligibility(name),
             )
         )
     return tuple(cmds)

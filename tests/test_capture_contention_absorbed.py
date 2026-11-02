@@ -33,6 +33,10 @@ WRITERS = 5
 @pytest.fixture(autouse=True)
 def _reset_managers(monkeypatch: pytest.MonkeyPatch):
     # These tests park WRITERS captures at once; the waiter cap is its own test.
+    # These cases pin the request-side wait an eligible write has with the journal off. With it on, the
+    # write is accepted instead (test_write_intent_accept.py).
+    # seam: task 11.3 rewrites them onto an ineligible command once `on` is the default.
+    monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
     monkeypatch.setenv("EXOMEM_SYNC_WORKERS", str(WRITERS * 4))
     yield
     writer_lease.reset_managers_for_tests()

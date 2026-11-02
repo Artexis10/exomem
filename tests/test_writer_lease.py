@@ -39,6 +39,16 @@ from exomem.writer_lease import (
     reset_managers_for_tests,
 )
 
+
+@pytest.fixture(autouse=True)
+def _journal_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These cases drive the lease, idempotency and absorbing loop with synthetic commands that carry no
+    # registry eligibility, and some pin the loop eligible commands use with the journal off. The journal
+    # has its own files (`test_write_intent_*.py`).
+    # seam: task 11.3 drops the pin for the cases on ineligible commands once `on` is the default.
+    monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
+
+
 #: The wall-clock shape of every contention test in this file.
 #:
 #: A HOLD parks a thread or process while the test observes an ordering; an
@@ -5762,6 +5772,7 @@ def test_startup_sweep_reads_a_released_store_without_changing_its_schema(
         "attempt_id",
         "commit_token",
         "commit_secret",
+        "window_seconds",  # each row's own replay window; opening the store adds it, the sweep does not
     }
     del released
     _seed_idempotency_row(database, "dead:legacy", owner="4244:deadbeefdeadbeef", updated_at=1.0)

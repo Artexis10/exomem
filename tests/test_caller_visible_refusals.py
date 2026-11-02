@@ -26,6 +26,10 @@ from exomem.mutation_lock import VaultMutationCoordinator
 
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # These cases pin the request-side wait an eligible write has with the journal off. With it on, the
+    # write is accepted instead (test_write_intent_accept.py).
+    # seam: task 11.3 rewrites them onto an ineligible command once `on` is the default.
+    monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
     monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state"))
     monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.05")

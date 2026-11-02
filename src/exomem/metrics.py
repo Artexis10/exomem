@@ -61,6 +61,17 @@ class MetricsRegistry:
         self._hist_buckets: dict[_Key, list[int]] = {}
         self._hist_sum: dict[_Key, float] = {}
         self._hist_count: dict[_Key, int] = {}
+        # A gauge is a level read now, such as a queue depth. It is never restored: a value
+        # restored after a restart would describe a process that no longer exists.
+        self._gauges: dict[_Key, float] = {}
+
+    def set_gauge(self, name: str, value: Any, labels: Mapping[str, Any] | None = None) -> None:
+        try:
+            key = (name, _label_key(labels))
+            with self._lock:
+                self._gauges[key] = float(value)
+        except Exception:  # noqa: BLE001 - metrics must never break the caller
+            log.debug("metrics set_gauge failed", exc_info=True)
 
     def inc(self, name: str, labels: Mapping[str, Any] | None = None, value: int = 1) -> None:
         try:
@@ -107,10 +118,14 @@ class MetricsRegistry:
                         for key, buckets in self._hist_buckets.items()
                     ],
                     "bucket_bounds_ms": list(self._buckets),
+                    "gauges": [
+                        {"name": key[0], "labels": dict(key[1]), "value": value}
+                        for key, value in self._gauges.items()
+                    ],
                 }
         except Exception:  # noqa: BLE001 - metrics must never break the caller
             log.debug("metrics snapshot failed", exc_info=True)
-            return {"counters": [], "histograms": [], "bucket_bounds_ms": list(self._buckets)}
+            return {"counters": [], "histograms": [], "bucket_bounds_ms": list(self._buckets), "gauges": []}
 
     def restore(self, data: Any) -> None:
         try:
@@ -142,6 +157,7 @@ class MetricsRegistry:
             self._hist_buckets.clear()
             self._hist_sum.clear()
             self._hist_count.clear()
+            self._gauges.clear()
 
 
 _REGISTRY = MetricsRegistry()
@@ -167,6 +183,12 @@ def observe_duration_ms(name: str, value_ms: Any, labels: Mapping[str, Any] | No
     if metrics_disabled():
         return
     _REGISTRY.observe(name, value_ms, labels)
+
+
+def set_gauge(name: str, value: Any, labels: Mapping[str, Any] | None = None) -> None:
+    if metrics_disabled():
+        return
+    _REGISTRY.set_gauge(name, value, labels)
 
 
 def snapshot() -> dict[str, Any]:

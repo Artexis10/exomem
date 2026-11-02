@@ -136,6 +136,8 @@ def test_service_release_cannot_revoke_a_cli_curation_grant(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, superseded: bool,
 ) -> None:
     """Idle/shutdown release must spare a peer; a real takeover must still fence its seal."""
+    # The grant is the subject; `always` would journal the curation instead of committing it in-process.
+    monkeypatch.setenv("EXOMEM_WRITE_INTENTS", "off")
     note_path = _seed_note(vault, "independent-edit", "Keep the original observation.")
     for name, value in {
         "EXOMEM_WRITER_LEASE_URL": "http://localhost",

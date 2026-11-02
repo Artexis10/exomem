@@ -529,7 +529,11 @@ def register_rest_facade(
                 _log_rest_success(
                     tool=_cmd.name, duration_ms=round((time.perf_counter() - t0) * 1000, 2)
                 )
-                response = RestJSONResponse(cli_ops.envelope(True, data=result))
+                # An accepted write is durable but not committed: 202, with the same success envelope.
+                accepted = isinstance(result, dict) and result.get("state") == "accepted"
+                response = RestJSONResponse(
+                    cli_ops.envelope(True, data=result), status_code=202 if accepted else 200
+                )
                 outcome = "abstained" if isinstance(result, dict) and result.get("abstained") else "ok"
                 return response
 

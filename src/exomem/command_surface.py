@@ -354,6 +354,15 @@ class Command:
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
     path_roles: tuple[reserved_paths.PathRole, ...] = ()
+    #: Whether a contended call becomes an intent in the write-intent journal instead of a busy
+    #: refusal. `None` means undeclared: a registry test fails for a write command that leaves it so.
+    intent_eligible: bool | None = None
+    #: One line saying why `intent_eligible` has its value.
+    intent_reason: str = ""
+    #: For a command eligible in some modes only: the selector argument and the values that qualify.
+    intent_modes: tuple[str, tuple[str, ...]] | None = None
+    #: An argument whose presence means the call carries inputs that the journal cannot stage yet.
+    intent_staged_argument: str | None = None
     #: A direct read whose refusals a restricted caller receives no sooner than
     #: `projection_timing.RESTRICTED_REFUSAL_FLOOR_MS` after dispatch.
     restricted_refusal_floor: bool = False

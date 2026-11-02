@@ -121,6 +121,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "trace",
         "logs",
         "lease",
+        "writes",
         "governance-schema",
         "relations",
         "collections",
@@ -286,6 +287,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _logs_main(raw[1:])
     if raw and raw[0] == "lease":
         return _lease_main(raw[1:])
+    if raw and raw[0] == "writes":
+        return _writes_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
     if raw and raw[0] == "relations":
@@ -4613,6 +4616,14 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
         _print_adopt_human(result)
         return
+    if op == "review_memory" and isinstance(result, dict) and "writes" in result:
+        _print_writes_human(result)
+        return
+    if op == "review_memory" and isinstance(result, dict) and str(result.get("ref", "")).startswith(
+        "exomem://write/"
+    ):
+        _print_write_human(result)
+        return
     if op == "review_memory" and isinstance(result, dict) and "items" in result:
         _print_review_human(result)
         return
@@ -4700,7 +4711,42 @@ def _print_review_human(result: dict) -> None:
         print(f"\n{result['note']}")
 
 
+def _print_writes_human(result: dict) -> None:
+    writes = result.get("writes") or []
+    if not writes:
+        print("No open writes.")
+        return
+    for write in writes:
+        cause = f" ({write['cause']})" if write.get("cause") else ""
+        paths = ", ".join(write.get("planned_paths") or []) or "-"
+        print(f"{write['state']}{cause}  {write['command']}  {paths}\n  {write['ref']}")
+    if result.get("truncated"):
+        print(f"(showing {result.get('returned')}; more exist, raise --limit)")
+
+
+def _print_write_human(result: dict) -> None:
+    cause = f" ({result['cause']})" if result.get("cause") else ""
+    print(f"Write {result.get('state')}{cause}: {result.get('command')}")
+    print(f"  {result['ref']}")
+    for path in result.get("targets") or {}:
+        print(f"  {path}")
+    if result.get("state") == "conflicted":
+        decisions = result.get("decisions") or {}
+        for name, decision in decisions.items():
+            refusal = decision.get("refused_because")
+            print(f"  {name}: {'allowed' if decision.get('allowed') else 'refused - ' + str(refusal)}")
+    if result.get("terminal_withheld"):
+        print("  The result of this write is not shown to this reader.")
+
+
 def _print_triage_human(result: dict) -> None:
+    if str(result.get("ref", "")).startswith("exomem://write/"):
+        retried = result.get("retried_as")
+        if retried:
+            print(f"Write retried as {retried['ref']} ({retried['state']})")
+        else:
+            print(f"Write {result.get('state')}: {result['ref']}")
+        return
     if result.get("family"):
         print(f"Signal family {result['family']} set to {result.get('disposition')}")
         if result.get("reason"):
@@ -4715,6 +4761,75 @@ def _print_triage_human(result: dict) -> None:
         print(f"  {result['path']}")
     if result.get("ref"):
         print(f"  {result['ref']}")
+
+
+def _queued_write_ref(result: object) -> str | None:
+    """The reference of a write the journal accepted and has not applied: from its answer or a retry's."""
+    if not isinstance(result, dict):
+        return None
+    retried = result.get("retried_as")
+    if isinstance(retried, dict) and retried.get("state") == "accepted":
+        return retried.get("ref")
+    if result.get("state") == "accepted" and result.get("terminal") is False:
+        return result.get("intent_ref")
+    return None
+
+
+def _wait_for_queued_write(root: Path, principal: object, ref: str) -> dict:
+    """The write's terminal once it commits, or the item that says why it did not."""
+    from . import intent_review
+    from .governance.principal import request_scope
+
+    with request_scope(principal):
+        view = intent_review.await_end(root, ref)
+    if view.get("state") == "committed" and isinstance(view.get("terminal"), dict):
+        return view["terminal"]
+    return view
+
+
+def _writes_main(argv: list[str]) -> int:
+    """`exomem writes list|show|retry|discard`: the write-intent modes of review_memory and triage_memory."""
+    parser = argparse.ArgumentParser(
+        prog="exomem writes",
+        description="List, show, retry or discard writes the vault accepted while it was busy.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    list_parser = sub.add_parser("list", help="your open and conflicted writes, newest first")
+    list_parser.add_argument("--limit", type=int, default=None, help="at most this many (default 25)")
+    show_parser = sub.add_parser("show", help="the state of one write, with its decision if it conflicted")
+    show_parser.add_argument("id", help="the write's id, or its exomem://write/ reference")
+    show_parser.add_argument(
+        "--wait-seconds", type=float, default=None, help="wait up to this long for the write to end"
+    )
+    retry_parser = sub.add_parser("retry", help="apply a conflicted write again, as a new write")
+    retry_parser.add_argument("id", help="the write's id, or its exomem://write/ reference")
+    retry_parser.add_argument(
+        "--rebase", action="store_true", help="drop the hash guards so the write applies to current content"
+    )
+    discard_parser = sub.add_parser("discard", help="give up a conflicted write")
+    discard_parser.add_argument("id", help="the write's id, or its exomem://write/ reference")
+    discard_parser.add_argument("--why", default=None, help="the reason, kept with the discarded write")
+    for each in (list_parser, show_parser, retry_parser, discard_parser):
+        each.add_argument("--json", action="store_true", help="emit the shared {success, data|error} JSON envelope")
+    args = parser.parse_args(argv)
+
+    prefix = "exomem://write/"
+    ref = getattr(args, "id", None)
+    if ref is not None and not ref.lower().startswith(prefix):
+        ref = prefix + ref
+    if args.action == "list":
+        op = ["review_memory", "--mode", "write-intent"]
+        op += ["--limit", str(args.limit)] if args.limit is not None else []
+    elif args.action == "show":
+        op = ["review_memory", "--mode", "write-intent", "--ref", ref]
+        op += ["--wait-seconds", str(args.wait_seconds)] if args.wait_seconds is not None else []
+    elif args.action == "retry":
+        op = ["triage_memory", ref, "--action", "retry-write"]
+        op += ["--rebase"] if args.rebase else []
+    else:
+        op = ["triage_memory", ref, "--action", "discard-write"]
+        op += ["--why", args.why] if args.why else []
+    return _core_op_main([*op, *(["--json"] if args.json else [])])
 
 
 def _core_op_main(argv: list[str]) -> int:
@@ -4888,10 +5003,24 @@ def _core_op_main(argv: list[str]) -> int:
                 print(err["remediation"], file=sys.stderr)
         return 1
 
+    queued = _queued_write_ref(result)
+    if queued is not None:
+        # An in-process caller loses no reply, so after the row it waits for the write with no bound.
+        try:
+            result = _wait_for_queued_write(root, principal, queued)
+        except KeyboardInterrupt:
+            print(
+                f"Interrupted. The write stays queued as {queued} and applies once the vault is free.\n"
+                f"Check it with: exomem writes show {queued.rsplit('/', 1)[-1]}",
+                file=sys.stderr,
+            )
+            return 130
     if as_json:
         print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
     else:
         _print_human(result, op=cmd.name)
+    if queued is not None and result.get("state") != "committed":
+        return 1
     return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
 
 

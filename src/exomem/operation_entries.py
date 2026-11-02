@@ -609,6 +609,7 @@ _REMAINING = {
         _row("upkeep", "read_review", ("categories", "limit")),
         _row("plan-progress", "read_review", ("path", "limit")),
         _row("write-advisory-result", "read_review", ("ref",), ("ref",)),
+        _row("write-intent", "read_review", ("ref", "limit", "wait_seconds")),
         _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family"),
              constraints=(_literal("path", None, True), _literal("query", "", True), _literal("family", None, True))),
         _row("vocabulary", "triage_memory", ("path", "query", "family", "ref"), ("path", "query", "family"), kind="question"),
