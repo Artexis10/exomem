@@ -172,17 +172,17 @@ Rejected: journal every eligible write, with no inline path. It changes the exec
 
 **The identity rule.** One rule decides which key commits an intent:
 
-1. The row stores the key K that `_effective_idempotency_key` derived, the digest of the original arguments, the replay window, and a dispatch `request_id` minted at accept. A write without a retry identity gets K = `intent:<intent_id>` with the explicit 24 h window.
+1. The row stores the key K that `_effective_idempotency_key` derived, the digest of the original arguments, the replay window, and a dispatch `request_id` minted at accept. A write without a retry identity gets K = `intent:<intent_id>` with the explicit 24 h window. A write with a retry identity keeps that key's own window (600 s for an implicit key).
 2. A unique index covers K on rows in `accepted` or `applying`. The inline attempt inserts the row while it still holds its claim on K, before `IdempotencyStore` releases the claim as retryable. A second attempt that fails to insert under the same K returns the existing intent.
 3. The applier claims K with the original digest. Rewritten arguments (input references, a moved target) go to the leaf only. A resend with the original arguments therefore never meets `IDEMPOTENCY_KEY_REUSED`.
 4. Every dispatch of the intent uses the stored `request_id` as the active mutation request id. The collection store deduplicates on it in tranche 2.
 5. The resend lookup of D2 also returns terminal intents within K's window. A resend after the intent ended gets its terminal or its review state, never a second intent.
-6. `retry-write` mints a new key, `intent:<intent_id>:retry:<n>`, with the 24 h window and a new `request_id`. The old key keeps its outcome.
+6. `retry-write` mints a new key, `intent:<intent_id>:retry:<n>`, with the old key's window and a new `request_id`. The old key keeps its outcome.
 7. A completed receipt for a journaled K stays until the later of K's own window and the end of the intent's retention. `IdempotencyStore` therefore stores each row's expiry and prunes by it, not by the window of the current caller. This also fixes the prune that the probe showed for implicit keys.
 
 **Order.** The applier applies by `seq`. A later intent for the same target applies after the earlier one, because order is global per vault.
 
-**Retention.** A terminal intent drops its arguments and inputs at once. It keeps content-free fields and the compact terminal for 24 h, for polls and resends. A `rejected` intent keeps its arguments for those 24 h, readable by its own principal. A `conflicted` intent keeps them until a decision.
+**Retention.** A terminal intent drops its arguments and inputs at once. It keeps content-free fields and the compact terminal for its key's own window after the terminal, for polls and resends. A `rejected` intent keeps its arguments for that window, readable by its own principal. A `conflicted` intent keeps them until a decision.
 
 **Orphan sweep.** A crash can leave staged inputs without a committed row. At start, and then every hour, the applier deletes each input directory whose intent is missing or terminal.
 
