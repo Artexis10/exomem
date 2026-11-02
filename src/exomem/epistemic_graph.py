@@ -3578,11 +3578,18 @@ class EpistemicGraphIndex:
         identity moved, and the answer is False when anything moved.
         """
         movement = _SealMovement() if movement_out is None else movement_out
+        # A collecting round proves each shared ancestor once, as
+        # `vault.recheck_path_guards` does. A strict seal re-reads every page,
+        # so ancestor `lstat` calls are a small part of its cost; it keeps
+        # proving each guard's ancestry whole.
+        verified: set[vault_module.PathIdentity] | None = (
+            None if movement_out is None else set()
+        )
         for guard in seal.guards:
             if interrupt is not None:
                 interrupt()
             try:
-                guard.recheck(self.vault_root)
+                guard.recheck(self.vault_root, verified)
             except vault_module.PathGuardError as error:
                 if movement_out is None:
                     raise
@@ -5735,17 +5742,13 @@ class EpistemicGraphIndex:
     ) -> frozenset[str] | None:
         """Capture on-disk membership of the vault-wide recall resolver."""
         try:
-            return frozenset(
-                rel
-                for path in recall_policy.iter_recall_markdown(
-                    self.vault_root,
-                    _interruptible_source_paths(
-                        foreground_priority.yielding_in_bulk(
-                            vault_module.walk_vault_md(self.vault_root)
-                        ), interrupt,
-                    ),
-                )
-                if (rel := _vault_rel(self.vault_root, path)) is not None
+            return recall_policy.admitted_relative_paths(
+                self.vault_root,
+                _interruptible_source_paths(
+                    foreground_priority.yielding_in_bulk(
+                        vault_module.walk_vault_md(self.vault_root)
+                    ), interrupt,
+                ),
             )
         except _RepublicationDeferred:
             raise
@@ -5758,17 +5761,13 @@ class EpistemicGraphIndex:
         """Capture the exact admitted KB paths represented by graph file rows."""
         kb = self.vault_root / kb_dirname()
         try:
-            return frozenset(
-                rel
-                for path in recall_policy.iter_recall_markdown(
-                    self.vault_root,
-                    _interruptible_source_paths(
-                        foreground_priority.yielding_in_bulk(
-                            find_module._walk_md(kb) if kb.is_dir() else ()
-                        ), interrupt,
-                    ),
-                )
-                if (rel := _vault_rel(self.vault_root, path)) is not None
+            return recall_policy.admitted_relative_paths(
+                self.vault_root,
+                _interruptible_source_paths(
+                    foreground_priority.yielding_in_bulk(
+                        find_module._walk_md(kb) if kb.is_dir() else ()
+                    ), interrupt,
+                ),
             )
         except _RepublicationDeferred:
             raise
