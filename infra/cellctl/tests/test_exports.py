@@ -472,13 +472,40 @@ async def test_each_role_holds_exactly_its_c6_columns(cell_db):
         granted[(row["grantee"], row["privilege_type"])].add(row["column_name"])
     observation = {"observed_state", "error_code", "archive_bytes", "archive_sha256", "archive_version_id", "upload_id",
                    "ready_at", "expires_at", "download_url", "download_url_expires_at", "link_issued_at", "packing_report"}
-    assert granted[("substrate_app", "INSERT")] == {"export_id", "cell_id", "requested_state", "link_requested_at"}
+    assert granted[("substrate_app", "INSERT")] == {"export_id", "cell_id", "requested_state", "link_requested_at",
+                                                    "operation_grant"}
     assert granted[("substrate_app", "UPDATE")] == {"requested_state", "link_requested_at"}
     assert granted[("exomem_cellctl", "UPDATE")] == observation
     assert ("exomem_cellctl", "INSERT") not in granted
     assert not [key for key in granted if key[0] == "exomem_gateway"]
     assert {row["grantee"] for row in usage} == {"exomem_cellctl"}
     assert app_deletes is False  # C6 rows are the content-free record; nothing deletes them
+
+
+async def test_cellctl_reads_the_grant_substrate_signs_and_cannot_write_one(cell_db):
+    """Defect: the grant never reaches the Job, or a compromised cellctl forges the grant it then relays."""
+    await _seed_cell(cell_db, CELL, "tenant-grant")
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        export_id = await app.fetchval(
+            "INSERT INTO exomem_cloud_exports(cell_id, operation_grant) VALUES($1, 'signed-export-grant') RETURNING export_id",
+            CELL)
+        import_id = await app.fetchval(
+            "INSERT INTO exomem_cloud_imports(cell_id, kind, declared_bytes, declared_files) "
+            "VALUES($1, 'adopt', 0, 0) RETURNING import_id", CELL)
+        await app.execute("UPDATE exomem_cloud_imports SET operation_grant='signed-import-grant' WHERE import_id=$1",
+                          import_id)
+
+        assert [item.operation_grant for item in await db.read_exports(controller, CELL)] == ["signed-export-grant"]
+        assert (await db.read_import(controller, CELL)).operation_grant == "signed-import-grant"
+        for table, key, identifier in (("exports", "export_id", export_id), ("imports", "import_id", import_id)):
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await controller.execute(f"UPDATE exomem_cloud_{table} SET operation_grant='forged' WHERE {key}=$1",
+                                         identifier)
+    finally:
+        await app.close()
+        await controller.close()
 
 
 async def test_a_request_and_a_link_request_wake_cellctl_but_its_own_writes_do_not(cell_db):

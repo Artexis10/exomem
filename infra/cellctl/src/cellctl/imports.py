@@ -62,6 +62,9 @@ class ImportRow:
     required_storage_gib: int | None = None
     staged_files: int | None = None
     staged_bytes: int | None = None
+    # contain-cloud-controller-compromise D4: the grant Substrate signed when the upload completed. cellctl
+    # only relays it, so it stays out of the row's repr and any log line that prints the row.
+    operation_grant: str | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if str(uuid.UUID(self.import_id)) != self.import_id:

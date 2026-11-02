@@ -15,7 +15,7 @@
 ## 3. Cell checks in report mode
 
 - [ ] 3.1 Make the gateway proof mandatory behind a report-mode switch, and log the credential that each request used.
-- [ ] 3.2 Add the grant verifier and the URL destination check to `cell-export`, `cell-import` and `cell-restore`, in report mode.
+- [x] 3.2 Add the grant verifier and the URL destination check to `cell-export` and `cell-import` in report mode, and relay the signed grant from the request rows to their Jobs. `cell-restore` takes the same check when task 4.1 adds it, and restore grants wait for a Substrate restore request flow.
 - [ ] 3.3 Substrate (separate repository): add the grant key and sign export, import and restore grants on the request rows.
 
 ## 4. Command pin

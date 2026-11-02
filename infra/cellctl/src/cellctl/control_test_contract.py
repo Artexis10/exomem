@@ -63,3 +63,11 @@ def media_key_test_sql(fixtures: Path) -> str:
     It mirrors Substrate migration 0081 and its grants stanza until the pin reaches a commit with both.
     """
     return (fixtures / "exomem_cloud_media_keys.sql").read_text(encoding="utf-8")
+
+
+def operation_grant_test_sql(fixtures: Path) -> str:
+    """The grant columns of an export and an import, and Substrate's grants on them, run after the pinned grants.
+
+    It mirrors Substrate migration 0082 and its grants stanzas until the pin reaches a commit with both.
+    """
+    return (fixtures / "exomem_cloud_operation_grants.sql").read_text(encoding="utf-8")

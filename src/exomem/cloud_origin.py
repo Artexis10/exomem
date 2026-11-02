@@ -7,7 +7,8 @@ with the gateway's public key verifies that proof once, when the request
 starts, and binds it to the request. The principal then carries a stable
 client binding and origin session, so the existing upload ticket, held file and
 capture checks apply unchanged. Without the key, the cell keeps its fixed
-owner principal and publishes no upload handoff.
+owner principal and publishes no upload handoff. A request with no route
+capsule is bound the same way and publishes no handoff either.
 """
 
 from __future__ import annotations
@@ -184,8 +185,10 @@ def verify_request(
 ) -> RequestOrigin | None:
     """Verify the gateway's proof for this request, or None.
 
-    An MCP request needs a proof for MCP and the route capsule for the same
-    login. An upload needs a proof that names the exact ticket it carries. A
+    An MCP request needs a proof for MCP. It may also carry the route capsule
+    for the same login, which makes the origin publish upload handoffs; a
+    capsule that is present must verify and match, or the whole origin is
+    refused. An upload needs a proof that names the exact ticket it carries. A
     download needs a proof that names the exact path it requests; there is no
     ticket, so each GET carries its own proof.
     """
@@ -210,6 +213,9 @@ def verify_request(
     if proof["purpose"] != "mcp":
         return None
     capsule = headers.get(ROUTE_HEADER)
+    if capsule is None:
+        # The gateway signs the proof for every cell and the capsule only for a cell that serves upload handoffs.
+        return RequestOrigin(_origin(proof), None)
     route = _claims(capsule, audience=_ROUTE_AUDIENCE, fields=_ROUTE_FIELDS, lifetime=_ROUTE_LIFETIME)
     if route is None or _origin(route) != _origin(proof) or not isinstance(route["upload_url"], str):
         return None

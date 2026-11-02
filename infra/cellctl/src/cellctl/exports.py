@@ -70,6 +70,9 @@ class ExportRow:
     download_url_expires_at: datetime | None = None
     link_issued_at: datetime | None = None
     updated_at: datetime | None = None
+    # contain-cloud-controller-compromise D4: the grant Substrate signed with the request. cellctl only relays
+    # it, so it stays out of the row's repr and any log line that prints the row.
+    operation_grant: str | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if str(uuid.UUID(self.export_id)) != self.export_id:

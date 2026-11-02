@@ -65,6 +65,10 @@ Today the static per-cell bearer is the cell's gate, and the gateway's Ed25519 p
 
 Why not keep a per-cell random bearer? `cellctl` would still render it. A signed proof needs a private key that only the gateway holds, and a fixed public key that the admission policy pins (D2).
 
+**Which cells receive which signed object.** The gateway signs an `mcp` proof for every cell once its signing key is present. It signs the route capsule, the object that lets a cell publish an upload handoff, only for a cell that serves upload handoffs. A cell therefore verifies an `mcp` proof with no capsule, binds the login from the proof alone, and publishes no handoff. A capsule that is present must still verify and name the proof's login, or the cell refuses the whole origin. A bad capsule is never dropped to serve the request as capsule-less.
+
+**The verifying key still marks the upload feature.** `cellctl` renders `EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY` only into the cells that `CELLCTL_UPLOAD_CELL_IDS` lists, and the cell registers its `/upload` and `/download` routes when the key is present. The D1 migration needs the key in every cell, so the key and the upload feature need separate switches first (see Open Questions).
+
 ### D2. The admission policy pins every trust anchor that a cell reads
 
 A cell trusts four values:
@@ -145,7 +149,7 @@ Why pin the environment names? An unpinned environment could set `PYTHONPATH`, `
 - for a restore, the snapshot ID;
 - `iat`, `exp` and `jti`.
 
-`cellctl` relays the grant from the request row to the Job, as an argument.
+`cellctl` relays the grant from the request row to the Job, as an argument. For exports and imports the relay is in place. Substrate writes the grant to the nullable column `operation_grant` of `exomem_cloud_exports` at creation and of `exomem_cloud_imports` when the upload completes. `cellctl`'s role can read the column and cannot write it. When the column is non-NULL, `cellctl` passes `--grant=<token>` to the export Job (including its `--verify` form) and to the `import` phase of the import Job. The token is one argument that the Job's `exec "$@"` receives as a positional, never part of the `sh -c` string. `cellctl` checks only that the token is printable ASCII within the cell's length limit, and it never logs the token. Restore grants wait for a Substrate restore request flow and for `cell-restore` (task 4.1).
 
 **The cell checks before it moves data.**
 1. It verifies the grant against the pinned grant key (D2).
@@ -406,6 +410,7 @@ The query may hold only these names, each once and in exact case, and no raw `;`
 
 ## Open Questions
 
+- The upload feature switch for D1. A cell registers its upload routes because the gateway key is present, and `cellctl` renders the key only for upload cells. Giving every cell the key needs a switch that the cell reads apart from the key, such as a rendered flag for upload cells, or a separate environment name for the proof key.
 - The browser side of encrypted owner exports (D4): `age` in the browser, and how a tenant who loses the export key asks for a new export.
 - Whether a tenant-initiated restore needs a confirmation step in Substrate before it signs a restore grant.
 - The age-custody recovery path for the escrow identity, shared with `make-cloud-cells-operator-resistant` task 4.5.

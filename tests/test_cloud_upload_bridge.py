@@ -289,6 +289,39 @@ def test_handoff_needs_the_route_capsule_for_the_same_login(cell):
     assert "ORIGINAL_UNAVAILABLE" in json.dumps(download)
 
 
+def test_a_proof_without_a_route_capsule_binds_the_login_and_publishes_no_handoff(cell, caplog):
+    """The gateway sends the capsule only to a cell that serves upload handoffs; every cell gets the proof."""
+    key, app, _ = cell
+    caplog.set_level(logging.INFO)
+    proof_only = {"x-exomem-cloud-origin": _mcp_origin(key, LOGIN_A)["x-exomem-cloud-origin"]}
+
+    async def scenario(client):
+        listed = await _list_tools(client, headers=proof_only)
+        return (listed, await _tool(client, "transfer_artifact", _prepare_arguments(), proof_only),
+                await _tool(client, "transfer_artifact", {"operation": "download", "artifact": "x.pdf"}, proof_only))
+
+    listed, handoff, download = _run(app, scenario)
+
+    assert listed.status_code == 200
+    # Each of the three MCP requests reports a valid proof alongside its bearer.
+    assert [record.fields for record in _credential_events(caplog)] == [
+        {"credential": "both", "proof": "valid", "verdict": "pass", "cell_id": CELL_ID}] * 3
+    # Refused as an unavailable handoff, not as a missing login: the proof bound the origin, and no ticket was issued.
+    assert "no usable upload handoff" in json.dumps(handoff) and "no verified gateway origin" not in json.dumps(handoff)
+    # The bound login reaches the download check, which refuses a path that is no readable original.
+    assert "ORIGINAL_UNAVAILABLE" in json.dumps(download)
+    assert cloud_origin.verify_request(proof_only) == cloud_origin.RequestOrigin(cloud_origin.Origin(**LOGIN_A), None)
+
+
+@pytest.mark.parametrize("capsule", ["not.a.jwt", ""])
+def test_a_route_capsule_that_is_present_but_invalid_still_rejects_the_proof(cell, capsule):
+    """A bad capsule is never dropped to serve the request as capsule-less."""
+    key, _, _ = cell
+    headers = {**_mcp_origin(key, LOGIN_A), "x-exomem-cloud-upload-route": capsule}
+
+    assert cloud_origin.verify_request(headers) is None
+
+
 @pytest.mark.parametrize("change", ["expired", "route_audience", "other_cell", "long_life", "extra_claim",
                                     "other_key", "issuer"])
 def test_origin_proof_rejects_each_altered_field(cell, change):
