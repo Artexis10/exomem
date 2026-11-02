@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: b4852bb90e6324a13e717027949aaaa9c6dd208d3aacc1b276d18a827d1cf2fa
+  skill_contract: ffabbfb2fc6d7986983c0873099881b8b8a8f94f1cfda76e735f9dc42ebcc205
   version: "0.32.0"
 ---
 
@@ -139,9 +139,13 @@ Mid-thought exploration, tentative events, and incidental names stay unwritten.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a
-conversation's decision or stopping point, record one bounded recap with
-`record_episode/read_episode` only when requested or permitted by the live proactive-capture
-disposition; it is what the next session on any client sees first.
+conversation's decision or stopping point, close in two steps, only when requested
+or permitted by the live proactive-capture disposition. First update each page whose
+knowledge this session changed (entity facets, decisions, workflow contracts) with
+`edit_note`, `change_observations` or `supersede_note`. Then record one bounded recap
+with `record_episode/read_episode`: link each Decided item to its page with `[[...]]`
+and set `about` to the pages you updated. The recap is what the next session on any
+client sees first. Nothing durable happened: record nothing.
 
 ## Recall loop
 

@@ -161,15 +161,28 @@ qualifies. A write response may carry a
 prompts a pass if one has not already been completed for that episode, never a
 demand that something be written.
 
-**Record the conversation.** At a decision or stopping point, record one bounded
-recap with `record_episode(operation={'kind': 'record'})`: a one-line subject and summary,
-what was worked on, decided and left open, and at most three verbatim user
-statements worth keeping. It is raw material about the conversation, not a
-compiled conclusion, and it is what the next session on any client sees first in
-`recent_context`. Reuse the `episode` key a hook named or an earlier record
-returned; an identical retry writes nothing. A Stop hook's episode check or an
-`episode_due` block in an activation packet is a reminder, not permission;
-skip it when nothing durable happened. Record only when the user asks or the
+**Close the session: update the pages, then record the conversation.** At a decision
+or stopping point, you hold the most context, so write the pages first and the recap
+second.
+
+1. Update each page whose knowledge this session changed, with the ordinary writers
+   (`edit_note`, `change_observations`, `supersede_note`). The pages are entity
+   facets, decisions and workflow contracts. A page the session did not change needs
+   no write.
+2. Record one bounded recap with `record_episode(operation={'kind': 'record'})`: a
+   one-line subject and summary, what was worked on, decided and left open, and at
+   most three verbatim user statements worth keeping. Link each Decided item to the
+   page it belongs to with `[[...]]`, and set `about` to the pages you updated.
+
+The recap is raw material about the conversation, not a compiled conclusion, and it
+is what the next session on any client sees first in `recent_context`. Its response
+may carry a `compile` block: the pages the recap names with each one's last update
+time, and how many Decided items name no page. The server cannot know which writes
+belong to this session, so you judge which listed pages still need an update. Reuse
+the `episode` key a hook named or an earlier record returned; an identical retry
+writes nothing. A Stop hook's episode check or an `episode_due` block in an
+activation packet is a reminder, not permission; skip it when nothing durable
+happened, and then write and record nothing. Record only when the user asks or the
 live `proactive_capture` disposition permits it. At `off` and `light`, an
 unrequested hook reminder does not authorize capture.
 

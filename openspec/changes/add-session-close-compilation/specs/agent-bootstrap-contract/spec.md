@@ -4,6 +4,14 @@
 
 At a decision or stopping point, the shipped skill, the engagement reference, the `episode_memory` tool description, the Stop-hook episode ask and the `episode_due` advisory SHALL tell the agent to close in two steps. First the agent SHALL update each page whose knowledge the session changed, with the ordinary writers (`edit_note`, `change_observations`, `supersede_note`). The pages are entity facets, decisions and workflow contracts. Then the agent SHALL record one recap, link each Decided item to the page it belongs to with `[[...]]`, and set `about` to the pages it updated. The Stop-hook episode ask SHALL stay one short line, and its byte ceilings SHALL change only by the added words. The existing rules SHALL hold: record only when the user asks or the live `proactive_capture` disposition permits it, record nothing when nothing durable happened, and treat a hook reminder as no permission.
 
+#### Scenario: The close step reaches a client with no hook
+
+- **WHEN** a tool-only client reads the `episode_memory` tool description
+- **THEN** the description tells the agent to update the pages the session changed first, and to link each Decided item to its page as `[[Page]]`
+- **AND** it points to the `compile` block of the response
+
+### Requirement: The record response compiles the pages the recap names
+
 The `record` response SHALL carry a `compile` block when the recap names at least one page the caller may see or has at least one Decided item. The block SHALL list each page the recap names through `about` or through a `[[...]]` link in a Decided item, with its reference, vault-relative path, title and last update time. The update time SHALL be the frontmatter `updated` value, else the file modification time, and the block's `diagnostics` SHALL say which source gave each time. The block SHALL count the Decided items that carry no resolvable visible link as `unlinked_decided`, and SHALL lead with one `outcome` sentence that an agent can repeat as is.
 
 The server SHALL NOT claim that a page was written in this session, and SHALL NOT use a time window to decide it: the episode ledger binds recap inputs only and ordinary writes carry no episode key. A page the caller cannot see, and a link that resolves to no page, SHALL be omitted and SHALL NOT be named or counted, so a withheld page reads exactly like an absent one. A recap that names no page and has no Decided item SHALL carry no `compile` block. When the server cannot check the links, the block SHALL say so and SHALL omit `unlinked_decided`, because an unknown count is never zero. A failed check SHALL NOT refuse the recap.
