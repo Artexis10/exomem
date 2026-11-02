@@ -2726,39 +2726,41 @@ class LeaseCoordinatorClient:
         """The JSON of a GET to the loopback coordinator, over this thread's one open connection.
 
         Every status RPC otherwise pays a new opener and a new TCP connection. A GET changes nothing,
-        so a connection that the coordinator closed while idle is replaced once and the GET repeats.
+        so a connection that the coordinator closed while idle is replaced once, and the GET repeats.
         The answer is never cached, `http.client` never uses a proxy, and no status outside 2xx is
         followed: a redirect refuses like any other status.
         """
-        origin = urllib.parse.urlsplit(self.config.url or "")
-        connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
-        for attempt in (1, 2):
-            connection = getattr(self._kept, "connection", None)
-            reused = connection is not None
-            if connection is None:
-                connection = connect(origin.hostname, origin.port, timeout=self.config.timeout_seconds)
-                self._kept.connection = connection
-            try:
-                connection.request("GET", request.selector, headers=dict(request.header_items()))
-                response = connection.getresponse()
-                data = response.read()
-            except ConnectionError as error:
-                self._drop_kept_connection()
-                if reused and attempt == 1:
-                    continue
-                raise urllib.error.URLError(error) from None
-            except http.client.HTTPException as error:
-                self._drop_kept_connection()
-                raise urllib.error.URLError(error) from None
-            except BaseException:
-                self._drop_kept_connection()
+        reused = getattr(self._kept, "connection", None) is not None
+        try:
+            response, data = self._exchange(request)
+        except ConnectionError:
+            if not reused:
                 raise
-            if response.will_close:
-                self._drop_kept_connection()
-            if not 200 <= response.status < 300:
-                raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, None)
-            return json.loads(data.decode("utf-8"))
-        raise AssertionError("the second attempt returns or raises")
+            response, data = self._exchange(request)
+        if not 200 <= response.status < 300:
+            raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, None)
+        return json.loads(data.decode("utf-8"))
+
+    def _exchange(self, request: urllib.request.Request) -> tuple[http.client.HTTPResponse, bytes]:
+        connection = getattr(self._kept, "connection", None)
+        if connection is None:
+            origin = urllib.parse.urlsplit(self.config.url or "")
+            connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
+            connection = self._kept.connection = connect(
+                origin.hostname, origin.port, timeout=self.config.timeout_seconds)
+        try:
+            connection.request("GET", request.selector, headers=dict(request.header_items()))
+            response = connection.getresponse()
+            data = response.read()
+        except BaseException as error:
+            self._drop_kept_connection()
+            # A protocol error is no OSError, which the caller maps; a reset is one, and stays one to retry.
+            if isinstance(error, http.client.HTTPException) and not isinstance(error, ConnectionError):
+                raise urllib.error.URLError(error) from None
+            raise
+        if response.will_close:
+            self._drop_kept_connection()
+        return response, data
 
     def _drop_kept_connection(self) -> None:
         connection, self._kept.connection = getattr(self._kept, "connection", None), None
