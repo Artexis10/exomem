@@ -1038,6 +1038,30 @@ class DeclineCause(enum.StrEnum):
     UNOBSERVED_DRIFT = "unobserved_drift"
 
 
+class CatchUpDecline(enum.StrEnum):
+    """Why a lag-only catch-up left its lag to a full pass, as the token the worker logs.
+
+    A closed set: one token per refusal that `catch_up_lagging_delta` and its
+    caller implement. The finish line carries it because a hosted cell redacts
+    the free-text decline line, so without it a declined catch-up has no cause.
+    """
+
+    NOT_CURRENT = "not_current"
+    OUTPACED = "outpaced"
+    REPLAY_FAILED = "replay_failed"
+    STORE_ERROR = "store_error"
+    STORE_FAILED = "store_failed"
+    STORE_MISSING = "store_missing"
+    SCHEMA = "schema"
+    IDENTITY = "identity"
+    NOT_LIVE = "not_live"
+    NO_CHECKPOINT = "no_checkpoint"
+    INSTANCE = "instance"
+    INCOMPLETE = "incomplete"
+    SOURCE_PROOF = "source_proof"
+    ERROR = "error"
+
+
 class RepairStage(enum.StrEnum):
     """The step of a repair pass that produced its result, as a closed log token.
 
@@ -1082,7 +1106,7 @@ def _log_repair_finished(
     awaited: int = 0,
     deferred: int = 0,
     parked_s: float = 0.0,
-    declined_for: DeclineCause | None = None,
+    declined_for: DeclineCause | CatchUpDecline | None = None,
     promoted: bool | None = None,
 ) -> None:
     """Name one repair pass's result and the stage that produced it.
@@ -1097,7 +1121,8 @@ def _log_repair_finished(
     `parked_s` is the part of `duration_s` that the pass's rebuild waited at its
     yields for foreground work, such as an apply that holds the mutation boundary.
     `declined_for` names the bound that ended a pass that declined for a moving
-    source, and is absent for any other result.
+    source, or the refusal that left a catch-up's lag to a full pass, and is
+    absent for any other result.
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -2482,21 +2507,26 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
             return False
         if _admit_if_current(vault_root):
             return True
-        return _log_catch_up_decline("not_current")
+        return _log_catch_up_decline(store, CatchUpDecline.NOT_CURRENT)
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):
             raise
-        log.info("lexical catch-up declined (%s); rebuilding", error)
-        return False
+        # The traceback stays local: a hosted cell strips exc_info.
+        log.debug("lexical catch-up raised", exc_info=True)
+        return _log_catch_up_decline(store, CatchUpDecline.ERROR, error=type(error).__name__)
 
 
-def _log_catch_up_decline(reason: str, **detail: int | str) -> bool:
-    """Log why a lag-only request still costs a full pass, and return False.
+def _log_catch_up_decline(store, reason: CatchUpDecline, **detail: int | str) -> bool:
+    """Record and log why a lag-only request still costs a full pass; return False.
 
-    Each reason is the fixed name of one refusal in `catch_up_lagging_delta` or
-    its caller, and `detail` holds counts, scope names or an error class, never
-    a vault path, so the next whole-corpus pass is attributable.
+    `detail` holds counts, scope names or an error class, never a vault path,
+    so the next whole-corpus pass is attributable. The store keeps the reason
+    for the worker's finish line, the only part of this a hosted cell retains.
+    The first refusal of a round wins: a store error inside the outpaced stamp
+    must not be reported as the `outpaced` that its caller logs next.
     """
+    if getattr(store, "_last_catch_up_decline", None) is None:
+        store._last_catch_up_decline = reason
     fields = "".join(f" {key}={value}" for key, value in detail.items())
     log.info("lexical catch-up declined (%s)%s; rebuilding", reason, fields)
     return False
@@ -2667,7 +2697,15 @@ def _schedule_repair(
                     else:
                         catch_up_result = "targeted" if caught_up else "declined"
                     _log_repair_finished(
-                        "catch_up", catch_up_result, RepairStage.TARGETED, catch_up_started
+                        "catch_up",
+                        catch_up_result,
+                        RepairStage.TARGETED,
+                        catch_up_started,
+                        declined_for=(
+                            getattr(store, "_last_catch_up_decline", None)
+                            if catch_up_result == "declined"
+                            else None
+                        ),
                     )
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
@@ -4835,6 +4873,7 @@ class LexicalStore:
         self._last_catch_up_advanced = False
         # Which bound ended the last pass that declined for a moving source.
         self._last_decline_cause: DeclineCause | None = None
+        self._last_catch_up_decline: CatchUpDecline | None = None
         # Seconds the last rebuild waited at its yields for foreground work:
         # requests and every wait for or hold of a mutation boundary.
         self._last_parked_seconds = 0.0
@@ -6954,6 +6993,7 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         self._last_catch_up_advanced = False
+        self._last_catch_up_decline = None
         plans: list[dict[str, _CatchUpPlan]] = [{}]
         rows_at_start: dict[str, tuple[bool, bool]] = {}
         lagging = self._lagging_catch_up_paths(plans[0], rows_at_start)
@@ -6981,7 +7021,9 @@ class LexicalStore:
                             taken,
                         )
                         return False
-                    return _log_catch_up_decline("outpaced", paths=len(lagging), steps=taken)
+                    return _log_catch_up_decline(
+                        self, CatchUpDecline.OUTPACED, paths=len(lagging), steps=taken
+                    )
                 taken += 1
                 chunk, pending = pending[:cap], pending[cap:]
                 # Taken before the step reads any file: an edit after it has an
@@ -7000,7 +7042,9 @@ class LexicalStore:
                     # stay in the lag that the next round re-reads.
                     continue
                 if not applied:
-                    return _log_catch_up_decline("replay_failed", paths=len(chunk))
+                    return _log_catch_up_decline(
+                        self, CatchUpDecline.REPLAY_FAILED, paths=len(chunk)
+                    )
                 steps.append(_CatchUpStep(marks, frozenset(chunk)))
             plans.append({})
             lagging = self._lagging_catch_up_paths(plans[-1], rows_at_start)
@@ -7102,7 +7146,9 @@ class LexicalStore:
         except VaultLockError as error:
             log.info("lexical catch-up stamp deferred (%s)", error)
         except sqlite3.Error as error:
-            return _log_catch_up_decline("store_error", error=type(error).__name__)
+            return _log_catch_up_decline(
+                self, CatchUpDecline.STORE_ERROR, error=type(error).__name__
+            )
         return moved and not frozen
 
     def _lagging_catch_up_paths(
@@ -7121,43 +7167,46 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         if self._failed:
-            _log_catch_up_decline("store_failed")
+            _log_catch_up_decline(self, CatchUpDecline.STORE_FAILED)
             return None
         if not self.path.exists():
-            _log_catch_up_decline("store_missing")
+            _log_catch_up_decline(self, CatchUpDecline.STORE_MISSING)
             return None
         lagging: set[str] = set()
         try:
             conn = self._connect()
             try:
                 if not self._schema_is_current(conn):
-                    _log_catch_up_decline("schema")
+                    _log_catch_up_decline(self, CatchUpDecline.SCHEMA)
                     return None
                 identity = catalog_semantic_identity(self.vault_root)
                 if self._meta_catalog_identity(conn) != identity:
-                    _log_catch_up_decline("identity")
+                    _log_catch_up_decline(self, CatchUpDecline.IDENTITY)
                     return None
                 for scope in freshness_module.SCOPES:
                     if not freshness_module.recall_is_live(self.vault_root, scope):
-                        _log_catch_up_decline("not_live", scope=scope)
+                        _log_catch_up_decline(self, CatchUpDecline.NOT_LIVE, scope=scope)
                         return None
                     stored = self._meta_checkpoint(conn, scope)
                     current = freshness_module.recall_checkpoint(self.vault_root, scope)
                     if stored is None or current is None:
-                        _log_catch_up_decline("no_checkpoint", scope=scope)
+                        _log_catch_up_decline(
+                            self, CatchUpDecline.NO_CHECKPOINT, scope=scope
+                        )
                         return None
                     if stored.instance_id != current.instance_id:
-                        _log_catch_up_decline("instance", scope=scope)
+                        _log_catch_up_decline(self, CatchUpDecline.INSTANCE, scope=scope)
                         return None
                     delta = freshness_module.recall_delta_since(
                         self.vault_root, scope, stored
                     )
                     if not delta.complete:
-                        _log_catch_up_decline("incomplete", scope=scope)
+                        _log_catch_up_decline(self, CatchUpDecline.INCOMPLETE, scope=scope)
                         return None
                     if delta.requires_source_proof:
                         _log_catch_up_decline(
-                            "source_proof",
+                            self,
+                            CatchUpDecline.SOURCE_PROOF,
                             scope=scope,
                             changed=len(delta.changed),
                             deleted=len(delta.deleted),
@@ -7179,7 +7228,9 @@ class LexicalStore:
             finally:
                 conn.close()
         except sqlite3.Error as error:
-            _log_catch_up_decline("store_error", error=type(error).__name__)
+            _log_catch_up_decline(
+                self, CatchUpDecline.STORE_ERROR, error=type(error).__name__
+            )
             return None
         return lagging
 

@@ -942,9 +942,6 @@ def test_a_watcher_save_burst_with_restored_stat_applies_before_the_full_pass(se
 
 def test_pending_view_publication_yields_to_a_waiting_query(served, monkeypatch):
     """A pending view window must release a reader before it starts another slow path."""
-    from contextlib import contextmanager
-
-    from exomem import mutation_lock
     from exomem.collection_store import runtime
     from exomem.collection_store.writer import CollectionWriter
 
@@ -954,7 +951,6 @@ def test_pending_view_publication_yields_to_a_waiting_query(served, monkeypatch)
     first_render = threading.Event()
     continue_first = threading.Event()
     continue_later = threading.Event()
-    query_waiting = threading.Event()
     query_done = threading.Event()
     query_result, errors, first_path = [], [], []
     tick = runtime.StoreServer._views_tick
@@ -990,24 +986,13 @@ def test_pending_view_publication_yields_to_a_waiting_query(served, monkeypatch)
             query_done.set()
 
     reader = threading.Thread(target=query)
-    boundary = served.service.manager._mutation_coordinator_for(root)
-    boundary_state = mutation_lock._state_for(boundary.lock_path)
-    waiting = mutation_lock._waiting
-
-    @contextmanager
-    def observe_query_wait(state):
-        with waiting(state):
-            if threading.current_thread() is reader and state is boundary_state:
-                query_waiting.set()
-            yield
-
     monkeypatch.setattr(CollectionWriter, "_render_view", slow_later_path)
-    monkeypatch.setattr(mutation_lock, "_waiting", observe_query_wait)
     try:
         publish.set()
         assert first_render.wait(10), "pending item publication did not start"
         reader.start()
-        assert query_waiting.wait(10), "the query did not enter its ownership wait"
+        # The store thread is held in the first render, so the only queued request is the query's.
+        until(lambda: server._requests, seconds=10)
         continue_first.set()
         assert query_done.wait(10), "the foreground query did not complete"
         if errors:

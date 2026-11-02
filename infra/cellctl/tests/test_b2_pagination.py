@@ -1,4 +1,4 @@
-"""The real B2 client must list every version before D10 can confirm deletion."""
+"""The real B2 client must list every version before a deletion can be called clean."""
 
 from __future__ import annotations
 
@@ -11,13 +11,7 @@ from cellctl.storage.b2 import B2Config, B2ObjectStorage
 from cellctl.storage.interface import ObjectVersion
 
 PREFIX = "cells/aaaaaaaaaaaaaaaa/"
-CONFIG = B2Config(
-    key_management_key_id="km-key-id",
-    key_management_application_key="km-app-key",
-    bucket_id="bucket-1",
-    account_id="account-1",
-    page_size=2,
-)
+CONFIG = B2Config(key_id="list-key-id", application_key="list-app-key", bucket_id="bucket-1", page_size=2)
 
 
 def _storage(responses: list[httpx.Response]) -> tuple[B2ObjectStorage, list[dict]]:
@@ -28,6 +22,7 @@ def _storage(responses: list[httpx.Response]) -> tuple[B2ObjectStorage, list[dic
             return httpx.Response(
                 200,
                 json={
+                    "accountId": "account-1",
                     "apiInfo": {"storageApi": {"apiUrl": "https://api.example"}},
                     "authorizationToken": "tok",
                 },

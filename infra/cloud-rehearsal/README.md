@@ -60,7 +60,7 @@ them to local ports and trusts only that CA.
 
 - **Email.** Substrate stores every emailed secret (invite, deletion token) only as an unsalted SHA-256 digest. The rehearsal mints the secret, seeds the digest the way the email path would, and uses the secret as the recipient would.
 - **Paddle.** Checkout binding is seeded. Activation, past-due, recovery and cancellation are real signed webhooks, signed with the run's own secret.
-- **B2 key management and Hetzner.** Both use cellctl's own doubles. Every per-cell key is the S3 double's one credential. D10's absence proof lists the live S3 double.
+- **B2 and Hetzner.** Both use cellctl's own doubles, and the key custodian runs its real watch loop over a B2 double. Every per-cell key is the S3 double's one credential. D10's absence proof lists the live S3 double. The node-loss drill (`drill.py`) renders no custodian yet, so a new cell there has no backup key.
 - **Neon and Vercel.** They are not involved: PostgreSQL is local and Substrate runs `next start`.
 
 ## Steps

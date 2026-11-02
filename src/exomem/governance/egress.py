@@ -58,10 +58,22 @@ from .. import (
     state_paths,
     vault,
 )
-from ..collection_store.preview import bound_writer, canonical_read, projection_decision
+from ..collection_store.preview import (
+    Batch,
+    bound_writer,
+    canonical_read,
+    note_checked_hash,
+    projection_decision,
+)
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
-from ..published_admission import Admission, AdmittedPredicate, admission_of
+from ..published_admission import (
+    Admission,
+    AdmittedPredicate,
+    admission_of,
+    announce,
+    request_decisions,
+)
 from . import (
     artifact_census,
     authorization_custody,
@@ -2137,7 +2149,18 @@ def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None
     return writer is None and ownership.file_only(vault_root)
 
 
-@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
+#: How a command's store-owned pages share one store request (`collection_store.preview.Batch`). A call that
+#: leaves `tombstones` out means the set the command read once, not the live set at that call.
+_PINNED_TOMBSTONES = {"tombstones": lambda vault_root: lifecycle.tombstoned_paths(vault_root)}
+#: `expected_content_hash` is checked against the page's own bytes, and a page copy belongs to the one page it copies.
+_DECIDE_PATH_BATCH = Batch(
+    pinned=_PINNED_TOMBSTONES,
+    expects_hash="expected_content_hash",
+    alone=lambda kwargs: kwargs.get("artifact_copy") is not None,
+)
+
+
+@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -2207,6 +2230,7 @@ def _decide_path(
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
+        note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
     canonical = projection_decision(
@@ -2839,6 +2863,8 @@ def annotate_hits(
     )
     if tombstoned:
         hits = [hit for hit in hits if _hit_path(hit) not in tombstoned]
+    # The pool is decided below and again by the terminal filter: the store decides its pages together.
+    announce(path for hit in hits if (path := _hit_path(hit)))
 
     # (1) Open fast path — no governance configured. The pool can still hold
     #     more than `limit` (a restricted caller, a tombstone): cut it here.
@@ -6916,7 +6942,16 @@ def release_level_for_path_only(
 _CURRENT_PATH_FINGERPRINT = object()
 
 
-@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
+def _path_only_stands_alone(kwargs: Mapping[str, Any]) -> bool:
+    """A receipt records its effect when the read runs, and a captured fingerprint is one page's."""
+    return (kwargs.get("receipt_decision") is not None
+            or kwargs.get("content_fingerprint", _CURRENT_PATH_FINGERPRINT) is not _CURRENT_PATH_FINGERPRINT)
+
+
+@canonical_read(
+    projection=True, unavailable=lambda: DISCLOSURE_MIN,
+    batch=Batch(pinned=_PINNED_TOMBSTONES, alone=_path_only_stands_alone),
+)
 def _release_level_for_path_only_snapshot(
     vault_root: Path,
     rel_path: str,
@@ -8713,6 +8748,38 @@ def filter_withheld_entries(
             return kept
         return node
 
+    def _pages_named(node, directory=None, location=()):
+        """The candidates the walk below asks about, found the way it finds them.
+
+        A page this misses is decided on a request of its own, and one it adds is decided for nothing:
+        a drift between the two costs requests and never a verdict.
+        """
+        if isinstance(node, Mapping):
+            here = _directory_of(node)
+            here = directory if here is None else here
+            for key, value in node.items():
+                child_location = (*location, key)
+                if _path_like(key) is not None:
+                    yield from _candidate_paths({"path": key}, here, ())
+                if _is_identifier_key(key) or isinstance(value, Mapping):
+                    yield from _candidate_paths(value, here, child_location)
+                yield from _pages_named(value, here, child_location)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for index, entry in enumerate(node):
+                child_location = (*location, index)
+                yield from _candidate_paths(entry, directory, child_location)
+                yield from _pages_named(entry, directory, child_location)
+
+    from ..collection_store import ownership
+
+    if (request_decisions() is not None and operation is None and not fail_closed
+            and not ownership.file_only(vault_root)):
+        # The store decides the pages of one pass together; a vault with no store has none to announce.
+        root_candidates = _candidate_paths(payload, None, ()) if isinstance(payload, Mapping) else ()
+        announce(
+            resolved for candidate in (*root_candidates, *_pages_named(payload))
+            if (resolved := _resolve_vault_item(candidate)) is not None
+        )
     filtered = _walk(payload)
     if (
         isinstance(payload, Mapping)

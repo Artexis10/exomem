@@ -1013,7 +1013,7 @@ def link(
             registrations=registrations,
         )
     except semantic_writes.SemanticWriteError as error:
-        raise LinkError(error.code, [], error.reason) from error
+        raise LinkError(error.code, list(error.missing), error.reason) from error
     warnings = (
         list(slug_warnings)
         + list(connection_warnings)

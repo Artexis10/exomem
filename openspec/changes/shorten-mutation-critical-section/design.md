@@ -423,8 +423,9 @@ waits in line under the existing bounds and waiter cap, routes again and
 submits again. Every attempt keeps one request id, and only the final refusal
 writes a journal row.
 
-Routing proves collection ownership under the boundary and changes nothing.
-Its busy refusal is therefore waited out too. A write that the store queue has
+Routing reads collection ownership without the boundary, so it never meets a
+held boundary and never refuses as busy; the write meets the hold first on the
+store thread. A write that the store queue has
 not taken never ran, so it keeps its place while its request budget leaves room
 for one attempt. `MUTATION_ACKNOWLEDGEMENT_PENDING`, which may hide a commit,
 still reaches the caller, and so does the refusal of a closed store server.

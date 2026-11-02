@@ -1236,6 +1236,9 @@ def test_the_chart_env_keys_the_listed_cells_and_no_other(monkeypatch: pytest.Mo
     env = _cellctl_env(_helm_template(*UPLOAD_ARGS))
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
     monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
     monkeypatch.setenv("CELLCTL_UPLOAD_CELL_IDS", env["CELLCTL_UPLOAD_CELL_IDS"])
     # Kubernetes resolves the secretKeyRef; the test stands in for it with a generated key.
     monkeypatch.setenv("CELLCTL_UPLOAD_PUBLIC_KEY", public_key)
