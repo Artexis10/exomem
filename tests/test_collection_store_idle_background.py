@@ -6,8 +6,15 @@ from contextlib import closing
 
 import pytest
 from test_collection_store_s1_gate import LATER, ROW, _until, coordinator
-from test_collection_store_service import ON, Service, _served_vault, call, offline_create
-from test_collection_store_writer import CID, manifest_path
+from test_collection_store_service import (
+    ON,
+    Service,
+    _served_vault,
+    call,
+    offline_create,
+)
+from test_collection_store_summary import summary_text
+from test_collection_store_writer import CID, manifest_path, manifest_text
 
 from exomem import writer_lease
 from exomem.cli_ops import OpError
@@ -100,6 +107,65 @@ def test_a_released_store_takes_the_lease_only_for_an_edited_view_or_a_request(i
     assert call(root, "record_memory", action="append", collection=CID, item={"title": "Later"},
                 item_key=LATER, why="after the release")["outcome"] == "committed"
     assert len(grants) > granted and manager._fencing_token is not None
+
+
+def test_a_released_store_runs_every_tick_without_opening_the_store_or_taking_the_lease(idle_service, monkeypatch):
+    """Defect: after an idle release the backfill, import, derived and views ticks each open the store once a
+    second to read a flag, and a due backfill takes the lease again by itself, so the release never lasts.
+
+    The opener is counted because "no open" is the behaviour: an open leaves no other trace."""
+    root, manager = idle_service.root, idle_service.manager
+    server = runtime._server(root)
+    rollup_of = "SELECT state FROM rollup_definitions WHERE collection_id=?"
+    activity = "99999999-9999-4999-8999-999999999999"
+    with monkeypatch.context() as held:
+        # A rollup that is still building is the backfill the tick owes; hold the tick while it is declared.
+        held.setattr(runtime.StoreServer, "_backfill_tick", lambda self: runtime.IMPORT_IDLE_SECONDS)
+        text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Lever")
+                            .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
+        call(root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Lever"),
+             manifest_text=text, why="a collection with rows to roll up")
+        for n in range(2):
+            call(root, "record_memory", action="append", collection=activity,
+                 item={"title": f"r{n}", "day": "2026-10-01", "count": n}, why="row")
+        guards = call(root, "record_memory", action="inspect", collection=activity)["lifecycle_guards"]
+        rollup = "rollups:\n  daily:\n    bucket: day\n    timestamp: day\n    values:\n      count: [sum]\n"
+        call(root, "record_memory", action="revise", collection=activity, why="daily rollup", **guards,
+             manifest_text=text.removesuffix("---\n") + rollup + "---\n")
+        assert rows(root, rollup_of, (activity,)) == [("building",)]
+        _until(lambda: rows(root, "SELECT count(*) FROM projection_state WHERE state!='current'") == [(0,)])
+        _until(lambda: server._history_policy is not None)
+        release_on_idle(manager)
+    # The sweep for edited view files is the one read a released store makes; the first test covers it.
+    monkeypatch.setattr(runtime.StoreServer, "_view_file_changed", lambda self: False)
+    grants, opens, ticks = [], [], dict.fromkeys(("create", "import", "backfill", "derived", "views"), 0)
+    acquire, opener = manager.client.acquire, connection._open_read_only
+
+    def counted_acquire(*args, **kwargs):
+        grants.append(args)
+        return acquire(*args, **kwargs)
+
+    def counted_open(*args, **kwargs):
+        if threading.current_thread() is server.thread:
+            opens.append(args)
+        return opener(*args, **kwargs)
+
+    monkeypatch.setattr(manager.client, "acquire", counted_acquire)
+    monkeypatch.setattr(connection, "_open_read_only", counted_open)
+    for name in ticks:
+        tick = getattr(runtime.StoreServer, f"_{name}_tick")
+
+        def counted_tick(self, name=name, tick=tick):
+            ticks[name] += 1
+            return tick(self)
+
+        monkeypatch.setattr(runtime.StoreServer, f"_{name}_tick", counted_tick)
+    _until(lambda: all(count >= 3 for count in ticks.values()))
+    assert manager._fencing_token is None and grants == [] and opens == []
+    # The next request takes the lease again, and the backfill that was due advances.
+    call(root, "record_memory", action="query", collection=CID)
+    assert grants
+    _until(lambda: rows(root, rollup_of, (activity,)) == [("ready",)])
 
 
 def test_taking_the_lease_again_queues_no_history_page_but_a_changed_row_still_renders_its_page(
