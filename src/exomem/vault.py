@@ -1535,7 +1535,7 @@ STAT_GENERATION_TRUSTED = os.name != "nt"
 #: How long both of a leaf's timestamps must have stood still before a read for its
 #: generation to bind the bytes read. Timestamps advance in clock ticks, so a write in
 #: the same tick as the previous one leaves the generation unchanged; git applies the
-#: same rule to its index. `record_item_cache` and `entity_evidence` keep older copies.
+#: same rule to its index. Every racy-clean check in the package uses this window.
 GENERATION_RACY_WINDOW_NS = 2_000_000_000
 
 
@@ -4356,7 +4356,8 @@ def read_bounded_guarded_bytes_with_generation(
     `GENERATION_RACY_WINDOW_NS` of the read. A filesystem that does not move ctime on
     a write (some FUSE or network mounts), or a Windows volume mounted on Linux, whose
     change time a Windows program can set, defeats the generation, as it does
-    `record_item_cache`.
+    `record_item_cache`. So do a writer through a shared mmap, which moves no timestamp
+    until it syncs, and one write call that runs longer than the racy window.
     """
     root = Path(vault_root)
     if not STAT_GENERATION_TRUSTED:

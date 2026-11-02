@@ -958,6 +958,52 @@ def test_a_same_size_edit_with_its_mtime_put_back_moves_the_generation_into_the_
     assert adoption.residue == (edited,)
 
 
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED, reason="ctime does not move on a write here"
+)
+def test_a_same_size_save_in_the_tick_of_a_recent_page_s_read_reaches_the_residue(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a generation guard minted for a page whose timestamps are inside the racy
+    # window: a same-size save in the same clock tick as its read leaves the generation
+    # as it was, so the recheck passes and the proof keeps the bytes it read.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    tick = 10**12
+    # A clock tick wide enough that every timestamp in this test falls in one tick.
+    monkeypatch.setattr(
+        vault_module,
+        "stat_generation",
+        lambda info: (info.st_size, info.st_mtime_ns // tick, info.st_ctime_ns // tick),
+        raising=True,
+    )
+    edited = f"{GENERATED}/generated-note-0003.md"
+    # Saved just now with the same bytes: inside the default racy window at its read.
+    os.utime(root / edited)
+    real_read = vault_module.read_bounded_guarded_bytes
+    saved: list[str] = []
+
+    def saved_right_after_its_read(vault_root, target, **kwargs):
+        result = real_read(vault_root, target, **kwargs)
+        if target == edited and not saved:
+            page = root / edited
+            size = page.stat().st_size
+            page.write_bytes(page.read_bytes().replace(b"Synthetic body", b"Synthetic BODY", 1))
+            assert page.stat().st_size == size, "premise: the save keeps the size"
+            saved.append(target)
+        return result
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes", saved_right_after_its_read, raising=True
+    )
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+
+    assert saved == [edited], "the save must land after the page's read"
+    assert adoption.adopted is True, adoption.reason
+    assert adoption.residue == (edited,)
+
+
 def test_without_a_trusted_generation_a_same_size_edit_with_its_mtime_put_back_is_hashed(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
