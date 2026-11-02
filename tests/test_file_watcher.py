@@ -22,6 +22,7 @@ from exomem import (
     epistemic_graph,
     file_watcher,
     freshness,
+    lexstore,
     media_processing,
     semantic_contract,
 )
@@ -1290,7 +1291,7 @@ def test_self_write_publishes_semantic_corpus_delta(vault, monkeypatch: pytest.M
     monkeypatch.setattr(
         "exomem.semantic_contract.publish_corpus_files_changed_classified",
         # `list.append` returns None, i.e. "published, no failure".
-        lambda root, *, changed=(), deleted=(): calls.append(
+        lambda root, *, changed=(), deleted=(), **_kwargs: calls.append(
             (list(changed), [str(path) for path in deleted])
         ),
     )
@@ -1311,7 +1312,7 @@ def test_external_batch_publishes_semantic_corpus_delta(
     monkeypatch.setattr(
         "exomem.semantic_contract.publish_corpus_files_changed_classified",
         # `list.append` returns None, i.e. "published, no failure".
-        lambda root, *, changed=(), deleted=(): calls.append(
+        lambda root, *, changed=(), deleted=(), **_kwargs: calls.append(
             (list(changed), [str(path) for path in deleted])
         ),
     )
@@ -1344,11 +1345,11 @@ def test_external_batch_retries_the_complete_vault_delta_before_fanout(
     real_publish = semantic_contract.publish_corpus_files_changed_classified
     calls: list[tuple[list[Path], list[str]]] = []
 
-    def flaky_publish(root, *, changed=(), deleted=()):
+    def flaky_publish(root, *, changed=(), deleted=(), **kwargs):
         calls.append((list(changed), [str(path) for path in deleted]))
         if len(calls) == 1:
             raise RuntimeError("transient publication failure")
-        return real_publish(root, changed=changed, deleted=deleted)
+        return real_publish(root, changed=changed, deleted=deleted, **kwargs)
 
     upserts: list[tuple[list[Path], dict]] = []
     monkeypatch.setattr(
@@ -1916,6 +1917,44 @@ def test_reconcile_reembeds_missed_kb_file(vault, monkeypatch: pytest.MonkeyPatc
     embedded = [p for batch in ups for p in batch]
     assert any(p.resolve() == target.resolve() for p in embedded)
     assert dels == []
+
+
+def test_a_cold_semantic_corpus_does_not_delay_the_lexical_apply(
+    vault, monkeypatch: pytest.MonkeyPatch, corpus_cache_on
+) -> None:
+    """A watcher batch applies its lexical change before any cold corpus build.
+
+    The batch's registry publication leaves the lexical catalogue behind until
+    the batch applies it, and readiness's strict proof refuses for that whole
+    window. A cold semantic corpus was built inside it, which took a minute on
+    a live vault after a promotion while readiness refused.
+    """
+    file_watcher.clear_self_write_registry()
+    _stub_embeddings(monkeypatch)
+    monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: None)
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    lexstore.ensure_fresh(vault)
+    assert lexstore.runtime_retrieval_catalog_current(vault, schedule_repair=False)
+    catalogue_current_at_build: list[bool] = []
+    build = semantic_contract._build_corpus_context_uncached
+
+    def observed_build(*args, **kwargs):
+        catalogue_current_at_build.append(
+            lexstore.runtime_retrieval_catalog_current(vault, schedule_repair=False)
+        )
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", observed_build)
+    page = next(find_module._walk_md(vault / "Knowledge Base"))
+    page.write_text(page.read_text(encoding="utf-8") + "\n- external edit\n", encoding="utf-8")
+
+    watcher._record(page, deleted=False)
+    watcher._flush()
+
+    assert catalogue_current_at_build, "the batch must still warm the cold corpus"
+    assert all(catalogue_current_at_build), catalogue_current_at_build
+    assert lexstore.runtime_retrieval_catalog_current(vault, schedule_repair=False)
 
 
 def test_reconcile_drift_evicts_resolver_without_checkpoint_leapfrog(

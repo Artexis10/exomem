@@ -2877,6 +2877,7 @@ def publish_corpus_files_changed_classified(
     *,
     changed: Iterable[Path] = (),
     deleted: Iterable[Path | str] = (),
+    populate_on_miss: bool = True,
 ) -> CorpusPublicationFailure | None:
     """:func:`publish_corpus_files_changed`, reporting WHICH half failed.
 
@@ -2885,6 +2886,10 @@ def publish_corpus_files_changed_classified(
     only wants to propagate can re-raise it unchanged. Interpreter-level
     exits (anything that is not an ``Exception``) are never turned into a
     result; they propagate as before.
+
+    ``populate_on_miss=False`` leaves a cold cache cold. The watcher passes it
+    because its consumers' apply follows this publication, and calls
+    :func:`populate_cold_corpus_context` once that apply has landed.
     """
     root = Path(vault_root)
     changed_values = tuple(Path(value) for value in changed)
@@ -2926,9 +2931,19 @@ def publish_corpus_files_changed_classified(
             return CorpusPublicationFailure(CORPUS_PUBLICATION_PROJECTION_PATCH, error)
     # Outside the update lock on purpose: the populate walks and parses the
     # whole vault, and the publisher advances freshness under that same lock.
-    if disposition == _CORPUS_PATCH_MISS:
+    if disposition == _CORPUS_PATCH_MISS and populate_on_miss:
         _populate_corpus_context_after_miss(root)
     return None
+
+
+def populate_cold_corpus_context(vault_root: Path) -> None:
+    """Build the corpus context when none is cached; a warm cache is a no-op.
+
+    The populate a publication skipped with ``populate_on_miss=False``, under
+    the same admission rules. It also fills a cache that the publication
+    evicted for config drift, which a reader would otherwise build.
+    """
+    _populate_corpus_context_after_miss(Path(vault_root))
 
 
 def _patch_corpus_files_changed_locked(
