@@ -87,6 +87,14 @@ def test_a_second_discard_fails_the_one_discard_limit() -> None:
     assert checks.max_calls(spec, evidence(discard, discard)).verdict == checks.FAIL
 
 
+def test_a_validate_only_save_is_not_a_committed_write() -> None:
+    dry = call("create_note", None, {"validate_only": True, "title": "t"})
+    wrote = call("create_note", None, {"draft_id": "d"})
+    spec = {"tool": "create_note", "expect": True}
+    assert checks.write_committed(spec, evidence(dry)).verdict == checks.FAIL
+    assert checks.write_committed(spec, evidence(dry, wrote)).verdict == checks.PASS
+
+
 def test_a_tool_outside_the_scenario_is_an_invented_tool() -> None:
     served = ("import_memory",)
     ok = evidence(tools=("mcp__exomem__import_memory",))

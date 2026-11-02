@@ -4,7 +4,7 @@ This probe shows whether a real headless agent follows the Cloud import tool tex
 
 ## Write-narration suite
 
-This suite shows whether a real agent tells the person what a save did, or leaks the tool's diagnostics (error codes, request ids, hashes, retries, sync state). It compares two checkouts, called arms, on the same six user turns in `scenarios/write-narration/`. Run it with `--suite write-narration` and one `--product-root [LABEL=]PATH` for each arm.
+This suite shows whether a real agent tells the person what a save did, or leaks the tool's diagnostics (error codes, request ids, hashes, retries, sync state). It compares two checkouts, called arms, on the same user turns in `scenarios/write-narration/`. Run it with `--suite write-narration` and one `--product-root [LABEL=]PATH` for each arm.
 
 1. Run `PYTHONPATH=benchmarks python -m import_guidance run --suite write-narration --product-root baseline=<checkout> --product-root candidate=<checkout> --model <m> --repeats N --out <dir outside every repository> --dry-run`. The dry run records each arm and starts no agent.
 2. Remove `--dry-run` to run the agents. Run it again with another `--model` and the same `--out` to add a model.
@@ -17,6 +17,14 @@ How an arm's replies are made:
 - The recording is made once per arm and scenario, so the ids in it stay fixed for all runs of that arm. `answer_lacks_scripted_strings` looks for them, and for the field names in its `literals`, in the final answer.
 
 Judge: the judge reads the person's turn, the scenario's `reference` (the true events, the same for both arms) and the agent's final answer. It never reads a tool reply, so it cannot tell the arms apart. Criteria R1 to R4 are in the scenario files.
+
+Store-identity cases 07 to 09 ask whether the agent tells the person which store took a write:
+
+- 07 runs the arm's code as Exomem Cloud (`"mode": "cloud"` in `record`) while the person asks for their personal Exomem. The judge's R5 passes when the agent says nothing was saved because the personal Exomem is not connected, or says plainly that the fact went to Exomem Cloud. Whether the agent wrote is read from the call log (R6) and passes or fails nothing.
+- 08 is an ordinary save on the Cloud-mode arm and 09 a save to the personal Exomem on the personal-mode arm. R7 needs a committed save (the `write_committed` check) and no refusal or request to choose a store.
+- These three serve the session-profile bootstrap that the skill tells an agent to request, because the compact reply carries no store identity. The scripted server does not check the digest the agent passes.
+- `scenario.outcome_facts` adds one sentence to the judge's reference, chosen by whether the call log holds a committed save, so the judge knows what happened without seeing a tool reply.
+- Run `python -m import_guidance store-report <out>/runs.jsonl --baseline baseline --candidate candidate --out <report.md>` for the pass counts, the write rate and the paired intervals.
 
 Limits:
 

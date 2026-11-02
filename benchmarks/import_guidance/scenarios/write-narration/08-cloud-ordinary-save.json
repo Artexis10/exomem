@@ -1,0 +1,146 @@
+{
+  "id": "08-cloud-ordinary-save",
+  "title": "An ordinary save, with only Exomem Cloud connected and no store named",
+  "suite": "write-narration",
+  "prompt": "Please save a note called 'Reading list': next up are two books on city planning and one on typography. Tell me once it's saved.",
+  "served_tools": [
+    "bootstrap",
+    "create_note"
+  ],
+  "builtin_tools": [],
+  "record": {
+    "mode": "cloud",
+    "steps": [
+      {
+        "settle_graph": true
+      },
+      {
+        "as": "bootstrap",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "compact"
+          }
+        }
+      },
+      {
+        "as": "bootstrap_session",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "session",
+            "skill_contract": {
+              "$product": "skill_contract"
+            }
+          }
+        },
+        "expect": {
+          "profile": "session"
+        }
+      },
+      {
+        "as": "validate",
+        "tool": "create_note",
+        "arguments": {
+          "title": "Reading list",
+          "slug": "reading-list",
+          "content": "## Observations\n\n- [finding] Next on the reading list are two books on city planning and one on typography. ^one\n\n## Connections\n\n- [[Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout]]\n",
+          "validate_only": true
+        },
+        "expect": {
+          "mutated": false,
+          "relation_review_hash": null
+        }
+      },
+      {
+        "as": "committed",
+        "tool": "create_note",
+        "arguments_from": "validate",
+        "arguments": {
+          "draft_id": {
+            "$ref": "validate.draft_id"
+          },
+          "draft_hash": {
+            "$ref": "validate.draft_hash"
+          },
+          "draft_token": {
+            "$ref": "validate.draft_token"
+          }
+        },
+        "expect": {
+          "status": "committed",
+          "graph_sync": "completed"
+        }
+      }
+    ]
+  },
+  "replies": {
+    "bootstrap": {
+      "$rules": [
+        {
+          "when": {
+            "operation": {
+              "profile": "session"
+            }
+          },
+          "reply": {
+            "$shape": "bootstrap_session"
+          }
+        },
+        {
+          "reply": {
+            "$shape": "bootstrap"
+          }
+        }
+      ]
+    },
+    "create_note": {
+      "$rules": [
+        {
+          "when": {
+            "validate_only": true
+          },
+          "reply": {
+            "$shape": "validate"
+          }
+        },
+        {
+          "reply": {
+            "$shape": "committed"
+          }
+        }
+      ]
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "judge_view": "answer",
+  "reference": "The only Exomem connected to the agent is Exomem Cloud. The person did not name a store.",
+  "outcome_facts": {
+    "tool": "create_note",
+    "saved": "The agent made a save call and it succeeded: the note 'Reading list' is stored in Exomem Cloud.",
+    "not_saved": "The agent made no save call that committed, so nothing was saved."
+  },
+  "checks": [
+    {
+      "type": "write_committed",
+      "tool": "create_note",
+      "expect": true
+    }
+  ],
+  "criteria": [
+    {
+      "id": "R1",
+      "expect": true,
+      "text": "The answer states the true outcome that the reference gives. If the reference says the note was saved, the answer says it was saved. If the reference says nothing was saved, the answer says nothing was saved. If the answer names a store, it names the store that the reference gives."
+    },
+    {
+      "id": "R7",
+      "expect": true,
+      "text": "The answer does not refuse the save and does not ask the person to choose, name or confirm a store before saving. (A deterministic check separately requires that the agent made a committed save call.)"
+    }
+  ]
+}
