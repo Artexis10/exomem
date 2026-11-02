@@ -20,8 +20,8 @@
 - [x] 3.3 `tests/test_governance_postfilter.py` names a page created after an earlier error; it fails when the census is reused without a walk.
 - [x] 3.4 Document `command.refusal_floor` and the second `read.release` span in `docs/observability.md`, and pin the span name in `tests/test_call_spans.py`.
 - [x] 3.5 Run the scoped suites one module at a time: the direct-read payload, egress, postfilter, receipts, memory-reference, server, REST, call-span, unit-read, schema, plugin and privacy modules, and every module that calls `op_get`, `read_memory` or `caller_restricted`.
-- [ ] 3.6 Run an author-independent review of the diff and recheck each correction.
+- [x] 3.6 Run an author-independent review of the diff and recheck each correction. Evidence: independent Opus lane-reviewer APPROVE on PR #1797.
 
 ## 4. Closure
 
-- [ ] 4.1 After merge, synchronize these deltas into `openspec/specs/get-payload-shape/spec.md` and `openspec/specs/stable-memory-references/spec.md`, then archive the change with `openspec archive`.
+- [x] 4.1 After merge, synchronize these deltas into `openspec/specs/get-payload-shape/spec.md` and `openspec/specs/stable-memory-references/spec.md`, then archive the change with `openspec archive`.

@@ -8,6 +8,7 @@ substitute for the held-handle operation that consumes the target.
 from __future__ import annotations
 
 import errno
+import functools
 import hashlib
 import io
 import logging
@@ -175,6 +176,13 @@ class PathRole:
     argument: str
     role: str
     value_kind: str = "path"
+    #: For a list whose items may also be objects, the object field that holds
+    #: the path. Every other field of such an object is the caller's free text.
+    object_path_field: str | None = None
+    #: False keeps the role out of `reserved_preflight`. Such a role is declared
+    #: so that errors echo the caller's reference; reserved preflight on its
+    #: write door belongs to the write-admission work.
+    preflight: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +683,11 @@ def _roles(*values: tuple[str, str, str]) -> tuple[PathRole, ...]:
     return tuple(PathRole(*value) for value in values)
 
 
+def _reference_roles(*values: tuple[str, str, str]) -> tuple[PathRole, ...]:
+    """Roles declared for error echo only, outside reserved preflight (see `PathRole.preflight`)."""
+    return tuple(PathRole(*value, preflight=False) for value in values)
+
+
 _COMMAND_PATH_ROLES = MappingProxyType(
     {
         "fetch": _roles(("id", "source", "path-or-ref")),
@@ -704,6 +717,7 @@ _COMMAND_PATH_ROLES = MappingProxyType(
             ("sources", "source", "path-or-ref-list"),
         ),
         "note": _roles(("sources", "source", "path-or-ref-list")),
+        "link": _reference_roles(("ref", "source", "path-or-ref")),
         "query_data": _roles(("path", "dataset", "path")),
         "create_file": _roles(("path", "destination", "path")),
         "list_directory": _roles(("path", "recursive-source", "path")),
@@ -751,7 +765,10 @@ _COMMAND_PATH_ROLES = MappingProxyType(
             ("sources", "source", "path-or-ref-list"),
         ),
         "review_item_context": _roles(("ref", "source", "ref")),
-        "triage_memory": _roles(("ref", "source-destination", "ref")),
+        "triage_memory": (
+            *_roles(("ref", "source-destination", "ref")),
+            *_reference_roles(("source_path", "source", "path")),
+        ),
         "connect_memory": _roles(
             ("path", "source", "path-or-ref"),
             ("target", "source", "path-or-ref"),
@@ -763,13 +780,24 @@ _COMMAND_PATH_ROLES = MappingProxyType(
             ("manifest_path", "external-selector", "external-path"),
             ("selected_paths", "external-selector", "external-path-list"),
         ),
-        "adoption_studio": _roles(
-            ("path", "external-source", "external-path"),
-            ("include", "external-selector", "external-path-list"),
-            ("exclude", "external-selector", "external-path-list"),
-            ("only_paths", "external-selector", "external-path-list"),
-            ("sources", "source", "path-or-ref-list"),
-            ("ref", "source", "ref"),
+        "adoption_studio": (
+            PathRole("path", "external-source", "external-path"),
+            # An include rule object is {path, source_kind?, domain?, ...}; see `adoption_run._rule_key`.
+            PathRole(
+                "include", "external-selector", "external-path-list", object_path_field="path"
+            ),
+            *_roles(
+                ("exclude", "external-selector", "external-path-list"),
+                ("only_paths", "external-selector", "external-path-list"),
+                ("sources", "source", "path-or-ref-list"),
+                ("ref", "source", "ref"),
+            ),
+            *_reference_roles(("paths", "external-selector", "external-path-list")),
+        ),
+        "maintain_memory": _reference_roles(
+            ("collection", "selector", "path-or-ref"),
+            ("refs", "source", "path-or-ref-list"),
+            ("paths", "source", "path-list"),
         ),
         "govern_memory": _roles(
             ("selector_paths", "policy-selector", "path-list"),
@@ -1031,6 +1059,27 @@ def path_roles_for_command(command_name: str) -> tuple[PathRole, ...]:
     return _COMMAND_PATH_ROLES.get(command_name, ())
 
 
+def reference_values(role: PathRole, value: object) -> tuple[str, ...]:
+    """The paths and refs that one role's value carries, and nothing else.
+
+    Unlike `_role_values`, which feeds preflight only the vault-relative paths,
+    this keeps refs and external paths: each is something the caller named.
+    A list item counts when it is a string, or the `object_path_field` of an
+    object. The other fields of an object, and an artifact handle (a client
+    file record), are free text and never count.
+    """
+    if role.value_kind == "external-artifacts":
+        return ()
+    listed = role.value_kind.endswith("-list") and isinstance(value, (list, tuple))
+    found: list[str] = []
+    for item in value if listed else (value,):
+        if isinstance(item, Mapping) and role.object_path_field is not None:
+            item = item.get(role.object_path_field)
+        if isinstance(item, str):
+            found.append(item)
+    return tuple(found)
+
+
 def _role_values(role: PathRole, value: object) -> tuple[object, ...]:
     if value is None or role.value_kind.startswith("external-"):
         return ()
@@ -1093,7 +1142,7 @@ def reserved_preflight(command: object, kwargs: Mapping[str, object]) -> Reserve
 
     roles = getattr(command, "path_roles", ())
     for role in roles:
-        if not isinstance(role, PathRole) or role.argument not in kwargs:
+        if not isinstance(role, PathRole) or not role.preflight or role.argument not in kwargs:
             continue
         for value in _role_values(role, kwargs[role.argument]):
             if isinstance(value, str) and value.casefold().startswith("exomem://"):
@@ -2527,6 +2576,19 @@ def _normalized_parts(
 def classify_logical(value: object) -> PathClassification:
     """Classify one KB-relative or vault-prefixed spelling without touching disk."""
 
+    if type(value) is str:
+        return _classify_logical_text(value, kb_dirname(), id(_REGISTRY))
+    return _classify_logical(value)
+
+
+# A whole-vault walk classifies every entry, and the answer depends only on the
+# spelling, the KB folder name and the registry, which the key carries.
+@functools.lru_cache(maxsize=65_536)
+def _classify_logical_text(value: str, _kb: str, _registry_id: int) -> PathClassification:
+    return _classify_logical(value)
+
+
+def _classify_logical(value: object) -> PathClassification:
     parts = _normalized_parts(value)
     if isinstance(parts, PathClassification):
         return parts

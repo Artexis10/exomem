@@ -181,10 +181,10 @@ def cmd_check(args) -> int:
 
 
 def cmd_score(args) -> int:
-    from .score import ScoreRefused, _read_json, score, write_report
+    from .score import ScoreRefused, read_json, score, write_report
 
     def read(path: str | None):
-        return _read_json(Path(path)) if path else None
+        return read_json(Path(path)) if path else None
 
     try:
         report = score(

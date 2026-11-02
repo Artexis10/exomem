@@ -42,7 +42,7 @@ from .query_compat import (
     coerce_num as _coerce_num, get_field as _get_field, match as _match, sort_key,
     distinct_key, group_key, latest_aggregate, numeric_aggregate, profile_kind,
 )
-from .vault import VaultPathError, resolve_under_vault
+from .vault import VaultPathError, VaultPathResolution, missing_path_reason, resolve_under_vault
 
 log = logging.getLogger(__name__)
 
@@ -493,18 +493,30 @@ def query_data(
 ) -> QueryDataResult:
     """Query a CSV/JSON data file under the vault. See module docstring."""
     try:
+        resolution = resolve_under_vault(vault_root, path, return_details=True)
+    except VaultPathError as e:
+        raise QueryDataError(e.code, e.reason) from None
+    assert isinstance(resolution, VaultPathResolution)
+    spellings = tuple(dict.fromkeys((resolution.relative, resolution.resolved_relative)))
+    absent = QueryDataError("NOT_FOUND", missing_path_reason(path))
+    # Authorization comes first and covers the caller's spelling and the resolved
+    # one (`//`, `/./` and aliases name the same file). Existence, exclusion, type
+    # and suffix are checked after it, so a path the caller may not see refuses
+    # with the absent text before any of them can answer differently.
+    if authorize_path is not None and not all(authorize_path(spelling) for spelling in spellings):
+        raise absent
+    # `excluded` paths (_access.yaml) refuse identically to a missing path, for the
+    # same reason, and before the type and suffix checks that would tell them apart.
+    if not resolution.candidate.exists() or any(
+        access.refuse_if_excluded(vault_root, spelling) for spelling in spellings
+    ):
+        raise absent
+    try:
         abs_path, rel = resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
     except VaultPathError as e:
         raise QueryDataError(e.code, e.reason) from None
-    # `excluded` paths (_access.yaml) refuse identically to a missing path —
-    # same code/shape/text as resolve_under_vault's own NOT_FOUND, never a
-    # distinct error, so this is not an existence oracle.
-    if access.refuse_if_excluded(vault_root, rel):
-        raise QueryDataError("NOT_FOUND", f"path does not exist: {rel}")
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
-    if authorize_path is not None and not authorize_path(rel):
-        raise QueryDataError("NOT_FOUND", f"path does not exist: {rel}")
 
     provenance: dict[str, Any] = {}
     fmt, rows, cols, warnings = load_generic_rows(

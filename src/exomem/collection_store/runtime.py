@@ -1442,8 +1442,7 @@ class StoreServer:
                     # does: a caller that gets MUTATION_ACKNOWLEDGEMENT_PENDING returns while this
                     # still runs. Governance policy stays pinned through the release, which a read's
                     # snapshot allows. Path resolution and the connector ceiling are pinned for the
-                    # body only: the terminal egress filter re-reads them live. The MCP second pass
-                    # runs outside both scopes, so it stays live too. A write opens neither: it can
+                    # body only: the terminal egress filter re-reads them live. A write opens neither: it can
                     # wait for the mutation boundary and must then decide on the policy and ceiling
                     # it finds, not on the ones it read before the wait.
                     scope.enter_context(state_paths.resolution_scope())
@@ -1534,8 +1533,8 @@ class StoreServer:
         return IMPORT_IDLE_SECONDS if result["status"] == "pending" else IMPORT_RETRY_SECONDS
 
     def _import_tick(self):
-        """Advance running import jobs by one batch; returns the seconds until the next tick."""
-        from . import capability, importer
+        """Advance running import jobs for one step budget; returns the seconds until the next tick."""
+        from . import capability, derived_rows, importer
         from .preview import preview_store
 
         if self.runtime is None or not capability.records_summary_enabled(self.root):
@@ -1546,8 +1545,11 @@ class StoreServer:
                 if reader.execute("SELECT 1 FROM import_jobs WHERE state='running' LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
             with preview_store(self.root, self.runtime):
-                done = importer.run_jobs(self.root, max_batches=1, deadline=time.monotonic()
-                                         + self.manager._mutation_timeout_seconds / 2)
+                # Batches run until the step budget is spent, each in its own transaction, so a derived
+                # import keeps its pace with small batches even when foreground demand spaces ticks out.
+                # It does not stop for a waiting request, as the views slice does: under steady demand
+                # that would leave one batch per tick. A request waits at most the budget and one batch.
+                done = importer.run_jobs(self.root, deadline=time.monotonic() + derived_rows.STEP_SECONDS)
         except Exception:  # noqa: BLE001 - a refused tick leaves its jobs for a later one
             logger.warning("import jobs could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS

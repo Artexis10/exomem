@@ -879,8 +879,7 @@ def bind_vault(
         # Resolve the canonical audience at the MCP boundary, beside the
         # existing `mcp_retry_scope()` identity derivation (design D5). Bound
         # for the whole invocation so every read leaf under it decides against
-        # the same principal; stdio resolves to `owner`. The invocation's
-        # record of what it served also covers the second pass below.
+        # the same principal; stdio resolves to `owner`.
         with context, principal_module.request_scope(principal), principal_module.invocation_scope():
             if command is None:
                 return leaf(*injected, **kwargs)
@@ -939,10 +938,11 @@ def bind_vault(
             t0 = time.perf_counter()
             returned_from_invoke = False
             try:
-                from .collection_store import connection, ownership
+                from .collection_store import connection
                 from .collection_store.governance import _StaleQueryHistoryProjection
-                from .governance.egress import is_vault_root, postfilter
 
+                # The dispatcher's terminal filter released this result: every return of
+                # `invoke_command` over a vault passes it, so a second pass here only redecided it.
                 # One whole reread handles ordinary movement without holding old authority or retrying writes.
                 for refreshed in (False, True):
                     try:
@@ -956,20 +956,16 @@ def bind_vault(
                             **kwargs,
                         )
                         returned_from_invoke = True
-                        # Measure the dispatcher and MCP's independent terminal pass separately.
+                        # Measure the dispatcher and MCP's own work after it separately.
                         call_spans.record_span_since("command.leaf", "command.leaf_start")
                         call_spans.mark("command.leaf_done")
-                        if injected and is_vault_root(injected[0]):
-                            with ownership.read_scope(injected[0]) as ownership_scope:
-                                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
-                                ownership_scope.finish()
                     except _StaleQueryHistoryProjection:
                         if not invocation_read_only:
                             raise
                         budget = request_budget.current()
                         if refreshed or (budget is not None and budget.remaining() <= 0):
                             raise connection.busy("the collection changed during its release checks") from None
-                        # Discard every old field; both passes must admit the original read again.
+                        # Discard every old field; the reread must admit the original read again.
                     else:
                         break
                 from .governance import scrubber as governance_scrubber
@@ -1026,7 +1022,7 @@ def bind_vault(
                 if refusal is None:
                     raise
                 if returned_from_invoke and not invocation_read_only:
-                    # The leaf returned before this second pass over its result refused.
+                    # The leaf returned before this surface's own handling of its result refused.
                     from .writer_lease import post_leaf_refusal
 
                     refusal = cli_ops.public_refusal(post_leaf_refusal(error)) or refusal
