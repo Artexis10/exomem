@@ -1518,6 +1518,11 @@ def _prepare_step(
             preimage, before_hash = _read_target(vault_root, path)
             if before_hash != args["expected_hash"]:
                 raise _error("CURATION_BINDING_STALE", "relation target hash is stale")
+            # A step cannot name a relation, so a candidate that needs a chosen one is accepted on
+            # the relation queue instead.
+            relation_queue.require_relation_choice(
+                vault_root, resolved.candidate, None, page=resolved.source_page
+            )
             prepared = {"candidate": dict(resolved.candidate)}
             after_hash = None
             effect_before = [{"path": path, "content_hash": before_hash}]

@@ -1392,3 +1392,50 @@ def test_queue_read_uses_published_snapshot_while_writer_boundary_is_held(
     assert batch_while_held.is_set()
     assert result["status"] == "available"
     assert result["groups"][0]["source_path"] == source
+
+
+def test_accept_refuses_a_generic_pair_the_other_page_already_relates_specifically(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "vault"
+    shared = f"{KB}/shared-evidence.md"
+    first, second = f"{KB}/first.md", f"{KB}/second.md"
+    _write(root, shared, "Shared evidence.")
+    for rel_path in (first, second):
+        (root / rel_path).write_text(
+            "---\ntype: insight\nstatus: active\nsources:\n"
+            f"  - {shared}\n---\n# {Path(rel_path).stem}\n\nA sourced claim.\n",
+            encoding="utf-8",
+        )
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == first and queued["to"] == second
+        and queued["method"] == "shared_sources"
+    )
+    _warm_reference_authority(root)
+    # The other page authors a specific relation toward this one after the queue read.
+    other = root / second
+    other.write_text(
+        other.read_text(encoding="utf-8")
+        + f"\n## Relations\n\n- supports [[{first.removesuffix('.md')}]]\n",
+        encoding="utf-8",
+    )
+    current = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    edits: list[dict[str, Any]] = []
+
+    with pytest.raises(ValueError, match=r"REVIEW_ITEM_CHANGED.*authored_edge"):
+        relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=vault.content_hash((root / first).read_text(encoding="utf-8")),
+            expected_fingerprint=current.fingerprint,
+            why="Refuse a generic relation the other page already types.",
+            edit_memory=lambda *_args, **kwargs: edits.append(kwargs)
+            or {"mutated": True},
+        )
+    assert edits == []

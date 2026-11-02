@@ -88,7 +88,7 @@ class Doors:
         argv = [tool]
         for key, value in args.items():
             flag = "--" + key.replace("_", "-")
-            if isinstance(value, dict):
+            if isinstance(value, dict) or (value and isinstance(value, list) and isinstance(value[0], dict)):
                 argv += [flag, json.dumps(value)]
             elif isinstance(value, list):
                 argv += [flag, ",".join(value)]
@@ -179,7 +179,7 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
                 "The vacuum pump that serves the parlour.",
                 entity_type="equipment",
                 name=PUMP,
-                connections=[f"Knowledge Base/Entities/Sites/{SITE}"],
+                relations=[{"kind": "located_at", "target": f"Knowledge Base/Entities/Sites/{SITE}"}],
             ),
         ),
         "cli": doors.cli(
@@ -188,7 +188,7 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
                 "A rotary milking parlour installed on the field.",
                 entity_type="milking-machine",
                 name=PARLOUR,
-                connections=[f"Knowledge Base/Entities/Sites/{SITE}"],
+                relations=[{"kind": "located_at", "target": f"Knowledge Base/Entities/Sites/{SITE}"}],
             ),
         ),
     }

@@ -41,7 +41,7 @@
                   "type": "string"
                 },
                 "profile": {
-                  "description": "compact (default), full, diagnostics, or session (needs installed skill digest).",
+                  "description": "compact, full, diagnostics, or session (needs installed skill digest).",
                   "type": "string",
                   "default": "compact"
                 },
@@ -344,7 +344,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none."
+              "description": "Audit reason for reviewed-none or generic."
             },
             "promotion_reason": {
               "type": "string",
@@ -633,6 +633,7 @@
                   },
                   "type": "array"
                 },
+                "ref": {},
                 "identity_decision": {
                   "additionalProperties": false,
                   "properties": {
@@ -684,7 +685,7 @@
                     "type": "object"
                   },
                   "type": "array",
-                  "description": "create-entity only. Typed {kind, target} edges; connections stay relates_to."
+                  "description": "create-entity only. {kind, target, reason?} edges; relates_to needs a reason."
                 }
               },
               "required": [
@@ -706,9 +707,7 @@
                 "requested_relation": {
                   "type": "string"
                 },
-                "ref": {
-                  "type": "string"
-                },
+                "ref": {},
                 "expected_hash": {
                   "description": "Target `content_hash`; required for accept-relation.",
                   "type": "string"
@@ -740,6 +739,11 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
           }
         },
         "response_detail": {
@@ -1034,7 +1038,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none."
+              "description": "Audit reason for reviewed-none or generic."
             },
             "promotion_reason": {
               "type": "string",
@@ -1614,7 +1618,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none."
+              "description": "Audit reason for reviewed-none or generic."
             },
             "reason": {
               "type": "string",
@@ -3593,7 +3597,7 @@
         },
         "suggestions": {
           "default": false,
-          "description": "Off by default. `suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
+          "description": "`suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
           "type": "boolean"
         },
         "project_category": {
@@ -3624,7 +3628,7 @@
         },
         "relation_review_reason": {
           "type": "string",
-          "description": "Audit reason for reviewed-none."
+          "description": "Audit reason for reviewed-none or generic."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -4809,7 +4813,7 @@
                 },
                 "relation_review_reason": {
                   "type": "string",
-                  "description": "Audit reason for reviewed-none."
+                  "description": "Audit reason for reviewed-none or generic."
                 },
                 "reason": {
                   "type": "string",
@@ -5783,18 +5787,18 @@
                   "type": "string"
                 },
                 "max_nodes": {
-                  "description": "Drawing cap, from 1 to 200. Default 200.",
+                  "description": "Drawing cap, from 1 to 200.",
                   "type": "integer",
                   "default": 200
                 },
                 "max_edges": {
-                  "description": "Drawing cap, from 0 to 400. Default 400.",
+                  "description": "Drawing cap, from 0 to 400.",
                   "type": "integer",
                   "default": 400
                 },
                 "purpose": {
                   "type": "string",
-                  "description": "Optional declared purpose under the existing disclosure policy."
+                  "description": "Declared purpose under the existing disclosure policy."
                 }
               },
               "required": [
@@ -8921,7 +8925,7 @@
         },
         "relation_review_reason": {
           "type": "string",
-          "description": "Audit reason for reviewed-none."
+          "description": "Audit reason for reviewed-none or generic."
         },
         "vocabulary_decision": {
           "additionalProperties": false,

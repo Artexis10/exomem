@@ -104,6 +104,7 @@ def propose_relation(
     target_kinds: Iterable[str] | None = None,
     projects: Iterable[str] | None = None,
     page_types: Iterable[str] | None = None,
+    endpoints: Mapping[str, Any] | None = None,
     query: str | None = None,
     limit: int = 20,
     observations: Iterable[Mapping[str, Any]] | Mapping[str, Any] = (),
@@ -125,6 +126,7 @@ def propose_relation(
         target_kinds=target_kinds,
         projects=projects,
         page_types=page_types,
+        endpoints=endpoints,
     )
     evidence = resolve_relation(
         registry,

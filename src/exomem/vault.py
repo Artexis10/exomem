@@ -8815,12 +8815,46 @@ def plan_log_writes(
     )
 
 
+def _operation_log_paths(vault_root: Path) -> list[Path]:
+    """The live log, then the rotated archives oldest first."""
+    root = kb_root(vault_root)
+    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
+    return [root / "log.md", *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+
+
+def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]]:
+    """The activity sections of one log file, with the provenance fence each carries."""
+    tokens = parser.parse(text)
+    sections = [i for i, token in enumerate(tokens)
+                if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
+    entries: list[dict[str, Any]] = []
+    for index, at in enumerate(sections):
+        header = tokens[at + 1].content
+        stamp, separator, rest = header.removeprefix("[").partition("] ")
+        op, bar, title = rest.partition(" | ")
+        if not header.startswith("[") or not separator or not bar:
+            continue
+        stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
+        entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
+        for token in tokens[at:stop]:
+            if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
+                continue
+            try:
+                value = json.loads(token.content)
+            except (ValueError, TypeError):
+                entry["provenance_invalid"] = True
+                continue
+            if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+                entry["provenance"] = value
+            else:
+                entry["provenance_invalid"] = True
+        entries.append(entry)
+    return entries
+
+
 def read_operation_log(vault_root: Path) -> dict[str, Any]:
     """Read activity sections and structured provenance from live and rotated logs."""
-    root = kb_root(vault_root)
-    live = root / "log.md"
-    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
-    paths = [live, *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    paths = _operation_log_paths(vault_root)
     entries: list[dict[str, Any]] = []
     failed = 0
     read = 0
@@ -8832,36 +8866,42 @@ def read_operation_log(vault_root: Path) -> dict[str, Any]:
             failed += 1
             continue
         read += 1
-        tokens = parser.parse(text)
-        sections = [i for i, token in enumerate(tokens)
-                    if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
-        for index, at in enumerate(sections):
-            header = tokens[at + 1].content
-            stamp, separator, rest = header.removeprefix("[").partition("] ")
-            op, bar, title = rest.partition(" | ")
-            if not header.startswith("[") or not separator or not bar:
-                continue
-            stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
-            entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
-            for token in tokens[at:stop]:
-                if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
-                    continue
-                try:
-                    value = json.loads(token.content)
-                except (ValueError, TypeError):
-                    entry["provenance_invalid"] = True
-                    continue
-                if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
-                    entry["provenance"] = value
-                else:
-                    entry["provenance_invalid"] = True
-            entries.append(entry)
+        entries.extend(_operation_log_entries(text, parser))
     return {
         "entries": entries,
-        "live_log_present": live.is_file(),
+        "live_log_present": paths[0].is_file(),
         "files_read": read,
         "files_unreadable": failed,
     }
+
+
+def latest_operation_id(vault_root: Path, path: str) -> str | None:
+    """The `operation_id` of the newest logged write to `path`, or None when none carries one.
+
+    "Newest" is the largest server time among the provenance fences of the first log file
+    that holds one for `path`. Files are read newest first, the live log and then the
+    archives from the latest down, because rotation moves only the oldest entries out of the
+    live log. The scan stops at that file, so a recent write never reads the archives.
+    """
+    paths = _operation_log_paths(vault_root)
+    parser = MarkdownIt("commonmark")
+    for log_path in (paths[0], *reversed(paths[1:])):
+        try:
+            text, _guard = read_guarded_text(vault_root, log_path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+        newest: tuple[str, str] | None = None
+        for entry in _operation_log_entries(text, parser):
+            data = entry.get("provenance")
+            if not isinstance(data, dict) or data.get("path") != path:
+                continue
+            stamp, operation_id = data.get("server_at"), data.get("operation_id")
+            if isinstance(stamp, str) and isinstance(operation_id, str) and operation_id:
+                if newest is None or stamp > newest[0]:
+                    newest = (stamp, operation_id)
+        if newest is not None:
+            return newest[1]
+    return None
 
 
 def plan_log_writes_many(

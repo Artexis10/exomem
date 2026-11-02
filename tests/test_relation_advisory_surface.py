@@ -182,6 +182,32 @@ def test_advisory_projects_bounded_indexed_recurrence_and_hides_lookup_context(
     assert "_relation_advisory_context" not in legacy
 
 
+@pytest.mark.parametrize("container", ["creation", "semantic", None])
+def test_recurrence_lookup_runs_wherever_the_write_nests_its_context(
+    container: str | None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A creation nests its lookup context one level down; it still earns the recurrence."""
+    import exomem.memory_schema as schema
+
+    calls: list[object] = []
+
+    def indexed(root, *, raw_relations, limit, offset):  # noqa: ANN001
+        calls.append(root)
+        return {"items": [{"raw_relation": "applies_to", "count": 3, "examples": []}]}
+
+    monkeypatch.setattr(schema, "indexed_relation_observations", indexed)
+    context = {"vault": str(tmp_path), "registry_hash": "b" * 64}
+    leaf = _leaf(container, [_fact("applies_to")])
+    (leaf if container is None else leaf[container])["_relation_advisory_context"] = context
+
+    advisory = _compact(leaf)["relation_advisory"]
+
+    assert calls == [tmp_path]
+    assert advisory["recurrence_available"] is True
+    assert advisory["registry_hash"] == "b" * 64
+    assert advisory["occurrences"][0]["count"] == 3
+
+
 def test_advisory_normalizes_and_aggregates_indexed_spelling_variants(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

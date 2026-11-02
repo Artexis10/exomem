@@ -780,8 +780,10 @@ profiles through one proposal-first surface.
    reality or another named contract.
 6. Before authoring a typed edge, call
    `read_connections(operation={'kind': 'resolve-relation'})`; reuse a specific truthful
-   registered meaning. Use `relates_to` only for a real generic connection, and
-   prefer no edge to an invented label.
+   registered meaning. Use `relates_to` only for a real generic connection; a new
+   generic edge that joins an entity is refused until you name a fitting relation or
+   give a reason (see [mutation-results](mutation-results.md)). Prefer no edge to an
+   invented label.
 7. For a durable recurring distinction, call
    `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})` with a
    reviewed parent, description, and direction. Review its full duplicate

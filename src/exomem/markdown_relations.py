@@ -32,6 +32,12 @@ _LEGACY_RE = re.compile(
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+")
 
 
+def bullet_marker_length(line: str) -> int:
+    """The characters before a bullet's first word: indent, marker and spacing; 0 for a non-bullet."""
+    match = _BULLET_RE.match(line)
+    return match.end() if match else 0
+
+
 @dataclass(frozen=True)
 class MarkdownRelation:
     kind: str

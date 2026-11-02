@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from exomem import vault as vault_module
-from exomem.vault import LOG_ROTATE_KEEP_ENTRIES, rotate_log_if_needed
+from exomem.vault import (
+    LOG_ROTATE_KEEP_ENTRIES,
+    latest_operation_id,
+    prepend_log_entry,
+    rotate_log_if_needed,
+)
 
 HEADER = "# Knowledge Base activity log\n\nNewest first.\n\n---\n"
 
@@ -170,3 +175,35 @@ def test_log_entry_insertion_matches_the_logs_own_line_endings(log_newline: str)
     assert body.lstrip(log_newline).startswith("## [2026-08-19]"), "newest entry goes first"
     naked_lf = once.replace("\r\n", "")
     assert ("\n" in naked_lf) is (log_newline == "\n"), "no mixed line endings"
+
+
+def test_the_latest_operation_id_of_a_page_is_found_in_the_live_log_before_any_archive(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
+    page = "Knowledge Base/Notes/Insights/crane.md"
+
+    def write(text: str, operation_id: str, server_at: str) -> str:
+        return prepend_log_entry(
+            text,
+            date_iso="2026-01-01",
+            op="note",
+            rel_path_no_ext=page.removesuffix(".md"),
+            body=f"Write {operation_id}.",
+            provenance={"version": 1, "path": page, "operation_id": operation_id, "server_at": server_at},
+        )
+
+    # The page's only write is the oldest entry, so rotation moves it into an archive.
+    text = write(HEADER, "op-old", "2026-01-01T00:00:00+00:00")
+    for i in range(LOG_ROTATE_KEEP_ENTRIES + 5):
+        text = prepend_log_entry(text, date_iso="2026-01-02", op="note", rel_path_no_ext=f"Notes/filler-{i}", body="Filler.")
+    log_file = vault / "Knowledge Base" / "log.md"
+    log_file.write_text(text, encoding="utf-8")
+    assert rotate_log_if_needed(vault)
+    assert "op-old" not in log_file.read_text(encoding="utf-8")
+
+    assert latest_operation_id(vault, page) == "op-old"
+
+    log_file.write_text(write(log_file.read_text(encoding="utf-8"), "op-new", "2026-02-01T00:00:00+00:00"), encoding="utf-8")
+    assert latest_operation_id(vault, page) == "op-new"
+    assert latest_operation_id(vault, "Knowledge Base/Notes/Insights/hoist.md") is None

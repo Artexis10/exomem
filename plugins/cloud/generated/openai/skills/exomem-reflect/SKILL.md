@@ -2,7 +2,7 @@
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
 metadata:
-  skill_contract: f1d926be0f41b6b64565a23502423649b8da8ed66e75f4310fadb9cb97a22502
+  skill_contract: 2b616de1574c9f2d7cfc9e1604541faf936e526b42e30560c750bd37deeddd22
   version: "0.1.0"
 ---
 
@@ -47,7 +47,9 @@ identity after an uncertain commit.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
+joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
+them), or choose no edge. Durable recurring
 meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 

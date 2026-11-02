@@ -507,6 +507,9 @@ def _merge(shipped: RoleRegistry, data: Any, digest: str, resolver: Any) -> Role
         for key in unknown:
             if key in {"remove", "removed"}:
                 continue
+            # A vault holds a full copy of the shipped file, which restates what the role has.
+            if key in _NEW_ROLE_FIELDS and getattr(existing, key, None) == raw[key]:
+                continue
             findings.append(
                 _finding("unknown_field", f"{name}.{key}", "unknown override field")
             )
@@ -538,7 +541,7 @@ def _cap(
 
 
 def _validated_evidence_cues(
-    value: object, *, role_id: str, findings: list[dict[str, str]]
+    value: object, *, role_id: str, findings: list[dict[str, str]], shipped: Sequence[str] = ()
 ) -> tuple[str, ...]:
     """Strip, drop empty/over-length (dropped, with a finding), dedupe.
 
@@ -547,6 +550,9 @@ def _validated_evidence_cues(
     matched as a substring), only evidence is stricter -- but flagged with a
     finding, since it can never be evidence. No cap here; the caller caps
     the combined list once (`_cap`).
+
+    A cue the shipped role already holds is restated, not added: it is kept and never judged
+    again, because the shipped file ships a deliberately weak cue and a vault copy repeats it.
     """
     if not isinstance(value, (list, tuple)):
         return ()
@@ -556,6 +562,9 @@ def _validated_evidence_cues(
             continue
         text = item.strip().casefold()
         if not text:
+            continue
+        if text in shipped:
+            accepted.append(text)
             continue
         if len(text) > MAX_CUE_CHARS:
             findings.append(
@@ -705,7 +714,9 @@ def _narrowed(
     # field directly ADDS to the shipped role's list rather than replacing
     # it, so there is no separate `add_evidence_cues`/`add_evidence_categories`.
     if "evidence_cues" in raw:
-        replacement = _validated_evidence_cues(raw.get("evidence_cues"), role_id=role.id, findings=findings)
+        replacement = _validated_evidence_cues(
+            raw.get("evidence_cues"), role_id=role.id, findings=findings, shipped=role.evidence_cues
+        )
         if replacement or isinstance(raw.get("evidence_cues"), (list, tuple)):
             evidence_cues = list(dict.fromkeys([*role.evidence_cues, *replacement]))
         else:

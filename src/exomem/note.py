@@ -2189,6 +2189,7 @@ def note(
             draft_token=encoded_token,
             registrations=registrations,
             relation_disposition=relation_disposition,
+            relation_review_reason=relation_review_reason,
             predecessor_path=_predecessor_path,
             predecessor_content_hash=_predecessor_content_hash,
             vocabulary_binding=domain_binding,

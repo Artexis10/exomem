@@ -1114,6 +1114,79 @@ def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+#: Wire bounds on the advisory `undeclared_referents` block
+#: (`write-time-identity-candidates` spec): at most three names, each with the page that
+#: linked it and the write-advisory handle that dismisses it. This module's own numbers,
+#: for the reason the bounds above are: the terminal re-validates what a leaf attached.
+_MAX_UNDECLARED_REFERENTS = 3
+_MAX_UNDECLARED_REFERENT_NAME_CHARS = 64
+_MAX_UNDECLARED_REFERENT_ORIGIN_CHARS = 512
+_UNDECLARED_REFERENT_REVIEW_PREFIX = "exomem://review/write-advisory/"
+_REVIEW_FINGERPRINT_CHARS = 24
+
+
+def _undeclared_referent(value: Any) -> dict[str, Any] | None:
+    """One validated name of the block, with its `create-entity` route spelled for this surface.
+
+    The route leaves `entity_type` and `summary` to the agent: the server never chooses a
+    type for a name. Its `ref` is the page that linked the name, which the entity's log
+    entry records as the origin.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    name = value.get("name")
+    origin = value.get("origin")
+    review = value.get("review")
+    fingerprint = value.get("fingerprint")
+    if not isinstance(name, str) or not 0 < len(name) <= _MAX_UNDECLARED_REFERENT_NAME_CHARS:
+        return None
+    if not isinstance(origin, str) or not 0 < len(origin) <= _MAX_UNDECLARED_REFERENT_ORIGIN_CHARS:
+        return None
+    if (
+        not isinstance(review, str)
+        or not review.startswith(_UNDECLARED_REFERENT_REVIEW_PREFIX)
+        or len(review) > _MAX_DUE_STATE_REF_CHARS
+    ):
+        return None
+    if not (
+        isinstance(fingerprint, str)
+        and len(fingerprint) == _REVIEW_FINGERPRINT_CHARS
+        and all(char in "0123456789abcdef" for char in fingerprint)  # a field's format, not a meaning
+    ):
+        return None
+    return {
+        "name": name,
+        "route": capabilities.active_call_route(
+            "connect_memory", {"operation": "create-entity", "name": name, "ref": origin}
+        ),
+        "review": review,
+        "fingerprint": fingerprint,
+    }
+
+
+def _undeclared_referents_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory `undeclared_referents` block out of a write leaf.
+
+    Same posture as `_entity_candidate_projection`: kept at compact detail, and a malformed
+    or oversized block is DROPPED rather than allowed to widen the wire contract.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("undeclared_referents")
+        names = value.get("names") if isinstance(value, Mapping) else None
+        if not isinstance(names, (list, tuple)) or not 0 < len(names) <= _MAX_UNDECLARED_REFERENTS:
+            continue
+        projected = [_undeclared_referent(item) for item in names]
+        if any(item is None for item in projected):
+            continue
+        return {"names": projected}
+    return None
+
+
 #: Wire bounds on the advisory due-state block. Deliberately this module's own
 #: numbers rather than an import of the producer's: the terminal re-validates what
 #: a leaf attached instead of trusting it, and a bound that came from the producer
@@ -1476,8 +1549,37 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+def _relation_advisory_context(leaf: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The semantic writer's lookup context for this committed write.
+
+    The writer nests it with the advisory facts, so a creation carries it under `creation`, an
+    edit under `semantic`, and a bare result at the top. The first container that holds one wins.
+    """
+    for container_key in ("creation", "semantic", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        context = (
+            container.get("_relation_advisory_context") if isinstance(container, Mapping) else None
+        )
+        if isinstance(context, Mapping):
+            return context
+    return None
+
+
+def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The specific-relation options the semantic writer built for this committed write.
+
+    It has already bounded the list and shaped each entry.
+    """
+    context = _relation_advisory_context(leaf)
+    options = context.get("specific_options") if context is not None else None
+    if not isinstance(options, (list, tuple)):
+        return []
+    return [dict(option) for option in options if isinstance(option, Mapping)]
+
+
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
-    """Project just-parsed unregistered facts plus optional indexed recurrence.
+    """Project just-parsed unregistered facts plus optional indexed recurrence, and the
+    specific relations a note-to-note generic edge could take.
 
     The fact scan is bounded by the semantic feedback renderer. Recurrence is a
     point lookup against one already-current graph snapshot and is deliberately
@@ -1486,12 +1588,12 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
     """
     if not isinstance(leaf, Mapping):
         return None
-    context = leaf.get("_relation_advisory_context")
+    context = _relation_advisory_context(leaf)
     labels: set[str] = set()
     facts_truncated = False
     registry_hash: str | None = None
     vault_hint: str | None = None
-    if isinstance(context, Mapping):
+    if context is not None:
         candidate_hash = context.get("registry_hash")
         if isinstance(candidate_hash, str) and 0 < len(candidate_hash) <= 256:
             registry_hash = candidate_hash
@@ -1530,8 +1632,9 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)
+    specific = _specific_options_projection(leaf)
     if not labels:
-        return None
+        return {"specific_options": specific} if specific else None
     ordered = sorted(labels)
     retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
     truncated = facts_truncated or len(ordered) > len(retained)
@@ -1604,7 +1707,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
         except Exception:  # noqa: BLE001 - advisory evidence never breaks a commit
             recurrence_available = False
             occurrences = []
-    return {
+    advisory = {
         "raw_relations": retained,
         "registry_hash": registry_hash,
         "recurrence_available": recurrence_available,
@@ -1616,6 +1719,9 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             "args": {"operation": "resolve-relation"},
         },
     }
+    if specific:
+        advisory["specific_options"] = specific
+    return advisory
 
 
 def _without_relation_advisory_context(result: Any) -> Any:
@@ -1924,14 +2030,18 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     raw_leaf = result["leaf_result"]
     due_state, due_state_vault = _due_state_projection(raw_leaf)
     capture_sweep = _capture_sweep_projection(raw_leaf)
+    undeclared_referents = _undeclared_referents_projection(raw_leaf)
     relation_advisory = (
         _relation_advisory_projection(raw_leaf)
         if result.get("state") == "committed"
         else None
     )
     leaf = _without_relation_advisory_context(
-        _without_advisory_capture_sweep(
-            _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+        _without_leaf_advisory(
+            _without_advisory_capture_sweep(
+                _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+            ),
+            "undeclared_referents",
         )
     )
     if detail == "legacy":
@@ -2117,6 +2227,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     entity_candidate = _entity_candidate_projection(leaf)
     if entity_candidate is not None:
         compact["entity_candidate"] = entity_candidate
+    if undeclared_referents is not None:
+        compact["undeclared_referents"] = undeclared_referents
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
     if capture_sweep is not None:
@@ -2137,6 +2249,13 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         from .vocabulary_delivery import public_projection
 
         compact.update(public_projection(result))
+    from . import vocabulary_delta
+
+    if vocabulary_delta.PENDING_KEY in result:
+        # Delivery is decided here, where the detail is known: a `legacy` response returned above.
+        delivered = vocabulary_delta.delivered_by(result)
+        if delivered is not None:
+            compact["vocabulary_delta"] = delivered
     if "additive_authority" in result:
         from .vocabulary_receipts import valid_projection
 

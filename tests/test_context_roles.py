@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from test_vocabulary_registries import _served
 
 from exomem import context_roles, semantic_language_registry
 
@@ -143,6 +144,21 @@ def test_save_roles_hash_matches_load_with_vault_semantic_registry(vault: Path) 
 # --------------------------------------------------------------------------- #
 # Overrides
 # --------------------------------------------------------------------------- #
+
+
+def test_a_fresh_vault_packet_carries_no_roles_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`init_vault` copies the shipped roles file into the vault as its override. That copy
+    restates the shipped roles, so the packet must not report it as an invalid override."""
+    _vault, call = _served(tmp_path, monkeypatch)
+
+    generation = call("activate_context", {"turn": "What should I remember about the budget?"})[
+        "generation"
+    ]
+
+    assert generation["roles_source"] == "vault", "the vault holds its copy as the override"
+    assert "roles_warnings" not in generation, generation.get("roles_warnings")
 
 
 def test_override_adds_a_role_without_removing_one(vault: Path) -> None:
