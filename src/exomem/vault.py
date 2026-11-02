@@ -4088,6 +4088,16 @@ def _unbounded_leaf_reason(info: os.stat_result, limit: int) -> str | None:
     return None
 
 
+def _refuse_unbounded_leaf(target: str, reason: str) -> PathGuardError:
+    """The refusal for a guarded leaf that is not a bounded regular file.
+
+    The error text names the failed condition and not the path: this read also covers pages
+    that are withheld from a restricted caller, so the path would name one. The server log has it.
+    """
+    log.warning("guarded read refused: %s %s", target, reason)
+    return PathGuardError("PATH_GUARD_UNSAFE", f"guarded content {reason}")
+
+
 def _read_bounded_guarded_snapshot(
     vault_root: Path, target: str, limit: int
 ) -> tuple[bytes, PathGuard]:
@@ -4129,7 +4139,7 @@ def _read_bounded_guarded_snapshot(
         before = os.fstat(leaf)
         unbounded = _unbounded_leaf_reason(before, limit)
         if unbounded is not None:
-            raise PathGuardError("PATH_GUARD_UNSAFE", f"{target} {unbounded}")
+            raise _refuse_unbounded_leaf(target, unbounded)
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
@@ -4244,7 +4254,7 @@ def _read_bounded_windows_snapshot(
             else _unbounded_leaf_reason(before, limit)
         )
         if unbounded is not None:
-            raise PathGuardError("PATH_GUARD_UNSAFE", f"{target} {unbounded}")
+            raise _refuse_unbounded_leaf(target, unbounded)
         leaf = _open_windows_path_descriptor(
             leaf_path,
             desired_access=0x80000000,
