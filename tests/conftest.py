@@ -100,6 +100,9 @@ if os.name == "nt":
         "test_lme_providers.py",
         "test_lme_runner_protocol.py",
         "test_protocol_manifest_trace.py",
+        # Cloud import runs on Linux cells and measures free space with os.statvfs;
+        # on Windows 35 of its 36 cases fail on that call.
+        "test_cloud_import.py",
     ]
 
 # --- CI tier selection (`.github/workflows/ci.yml`) -------------------------
