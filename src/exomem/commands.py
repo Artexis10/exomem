@@ -8810,7 +8810,9 @@ def op_episode_memory(
     unknown policy. At a durable stop, one-line
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads recall_context recent_context. Same episode adds a revision,
-    retiring the previous one; identical retry writes nothing.
+    retiring the previous one; identical retry writes nothing. Update the pages
+    this session changed first, then link each decided item to its page as [[Page]].
+    The response's `compile` block lists the pages the recap names and their update times.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.

@@ -139,9 +139,13 @@ Mid-thought exploration, tentative events, and incidental names stay unwritten.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a
-conversation's decision or stopping point, record one bounded recap with
-`record_episode/read_episode` only when requested or permitted by the live proactive-capture
-disposition; it is what the next session on any client sees first.
+conversation's decision or stopping point, close in two steps, only when requested
+or permitted by the live proactive-capture disposition. First update each page whose
+knowledge this session changed (entity facets, decisions, workflow contracts) with
+`edit_note`, `change_observations` or `supersede_note`. Then record one bounded recap
+with `record_episode/read_episode`: link each Decided item to its page with `[[...]]`
+and set `about` to the pages you updated. The recap is what the next session on any
+client sees first. Nothing durable happened: record nothing.
 
 ## Recall loop
 
