@@ -62,7 +62,7 @@ Registry, in build order:
 |---|---|---|---|
 | `pair.relation` | contradicts, refines, restates, neutral, abstain (both directions) | mDeBERTa NLI pin (already admitted) | 1 |
 | `mention.same_referent` | same, different, abstain | open-weight 3–8B instruct model chosen by a fixture spike | 2 |
-| `recap.covered_by` | entailed, partial, absent | NLI | 4 |
+| `recap.covered_by` | entailed, partial, absent, abstain (one recap claim against each unit of its home page; no `contradicted`, see "Known misses") | mDeBERTa NLI pin, template `nli-coverage-v1`, label map `coverage-v1`, fixture set `recap-covered-v1` | 4 |
 | supersession direction, relation typing, `term.same_meaning` | closed per question | chosen per question | 4 |
 
 **`pair.relation` (slice 1).**
@@ -278,6 +278,7 @@ What slice 1 serves (review of slice 1, 2026-09-28):
   - Set `relation-v1-multilingual`: English, same-language non-English and mixed-language pairs over every label, each with a negative twin (a minimally different pair that must not get that label).
   - It is checked at the exact pin through the existing `_verify_fixtures` machinery. One miss refuses the whole pair.
   - Twins the pin mislabels are recorded under "Known misses" below, never in the admission gate.
+  - Set `recap-covered-v1` (`recap.covered_by`) is admitted by error cost, not by exact match. A fixture that reads `entailed` when `partial` or `absent` was expected refuses admission, because that error hides a compile that is due. An expected-`entailed` fixture that reads `partial` or `absent` is recorded under "Known misses" with its vectors and does not refuse, because its only effect is a compile prompt that was not due. A twin that takes the label of the pair it twins still refuses.
 - **Lean suite.** Stub instruments (a deterministic function of the text hashes) under a stub identity cover:
   - the ledger, invalidation, migration and replay;
   - the proposers, projections and status line;
@@ -345,7 +346,13 @@ Measured on 2026-09-28 against the exact pin (`b5113eb3…`, weights `b1dbf445�
 
 ## Known misses
 
-None. Every fixture, twins included, passes at the exact pin. Twins that fail in future must be recorded here and never enter the admission gate.
+`relation-v1-multilingual`: none. Every fixture, twins included, passes at the exact pin. Twins that fail in future must be recorded here and never enter the admission gate.
+
+`recap-covered-v1` (`coverage-v1`): 15 of 16 pairs read as expected at the exact pin. The rule is that coverage-v1 records an expected-`entailed` miss here and not in the admission gate. A false `entailed` hides a due compile and refuses admission. A missed `entailed` only prompts a compile that was not due. Its rate is measured by the real-data precision round and by the dismissal counts of the compile family.
+
+- German entailed pair. Premise "Die Sicherung läuft jede Nacht um zwei Uhr.", hypothesis "Die Sicherung läuft jede Nacht.". Expected `entailed`, read `absent`. The `ab` vector (entailment, neutral, contradiction) is 0.948906, 0.048285, 0.002809, which is under the 0.95 threshold inherited from relation-v1. The `ba` vector is 0.001384, 0.998303, 0.000312. The threshold stays; the fixture stays.
+
+`coverage-v1` has no `contradicted` label. A claim is read against every unit of its home page, and most of those units are unrelated to it. This pin reads unrelated pairs as contradiction: it scores an unrelated Estonian pair at 0.943 and an unrelated English and Estonian pair at 0.625 contradiction on the `ab` order. So a contradiction label would fire on noise and suppress real compile prompts. Claim-versus-page contradiction stays with `pair.relation` proposed pairs and with the agent at compile time.
 
 ## Open items
 

@@ -97,7 +97,7 @@
   - The per-vault and per-tenant API placement opt-in, with `unpinned_weights` identity and retirement migration (R7).
   - The ledger registered as a portable-derived external-state family for hosted export and restore (R3).
   - Update `tests/test_dreamer_hosted_boundary.py` and `tests/test_frozen_verifier_hosted_boundary.py` to the new contract.
-- [ ] 9.4 Slice 4: `recap.covered_by` (entailed, partial, absent); supersession direction, relation typing and `term.same_meaning`; convergence across independent origins and emerging connections to recent work.
+- [ ] 9.4 Slice 4: `recap.covered_by` (entailed, partial, absent, abstain; admitted by error cost, so an expected-entailed miss is recorded and a false entailed refuses); supersession direction, relation typing and `term.same_meaning`; convergence across independent origins and emerging connections to recent work.
 
 ## 10. Verification and closure
 
