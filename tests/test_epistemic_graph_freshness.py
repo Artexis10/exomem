@@ -1721,9 +1721,9 @@ def test_cold_source_proof_never_follows_post_admission_symlink(
     real_indexed_membership = index._indexed_recall_membership
     swapped = False
 
-    def swap_after_admission() -> frozenset[str] | None:
+    def swap_after_admission(**kwargs: object) -> frozenset[str] | None:
         nonlocal swapped
-        result = real_indexed_membership()
+        result = real_indexed_membership(**kwargs)
         if not swapped:
             swapped = True
             source.unlink()
