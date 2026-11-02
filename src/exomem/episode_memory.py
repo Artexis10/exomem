@@ -26,6 +26,7 @@ from . import (
     call_spans,
     curation,
     episode_capture,
+    episode_compile,
     episode_nudge,
     freshness,
     memory_refs,
@@ -264,6 +265,8 @@ def record(
     original_recap = episode_capture.prepare(
         episode=episode, about=about, when=when, audience=audience, **fields
     )
+    # Before the write, which leaves the resolver cache behind until the terminal's fanout.
+    decided_links = episode_compile.linked_pages(vault_root, original_recap.decided)
     request_id = writer_lease.active_mutation_request_id()
     retry = writer_lease._active_capture_preparation_retry() if request_id is not None else None
 
@@ -417,6 +420,12 @@ def record(
     if not defer_housekeeping_until_terminal_persisted(record_housekeeping):
         record_housekeeping()
     warnings = [*about_warnings, *ledger_warnings]
+    compiled = episode_compile.block(
+        vault_root,
+        decided=len(recap.decided),
+        decided_links=decided_links,
+        about_paths={ref: about_paths[ref] for ref in recap.about if ref in about_paths},
+    )
     return {
         "operation": "episode_memory",
         "episode": recap.key,
@@ -426,6 +435,7 @@ def record(
         "recovery": recovery,
         "ledger": ledger,
         "about_skipped": about_skipped,
+        **({"compile": compiled} if compiled else {}),
         **({"warnings": warnings} if warnings else {}),
     }
 

@@ -85,6 +85,8 @@ class Recap:
     group: str
     stem: str
     about: tuple[str, ...] = ()
+    #: The validated Decided items, as written: the compile block reads their links.
+    decided: tuple[str, ...] = ()
     client: str | None = None
     frontmatter: dict[str, Any] = field(default_factory=dict)
 
@@ -294,6 +296,7 @@ def prepare(
         group=group,
         stem=subject_slug,
         about=refs,
+        decided=sections["decided"],
         client=label,
         frontmatter=frontmatter,
     )
