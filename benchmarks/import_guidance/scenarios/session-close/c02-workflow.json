@@ -1,0 +1,13 @@
+{
+  "id": "c02-workflow",
+  "title": "One step of an existing workflow page changes",
+  "suite": "session-close",
+  "seed": "c02",
+  "engagement": "balanced",
+  "turns": [
+    "I'm tidying up my Sunday meal-prep routine. Can you pull up what I have written for it?",
+    "Okay. One change: I'm no longer ordering the groceries on Saturday afternoon, because the delivery slots are gone by then. From now on I place the order on Friday evening. Everything else in the routine stays as it is.",
+    "That's all for today, thanks."
+  ],
+  "answer_key": null
+}

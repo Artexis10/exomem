@@ -31,3 +31,42 @@ Limits:
 - The first commit in the two review scenarios is refused whatever arguments the agent sends. The real product would accept a commit that carries the hash.
 - The agent has the tools a scenario serves, not the whole product surface, and the compact bootstrap reply stands in for the session profile.
 - The judge model is the same family as the agents.
+
+## Session-close suite
+
+This suite asks whether a session that settled something durable about an existing page updates that page before or with its recap, and whether the agent still writes nothing when nothing durable happened or the person or policy forbids a write. It compares two checkouts (arms) on the same turns in `scenarios/session-close/`.
+
+The scripted harness serves recorded replies to one prompt, so this suite adds two modules instead of using it:
+
+- `session_close.py` seeds a vault with the arm's own `init_vault` and the case's pages (`session_seed.py`, run in the arm's environment), starts the arm's real stdio server, and runs one `claude -p --input-format stream-json` process. It sends the case's user turns one after another, so the server's caches live across the session. A run ends with a snapshot diff of the knowledge base.
+- `session_score.py` reads the answer key, runs the deterministic checks and the blind judge.
+
+A run holds raw observations only. It never reads the key.
+
+Layout:
+
+- `scenarios/session-close/c0N-*.json`: `id`, `title`, `suite`, `seed`, `engagement` (the `EXOMEM_PROMINENCE` level), `turns` and the `answer_key` slot. `session_of` takes the seed and turns of another case (c06 is c01 at `light`).
+- `scenarios/session-close/seeds/<seed>/`: the seeded pages, with paths relative to the knowledge base. They are invented data with fixed `exomem_id` values.
+
+The answer key is `null` until its writer fills it. `session-score` refuses to score while any case in the runs has no key, and refuses a key that names a page outside the seed. The shape (fields only, no values) is in the `session_score.py` docstring.
+
+Run it:
+
+1. Run `python -m benchmarks.import_guidance run --suite session-close --product-root baseline=<checkout> --product-root candidate=<checkout> --model sonnet --repeats 2 --out <dir outside every repository>` from the repository root, with `PYTHONPATH` unset. Add `--dry-run` to seed each case on each arm and start no agent. Add `--scenario c01` to run one case.
+2. Run `python -m benchmarks.import_guidance session-score <out>/runs.jsonl --baseline baseline --candidate candidate --out <score dir>` to get `scores.jsonl` and `report.md`.
+
+How a run is made:
+
+- The server runs with `PYTHONPATH=<arm>/src`, a state tree under the run folder, embeddings off and `EXOMEM_PROMINENCE` set to the case's engagement. The agent reads the arm's `SKILL.md` and `references/engagement.md` as its system prompt and has the server's tools only.
+- The arm's own Stop and UserPromptSubmit hooks (from its `plugins/claude-code/hooks/hooks.json`) run with `EXOMEM_RETRIEVE_INJECT=mcp` and a hook home under the run folder.
+- The first turn waits 15 seconds so the index warm (`RETRIEVAL_INDEX_WARMING`) ends. A row counts the warming replies that remain.
+- The row holds the pages changed (as diffs), the pages created, each recap with the pages it links (`seeded`, `created`, `dangling`, `ambiguous`), where the last write of each changed page falls against the recap's write (`order`), the `compile` block of each `record_episode` reply, the hook counts and the cost.
+
+Judge: it reads the person's turns, the key's `reference` and the page diffs, and answers J1 (the changes are correct) and J2 (the changes are appropriately scoped). It never sees the arm, the model, the recap or a tool reply.
+
+Limits:
+
+- The agent has no shell, so the Stop hook's episode check never fires, because it asks only after a landing. The suite measures the hookless close.
+- The agent has `references/engagement.md` in its prompt, where a real agent would read it on demand.
+- `order` uses the last write of a page. A page written twice shows its later write.
+- Sonnet is the agent. The judge is Opus.
