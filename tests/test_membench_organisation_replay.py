@@ -21,13 +21,19 @@ import pytest
 import yaml
 from epistemic.journeys.f27_replay import AgentEnvelope
 from fastmcp import Client
+from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StdioTransport
 from membench.utility.organisation_replay import runner
 from membench.utility.organisation_replay.__main__ import main as replay_main
 from membench.utility.organisation_replay.readback import edge_review_reasons
 from membench.utility.organisation_replay.runfile import call_records, check_run, read_jsonl
 from membench.utility.organisation_replay.runner import RunConfig, bind, refuse_api_keys
-from membench.utility.organisation_replay.scripted import DoorFault, ScriptedSession, retry_after
+from membench.utility.organisation_replay.scripted import (
+    DoorFault,
+    ScriptedSession,
+    payload,
+    retry_after,
+)
 from membench.utility.organisation_replay.seed import (
     SeedBuild,
     check_seed,
@@ -405,6 +411,23 @@ def test_the_seed_resends_only_a_refusal_that_committed_nothing(status, committe
     assert retry_after({"success": False, "error": error}) == expected
 
 
+def test_a_wrapped_warm_up_refusal_is_resent():
+    # Failure caught: a warm-up refusal that FastMCP sends wrapped as {"result": ...}
+    # reads as no refusal, so the seed records a write that never landed.
+    error = {"code": "MUTATION_WARMING", "status": "retryable", "committed": False}
+    result = CallToolResult(
+        content=[],
+        structured_content={
+            "result": {"success": False, "error": {**error, "retry_after_ms": 750}}
+        },
+        meta={"fastmcp": {"wrap_result": True}},
+        data=None,
+        is_error=False,
+    )
+
+    assert retry_after(payload(result)) == 0.75
+
+
 def product_slot(tmp_path):
     """A fresh slot whose vault this checkout's product initialised, its arm spec and env.
 
@@ -438,8 +461,12 @@ def test_a_refusal_inside_a_wrapped_answer_is_a_refusal_to_the_seed_and_the_run_
                 )  # fmt: skip
             return s.tap_log
 
-    records = call_records(read_jsonl(asyncio.run(create_entity_of_unregistered_type())))
+    events = read_jsonl(asyncio.run(create_entity_of_unregistered_type()))
+    records = call_records(events)
 
+    # The product still wraps this answer; without the marker this test proves nothing.
+    last_call = [e for e in events if e.get("event") == "call"][-1]
+    assert last_call["result"]["_meta"]["fastmcp"]["wrap_result"] is True
     assert records[-1]["refusal_code"] == "ENTITY_TYPE_UNKNOWN"
 
 
