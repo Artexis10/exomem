@@ -18,7 +18,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from . import capabilities, intent_outcomes, mutation_journal, mutation_lock, request_budget, write_intents
+from . import (
+    capabilities,
+    intent_outcomes,
+    mutation_journal,
+    mutation_lock,
+    request_budget,
+    write_intents,
+)
 from .cli_ops import OpError
 
 log = logging.getLogger(__name__)
