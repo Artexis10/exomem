@@ -1238,10 +1238,12 @@ def test_a_limited_client_cannot_publish_a_public_registry_overlay(private_insta
 
     with pytest.raises(ValueError, match="WRITE_REFUSED: target is unavailable"):
         save("limited")
-    assert entity_types.load_entity_types(vault).resolve("venue") is None
+    with principal.request_scope(private_instances("full")):
+        assert entity_types.load_entity_types(vault).resolve("venue") is None
 
     assert save("full")["valid"]
-    assert entity_types.load_entity_types(vault).resolve("venue") is not None
+    with principal.request_scope(private_instances("full")):
+        assert entity_types.load_entity_types(vault).resolve("venue") is not None
 
 
 def test_prospective_selector_never_overrides_canonical_destination(private_instances, vault):

@@ -186,6 +186,23 @@ def test_every_write_door_answers_a_read_only_page_as_a_hidden_or_absent_one(con
     assert {path: (vault / path).read_bytes() for path in snapshot} == snapshot
 
 
+def test_an_adoption_run_is_a_write_only_the_unrestricted_may_start(confined, vault):
+    """`start` saves a run record in the Knowledge Base; a restricted writer's save is refused, so no run opens."""
+    _, authenticate = confined
+    runs = vault / "Knowledge Base/_Adoption/runs"
+
+    refused = {
+        kind: _call(vault, who, "adoption_studio", action="start", path="Knowledge Base/Notes")
+        for kind, who in _writers(authenticate).items() if kind in ("fenced-connector", "bound-non-owner")
+    }
+    assert all(_refused(answer) for answer in refused.values()), refused
+    assert not runs.exists()
+
+    opened = _call(vault, principal.owner_principal(surface="cli"), "adoption_studio", action="start",
+                   path="Knowledge Base/Notes")
+    assert opened.get("run_id"), opened
+
+
 def test_a_fenced_writer_cannot_declassify_its_own_page(confined, vault):
     """The page is writable before the write; bytes that would move it into another scope are refused."""
     _, authenticate = confined

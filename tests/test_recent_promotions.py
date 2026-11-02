@@ -380,10 +380,14 @@ def test_a_created_entity_names_the_page_that_led_to_it_in_its_log_entry(vault: 
     assert f"Origin: {NOTE}." in _log_entry(vault, created)
 
 
-def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Path) -> None:
+def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from granted_writer import grant_writer
+
     from exomem.governance import egress as egress_module
     from exomem.governance import membership, policy
-    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.governance.principal import library_scope, request_scope
 
     gov = vault / "Knowledge Base" / "_Governance"
     (gov / "scopes").mkdir(parents=True)
@@ -402,9 +406,14 @@ def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Pa
     membership.clear_memo()
     egress_module.clear_decision_memo()
     missing = "Knowledge Base/Notes/Insights/a-page-that-was-never-written.md"
+    # The restricted audience writes entities through a client entry; it never reads Insights.
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch, protected=[scope_id],
+        writable_paths=["Entities/**"], capture_paths=["Knowledge Base/Entities"],
+    )
 
     def create_as_external(name: str, ref: str) -> dict:
-        with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with request_scope(writer("external")):
             return commands.op_connect_memory(
                 vault, operation="create-entity", entity_type="concept", name=name,
                 summary="A synthetic accounting concept used to exercise provenance.", ref=ref,
@@ -421,7 +430,8 @@ def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Pa
         entry = _log_entry(vault, result["path"])
         assert "Origin: unknown." in entry
         assert NOTE not in entry and missing not in entry
-    assert commands._creation_origin(vault, NOTE)["path"] == NOTE, "the owner reads the page"
+    with library_scope():
+        assert commands._creation_origin(vault, NOTE)["path"] == NOTE, "the owner reads the page"
 
 
 # --------------------------------------------------------------------------- #

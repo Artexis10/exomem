@@ -165,8 +165,13 @@ def test_interrupted_protection_restore_resumes_original_proposal(configured_bou
         proposal(*args, **kwargs)
         raise OSError("process stopped after proposal insertion")
 
+    # The restore writes one document per protective scope, and the bare crash point stops after the
+    # first. "After the target write" here means after the last, so the vault holds the whole prepared state.
+    last_document = len(connector_boundary.read_requirement(vault)["protected_scopes"])
+
     def interrupted_commit(*args, **kwargs):
-        return commit(*args, **kwargs, crash_at=boundary)
+        crash = f"after_target_write:{last_document}" if boundary == "after_target_write" else boundary
+        return commit(*args, **kwargs, crash_at=crash)
 
     def interrupted_install(*args, **kwargs):
         install(*args, **kwargs)

@@ -772,8 +772,11 @@ def canonical_compiled_bytes(policy: Policy) -> bytes:
     value = {
         "schema": "exomem.compiled-policy/v1",
         "fingerprint": policy.fingerprint,
+        # `residual` joins the bytes only when set, so a policy authored before the
+        # field existed keeps the authority bytes its stored digest was taken over.
         "scopes": [
-            dataclasses.asdict(scope)
+            {key: value for key, value in dataclasses.asdict(scope).items()
+             if key != "residual" or value}
             for _scope_id, scope in sorted(policy.scopes.items())
         ],
         "rules": [dataclasses.asdict(rule) for rule in policy.rules],

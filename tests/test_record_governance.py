@@ -35,7 +35,7 @@ from exomem import (
 from exomem import note as note_module
 from exomem import structured_collections as collections
 from exomem.governance import egress, receipts
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 EXTERNAL = "external"
 
@@ -2373,7 +2373,7 @@ def test_governed_append_records_authorization_without_claiming_commit(tmp_path:
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
 
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         receipt = records.append_record(
             tmp_path,
             manifest,
@@ -2415,7 +2415,7 @@ def test_governed_append_emits_one_disclosure_receipt_at_precommit_only(tmp_path
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
 
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         records.append_record(
             tmp_path,
             manifest,
@@ -2467,7 +2467,7 @@ def test_governed_append_persists_receipt_before_publication(
 
     monkeypatch.setattr(egress.receipts, "append_event", receipt)
     monkeypatch.setattr(records.vault, "batch_atomic_write", publication)
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         records.append_record(
             tmp_path,
             manifest,
@@ -2600,7 +2600,7 @@ def test_governed_append_refuses_an_l0_future_item_before_writing(
     assert not (fixture / "Events" / f"{key}.md").exists()
 
 
-def test_governed_create_refuses_an_l0_future_source_before_writing(tmp_path: Path) -> None:
+def test_a_restricted_create_over_an_l0_future_source_is_refused_before_writing(tmp_path: Path) -> None:
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     activity = tmp_path / "Knowledge Base" / "log.md"
     activity.write_text("# Activity\n", encoding="utf-8")
@@ -2611,15 +2611,14 @@ def test_governed_create_refuses_an_l0_future_source_before_writing(tmp_path: Pa
     before = activity.read_bytes()
 
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
-        with pytest.raises(collections.CollectionError) as raised:
+        with pytest.raises(ValueError, match="^WRITE_REFUSED: target is unavailable$"):
             records.create_collection(
                 tmp_path,
                 manifest_path,
                 manifest_text,
-                why="future source must be authorized before create publication",
+                why="a restricted audience holds no write authority over the new collection",
             )
 
-    assert raised.value.code == "COLLECTION_NOT_FOUND"
     assert activity.read_bytes() == before
     assert not (tmp_path / manifest_path).exists()
     assert not (tmp_path / "Knowledge Base/Records/future/Events").exists()
@@ -2678,7 +2677,7 @@ def test_governed_replay_and_update_each_emit_one_final_receipt(tmp_path: Path) 
     }
     key = "ed6854be-c236-4cf6-9c90-18dfb8ac2544"
 
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         appended = records.append_record(tmp_path, manifest, item=item, item_key=key, why="append")
         assert _disclosure_count(tmp_path) == 1
         replayed = records.append_record(tmp_path, manifest.path, item=item, item_key=key, why="replay")
@@ -2702,7 +2701,7 @@ def test_governed_create_emits_one_final_receipt(tmp_path: Path) -> None:
     (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
 
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         records.create_collection(
             tmp_path,
             "Knowledge Base/Records/new/_collection.md",
@@ -2761,7 +2760,7 @@ def test_failed_create_receipt_leaves_all_publication_targets_unchanged(
         raise receipts.ReceiptError("simulated receipt outage")
 
     monkeypatch.setattr(egress.receipts, "append_event", receipt_failure)
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         with pytest.raises(egress.ReceiptUnavailableError):
             records.create_collection(
                 tmp_path,

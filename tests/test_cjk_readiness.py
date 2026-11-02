@@ -27,7 +27,8 @@ from epistemic.corpora.recall_japanese_vault import (
     TARGET_NOTES,
     background_notes,
 )
-from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+from granted_writer import grant_writer
+from test_governance_egress import SCOPE_ID, _external, _reset_caches, write_rule, write_scope
 from test_working_set_hot_projection import _edit, _live, _one_old_tick
 
 from exomem import (
@@ -597,13 +598,16 @@ def test_an_alias_with_a_soft_hyphen_is_refused(ja_vault: Path) -> None:
     _refused(ja_vault, "Corvane Motors", ["テッ\u00adサリー"])
 
 
-def test_an_alias_only_a_withheld_page_answers_to_reads_as_absent(ja_vault: Path) -> None:
+def test_an_alias_only_a_withheld_page_answers_to_reads_as_absent(
+    ja_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The guard decides visibility first: a caller who may not see the page
     gets the same answer as if it did not exist, and never its path."""
     write_scope(ja_vault, paths=SECRET, name="Hidden")
     write_rule(ja_vault, ceiling=0)
+    writer = _entity_writer(ja_vault, tmp_path, monkeypatch)
     _reset_caches()
-    with request_scope(_external()):
+    with request_scope(writer("external")):
         result = commands.op_connect_memory(
             ja_vault,
             operation="create-entity",
@@ -876,6 +880,14 @@ def test_japanese_activation_stays_inside_the_latency_budget(ja_vault: Path) -> 
 _FINGERPRINT = re.compile(r"candidate_fingerprint: ([0-9a-f]{64})")
 
 
+def _entity_writer(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The restricted audience as a client that may write the entity folders, and nothing it is denied."""
+    return grant_writer(
+        vault, tmp_path, monkeypatch, protected=[SCOPE_ID],
+        writable_paths=["Entities/**"], capture_paths=[f"{KB}/Entities"],
+    )
+
+
 def _alias_refusal(vault: Path, name: str, alias: str) -> str:
     """The fingerprint a refused create names for `alias`."""
     message = _refused(vault, name, [alias])
@@ -1007,21 +1019,22 @@ def test_edit_memory_takes_the_same_alias_decision(ja_vault: Path, field: str) -
 
 
 def test_a_withheld_page_never_claims_an_alias_so_no_decision_is_needed(
-    ja_vault: Path,
+    ja_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Withheld = absent: the restricted caller is neither refused nor asked to
     decide. The owner, who sees the page, is still refused without one."""
     corvane = _create_entity(ja_vault, "Corvane Motors", "The carmaker.")
     write_scope(ja_vault, paths=SECRET, name="Hidden")
     write_rule(ja_vault, ceiling=0)
+    writer = _entity_writer(ja_vault, tmp_path, monkeypatch)
     _reset_caches()
 
-    with request_scope(_external()):
+    with request_scope(writer("external")):
         result = _create_sharing(ja_vault, "Northgate Tools", "月影プロジェクト")
     assert "月影プロジェクト" in (ja_vault / result["path"]).read_text(encoding="utf-8")
 
     _reset_caches()
-    with pytest.raises(ValueError, match="ENTITY_EXISTS"):
+    with request_scope(owner_principal(surface="library")), pytest.raises(ValueError, match="ENTITY_EXISTS"):
         _patch_aliases(ja_vault, corvane, ["月影プロジェクト"])
 
 
@@ -1134,7 +1147,7 @@ def test_an_edit_binds_the_decision_to_the_claimants_too(ja_vault: Path) -> None
 
 
 def test_a_withheld_claimant_is_left_out_of_a_restricted_callers_fingerprint(
-    ja_vault: Path,
+    ja_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The shared name is held by a visible note and, once the owner adds it, a
     withheld page. The restricted caller's fingerprint covers the visible
@@ -1151,10 +1164,11 @@ def test_a_withheld_claimant_is_left_out_of_a_restricted_callers_fingerprint(
     working_set_index.WorkingSetIndex(ja_vault).update()
     write_scope(ja_vault, paths=SECRET, name="Hidden")
     write_rule(ja_vault, ceiling=0)
+    writer = _entity_writer(ja_vault, tmp_path, monkeypatch)
     _reset_caches()
 
     def restricted_refusal() -> str:
-        with request_scope(_external()):
+        with request_scope(writer("external")):
             return _refused(ja_vault, "Corvane Motors", ["ハヤブサ号"])
 
     first = restricted_refusal()

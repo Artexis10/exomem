@@ -678,11 +678,11 @@ def test_a_withheld_source_reads_exactly_like_an_absent_one(scalar_vault_root: P
     with request_scope(owner_principal(surface="mcp")):
         visible = _bulk(vault_root, [rows[1]], on_reject="skip")
     assert visible["rows"][0]["outcome"] == "inserted"
+    # A restricted audience holds no write authority, so every row is rejected on its source and nothing is written.
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
-        result = _bulk(vault_root, rows[:1] + [{**rows[1], "item": _scalar_rows(1, start=10)[0]["item"]}, rows[2]],
+        result = _bulk(vault_root, [{**rows[1], "item": _scalar_rows(1, start=10)[0]["item"]}, rows[2]],
                        on_reject="skip", expected_container_hash=visible["after_container_hash"])
-    assert result["rows"][0]["outcome"] == "inserted"
-    hidden, absent = result["rows"][1], result["rows"][2]
+    hidden, absent = result["rows"]
     assert hidden["outcome"] == absent["outcome"] == "rejected"
     assert hidden["code"] == absent["code"] == "SOURCE_NOT_FOUND"
     assert {k: v for k, v in hidden.items() if k not in {"index", "source"}} == {
