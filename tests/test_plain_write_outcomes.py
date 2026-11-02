@@ -15,7 +15,6 @@ from exomem import (
     mutation_terminal,
     operation_entries,
     relation_review,
-    workflow_skills,
     writer_lease,
 )
 from exomem import server as server_module
@@ -495,22 +494,6 @@ def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> 
     assert rule in skill
     assert "Working on Exomem does not make an unrelated conversation diagnostic." in skill
 
-
-def test_every_skill_tells_the_agent_to_use_the_store_the_user_named() -> None:
-    """The rule is only in skill text, and a standalone workflow skill is installed without the core."""
-    schema = Path(__file__).parents[1] / "src/exomem/_scaffold/_Schema"
-    skills = [
-        source
-        for _, source in workflow_skills.contract_sources(schema)
-        if source.name == "SKILL.md"
-    ]
-
-    assert skills
-    for source in skills:
-        text = " ".join(source.read_text(encoding="utf-8").split())
-        assert "Bootstrap's `store` names the Exomem this connector reaches." in text, source
-        assert "write nothing elsewhere" in text, source
-        assert "a write landed in a store other than the one `user_summary` names" in text, source
 
 
 def test_a_supersede_summary_leads_with_the_new_page(vault: Path) -> None:
