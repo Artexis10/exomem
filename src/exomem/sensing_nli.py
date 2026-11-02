@@ -1,14 +1,16 @@
-"""The `pair.relation` instrument on the admitted NLI pin.
+"""The NLI instrument on the admitted pin, for `pair.relation` and `recap.covered_by`.
 
 The same repository pin, resident-snapshot digest and local-only loader that
 admit the stance verifier (`claims.VERIFIER_PINS`), recorded as an instrument:
 
-* The template `nli-pair-v1` feeds the two unit texts as a classification pair
-  in both orders. There is no prompt and no generation, so vault text never
-  reaches instruction position.
+* The templates `nli-pair-v1` and `nli-coverage-v1` feed two texts as a
+  classification pair in both orders. There is no prompt and no generation, so
+  vault text never reaches instruction position. Both templates share one
+  loaded model; each is admitted on its own fixture set, so a coverage fixture
+  miss refuses coverage only.
 * The output is one probability vector per direction over the head's declared
   `(entailment, neutral, contradiction)` columns. The verdict is derived from
-  the rounded vectors by the versioned `relation-v1` map (`sensing`).
+  the rounded vectors by the question's versioned label map (`sensing`).
 * An input the model cannot see whole abstains (`input_too_long`) instead of
   being truncated.
 * It runs on CPU with one thread (owner ruling R5) and only inside the sensor
@@ -63,17 +65,17 @@ def runtime_version() -> str | None:
         return None
 
 
-def identity() -> sensing.InstrumentIdentity | None:
-    """The pinned instrument's identity, or None when the runtime is not installed.
+def identity(question_type: str = sensing.PAIR_RELATION) -> sensing.InstrumentIdentity | None:
+    """The pinned instrument's identity for a question, or None when the runtime is not installed.
 
     Loads nothing: the pin is repository data and the runtime version is
-    package metadata.
+    package metadata. The two questions share the model and differ in template.
     """
     pin = claims._active_pin()
     version = runtime_version()
     if pin is None or version is None:
         return None
-    entry = sensing.QUESTIONS[sensing.PAIR_RELATION]
+    entry = sensing.question(question_type)
     return sensing.InstrumentIdentity(
         model=pin.model_name,
         revision=pin.model_revision,
@@ -149,12 +151,17 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
 
     Returns `(green, detail, results)`. One miss is red: partial evidence is none.
     """
-    fixtures = sensing.RELATION_FIXTURES.get(fixture_set)
+    fixtures = sensing.fixtures(fixture_set)
     if not fixtures:
         return False, f"unknown fixture set {fixture_set!r}", []
     label_map = sensing.label_map(instrument.identity.label_map_version)
+    # A slotted fixture is read in slot order. A relation pair is unordered, so it
+    # is fed in text-hash order, as the sensor worker feeds it.
     ordered = []
     for item in fixtures:
+        if isinstance(item, sensing.CoverageFixture):
+            ordered.append((item, False, (item.premise, item.hypothesis)))
+            continue
         swap = sensing.text_sha256(item.text_b) < sensing.text_sha256(item.text_a)
         ordered.append((item, swap, (item.text_b, item.text_a) if swap else (item.text_a, item.text_b)))
     judged = instrument.judge([pair for _item, _swap, pair in ordered])
@@ -181,8 +188,9 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
                 "vectors": vectors,
             }
         )
-        if produced != item.expected or (item.expected == "refines" and refining != item.refining):
-            misses.append(f"{item.note!r}: expected {item.expected}/{item.refining}, got {produced}/{refining}")
+        wanted_refining = getattr(item, "refining", None)
+        if produced != item.expected or (item.expected == "refines" and refining != wanted_refining):
+            misses.append(f"{item.note!r}: expected {item.expected}/{wanted_refining}, got {produced}/{refining}")
     if misses:
         return False, "; ".join(misses), results
     return True, f"{len(fixtures)} fixtures green for {fixture_set!r}", results
@@ -190,6 +198,9 @@ def judge_fixtures(instrument: Any, fixture_set: str) -> tuple[bool, str, list[d
 
 _ADMITTED: dict[tuple[str, str], tuple[bool, str]] = {}
 _LOADED: dict[str, NliInstrument] = {}
+#: One resident model per pinned weights digest, shared by both templates: the
+#: weights are the only large allocation and a template adds none.
+_MODELS: dict[str, Any] = {}
 _LOCK = threading.Lock()
 
 
@@ -201,7 +212,7 @@ def _fixture_digest(ident: sensing.InstrumentIdentity) -> str:
 
     payload = json.dumps(
         [
-            [dataclasses.asdict(item) for item in sensing.RELATION_FIXTURES.get(ident.fixture_set, ())],
+            [dataclasses.asdict(item) for item in sensing.fixtures(ident.fixture_set)],
             dataclasses.asdict(sensing.label_map(ident.label_map_version)),
         ],
         sort_keys=True,
@@ -222,22 +233,56 @@ def _recorded_green(evidence_path: Path | None, key: str) -> bool:
 
 
 def _record_green(evidence_path: Path | None, key: str) -> None:
+    """Add `key` to the memo, keeping every other identity's verdict.
+
+    The memo holds one entry per admitted question, so a second question's
+    write must not erase the first's. An unreadable memo restarts empty: the
+    cost is one repeated fixture run, never a wrong admission.
+    """
     if evidence_path is None:
         return
     import json
     import os
 
     try:
+        try:
+            memo = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            memo = {}
+        if not isinstance(memo, dict):
+            memo = {}
+        memo[key] = True
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = evidence_path.with_name(evidence_path.name + f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({key: True}), encoding="utf-8")
+        tmp.write_text(json.dumps(memo, sort_keys=True), encoding="utf-8")
         os.replace(tmp, evidence_path)
     except OSError:
         log.debug("sensing: admission evidence not recorded", exc_info=True)
 
 
-def admit(evidence_path: Path | None = None) -> NliInstrument:
-    """Load and admit the pinned instrument on CPU, or raise `Refused`.
+def _build_model(snapshot: str) -> Any:
+    import torch
+    from sentence_transformers import CrossEncoder
+
+    torch.set_num_threads(1)
+    return CrossEncoder(str(Path(snapshot)), device="cpu", local_files_only=True)
+
+
+def _load_model(pin: Any, snapshot: str) -> Any:
+    """The resident CrossEncoder for a pin, loaded once per weights digest."""
+    with _LOCK:
+        cached = _MODELS.get(pin.weights_sha256)
+    if cached is not None:
+        return cached
+    model = _build_model(snapshot)
+    with _LOCK:
+        return _MODELS.setdefault(pin.weights_sha256, model)
+
+
+def admit(
+    evidence_path: Path | None = None, question_type: str = sensing.PAIR_RELATION
+) -> NliInstrument:
+    """Load and admit the pinned instrument for a question on CPU, or raise `Refused`.
 
     Only the sensor worker child calls this. The fixture run is the costly half
     of admission (about 20 CPU-seconds on one thread), so a green verdict is
@@ -249,7 +294,7 @@ def admit(evidence_path: Path | None = None) -> NliInstrument:
     pin = claims._active_pin()
     if pin is None:
         raise Refused("no-pin", "the repository pin registry is empty")
-    ident = identity()
+    ident = identity(question_type)
     if ident is None:
         raise Refused("dependency-missing", "the `nli` extra is not installed")
     try:
@@ -267,11 +312,7 @@ def admit(evidence_path: Path | None = None) -> NliInstrument:
     if loaded is not None and verdict is not None and verdict[0]:
         return loaded
     try:
-        import torch
-        from sentence_transformers import CrossEncoder
-
-        torch.set_num_threads(1)
-        model = CrossEncoder(str(Path(detail)), device="cpu", local_files_only=True)
+        model = _load_model(pin, detail)
     except Exception as error:  # noqa: BLE001 - an absent extra or bad load is a refusal
         raise Refused("dependency-missing", f"{type(error).__name__}: {error}") from None
     labels = getattr(getattr(model, "config", None), "id2label", None) or getattr(

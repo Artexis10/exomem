@@ -34,6 +34,7 @@ SETTINGS: tuple[str, ...] = ("off", "on")
 DEFAULT_SETTING = "off"
 
 PAIR_RELATION = "pair.relation"
+RECAP_COVERED_BY = "recap.covered_by"
 
 #: Placements an instrument may run in. Only `local-cpu` exists in this build.
 PLACEMENTS = frozenset({"local-cpu", "cloud-plane", "api"})
@@ -150,16 +151,8 @@ class RelationLabelMap:
         """
         if abstain_reason is not None:
             return Verdict("abstain", None, None, abstain_reason)
-        if ab is None or ba is None:
-            return None
-        try:
-            vectors = [[float(value) for value in ab], [float(value) for value in ba]]
-        except (TypeError, ValueError):
-            return None
-        width = len(self.columns)
-        if any(len(vector) != width for vector in vectors):
-            return None
-        if any(not _finite(value) for vector in vectors for value in vector):
+        vectors = _read_vectors(ab, ba, len(self.columns))
+        if vectors is None:
             return None
         entail = self.columns.index("entailment")
         neutral = self.columns.index("neutral")
@@ -182,24 +175,99 @@ def _finite(value: float) -> bool:
     return value == value and value not in (float("inf"), float("-inf"))
 
 
+def _read_vectors(
+    ab: Sequence[float] | None, ba: Sequence[float] | None, width: int
+) -> list[list[float]] | None:
+    """Two stored vectors as floats, or None when they cannot be read.
+
+    None is a refusal (missing, wrong width, non-finite), never a label.
+    """
+    if ab is None or ba is None:
+        return None
+    try:
+        vectors = [[float(value) for value in ab], [float(value) for value in ba]]
+    except (TypeError, ValueError):
+        return None
+    if any(len(vector) != width for vector in vectors):
+        return None
+    if any(not _finite(value) for vector in vectors for value in vector):
+        return None
+    return vectors
+
+
 def _p(value: float) -> float:
     return round(float(value), VECTOR_DECIMALS)
 
 
-#: Every label map this build can load. The thresholds equal the stance
-#: verifier's reviewed `v2` ones, so its fixture evidence carries over.
-LABEL_MAPS: dict[str, RelationLabelMap] = {
-    "relation-v1": RelationLabelMap(
-        version="relation-v1",
-        columns=("entailment", "neutral", "contradiction"),
-        contradicts_min=0.93,
-        restates_min=0.95,
-        refines_min=0.95,
+@dataclass(frozen=True)
+class CoverageLabelMap:
+    """`recap.covered_by`'s versioned map from two directional probability vectors.
+
+    The inputs are slotted: `ab` reads the premise (a page unit) against the
+    hypothesis (a recap claim), `ba` the reverse. Rules, in order: the unit
+    contradicts the claim; the unit entails the claim; the claim entails the
+    unit, so the unit covers only part of it (`partial`); otherwise `absent`.
+    The contradiction rule comes first so a contradiction is never read as
+    absence. `absent` means only that the head established none of the three at
+    the reviewed thresholds, never that the page cannot cover the claim.
+    """
+
+    version: str
+    columns: tuple[str, ...]
+    contradicted_min: float
+    entailed_min: float
+    partial_min: float
+    labels: tuple[str, ...] = ("entailed", "partial", "absent", "contradicted", "abstain")
+
+    def apply(
+        self,
+        ab: Sequence[float] | None,
+        ba: Sequence[float] | None,
+        *,
+        abstain_reason: str | None = None,
+    ) -> Verdict | None:
+        """The verdict for two stored vectors, or None when they cannot be read."""
+        if abstain_reason is not None:
+            return Verdict("abstain", None, None, abstain_reason)
+        vectors = _read_vectors(ab, ba, len(self.columns))
+        if vectors is None:
+            return None
+        entail = self.columns.index("entailment")
+        neutral = self.columns.index("neutral")
+        contra = self.columns.index("contradiction")
+        if vectors[0][contra] >= self.contradicted_min:
+            return Verdict("contradicted", _p(vectors[0][contra]))
+        if vectors[0][entail] >= self.entailed_min:
+            return Verdict("entailed", _p(vectors[0][entail]))
+        if vectors[1][entail] >= self.partial_min:
+            return Verdict("partial", _p(vectors[1][entail]))
+        return Verdict("absent", _p((vectors[0][neutral] + vectors[1][neutral]) / 2.0))
+
+
+_RELATION_V1 = RelationLabelMap(
+    version="relation-v1",
+    columns=("entailment", "neutral", "contradiction"),
+    contradicts_min=0.93,
+    restates_min=0.95,
+    refines_min=0.95,
+)
+
+#: Every label map this build can load. The `relation-v1` thresholds equal the
+#: stance verifier's reviewed `v2` ones, so its fixture evidence carries over.
+#: `coverage-v1` imports them rather than copying: one reviewed pair of numbers.
+LABEL_MAPS: dict[str, RelationLabelMap | CoverageLabelMap] = {
+    _RELATION_V1.version: _RELATION_V1,
+    "coverage-v1": CoverageLabelMap(
+        version="coverage-v1",
+        columns=_RELATION_V1.columns,
+        contradicted_min=_RELATION_V1.contradicts_min,
+        entailed_min=_RELATION_V1.refines_min,
+        partial_min=_RELATION_V1.refines_min,
     ),
 }
 
 
-def label_map(version: str) -> RelationLabelMap:
+def label_map(version: str) -> RelationLabelMap | CoverageLabelMap:
     if not version:
         raise ValueError("label map version is required")
     try:
@@ -230,12 +298,24 @@ class UnitScope:
 
 
 @dataclass(frozen=True)
+class Slot:
+    """One named, ordered input of a slotted question and the extractor that
+    makes its text. Its position is part of the reading's identity."""
+
+    name: str
+    extractor: str
+
+
+@dataclass(frozen=True)
 class Question:
     question_type: str
     template_version: str
     label_map_version: str
     unit_scope: UnitScope
     fixture_set: str
+    #: None for an unordered pair (`pair.relation`: inputs ordered by text
+    #: hash). Otherwise the ordered slots, which fix the input identity.
+    slots: tuple[Slot, ...] | None = None
 
 
 UNITS_V1 = UnitScope(
@@ -270,9 +350,16 @@ UNITS_V1 = UnitScope(
     ),
 )
 
-#: The registry. Later entries (`mention.same_referent`, `recap.covered_by`,
-#: ...) are specified in `add-sensed-epistemic-model` and land with their
-#: instruments; an entry exists here only once something can answer it.
+#: How a unit's text is taken from the graph before it is fed to an instrument.
+EXTRACTOR = "unit-text-v1"
+
+#: How a recap's Decided line becomes the text an instrument reads: its display
+#: text, link syntax removed (`sensed_model.recap_claims`).
+CLAIM_EXTRACTOR = "recap-claim-v1"
+
+#: The registry. Later entries (`mention.same_referent`, ...) are specified in
+#: `add-sensed-epistemic-model` and land with their instruments; an entry exists
+#: here only once something can answer it.
 QUESTIONS: dict[str, Question] = {
     PAIR_RELATION: Question(
         question_type=PAIR_RELATION,
@@ -280,6 +367,14 @@ QUESTIONS: dict[str, Question] = {
         label_map_version="relation-v1",
         unit_scope=UNITS_V1,
         fixture_set="relation-v1-multilingual",
+    ),
+    RECAP_COVERED_BY: Question(
+        question_type=RECAP_COVERED_BY,
+        template_version="nli-coverage-v1",
+        label_map_version="coverage-v1",
+        unit_scope=UNITS_V1,
+        fixture_set="recap-covered-v1",
+        slots=(Slot("premise", EXTRACTOR), Slot("hypothesis", CLAIM_EXTRACTOR)),
     ),
 }
 
@@ -295,8 +390,6 @@ def question(question_type: str) -> Question:
 # inputs: the exact text fed in, and its hash
 # ----------------------------------------------------------------------
 
-#: How a unit's text is taken from the graph before it is fed to an instrument.
-EXTRACTOR = "unit-text-v1"
 _SPACE = re.compile(r"\s+")
 
 
@@ -320,20 +413,37 @@ def ordered_hashes(hashes: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(str(value) for value in hashes))
 
 
+def _input_parts(question_type: str, hashes: Sequence[str]) -> list[Any]:
+    """What an input set contributes to an id.
+
+    An unslotted question keeps its exact payload (inputs ordered by hash, so a
+    pair is unordered), which keeps every stored `pair.relation` id stable. A
+    slotted question's `hashes` are in slot order, and each is bound to its slot
+    name and extractor, so a claim read as premise cannot collide with the same
+    text read as hypothesis.
+    """
+    entry = QUESTIONS.get(question_type)
+    if entry is None or entry.slots is None:
+        return list(ordered_hashes(hashes))
+    if len(hashes) != len(entry.slots):
+        raise ValueError(f"{question_type} takes {len(entry.slots)} inputs, got {len(hashes)}")
+    return [[slot.name, slot.extractor, str(value)] for slot, value in zip(entry.slots, hashes, strict=True)]
+
+
 def input_key(question_type: str, hashes: Sequence[str]) -> str:
     """Lookup key for the same inputs under any instrument."""
-    return _digest("input", question_type, list(ordered_hashes(hashes)))
+    return _digest("input", question_type, _input_parts(question_type, hashes))
 
 
 def reading_id(question_type: str, instrument_id: str, hashes: Sequence[str]) -> str:
-    return _digest("reading", question_type, instrument_id, list(ordered_hashes(hashes)))
+    return _digest("reading", question_type, instrument_id, _input_parts(question_type, hashes))
 
 
 def edge_fingerprint(question_type: str, hashes: Sequence[str], verdict: Verdict) -> str:
     """Binds to the inputs and the verdict, never to the reading id, so a replay
     or a re-sense that agrees yields the same fingerprint."""
     return _digest(
-        "edge", question_type, list(ordered_hashes(hashes)), verdict.label, verdict.direction
+        "edge", question_type, _input_parts(question_type, hashes), verdict.label, verdict.direction
     )[:24]
 
 
@@ -419,14 +529,19 @@ class InputUnit:
     path: str
     text_sha256: str
     extractor: str = EXTRACTOR
+    #: The slot name of a slotted question's input; None for an unordered pair.
+    slot: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "unit_ref": self.unit_ref,
             "path": self.path,
             "text_sha256": self.text_sha256,
             "extractor": self.extractor,
         }
+        if self.slot is not None:
+            data["slot"] = self.slot
+        return data
 
 
 @dataclass(frozen=True)
@@ -479,15 +594,19 @@ def make_reading(
 ) -> Reading | None:
     """One reading, with its verdict derived from the rounded vectors.
 
-    `inputs` must already be in text-hash order and `ab`/`ba` in that order.
+    An unslotted question's `inputs` must already be in text-hash order; a
+    slotted question's in slot order. `ab`/`ba` follow the same order.
     None when the vectors cannot be read (a refusal, never a label).
     """
     entry = question(question_type)
     if abstain_reason is not None and abstain_reason not in ABSTAIN_REASONS:
         raise ValueError(f"unknown abstain reason: {abstain_reason!r}")
     ordered = tuple(inputs)
-    if [item.text_sha256 for item in ordered] != list(ordered_hashes([i.text_sha256 for i in ordered])):
-        raise ValueError("inputs must be ordered by text hash")
+    if entry.slots is None:
+        if [item.text_sha256 for item in ordered] != list(ordered_hashes([i.text_sha256 for i in ordered])):
+            raise ValueError("inputs must be ordered by text hash")
+    elif [item.slot for item in ordered] != [slot.name for slot in entry.slots]:
+        raise ValueError("inputs must follow the question's slot order")
     vectors = None
     if abstain_reason is None:
         if ab is None or ba is None:
@@ -704,10 +823,158 @@ RELATION_FIXTURES: dict[str, tuple[RelationFixture, ...]] = {
 }
 
 
+@dataclass(frozen=True)
+class CoverageFixture:
+    """One (unit, claim) pair an admitted `recap.covered_by` instrument must label exactly.
+
+    `premise` is the page unit and `hypothesis` the recap claim, in slot order.
+    `twin_of` marks a negative twin: a minimally different pair that must NOT
+    receive the label of the pair it twins. All text is invented.
+    """
+
+    premise: str
+    hypothesis: str
+    expected: str
+    note: str
+    language_shape: str
+    twin_of: str | None = None
+
+
+#: Admission evidence for `recap.covered_by`, one set per question registry
+#: entry. Per label: an English pair, a same-language non-English pair, a mixed
+#: English/Estonian pair and a negative twin, so a head that keys on overlap,
+#: on English or on word order cannot pass.
+COVERAGE_FIXTURES: dict[str, tuple[CoverageFixture, ...]] = {
+    "recap-covered-v1": (
+        CoverageFixture(
+            "The backup runs every night at two in the morning.",
+            "The backup runs every night.",
+            "entailed",
+            "the unit states the claim and more",
+            "en/en",
+        ),
+        CoverageFixture(
+            "Die Sicherung läuft jede Nacht um zwei Uhr.",
+            "Die Sicherung läuft jede Nacht.",
+            "entailed",
+            "same-language German: the unit states the claim and more",
+            "de/de",
+        ),
+        CoverageFixture(
+            "The backup runs every night at two o'clock.",
+            "Varukoopia käivitub igal ööl.",
+            "entailed",
+            "mixed English/Estonian: the unit states the claim and more",
+            "en/et",
+        ),
+        CoverageFixture(
+            "The report lists the failed jobs and the cause of each failure.",
+            "The report lists the failed jobs.",
+            "entailed",
+            "twin of the English partial pair: swapped, so the unit now holds the detail",
+            "en/en",
+            twin_of="partial",
+        ),
+        CoverageFixture(
+            "The report lists the failed jobs.",
+            "The report lists the failed jobs and the cause of each failure.",
+            "partial",
+            "the claim adds a detail the unit lacks",
+            "en/en",
+        ),
+        CoverageFixture(
+            "La sauvegarde démarre chaque nuit.",
+            "La sauvegarde démarre chaque nuit à deux heures.",
+            "partial",
+            "same-language French: the claim adds a detail the unit lacks",
+            "fr/fr",
+        ),
+        CoverageFixture(
+            "The backup runs every night.",
+            "Varukoopia käivitub igal ööl kell kaks.",
+            "partial",
+            "mixed English/Estonian: the claim adds a detail the unit lacks",
+            "en/et",
+        ),
+        CoverageFixture(
+            "Der Cache reduziert die Latenz.",
+            "Der Cache reduziert die Latenz bei wiederholten Lesezugriffen.",
+            "partial",
+            "twin of the German contradiction: added detail, same stance",
+            "de/de",
+            twin_of="contradicted",
+        ),
+        CoverageFixture(
+            "Inlet pressure falls before cavitation begins.",
+            "The team adopted weekly planning on Mondays.",
+            "absent",
+            "disjoint topics",
+            "en/en",
+        ),
+        CoverageFixture(
+            "Varukoopia käivitub igal ööl.",
+            "Aruanne saadetakse kuu esimesel päeval.",
+            "absent",
+            "same-language Estonian disjoint topics",
+            "et/et",
+        ),
+        CoverageFixture(
+            "The cache reduces latency.",
+            "Varukoopia käivitub igal ööl.",
+            "absent",
+            "mixed English/Estonian disjoint topics",
+            "en/et",
+        ),
+        CoverageFixture(
+            "The backup runs every night.",
+            "The backup disk was replaced last month.",
+            "absent",
+            "twin of the English entailed pair: shared subject, unrelated claim",
+            "en/en",
+            twin_of="entailed",
+        ),
+        CoverageFixture(
+            "Raising the cache TTL reduces p99 latency.",
+            "Raising the cache TTL increases p99 latency.",
+            "contradicted",
+            "genuine contradiction, shared vocabulary",
+            "en/en",
+        ),
+        CoverageFixture(
+            "Der Cache reduziert die Latenz.",
+            "Der Cache erhöht die Latenz.",
+            "contradicted",
+            "same-language German contradiction",
+            "de/de",
+        ),
+        CoverageFixture(
+            "The cache reduces latency.",
+            "Vahemälu suurendab latentsust.",
+            "contradicted",
+            "mixed English/Estonian contradiction",
+            "en/et",
+        ),
+        CoverageFixture(
+            "The backup runs every night at two in the morning.",
+            "The backup never runs at night.",
+            "contradicted",
+            "twin of the English entailed pair: negated instead of restated",
+            "en/en",
+            twin_of="entailed",
+        ),
+    ),
+}
+
+
+def fixtures(fixture_set: str) -> tuple[RelationFixture | CoverageFixture, ...]:
+    """The fixtures of a named set, whichever question owns it. Empty when unknown."""
+    return RELATION_FIXTURES.get(fixture_set) or COVERAGE_FIXTURES.get(fixture_set) or ()
+
+
 def fixture_counts(fixture_set: str) -> dict[str, int]:
     """Fixture pairs per expected label: the size of each label's evidence."""
     counts: dict[str, int] = {}
-    for item in RELATION_FIXTURES.get(fixture_set, ()):
+    for item in fixtures(fixture_set):
         counts[item.expected] = counts.get(item.expected, 0) + 1
     return counts
 

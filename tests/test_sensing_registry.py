@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import sensing_fixture as sx
 
 from exomem import sensing
 
 MAP = sensing.label_map("relation-v1")
+COVERAGE = sensing.label_map("coverage-v1")
 
 
 def _v(entail: float, neutral: float, contra: float) -> list[float]:
@@ -224,3 +226,145 @@ def test_the_config_memo_follows_the_config_path(tmp_path: Path, monkeypatch) ->
     monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(on))
     assert sensing.enabled() is True
     sensing.clear_memo()
+
+
+@pytest.mark.parametrize(
+    ("ab", "ba", "label"),
+    [
+        (_v(0.97, 0.02, 0.01), _v(0.30, 0.60, 0.10), "entailed"),
+        (_v(0.30, 0.60, 0.10), _v(0.98, 0.01, 0.01), "partial"),
+        (_v(0.20, 0.70, 0.10), _v(0.30, 0.60, 0.10), "absent"),
+        # A contradiction is never read as absence, even when the claim also
+        # entails the unit: the first rule wins.
+        (_v(0.01, 0.02, 0.97), _v(0.98, 0.01, 0.01), "contradicted"),
+    ],
+)
+def test_coverage_map_rules_in_order(ab, ba, label) -> None:
+    verdict = COVERAGE.apply(ab, ba)
+    assert verdict is not None and verdict.label == label
+
+
+def test_coverage_thresholds_are_the_relation_ones_not_a_copy() -> None:
+    assert COVERAGE.contradicted_min == MAP.contradicts_min
+    assert COVERAGE.entailed_min == MAP.refines_min
+    assert COVERAGE.partial_min == MAP.refines_min
+    assert COVERAGE.apply(_v(0, 0.07, 0.93), _v(0, 1, 0)).label == "contradicted"
+    assert COVERAGE.apply(_v(0.949999, 0.05, 0.000001), _v(0.2, 0.7, 0.1)).label == "absent"
+    assert COVERAGE.apply(None, _v(0.3, 0.3, 0.4)) is None
+    assert COVERAGE.apply(None, None, abstain_reason="input_too_long").label == "abstain"
+
+
+def test_pair_relation_ids_are_unchanged_and_slotted_ids_are_not_unordered() -> None:
+    """Golden values taken from the build before slots existed: a stored
+    `pair.relation` reading must keep its id. A slotted question binds each
+    hash to its slot, so a claim read as premise never collides with the same
+    text read as hypothesis."""
+    a, b = "a" * 64, "b" * 64
+    q = sensing.PAIR_RELATION
+    assert sensing.reading_id(q, "inst", [a, b]) == (
+        "c708d42c6b7275683e6d36093ede91e0e37bac39969434c79bcaa2677d3ff259"
+    )
+    assert sensing.input_key(q, [a, b]) == (
+        "7006a129716bbb043a4bedeadc4538964b1e3f12b426553ef3128b425427a212"
+    )
+    assert sensing.edge_fingerprint(q, [a, b], sensing.Verdict("refines", 0.99, "ab")) == (
+        "ee18253a6399d21cf58f3772"
+    )
+    assert _identity(
+        model="m", revision="r", weights_sha256="w" * 64, runtime="rt", runtime_version="1"
+    ).instrument_id == "2cce82d7f88c231d64c503f879b96c118e0f295d1421fad8d468b7bb7987da1a"
+    cover = sensing.RECAP_COVERED_BY
+    assert sensing.reading_id(cover, "inst", [a, b]) != sensing.reading_id(cover, "inst", [b, a])
+    assert sensing.input_key(cover, [a, b]) != sensing.input_key(cover, [b, a])
+
+
+def test_a_slotted_reading_keeps_slot_order_whatever_the_hash_order() -> None:
+    premise, claim = "Seal wear doubles.", "Seals wear faster."
+    inputs = [
+        sensing.InputUnit("u1", "p.md", sensing.text_sha256(premise), slot="premise"),
+        sensing.InputUnit("recap", "r.md", sensing.text_sha256(claim), extractor="recap-claim-v1", slot="hypothesis"),
+    ]
+    reading = sensing.make_reading(
+        sensing.RECAP_COVERED_BY,
+        sx.COVERAGE_STUB,
+        inputs,
+        ab=sx.ENTAIL,
+        ba=sx.WEAK,
+        abstain_reason=None,
+        sensed_at="2026-11-02T00:00:00Z",
+    )
+    assert reading is not None and reading.verdict.label == "entailed"
+    assert [item["slot"] for item in (i.as_dict() for i in reading.inputs)] == ["premise", "hypothesis"]
+    with pytest.raises(ValueError):
+        sensing.make_reading(
+            sensing.RECAP_COVERED_BY, sx.COVERAGE_STUB, list(reversed(inputs)),
+            ab=sx.ENTAIL, ba=sx.WEAK, abstain_reason=None, sensed_at="t",
+        )
+    assert "slot" not in sensing.InputUnit("u", "p.md", "h").as_dict()
+
+
+def test_coverage_fixtures_are_read_in_slot_order_and_a_miss_is_red() -> None:
+    from exomem import sensing_nli
+
+    green, detail, results = sensing_nli.judge_fixtures(sx.CoverageStubInstrument(sx.coverage_table()), "recap-covered-v1")
+    assert green, detail
+    assert len(results) == len(sensing.COVERAGE_FIXTURES["recap-covered-v1"])
+    # A reader that swaps premise and hypothesis (the pair.relation hash order) reads
+    # `partial` as `entailed`: one miss is red.
+    swapped = {(h, p): label for (p, h), label in sx.coverage_table().items()}
+    red, detail, _ = sensing_nli.judge_fixtures(sx.CoverageStubInstrument(swapped), "recap-covered-v1")
+    assert not red and "expected" in detail
+
+
+def test_coverage_fixtures_cover_every_label_in_three_language_shapes_with_a_twin() -> None:
+    fixtures = sensing.COVERAGE_FIXTURES["recap-covered-v1"]
+    for label in ("entailed", "partial", "absent", "contradicted"):
+        own = [item for item in fixtures if item.expected == label]
+        assert any(item.language_shape == "en/en" and not item.twin_of for item in own)
+        assert any(item.language_shape.split("/")[0] != item.language_shape.split("/")[1] for item in own)
+        assert any(item.twin_of for item in own)
+        assert all(item.expected != item.twin_of for item in own)
+    assert len({(i.premise, i.hypothesis) for i in fixtures}) == len(fixtures)
+
+
+def _stub_admission(monkeypatch, green_sets: set[str]) -> list[str]:
+    """Admission with no model: a counted loader and fixture runs that go green for `green_sets`."""
+    from exomem import claims, sensing_nli
+
+    built: list[str] = []
+    monkeypatch.setattr(sensing_nli, "runtime_version", lambda: "stub=1")
+    monkeypatch.setattr(claims, "_resolve_weights", lambda pin: (pin.weights_sha256, "snapshot"))
+    monkeypatch.setattr(sensing_nli, "_build_model", lambda snapshot: built.append(snapshot) or object())
+    for cache in ("_ADMITTED", "_LOADED", "_MODELS"):
+        monkeypatch.setattr(sensing_nli, cache, {})
+    monkeypatch.setattr(
+        sensing_nli, "judge_fixtures", lambda _instrument, fixture_set: (fixture_set in green_sets, "stub", [])
+    )
+    return built
+
+
+def test_a_coverage_fixture_miss_refuses_coverage_only_and_the_model_loads_once(tmp_path, monkeypatch) -> None:
+    from exomem import sensing_nli
+
+    built = _stub_admission(monkeypatch, {"relation-v1-multilingual"})
+    evidence = tmp_path / "admission.json"
+    relation = sensing_nli.admit(evidence_path=evidence)
+    with pytest.raises(sensing_nli.Refused) as refused:
+        sensing_nli.admit(evidence_path=evidence, question_type=sensing.RECAP_COVERED_BY)
+    assert refused.value.reason == "fixtures-failed"
+    assert sensing_nli.admit(evidence_path=evidence) is relation
+    assert len(built) == 1
+
+
+def test_the_admission_memo_keeps_every_admitted_question(tmp_path, monkeypatch) -> None:
+    import json
+
+    from exomem import sensing_nli
+
+    _stub_admission(monkeypatch, {"relation-v1-multilingual", "recap-covered-v1"})
+    evidence = tmp_path / "admission.json"
+    sensing_nli.admit(evidence_path=evidence)
+    sensing_nli.admit(evidence_path=evidence, question_type=sensing.RECAP_COVERED_BY)
+    ids = {sensing_nli.identity(q).instrument_id for q in (sensing.PAIR_RELATION, sensing.RECAP_COVERED_BY)}
+    assert len(ids) == 2
+    assert {key.split(":")[0] for key in json.loads(evidence.read_text())} == ids

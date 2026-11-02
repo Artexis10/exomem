@@ -38,6 +38,23 @@ def test_the_exact_pin_admits_every_relation_fixture_on_cpu() -> None:
     assert len(results) == len(sensing.RELATION_FIXTURES[identity.fixture_set])
 
 
+def test_the_exact_pin_admits_every_coverage_fixture_on_cpu() -> None:
+    pin = claims.VERIFIER_PINS[0]
+    sensing_nli._ADMITTED.clear()
+    sensing_nli._LOADED.clear()
+    instrument = sensing_nli.admit(question_type=sensing.RECAP_COVERED_BY)
+    identity = instrument.identity
+    assert identity.weights_sha256 == pin.weights_sha256
+    assert identity.template_version == "nli-coverage-v1"
+    green, detail, results = sensing_nli.judge_fixtures(instrument, identity.fixture_set)
+    for item, result in zip(sensing.COVERAGE_FIXTURES[identity.fixture_set], results, strict=True):
+        print(result["expected"], result["produced"], result["vectors"], item.language_shape, item.note)
+    assert green, detail
+    assert len(results) == len(sensing.COVERAGE_FIXTURES[identity.fixture_set])
+    relation = sensing_nli.admit()
+    assert relation._model is instrument._model, "both templates must share one resident model"
+
+
 def test_the_instrument_abstains_instead_of_truncating() -> None:
     instrument = sensing_nli.admit()
     long_text = " ".join(["The pump runs cool under a steady load."] * 200)

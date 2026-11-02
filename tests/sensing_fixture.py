@@ -43,6 +43,17 @@ STUB = sensing.InstrumentIdentity(
     fixture_set="relation-v1-multilingual",
 )
 
+COVERAGE_STUB = sensing.InstrumentIdentity(
+    model="stub/recap-coverage",
+    revision="1",
+    weights_sha256="0" * 64,
+    runtime="stub",
+    runtime_version="1",
+    template_version="nli-coverage-v1",
+    label_map_version="coverage-v1",
+    fixture_set="recap-covered-v1",
+)
+
 #: The served bge-m3 fingerprint (`EncoderProfile.fingerprint()` of the pinned int8
 #: artefact), the one space `sensed_model.COSINE_THETA` calibrates.
 ENCODER = "BAAI/bge-m3|cls|l2|74068c180d6514e8"
@@ -78,6 +89,44 @@ class StubInstrument:
             else:
                 out.append((NEUTRAL, NEUTRAL, None))
         return out
+
+
+class CoverageStubInstrument:
+    """`table[(unit, claim)] = label` for the labels `entailed`, `partial` and
+    `contradicted`. Every other pair is `absent`.
+
+    Directional like the real head: `ab` reads the unit as premise and the claim
+    as hypothesis, `ba` the reverse. A fixture swapped into text-hash order
+    therefore reads as the opposite label.
+    """
+
+    def __init__(self, table: dict[tuple[str, str], str] | None = None, identity=COVERAGE_STUB) -> None:
+        self.identity = identity
+        self.table = dict(table or {})
+        self.calls: list[tuple[str, str]] = []
+
+    def judge(self, pairs):
+        out = []
+        for premise, hypothesis in pairs:
+            self.calls.append((premise, hypothesis))
+            label = self.table.get((premise, hypothesis))
+            if label == "entailed":
+                out.append((ENTAIL, WEAK, None))
+            elif label == "partial":
+                out.append((WEAK, ENTAIL, None))
+            elif label == "contradicted":
+                out.append((CONTRA, WEAK, None))
+            else:
+                out.append((NEUTRAL, NEUTRAL, None))
+        return out
+
+
+def coverage_table() -> dict[tuple[str, str], str]:
+    """The recap-covered-v1 fixtures as the table that answers them exactly."""
+    return {
+        (item.premise, item.hypothesis): item.expected
+        for item in sensing.COVERAGE_FIXTURES["recap-covered-v1"]
+    }
 
 
 def default_table() -> dict[tuple[str, str], str]:
