@@ -1,1 +1,1 @@
-{"public_key":"cloud-production-v2.public.pem","public_key_sha256":"ab96038e84ecf3dcd052529315775fa424fb4d41ebc543c5a7fc5eaa596a00ff","registry":"cloud-production-v2.json","registry_sha256":"e8add93629f2c8799b8818ef3a6daf5db2db9a0a18f5db6ea640f18552dd386b","schema_version":1}
+{"public_key":"cloud-production-v2.public.pem","public_key_sha256":"ab96038e84ecf3dcd052529315775fa424fb4d41ebc543c5a7fc5eaa596a00ff","registry":"cloud-production-v2.json","registry_sha256":"cf60e096d5ad151bce11eefad05937d75fd5a868097fe207321352dc678e845f","schema_version":1}

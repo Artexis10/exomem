@@ -104,7 +104,8 @@ async def test_reconcile_prepare_survives_restart_with_real_c5(cell_db):
         # The bucket the controller presigns for is the one the Job checks its URLs against.
         job_env = {entry["name"]: entry.get("value")
                    for entry in cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["env"]}
-        assert job_env["EXOMEM_CLOUD_OBJECT_STORE_BUCKET"] == _cluster_config().object_storage_bucket
+        assert job_env["EXOMEM_CLOUD_OBJECT_STORE_BUCKET"] == _cluster_config().cell_data_staging_bucket
+        assert job_env["EXOMEM_CLOUD_OBJECT_STORE_ENDPOINT"] == _cluster_config().cell_data_endpoint
         jobs["prepare"] = ImportJob(succeeded=True, report={"recipient": "age1" + "a" * 58})
         await reconcile.reconcile_once(controller, cluster, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert (await db.read_import(controller, CELL)).observed_state == "key_ready"

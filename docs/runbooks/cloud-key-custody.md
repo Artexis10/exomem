@@ -96,10 +96,21 @@ import object left in the old bucket is orphaned.
    `kubectl annotate namespace exomem-key-custody meta.helm.sh/release-name=exomem-platform meta.helm.sh/release-namespace=exomem-platform`
 5. Set `EXOMEM_ACTIVE_SECRET_REGISTRY` and `EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY` to the
    `cloud-production-v2` pair under `infra/contracts/active-secret-registries/`. It adds the three
-   cell-data credentials.
-6. Run the secret apply in `docs/runbooks/cloud-platform-deploy.md`. Expect 18 verified destinations.
+   cell-data credentials and drops `exomem-cloud-b2-key-management`. Dropping a destination does not delete
+   its Secret, so the running `cellctl` keeps its key until step 12.
+6. Run the secret apply in `docs/runbooks/cloud-platform-deploy.md`. Expect 17 verified destinations.
 7. Set the chart values from the `infra/terraform/cell-data` outputs: `cellData.backupBucketName`,
    `cellData.backupBucketId`, `cellData.stagingBucketName`, and `cellData.endpoint`, the account's S3
    endpoint (`s3ApiUrl` from `b2_authorize_account`). Set `keyCustodian.enabled=true`.
 8. Run the Helm upgrade in `docs/runbooks/cloud-platform-deploy.md`. Expect the key custodian pod to be
    ready on the control-plane node, and each new cell to receive the Secret `cell-object-store-key`.
+9. Wait until the new `cellctl` is healthy: its heartbeat is fresh and its pod does not restart.
+10. Plan the durability root with `infra/scripts/plan.sh durability <plan>`. Expect exactly one destroy,
+    `b2_application_key.cloud_controller[0]`. The bucket's CORS header casing can show as an in-place update.
+11. With the operator's approval, apply that plan. This deletes the old account-wide key at the provider.
+    `infra/scripts/apply_saved_plan.sh durability <plan> --allow-destructive 'b2_application_key.cloud_controller[0]'`
+12. Delete the old controller Secret.
+    `kubectl delete secret exomem-cloud-b2-key-management --namespace exomem-cloud`
+13. Retire its SOPS artifact through the [retirement disposal](cloud-hosted-retirement.md).
+14. Remove the deleted key's ID from the founder account in the key watcher's pinned set, then run the watcher
+    once. Expect `0 active` for both accounts. No key that can create keys is now reachable from the cluster.
