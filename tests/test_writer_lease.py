@@ -2144,7 +2144,7 @@ def test_reserved_identity_guard_does_not_fsync_diagnostic_holder_metadata(
         pass
 
     assert first_generation != second_generation
-    assert read_generation == second_generation
+    assert read_generation is None  # the domain-only path reads no token
     assert observed_generation == second_generation
 
 
@@ -2165,10 +2165,12 @@ def test_reserved_identity_owner_acquires_gate_before_its_domain(
             entered.append(self.identity)
             yield self
 
+        try_hold = hold
+
     monkeypatch.setattr(
         manager,
         "_mutation_coordinator_for",
-        lambda identity: RecordingCoordinator(str(identity)),
+        lambda identity, **_labels: RecordingCoordinator(str(identity)),
     )
 
     with manager.reserved_identity_guard(
