@@ -36,11 +36,13 @@ from .kbdir import kb_dirname, kb_prefix
 from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
+    LogEntry,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
     kb_root,
     parse_frontmatter,
+    plan_log_entries,
     prepend_log_entry,
     resolve_under_vault,
     unique_path,
@@ -978,9 +980,9 @@ def commit_import_items(
                 root,
                 top_index_text=top_text,
                 pending_paths=[row["source_path"] for row in copied],
+                include_sources_index=False,  # The Sources index write above supplies that page.
                 sources_counts=pre_counts,
             )
-            sub_writes = [write for write in sub_writes if write.path != sources_index]
             writes.append(
                 PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8"))
             )
@@ -990,30 +992,27 @@ def commit_import_items(
         else:
             warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
-        log_file = kb / "log.md"
-        if log_file.exists():
-            body_lines = [
-                f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
-                "",
-            ]
-            for row in copied:
-                body_lines.append(
-                    f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}"
-                )
-            writes.append(
-                PlannedWrite(
-                    path=log_file,
-                    content=prepend_log_entry(
-                        log_file.read_text(encoding="utf-8"),
-                        date_iso=date_iso,
-                        op="adopt-copy",
-                        rel_path_no_ext=f"{kb_prefix()}Sources",
-                        body="\n".join(body_lines),
-                    ),
-                )
+        body_lines = [
+            f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
+            "",
+        ]
+        for row in copied:
+            body_lines.append(
+                f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}"
             )
-        else:
-            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+        # Planned like any other log write, so a long import rotates the live log instead of growing it.
+        log_plan = plan_log_entries(
+            root,
+            [LogEntry(date_iso, "adopt-copy", f"{kb_prefix()}Sources", "\n".join(body_lines))],
+            operation_token=hashlib.sha256(
+                "\n".join(row["source_path"] for row in copied).encode("utf-8")
+            ).hexdigest(),
+        )
+        writes.extend(log_plan.writes)
+        if log_plan.warning is not None:
+            warnings.append(log_plan.warning)
+        if log_plan.rotation_note is not None:
+            warnings.append(log_plan.rotation_note)
 
         writes.extend(extra_writes)
 

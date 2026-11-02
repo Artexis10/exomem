@@ -1807,11 +1807,18 @@ class _ApplyPacer:
     A call never starts a chunk whose predicted cost does not fit in the time left
     before the delivery reserve, after the fan-out the call already owes past the
     loop. A chunk costs its items, its bytes and its media requests. Costs are those
-    this call has measured, not a past call's, and each rate is the dearest seen so
-    far: chunk cost swings several-fold with media artifacts and a contended index,
-    so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
+    this call has measured, not a past call's, and the byte and media rates are the
+    dearest seen so far: chunk cost swings several-fold with media artifacts and a
+    contended index, so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
     of this call's chunks and nothing after it. Notes are the exception: `_create_notes`
     sizes a call's first batch of notes on the price that the run's last call recorded.
+
+    A commit also costs a fixed part that does not depend on its size, and that part grows
+    with the vault. Once two chunks of different sizes are timed, an item is priced at the
+    fitted marginal rate and the commit at the dearest fixed part consistent with it. A
+    chunk may then last up to twice its fixed part: shrinking a chunk below that only adds
+    commits, each paying the fixed part again, until a chunk of one item costs more than
+    the call can file.
     """
 
     def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
@@ -1820,6 +1827,8 @@ class _ApplyPacer:
         self._root = root
         self._budget = budget
         self._item_seconds: float | None = None
+        self._commit_seconds = 0.0
+        self._item_chunks: list[tuple[int, float]] = []
         self._mib_seconds: float | None = None
         self._extraction_seconds: float | None = None
         self._deferred_artifacts = 0
@@ -1869,7 +1878,10 @@ class _ApplyPacer:
             INITIAL_EXTRACTION_SECONDS if self._extraction_seconds is None
             else self._extraction_seconds
         )
-        return len(chunk) * item + self._mib(chunk) * per_mib + self._media(chunk) * extraction
+        return (
+            self._commit_seconds + len(chunk) * item + self._mib(chunk) * per_mib
+            + self._media(chunk) * extraction
+        )
 
     def _room(self, chunk: list[dict]) -> float:
         """Seconds the chunk may take: what is left, less the reserve and the call's debts."""
@@ -1881,8 +1893,14 @@ class _ApplyPacer:
 
     def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
         """The next chunk, trimmed to fit; empty when none fits. The first is never empty."""
-        share = APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds
-        chunk = _take_chunk(pending, APPLY_CHUNK_ITEMS)
+        share = max(APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds, 2 * self._commit_seconds)
+        limit = APPLY_CHUNK_ITEMS
+        timed = {size for size, _ in self._item_chunks}
+        if len(timed) == 1 and min(APPLY_CHUNK_ITEMS, 2 * next(iter(timed))) not in timed:
+            # A second size, twice the first, so the fit can tell the fixed part from the per-item rate.
+            limit = min(APPLY_CHUNK_ITEMS, 2 * next(iter(timed)))
+            share = float("inf")
+        chunk = _take_chunk(pending, limit)
         cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         while len(chunk) > 1 and cost > allowed:
             chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
@@ -1906,12 +1924,35 @@ class _ApplyPacer:
         if mib >= BYTE_RATE_MIN_ITEM_MIB * len(chunk):
             self._mib_seconds = self._tracked(self._mib_seconds, committing / mib)
         else:
-            self._item_seconds = self._tracked(self._item_seconds, committing / len(chunk))
+            self._item_chunks.append((len(chunk), committing))
+            self._price_items()
         if extractions:
             self._extraction_seconds = self._tracked(
                 self._extraction_seconds, sum(extractions) / len(extractions)
             )
             self._deferred_artifacts += len(extractions)
+
+
+    def _price_items(self) -> None:
+        """Split the item chunks' seconds into a fixed commit part and a marginal per-item rate.
+
+        Until two sizes are timed, the whole cost is priced per item, at the dearest rate seen.
+        """
+        sizes = [size for size, _ in self._item_chunks]
+        if len(set(sizes)) < 2:
+            self._item_seconds = max(seconds / size for size, seconds in self._item_chunks)
+            self._commit_seconds = 0.0
+            return
+        mean_size = sum(sizes) / len(sizes)
+        mean_seconds = sum(seconds for _, seconds in self._item_chunks) / len(sizes)
+        spread = sum((size - mean_size) ** 2 for size in sizes)
+        slope = sum((size - mean_size) * (seconds - mean_seconds) for size, seconds in self._item_chunks) / spread
+        self._item_seconds = max(slope, 0.0)
+        # The dearest fixed part with that rate, never below zero: no timed chunk, and no smaller one, is priced
+        # cheaper than it ran, so the room check still stops a call that has run out of time.
+        self._commit_seconds = max(
+            0.0, *(seconds - size * self._item_seconds for size, seconds in self._item_chunks)
+        )
 
 
 def _custody_batches(chunk: list[dict]) -> int:

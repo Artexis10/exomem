@@ -1148,6 +1148,62 @@ def test_an_apply_finds_a_source_another_run_filed_since_the_plan_and_files_no_d
     assert len(filed) == 2
 
 
+@pytest.mark.parametrize(("fixed", "per_item", "at_least"), [(8.0, 0.18, 50), (1.2, 0.025, 500)])
+def test_a_commit_cost_that_does_not_depend_on_chunk_size_does_not_shrink_a_calls_chunks_to_one_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixed: float, per_item: float, at_least: int,
+) -> None:
+    """A large import's commits pay a fixed cost that grows with the vault; priced per item, it cut chunks to one item.
+
+    The Cloud rehearsal filed 17 notes per 50 s call at 12,500 to 15,000 Sources this way. The cheap case is
+    a small vault, which must keep filing as many items per call as before.
+    """
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(request_budget, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(writer_lease, "active_derived_batch_custody", lambda root: True)
+    monkeypatch.setattr(
+        writer_lease, "owed_custody_handoff_seconds",
+        lambda root, more_batches: adoption_run.CUSTODY_RESERVE_FLOOR_SECONDS,
+    )
+    pacer = adoption_run._ApplyPacer(
+        tmp_path, request_budget.RequestBudget(seconds=50.0, entry=clock["now"]),
+    )
+    pending = [{"form": "text", "original_bytes": 1500} for _ in range(5000)]
+    filed = 0
+    while chunk := pacer.next_chunk(pending[filed:], first=not filed):
+        elapsed = fixed + per_item * len(chunk)
+        clock["now"] += elapsed
+        pacer.record(chunk, elapsed, [])
+        filed += len(chunk)
+
+    assert filed >= at_least
+
+
+def test_a_chunk_that_ran_slower_than_its_size_does_not_let_the_pacer_start_a_chunk_past_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Own notes after attachments can make a chunk run far longer than its size ratio.
+
+    A fit through such chunks gave a negative fixed part, a negative price, and a commit started after the budget ran out.
+    """
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(request_budget, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(writer_lease, "active_derived_batch_custody", lambda root: True)
+    monkeypatch.setattr(
+        writer_lease, "owed_custody_handoff_seconds",
+        lambda root, more_batches: adoption_run.CUSTODY_RESERVE_FLOOR_SECONDS,
+    )
+    pacer = adoption_run._ApplyPacer(
+        tmp_path, request_budget.RequestBudget(seconds=50.0, entry=clock["now"]),
+    )
+    pending = [{"form": "text", "original_bytes": 1500} for _ in range(100)]
+    for size, seconds in ((9, 1.0), (18, 15.0)):
+        pacer.record(pending[:size], seconds, [])
+
+    clock["now"] += 51.0
+
+    assert pacer.next_chunk(pending, first=False) == []
+
+
 def test_a_fast_acknowledged_call_reserves_the_custody_handoff_it_measured_between_a_floor_and_a_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
