@@ -171,7 +171,7 @@ def test_a_resend_after_the_intent_committed_returns_its_terminal_and_no_second_
     journal.finish(first["intent_id"], "committed", terminal=terminal)
 
     again = _remember(manager, vault, kwargs, idempotency_key="done-key")
-    assert again == terminal
+    assert again == {**terminal, "intent_id": first["intent_id"]}
     assert not journal.non_terminal()
     assert not list(vault.rglob("accepted-save-4*.md"))
 

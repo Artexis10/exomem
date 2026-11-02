@@ -28,6 +28,7 @@ CAUSE_IDENTITY_CONFLICT = "identity_conflict"
 CAUSE_OUTCOME_UNKNOWN = "outcome_unknown"
 CAUSE_APPLY_FAILED = "apply_failed"
 CAUSE_STALLED = "stalled"
+CAUSE_BOUNDARY_HELD = "boundary_held"
 
 CAUSE_REVOKED = "authorization_revoked"
 CAUSE_EXPIRED = "authorization_expired"
@@ -107,6 +108,8 @@ def is_precommit_code(code: str | None) -> bool:
 
 def accept_cause(code: str | None) -> str | None:
     """Why a precommit refusal made the write journal, as a cause and never as the error code."""
+    if code == "MUTATION_BUSY":  # the one closed protocol code for a plain held boundary; a cause on it wins upstream
+        return CAUSE_BOUNDARY_HELD
     outcome = _WAITS.get(code or "")
     return None if outcome is None else outcome.accept_cause
 
