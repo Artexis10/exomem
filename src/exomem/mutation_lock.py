@@ -118,7 +118,7 @@ _COORDINATOR_BUSY_MESSAGE = {
 }
 _COORDINATOR_KINDS = frozenset(_COORDINATOR_BUSY_MESSAGE)
 
-# One entry per coordinator: a command that holds the vault boundary reads that hold, and a
+# One entry per vault-boundary coordinator: a command that holds the vault boundary reads that hold, and a
 # later hold of the reserved-identity gate, a domain or a review-state lock cannot replace it.
 _LAST_MUTATION_TIMING: ContextVar[Mapping[Path, MutationTiming]] = ContextVar(
     "exomem_last_mutation_timing", default=MappingProxyType({})
@@ -142,19 +142,32 @@ def last_mutation_timing(coordinator: VaultMutationCoordinator | None = None) ->
 logger = logging.getLogger(__name__)
 
 
-def _forget_timing(lock_path: Path) -> None:
+# Cap on remembered coordinators per context. Each hold copies the map, so the cap bounds the cost
+# per hold; 64 is far above the few vault boundaries one request reads and small enough to copy cheaply.
+_MAX_TIMING_COORDINATORS = 64
+
+
+def _forget_timing(coordinator: VaultMutationCoordinator) -> None:
     """Clear this coordinator's prior hold and the latest, so an attempt that fails journals none."""
     _LATEST_MUTATION_TIMING.set(None)
+    if coordinator.kind != COORDINATOR_VAULT_BOUNDARY:
+        return
     timings = _LAST_MUTATION_TIMING.get()
-    if lock_path in timings:
-        _LAST_MUTATION_TIMING.set(MappingProxyType({k: v for k, v in timings.items() if k != lock_path}))
+    if coordinator.lock_path in timings:
+        _LAST_MUTATION_TIMING.set(
+            MappingProxyType({k: v for k, v in timings.items() if k != coordinator.lock_path})
+        )
 
 
-def _record_timing(lock_path: Path, timing: MutationTiming) -> None:
-    """Make `timing` this coordinator's latest, and the latest of all."""
+def _record_timing(coordinator: VaultMutationCoordinator, timing: MutationTiming) -> None:
+    """Make `timing` the latest of all, and the vault boundary's own latest."""
     _LATEST_MUTATION_TIMING.set(timing)
-    timings = {k: v for k, v in _LAST_MUTATION_TIMING.get().items() if k != lock_path}
-    timings[lock_path] = timing
+    if coordinator.kind != COORDINATOR_VAULT_BOUNDARY:
+        return
+    timings = {k: v for k, v in _LAST_MUTATION_TIMING.get().items() if k != coordinator.lock_path}
+    timings[coordinator.lock_path] = timing
+    while len(timings) > _MAX_TIMING_COORDINATORS:
+        del timings[next(iter(timings))]
     _LAST_MUTATION_TIMING.set(MappingProxyType(timings))
 
 
@@ -2495,7 +2508,7 @@ class VaultMutationCoordinator:
         wait_start = time.monotonic()
         # Clear any prior hold's timing so a mutation that fails BEFORE
         # acquiring can never journal a previous mutation's wait/hold values.
-        _forget_timing(self.lock_path)
+        _forget_timing(self)
         deadline = wait_start + timeout
         state = _state_for(self.lock_path)
         _note_acquire_attempt(state)
@@ -2586,7 +2599,7 @@ class VaultMutationCoordinator:
                 # The part of `hold_ms` that borrowers held (`lend`), so a long hold reads honestly.
                 lent_ms = round(state.lent_seconds * 1000, 2)
                 _record_timing(
-                    self.lock_path,
+                    self,
                     {
                         "wait_ms": wait_ms,
                         "hold_ms": hold_ms,
