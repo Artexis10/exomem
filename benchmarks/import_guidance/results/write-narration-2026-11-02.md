@@ -10,6 +10,8 @@ the codes, ids, retry history or sync state that the tool replies carry?
   that also resamples the runs is [-0.500, -0.042].
 - The interval rests on four cases, and three of them show the same drop (-0.333), so it is coarse. Read it as a direction,
   not a size. Case 01 shows no leak on either arm.
+- Case by case, no interval excludes zero. Resampling the runs inside each case gives [-0.83, +0.17] for case 02,
+  [-0.67, +0.00] for case 04 and [-0.83, +0.17] for case 06. Only the interval over the four cases pooled excludes zero.
 - Each model alone has the same mean (-0.250), and its interval over cases touches zero ([-0.500, +0.000]).
 - The leaks that remain are judged R2 failures. In case 04 the agent says that the graph
   index is still rebuilding: 6 of 6 baseline runs, 4 of 6 candidate runs. In cases 02 and 06 the agent says the first save
@@ -47,8 +49,7 @@ the codes, ids, retry history or sync state that the tool replies carry?
   alone. In those runs the refusal reply was not exercised.
 - Case 03 refusal text carries an incidental suffix `(missing: ['path'])` on both arms. It is old behaviour, not part of the
   change.
-- Only the final answer is judged. The table "Leak anywhere in what the agent wrote" widens the same test to every message
-  of the run and gives the same counts.
+- Only the final answer is judged. The run rows also keep every message the agent wrote (`said`).
 - An earlier run of 12 agent runs used a check that matched the first characters of a long code. It counted the plain
   words "relation review" as a leaked code, so those runs were discarded and the whole run was repeated from empty with
   the fixed check. Nothing else was changed between the two.
@@ -73,12 +74,14 @@ A leak is an R2 failure or an exact-string hit in the final answer. Cells are le
 
 ## Leak rate by case, both models together
 
-| case | baseline | candidate | difference |
-|---|---|---|---|
-| 01-ordinary-save | 0/6 | 0/6 | +0.00 |
-| 02-review-needed-then-saved | 3/6 | 1/6 | -0.33 |
-| 04-saved-indexing-pending | 6/6 | 4/6 | -0.33 |
-| 06-health-task-recoverable-error | 3/6 | 1/6 | -0.33 |
+The interval resamples the runs of each arm inside the case (the same 95% bootstrap as below).
+
+| case | baseline | candidate | difference | 95% interval |
+|---|---|---|---|---|
+| 01-ordinary-save | 0/6 | 0/6 | +0.00 | [+0.00, +0.00] |
+| 02-review-needed-then-saved | 3/6 | 1/6 | -0.33 | [-0.83, +0.17] |
+| 04-saved-indexing-pending | 6/6 | 4/6 | -0.33 | [-0.67, +0.00] |
+| 06-health-task-recoverable-error | 3/6 | 1/6 | -0.33 | [-0.83, +0.17] |
 
 ## Overall leak difference
 
@@ -90,17 +93,6 @@ Mean of the per-case differences over 4 cases: **-0.250**.
 An interval that includes zero means no change.
 - haiku alone: -0.250, 95% interval over cases [-0.500, +0.000].
 - sonnet alone: -0.250, 95% interval over cases [-0.500, +0.000].
-
-## Leak anywhere in what the agent wrote
-
-The same leak test, widened from the final answer to every message the agent wrote in the run.
-
-| case | baseline | candidate |
-|---|---|---|
-| 01-ordinary-save | 0/6 | 0/6 |
-| 02-review-needed-then-saved | 3/6 | 1/6 |
-| 04-saved-indexing-pending | 6/6 | 4/6 |
-| 06-health-task-recoverable-error | 3/6 | 1/6 |
 
 ## Pass rates
 

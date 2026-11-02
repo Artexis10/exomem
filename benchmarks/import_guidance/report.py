@@ -67,14 +67,6 @@ def passed(row: dict, criterion: str) -> bool | None:
     return {checks.PASS: True, checks.FAIL: False}.get(verdict)
 
 
-def said_leak(row: dict) -> bool | None:
-    """A leak in any message the agent wrote, not only the final answer."""
-    final = leak_of(row)
-    if final is None:
-        return None
-    return final or bool(row.get("said_leaks"))
-
-
 def rate(values: Sequence[bool | None]) -> tuple[int, int]:
     """(true count, known count)."""
     known = [v for v in values if v is not None]
@@ -160,7 +152,12 @@ def build(paths: Sequence[Path], *, baseline: str, candidate: str) -> str:
             out.append(f"| {sid} | {model} | {_pct(*base)} | {_pct(*cand)} | {_diff(base, cand)} |")
 
     out += ["", "## Leak rate by case, both models together", ""]
-    out += ["| case | baseline | candidate | difference |", "|---|---|---|---|"]
+    out += [
+        "The interval resamples the runs of each arm inside the case (the same 95% bootstrap as below).",
+        "",
+        "| case | baseline | candidate | difference | 95% interval |",
+        "|---|---|---|---|---|",
+    ]
     per_case: dict[str, tuple[list[bool], list[bool]]] = {}
     for sid in leak_cases:
         known = {
@@ -168,9 +165,12 @@ def build(paths: Sequence[Path], *, baseline: str, candidate: str) -> str:
             for arm in arms
         }
         base, cand = ((sum(known[a]), len(known[a])) for a in arms)
-        out.append(f"| {sid} | {_pct(*base)} | {_pct(*cand)} | {_diff(base, cand)} |")
+        interval = "n/a"
         if known[baseline] and known[candidate]:
             per_case[sid] = (known[baseline], known[candidate])
+            low, high = two_stage_interval({sid: per_case[sid]})
+            interval = f"[{low:+.2f}, {high:+.2f}]"
+        out.append(f"| {sid} | {_pct(*base)} | {_pct(*cand)} | {_diff(base, cand)} | {interval} |")
 
     out += ["", "## Overall leak difference", ""]
     if per_case:
@@ -206,17 +206,6 @@ def build(paths: Sequence[Path], *, baseline: str, candidate: str) -> str:
                 )
     else:
         out.append("No case has a known leak result on both arms.")
-
-    out += ["", "## Leak anywhere in what the agent wrote", ""]
-    out += [
-        "The same leak test, widened from the final answer to every message the agent wrote in the run.",
-        "",
-        "| case | baseline | candidate |",
-        "|---|---|---|",
-    ]
-    for sid in leak_cases:
-        cells = [rate([said_leak(r) for m in models for r in cell[(sid, m, arm)]]) for arm in arms]
-        out.append(f"| {sid} | {_pct(*cells[0])} | {_pct(*cells[1])} |")
 
     out += [
         "",

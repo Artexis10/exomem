@@ -402,14 +402,6 @@ def run_once(
         # Every message the person could have read, not only the last: a leak in a message before the answer.
         said = judge.assistant_texts(proc.stdout.splitlines())
         row["said"] = said
-        row["said_leaks"] = sorted(
-            {
-                leak
-                for spec in scenario.checks
-                if spec["type"] == "answer_lacks_scripted_strings" and shapes
-                for leak in checks.leaked_strings("\n".join(said), shapes, spec)
-            }
-        )
     return row
 
 
