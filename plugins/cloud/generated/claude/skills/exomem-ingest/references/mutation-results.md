@@ -90,7 +90,9 @@ failure and not a commit.
 
 A queued write whose basis changed before it applied ends `state: conflicted`
 with a cause (`basis_changed`, `target_missing`, `outcome_unknown`,
-`authorization_revoked`, `stalled` and others). It changed nothing. Read it with
+`authorization_revoked`, `stalled` and others). It changed nothing, except for
+`outcome_unknown`: that write may have committed, so read the page before you
+retry it. Read the item with
 `review_memory(mode="item", ref=<intent_ref>)`. Decide it with
 `triage_memory(ref=<intent_ref>, action="retry-write")` (add `rebase=true` for
 `basis_changed`) or `action="discard-write"`. A retry is a new write under a new
