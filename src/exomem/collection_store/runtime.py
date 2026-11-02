@@ -1221,13 +1221,13 @@ class StoreServer:
             try:
                 return self._call(
                     work, wake_maintenance=wake_maintenance, read_only=read_only,
-                    extend=extend, on_refusal=on_refusal,
+                    extend=extend, on_refusal=on_refusal, initial=initial,
                 )
             except BaseException:
                 fields["refused"] = 1
                 raise
 
-    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal):
+    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial):
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
