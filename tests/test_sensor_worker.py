@@ -188,7 +188,7 @@ def test_a_running_child_is_never_killed_for_memory(tmp_path: Path, monkeypatch)
     sup, launcher = _supervisor(vault, [1000.0])
     sensor_worker._write_json(
         sensing_ledger.ledger_path(vault).with_name(sensor_worker.PEAK_FILE),
-        {"peak_rss_bytes": PEAK, "key": sensor_worker._refusal_key()},
+        {"peak_rss_bytes": PEAK, "key": sensor_worker._instrument_key()},
     )
     monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK * 2)
     assert _step(sup) == "launched"
