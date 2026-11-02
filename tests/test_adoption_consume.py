@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from exomem import (
-    _held_fs_posix,
     adoption_consume,
     adoption_run,
     cloud_import_job,
@@ -280,6 +279,8 @@ def test_a_removal_that_fails_leaves_the_item_applied_and_a_later_call_removes_t
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
     staged = _stage(tmp_path, vault, {"paper.pdf": PDF})
+    # The test drives the POSIX backend; importing it here keeps the module collectable on Windows.
+    _held_fs_posix = pytest.importorskip("exomem._held_fs_posix")
     # A rename leaves nothing to remove, so the stage sits on another device for this file: it files by copy.
     monkeypatch.setattr(
         _held_fs_posix, "_rename_noreplace", _rename_across_devices(_held_fs_posix._rename_noreplace, "paper.pdf"))

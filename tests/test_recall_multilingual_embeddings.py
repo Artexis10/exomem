@@ -30,7 +30,6 @@ memory the one encoder instance adds.
 from __future__ import annotations
 
 import os
-import resource
 import shutil
 import statistics
 import sys
@@ -84,6 +83,9 @@ def _load() -> str:
 
 
 def _rss_mib() -> float:
+    # resource is POSIX-only; importing it here keeps the module collectable on Windows.
+    import resource
+
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 

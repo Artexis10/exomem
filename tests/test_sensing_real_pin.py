@@ -7,7 +7,6 @@ job sets `EXOMEM_RUN_REAL_NLI=1` after downloading the pin's exact declared file
 from __future__ import annotations
 
 import os
-import resource
 import time
 
 import pytest
@@ -55,6 +54,9 @@ def test_cost_per_judgement_stays_inside_the_hourly_budget() -> None:
     instrument.judge(pairs)
     cpu_per_judgement = (time.process_time() - started_cpu) / len(pairs)
     wall_per_judgement = (time.monotonic() - started_wall) / len(pairs)
+    # resource is POSIX-only; importing it here keeps the module collectable on Windows.
+    import resource
+
     peak_rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(
         f"cpu/judgement={cpu_per_judgement:.3f}s wall/judgement={wall_per_judgement:.3f}s "
