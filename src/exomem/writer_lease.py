@@ -43,9 +43,6 @@ from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
-    COORDINATOR_IDENTITY_DOMAIN,
-    COORDINATOR_IDENTITY_GATE,
-    COORDINATOR_VAULT_BOUNDARY,
     VaultMutationCoordinator,
     _mutation_busy,
     canonical_mutation_identity,
@@ -4883,24 +4880,14 @@ class LeaseManager:
             pass
 
     def _mutation_coordinator_for(
-        self,
-        vault_root: os.PathLike[str] | str,
-        *,
-        kind: str = COORDINATOR_VAULT_BOUNDARY,
-        name: str | None = None,
+        self, vault_root: os.PathLike[str] | str
     ) -> VaultMutationCoordinator:
-        """Construct this manager's canonical boundary for one vault.
-
-        `kind` and `name` say which lock a refusal came from; a synthetic reserved-identity
-        lock passes its own.
-        """
+        """Construct this manager's canonical boundary for one vault."""
         return VaultMutationCoordinator(
             self.config.state_dir,
             vault_root,
             timeout_seconds=self._mutation_timeout_seconds,
             poll_interval_seconds=self._mutation_poll_interval_seconds,
-            kind=kind,
-            name=name,
         )
 
     @contextmanager
@@ -5288,95 +5275,54 @@ class LeaseManager:
         vault_identity = canonical_mutation_identity(vault_root)
         manager_deadline = time.monotonic() + self._mutation_timeout_seconds
         deadline = manager_deadline if deadline is None else min(deadline, manager_deadline)
-        gate = self._mutation_coordinator_for(
-            f"reserved-identity-v1:gate:{vault_identity}", kind=COORDINATOR_IDENTITY_GATE
-        )
-        domain_locks = [
-            (
-                domain,
-                self._mutation_coordinator_for(
-                    f"reserved-identity-v1:{domain}:{vault_identity}",
-                    kind=COORDINATOR_IDENTITY_DOMAIN,
-                    name=domain,
-                ),
-            )
-            for domain in ordered_domains
-        ]
+        gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
 
-        def hold_args(label: str) -> dict[str, Any]:
-            return {
-                "request_id": request_id,
-                "operation": f"{operation}:{label}" if operation is not None else label,
-                "holder_kind": holder_kind,
-                "publish_holder_metadata": False,
-            }
-
-        def enter(stack: ExitStack, mutation: VaultMutationCoordinator, label: str) -> None:
+        def enter(
+            stack: ExitStack,
+            mutation: VaultMutationCoordinator,
+            *,
+            operation_label: str | None = operation,
+        ) -> None:
             stack.enter_context(
                 mutation.hold(
-                    timeout_seconds=max(0.0, deadline - time.monotonic()), **hold_args(label)
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
+                    request_id=request_id,
+                    operation=operation_label,
+                    holder_kind=holder_kind,
+                    publish_holder_metadata=False,
                 )
             )
 
+        def enter_domains(stack: ExitStack) -> None:
+            for domain in ordered_domains:
+                identity = f"reserved-identity-v1:{domain}:{vault_identity}"
+                mutation = self._mutation_coordinator_for(identity)
+                label = f"{operation}:{domain}" if operation is not None else domain
+                enter(stack, mutation, operation_label=label)
+
         if exclusive:
             with ExitStack() as gate_stack:
-                enter(gate_stack, gate, "gate")
+                gate_label = f"{operation}:gate" if operation is not None else "gate"
+                enter(gate_stack, gate, operation_label=gate_label)
                 with ExitStack() as domains_stack:
-                    for domain, mutation in domain_locks:
-                        enter(domains_stack, mutation, domain)
+                    enter_domains(domains_stack)
                     yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
             return
 
-        if not advance_generation:
-            # No gate: this owner changes no identity, so no scanner needs ordering against it,
-            # and it holds only its own domains. It never asks for the gate while it holds them
-            # (reserved_paths forbids widening), so no domain-then-gate wait exists to invert the
-            # exclusive scanner's gate-then-domains order.
-            with ExitStack() as domains_stack:
-                for domain, mutation in domain_locks:
-                    enter(domains_stack, mutation, domain)
-                yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
-            return
-
-        # Admission order matches the exclusive scanner: gate first, then domains. Only a wait for
-        # one lock is ever blocking, and it starts with nothing held; every other lock is tried.
-        # A try never waits, so holding one lock while trying the next adds no wait-for edge. The
-        # lock won by waiting is kept, so a stream of short owners cannot take it back at release.
-        admission = [("gate", gate), *domain_locks]
         with ExitStack() as domains_stack:
-            gate_stack = ExitStack()
-            with gate_stack:
-                held: set[str] = set()
-                won: tuple[str, VaultMutationCoordinator] | None = None
-                while True:
-                    if won is not None:
-                        # The deadline is checked here, not only inside the wait, so the retry
-                        # loop cannot outlive it; a lock still busy then is refused by name.
-                        label, mutation = won
-                        remaining = max(0.0, deadline - time.monotonic())
-                        stack = gate_stack if label == "gate" else domains_stack
-                        stack.enter_context(
-                            mutation.hold(timeout_seconds=remaining, **hold_args(label))
-                        )
-                        held.add(label)
-                        won = None
-                    for label, mutation in admission:
-                        if label in held:
-                            continue
-                        stack = gate_stack if label == "gate" else domains_stack
-                        if stack.enter_context(mutation.try_hold(**hold_args(label))):
-                            held.add(label)
-                            continue
-                        # Busy: release everything and wait for this lock alone.
-                        gate_stack.close()
-                        domains_stack.close()
-                        held.clear()
-                        won = (label, mutation)
-                        break
-                    else:
-                        break
-                generation = _bump_reserved_identity_generation(self.config.state_dir, vault_root)
-                gate_stack.close()
+            with ExitStack() as gate_stack:
+                gate_label = f"{operation}:gate" if operation is not None else "gate"
+                enter(gate_stack, gate, operation_label=gate_label)
+                # Admission order matches the exclusive scanner: gate first,
+                # then domains.  The domain stack outlives the gate so exact
+                # owners still release admission before doing their work,
+                # without the gate/domain inversion that can deadlock a scan.
+                enter_domains(domains_stack)
+                generation = (
+                    _bump_reserved_identity_generation(self.config.state_dir, vault_root)
+                    if advance_generation
+                    else _read_reserved_identity_generation(self.config.state_dir, vault_root)
+                )
             yield generation
 
     @contextmanager
@@ -6747,12 +6693,10 @@ class LeaseManager:
                         with guard:
                             yield
                     finally:
-                        # The vault boundary's own hold: later holds of other coordinators
-                        # (identity gate, domains, review state) do not replace it, and
-                        # post-terminal housekeeping's later vault holds are not yet taken.
-                        wide_hold["timing"] = last_mutation_timing(
-                            self._mutation_coordinator_for(mutation_subject)
-                        )
+                        if not narrow_boundary:
+                            # Post-terminal housekeeping takes later, shorter holds that
+                            # would overwrite this one before the journal row is written.
+                            wide_hold["timing"] = last_mutation_timing()
                 finally:
                     _ACTIVE_FAST_ACK_SESSION.reset(token)
 
@@ -8189,7 +8133,7 @@ def _invocation_provenance(
     """Give each dispatched command one record of what it served, for its own guard passes only.
 
     Outermost, so a store-routed call fills the same record from the store's thread. Under the
-    MCP surface this joins the record that the surface opened for its second pass.
+    MCP surface this joins the record that the surface opened.
     """
     @wraps(function)
     def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
@@ -8292,10 +8236,11 @@ def _restricted_refusal_floor(
     A missing page refuses before any page is read, while a withheld one is
     read and decided first. Padding every refusal that a restricted caller
     receives to one floor removes that difference. A success returns at once,
-    notices included. The restriction is asked only after a refusal, so a
-    success never pays for the question. Behind an MCP or REST surface the
-    surface waits, after its own handling of the refusal; elsewhere this
-    thread waits.
+    notices included, unless the command asked for the floor through
+    `projection_timing.floor_restricted_outcome`. The restriction is asked
+    only after a refusal, so a success never pays for the question. Behind an
+    MCP or REST surface the surface waits, after its own handling of the
+    refusal; elsewhere this thread waits.
     """
 
     @wraps(function)
@@ -8306,16 +8251,29 @@ def _restricted_refusal_floor(
             or not isinstance(injected[0], (str, os.PathLike))
         ):
             return function(command, *injected, **kwargs)
-        from .governance import policy
+        from .commands import invocation_is_read_only
+        from .governance import policy, projection_timing
+        from .governance.egress import SelectorCoverageError
 
         started_at = time.perf_counter()
-        # A direct read changes no governance, so it decides under one policy load.
-        with policy.request_policy_snapshot():
+        try:
+            read_only = invocation_is_read_only(command, kwargs)
+        except SelectorCoverageError:
+            read_only = False  # the dispatcher sends it down the writer path too
+        # A read changes no governance, so it decides under one policy load. A
+        # write must see the policy it finds, so it opens no snapshot.
+        with (
+            policy.request_policy_snapshot() if read_only else nullcontext(),
+            projection_timing.floored_outcome_scope() as outcome,
+        ):
             try:
-                return function(command, *injected, **kwargs)
+                result = function(command, *injected, **kwargs)
             except Exception as error:
                 _complete_restricted_refusal(Path(injected[0]), started_at, error)
                 raise
+        if outcome.requested:
+            _hold_to_refusal_floor(started_at)
+        return result
 
     return wrapped
 
@@ -8323,7 +8281,7 @@ def _restricted_refusal_floor(
 def _complete_restricted_refusal(
     vault_root: Path, started_at: float, error: BaseException
 ) -> None:
-    from .governance import egress, projection_timing
+    from .governance import egress
 
     try:
         restricted = egress.caller_restricted(vault_root)
@@ -8340,6 +8298,13 @@ def _complete_restricted_refusal(
         seen.add(id(chained))
         traceback.clear_frames(chained.__traceback__)
         chained = chained.__cause__ or chained.__context__
+    _hold_to_refusal_floor(started_at)
+
+
+def _hold_to_refusal_floor(started_at: float) -> None:
+    """Complete no sooner than the floor after `started_at`, on the surface if one waits."""
+    from .governance import projection_timing
+
     padding_started = time.perf_counter()
     work_ms = (padding_started - started_at) * 1000.0
     deferred = projection_timing.defer_refusal_floor(started_at)
@@ -8509,7 +8474,7 @@ def invoke_command(
         kwargs = normalize_edit_surface_arguments(kwargs)
 
     # Terminal egress filter (design D1). THIS is the one dispatcher shared by
-    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
+    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` serves MCP
     # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.

@@ -67,8 +67,8 @@ aliases SHALL contribute outcomes to the request-scoped collector and SHALL NOT
 emit before the outer representation is finalized. An internal append retry
 within that invocation SHALL reuse its minted id; a new external invocation
 SHALL mint a new id. The universal terminal postfilter SHALL remain
-side-effect-free because some transports invoke it more than once, and the
-second MCP filter pass SHALL emit zero events.
+side-effect-free because a result can pass it more than once, and a repeated
+filter pass SHALL emit zero events.
 
 Coverage SHALL be derived from content-returning operation/mode branches and
 registered reduction adapters, not only top-level command names. Adding a new
@@ -82,10 +82,10 @@ If append reports an error, the boundary SHALL fail closed with a content-free
 retryable service error and SHALL NOT return the unreceipted payload. Read-path
 events need not fsync and SHALL make no whole-system power-loss durability claim.
 
-#### Scenario: MCP's second filter pass does not duplicate evidence
+#### Scenario: A repeated filter pass does not duplicate evidence
 
-- **WHEN** an MCP response runs both the universal dispatcher filter and the MCP
-  filter pass
+- **WHEN** a response runs the universal dispatcher filter and the same filter
+  runs again over its result
 - **THEN** the governed decision produces one receipt, not two
 
 #### Scenario: Aggregate withholding is receipted where reduced

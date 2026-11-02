@@ -2165,12 +2165,10 @@ def test_reserved_identity_owner_acquires_gate_before_its_domain(
             entered.append(self.identity)
             yield self
 
-        try_hold = hold
-
     monkeypatch.setattr(
         manager,
         "_mutation_coordinator_for",
-        lambda identity, **_labels: RecordingCoordinator(str(identity)),
+        lambda identity: RecordingCoordinator(str(identity)),
     )
 
     with manager.reserved_identity_guard(
@@ -4509,6 +4507,21 @@ def test_coordination_status_is_a_read_only_public_command() -> None:
     for surface in ("mcp", "rest", "cli"):
         command = next(c for c in product_commands_for(surface) if c.name == "coordination_status")
         assert command.read_only
+
+
+def test_coordination_status_shows_lock_contention_to_the_owner_only(vault: Path) -> None:
+    """Refusal counts and the last holder's operation say when and how the owner writes."""
+    from exomem import commands
+    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+
+    with library_scope():
+        owner = commands.op_coordination_status(vault)
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        guest = commands.op_coordination_status(vault)
+
+    assert "contention" in owner["mutation_boundary"]
+    assert "contention" not in guest["mutation_boundary"]
+    assert guest["mutation_boundary"]["state"] == owner["mutation_boundary"]["state"]
 
 
 def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: Path) -> None:

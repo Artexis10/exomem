@@ -442,11 +442,12 @@ These tasks do not gate P3.6. Existing bounded CSV/JSON query output remains the
 
 ## Rollback qualification follow-up (after GA)
 
-- [ ] RQ1 Qualify the rollback application for the current store schema in release evidence (design §10, "Reversal"). Follow-up to P3.6; not a GA prerequisite.
+- [x] RQ1 Qualify the rollback application for the current store schema in release evidence (design §10, "Reversal"). Follow-up to P3.6; not a GA prerequisite.
   - The journey's `compatible_rollback` step never runs in CI: no workflow supplies `--compatible-python`.
   - Install the earlier release from its published wheel, bound to the index's SHA-256 through a `file://` URL with a `#sha256=` fragment, so the journey's provenance check accepts it. A by-name index install records no `direct_url.json`, which the check refuses.
   - The journey still requires the earlier application to declare no general migration. Every release from 0.140.0 on declares `collections-migrate-v1`, so post-GA rollback applications need that assertion changed with a reason.
   - Full runs are the scheduled and dispatched runs (`release_evidence.ci_scope`); measure the step's cost against the product E2E budget before enabling it there.
+  Evidence, 2026-11-01: full CI runs now install the release that `EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION` pins (0.151.1, store schema 14) from its published wheel, after checking `EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256`, and pass it to the journey. The journey's compatible-application check now refuses only a failed migration probe, because every release since GA declares the migration; its store, marker and fence checks prove that SQLite authority survives. Dispatched full run `41312187918` at `7a197fe42`, whose journey check also required that the rollback would not migrate (always true in the journey, so it implied the current check): the product E2E job reported `compatible_rollback` passed; the S1 branch took 195.6 s against 185.1 s on main run `41069453400`, and the product E2E took 206.2 s against its 330 s wall-time budget.
 
 ## P6. Legacy window close (two minor releases after GA, R7)
 

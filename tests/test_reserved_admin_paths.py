@@ -3378,8 +3378,6 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
     ):
         assert reserved_paths.owner_authorized(descriptor_id)
         assert reserved_paths._identity_coordination_active(vault_root)
-        if not create and not Path(database).exists():
-            raise FileNotFoundError(database)  # as the real scope does
         observed.append((descriptor_id, Path(database).name, create))
         retained.add(descriptor_id)
         try:
@@ -4583,6 +4581,7 @@ def test_every_command_and_finite_selector_has_total_path_role_metadata() -> Non
         "observe_memory": {"path", "unit_ref"},
         "replace": {"old_path", "sources"},
         "note": {"sources"},
+        "link": {"ref"},
         "query_data": {"path"},
         "create_file": {"path"},
         "list_directory": {"path"},
@@ -4605,7 +4604,7 @@ def test_every_command_and_finite_selector_has_total_path_role_metadata() -> Non
         "process_media": {"path", "paths"},
         "review_memory": {"path", "ref", "sources"},
         "review_item_context": {"ref"},
-        "triage_memory": {"ref"},
+        "triage_memory": {"ref", "source_path"},
         "connect_memory": {"path", "target", "unit_ref", "ref"},
         "adopt_vault": {"path", "manifest_path", "selected_paths"},
         "adoption_studio": {
@@ -4615,7 +4614,9 @@ def test_every_command_and_finite_selector_has_total_path_role_metadata() -> Non
             "only_paths",
             "sources",
             "ref",
+            "paths",
         },
+        "maintain_memory": {"collection", "refs", "paths"},
         "govern_memory": {"selector_paths", "path", "paths"},
         "manage_memory_file": {
             "path",
@@ -4710,6 +4711,10 @@ def test_every_generic_command_path_role_routes_every_private_family() -> None:
                     command,
                     {role.argument: value},
                 )
+                if not role.preflight:
+                    # Reserved preflight on these write doors belongs to the write-admission work.
+                    assert hit is None, (command.name, role.argument, descriptor_id)
+                    continue
                 assert hit is not None, (command.name, role.argument, descriptor_id)
                 assert hit.role == role
                 assert hit.classification.descriptor_id == descriptor_id

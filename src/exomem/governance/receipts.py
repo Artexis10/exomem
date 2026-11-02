@@ -1801,6 +1801,13 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
     Restore staging may hold destination evidence after rollback. Its separate
     authority root requires anchored instances: an invented chain must not gain
     restore admission, at the cost of refusing an unprovable stopped retry.
+
+    `valid` means internally consistent and agreeing with every anchor that
+    exists. Each instance also says whether a local anchor covers it
+    (`anchored`), and `unanchored_instances` counts those that none covers. A
+    consistently rewritten copy of a vault passes `valid` and reads as
+    unanchored. It is not an issue: each machine anchors only its own instance,
+    so a synced vault always holds instances that this machine cannot anchor.
     """
     instances: dict[str, dict[str, Any]] = {}
     all_issues: list[dict[str, str]] = []
@@ -1812,6 +1819,7 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
             "valid": False,
             "issues": [{"code": "events_root_escape", "path": str(root), "detail": str(exc)}],
             "instances": instances,
+            "unanchored_instances": 0,
         }
     active_anchor: tuple[str, Path, tuple[int, str, int, str, str | None, int | None]] | None = None
     anchor_root = authority_root if authority_root is not None else vault_root
@@ -1865,14 +1873,31 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
             for item in records:
                 if item.get("phase") == "intent" and str(item.get("event_id")) not in terminals:
                     issues.append({"code": "unresolved_intent", "path": str(instance_dir), "detail": str(item.get("event_id"))})
-            instances[instance_dir.name] = {"tail_seq": actual_seq, "tail_hash": actual_hash, "issues": issues}
+            instances[instance_dir.name] = {
+                "tail_seq": actual_seq,
+                "tail_hash": actual_hash,
+                "issues": issues,
+                "path": str(instance_dir),
+                "anchored": anchor is not None,
+            }
             all_issues.extend(issues)
     if active_anchor is not None and not active_seen:
         instance_id, instance_dir, anchor = active_anchor
         issues = _anchor_issues(vault_root, instance_dir, [], anchor)
-        instances[instance_id] = {"tail_seq": 0, "tail_hash": GENESIS_HASH, "issues": issues}
+        instances[instance_id] = {
+            "tail_seq": 0,
+            "tail_hash": GENESIS_HASH,
+            "issues": issues,
+            "path": str(instance_dir),
+            "anchored": True,
+        }
         all_issues.extend(issues)
-    return {"valid": not all_issues, "issues": all_issues, "instances": instances}
+    return {
+        "valid": not all_issues,
+        "issues": all_issues,
+        "instances": instances,
+        "unanchored_instances": sum(1 for item in instances.values() if not item["anchored"]),
+    }
 
 
 def restore_evidence_paths(evidence_root: Path, *, authority_root: Path,
