@@ -7790,7 +7790,8 @@ def page_filter_over(
         if offered is None:
             # A path `keep` admits is kept whether or not it is a file, so only a refused, live path
             # needs the stat that tells a non-page reference (kept) from a page; a ranking decides
-            # every catalogue page, and that stat was most of its cost.
+            # every catalogue page, and that stat was most of its cost. A stat error therefore no
+            # longer withholds a page `keep` admits: `keep` is this branch's whole release decision.
             if keep(rel):
                 return True, False
             if tombstoned:
