@@ -2002,6 +2002,10 @@ class LeaseConfig:
                     "WRITER_LEASE_CONFIG: EXOMEM_WRITER_LEASE_IDLE_SECONDS must be 0 (disabled) "
                     "or >= EXOMEM_WRITER_LEASE_TTL"
                 )
+        elif topology == "single-host":
+            # No other replica can reach a literal loopback coordinator, so an idle
+            # release hands authority to nobody and the next read pays a takeover.
+            idle_release_seconds = 0.0
         else:
             # The default tracks the TTL so raising EXOMEM_WRITER_LEASE_TTL
             # alone can never trip the idle>=ttl validation and brick startup.
