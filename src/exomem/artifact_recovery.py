@@ -7,10 +7,9 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
 import threading
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +40,7 @@ class _NativeGrantState:
 
 
 _NATIVE_GRANT: ContextVar[_NativeGrantState | None] = ContextVar("exomem_native_original_grant", default=None)
-# Two simultaneous private spools bound process disk use; oversized files use a configurable byte budget.
+# Two simultaneous held originals bound open descriptors and the hashing work for a file with no record.
 _SLOTS = threading.BoundedSemaphore(2)
 # This matches only the fixed signed protocol syntax, never a user's vocabulary or intent.
 _CAPABILITY = re.compile(r"v4\.[0-9]{1,12}\.[0-9a-f]{1,32768}\.[0-9a-f]{64}")
@@ -57,7 +56,7 @@ class RecoveryUnavailable(ValueError):
 
 
 class RecoveryBusy(RecoveryUnavailable):
-    """Both private spools are in use. The slot is taken before any path is resolved, so this says nothing about a path."""
+    """Both original slots are in use. The slot is taken before any path is resolved, so this says nothing about a path."""
 
 
 class _CapabilityRedaction(logging.Filter):
@@ -265,16 +264,13 @@ def stage(
     expected: dict | None = None,
     byte_proofs: dict | None = None,
 ):
-    """Own private storage for one request, including refusal and cancellation cleanup."""
+    """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
     if not who.resolved:
         raise RecoveryUnavailable
     if not _SLOTS.acquire(blocking=False):
         raise RecoveryBusy
     try:
-        from contextlib import ExitStack
-
         with ExitStack() as stack:
-            temporary = stack.enter_context(reserved_paths.private_copy_directory())
             try:
                 seconds = request_budget.budget_seconds()
                 budget = request_budget.current()
@@ -285,26 +281,26 @@ def stage(
                 )
                 path, metadata = _resolve(root, selected)
                 stack.enter_context(media_store.local_originals(root, (path,), read=True))
-                available = shutil.disk_usage(temporary).free
-                copied = reserved_paths.copy_generic_file(
-                    root,
-                    path,
-                    Path(temporary) / "original",
-                    max_bytes=available // 2,
-                    deadline=deadline,
+                held = stack.enter_context(
+                    reserved_paths.hold_generic_file(
+                        root,
+                        path,
+                        recorded_sha256=lambda version: media_store.cached_sha256(root, path, version),
+                        deadline=deadline,
+                    )
                 )
-                descriptor = _descriptor(path, metadata, copied)
+                descriptor = _descriptor(path, metadata, held)
                 if (
                     expected_sha256 is not None
-                    and copied.sha256 != expected_sha256
+                    and held.sha256 != expected_sha256
                     or expected is not None
                     and descriptor != expected
                 ):
                     raise RecoveryUnavailable
-                require_current(root, copied, who, byte_proofs=byte_proofs)
+                require_current(root, held, who, byte_proofs=byte_proofs)
                 if _resolve(root, selected) != (path, metadata):
                     raise RecoveryUnavailable
-                yield copied, descriptor
+                yield held, descriptor
             except (
                 reserved_paths.ReservedPathLeafError,
                 media_store.MediaStoreError,

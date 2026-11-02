@@ -845,7 +845,7 @@ def build_server(
         async def stored_original(grant: str):
             from starlette.concurrency import run_in_threadpool
 
-            from . import auth_sessions, upload_tokens
+            from . import auth_sessions, reserved_paths, upload_tokens
             from .governance.principal import effective_principal
 
             try:
@@ -858,21 +858,21 @@ def build_server(
                     raise artifact_recovery.RecoveryUnavailable
                 async with artifact_recovery.staged(
                     runtime.vault_root, descriptor["path"], who, expected=descriptor
-                ) as (copied, _, proofs):
-                    # Only the bounded private copy reaches base64 serialization, never a large canonical original.
-                    content = await run_in_threadpool(copied.private_path.read_bytes)
+                ) as (held, _, proofs):
+                    # Only the bounded descriptor size reaches base64 serialization, never a large canonical original.
+                    content = await run_in_threadpool(reserved_paths.read_held, held, 0, held.size)
                     if not await auth_sessions.origin_session_active(who):
                         raise artifact_recovery.RecoveryUnavailable
-                    revision = await run_in_threadpool(artifact_recovery.require_current, runtime.vault_root, copied, who, byte_proofs=proofs)
+                    revision = await run_in_threadpool(artifact_recovery.require_current, runtime.vault_root, held, who, byte_proofs=proofs)
                     artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
                     if not await auth_sessions.origin_session_active(who):
                         raise artifact_recovery.RecoveryUnavailable
-                    artifact_recovery.require_revision(runtime.vault_root, who, copied, revision, byte_proofs=proofs)
+                    artifact_recovery.require_revision(runtime.vault_root, who, held, revision, byte_proofs=proofs)
                     artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
                     result = ResourceResult([ResourceContent(content, mime_type=descriptor["mime_type"])])
                 artifact_recovery.complete_native_grant(grant)
                 return result
-            except artifact_recovery.RecoveryUnavailable:
+            except (artifact_recovery.RecoveryUnavailable, reserved_paths.ReservedPathLeafError):
                 raise ResourceError("original recovery is unavailable") from None
 
         expose_tier2 = register_rest_facade(

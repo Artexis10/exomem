@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from test_agent_upload_handoff import _ASGISyncTransport
 from test_agent_upload_handoff import upload_env as upload_env
 
-from exomem import artifact_recovery, server, upload_handoff
+from exomem import artifact_recovery, reserved_paths, server, upload_handoff
 from exomem.__main__ import _attach_main
 from exomem.governance import principal
 
@@ -59,8 +59,8 @@ def test_mcp_handoff_cli_capture_and_original_recovery(upload_env, tmp_path, mon
     assert receipt["hash"] == digest
     assert (vault / receipt["stored_path"]).read_bytes() == original
     with principal.request_scope(who):
-        with artifact_recovery.stage(vault, receipt["stored_path"] + ".md", who) as (copied, descriptor):
-            assert copied.private_path.read_bytes() == original
+        with artifact_recovery.stage(vault, receipt["stored_path"] + ".md", who) as (held, descriptor):
+            assert reserved_paths.read_held(held, 0, held.size) == original
             assert descriptor["sha256"] == digest
 
 

@@ -110,6 +110,13 @@ call can consume.
   4 MiB before base64; `EXOMEM_RECOVERY_NATIVE_MAX_BYTES` owns that payload budget.
   Older custody pages may lack stored MIME. The descriptor identifies filename
   inference or the generic fallback explicitly instead of claiming stored MIME.
+  Amended (decided on 2026-11-01 under the operator's standing rule for
+  reversible choices; the operator may revert it): downloads no longer copy the
+  original. The request holds the original open and serves the response from that
+  handle, with no private copy and no disk-space admission. The two request slots
+  still bound the work. The contract for the digest, the cache identity and the
+  stop on a change is in `openspec/changes/add-cloud-media-store/specs/cloud-media-store/spec.md`.
+  The private copy and its spool remain only for the parent video of a scene frame.
 - **D12. Keep native identity and delegated browser authority distinct.** Native
   resource reads match the caller's audience, client and origin session before
   restoring the signed issuing authorization context. Browser possession delegates

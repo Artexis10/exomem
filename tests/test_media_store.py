@@ -975,7 +975,7 @@ def test_recovery_adoption_and_export_read_the_same_stored_bytes(vault: Path, se
     canonical = path.with_name(path.name + ".md").read_bytes()
     assert media_store.evict(vault, path)
     with artifact_recovery.stage(vault, path.relative_to(vault).as_posix(), owner_principal(surface="mcp")) as (copied, descriptor):
-        assert copied.private_path.read_bytes() == expected
+        assert reserved_paths.read_held(copied, 0, copied.size) == expected
         assert descriptor["sha256"] == hashlib.sha256(expected).hexdigest()
         assert not media_store.evict(vault, path)
     assert media_store.evict(vault, path)
@@ -1284,7 +1284,7 @@ def test_captured_source_original_reconciles_and_recovers_without_metadata_rewri
     assert page.read_bytes() == published
     who = owner_principal(surface="mcp")
     with request_scope(who), artifact_recovery.stage(vault, page.relative_to(vault).as_posix(), who) as (copied, descriptor):
-        assert copied.private_path.read_bytes() == original
+        assert reserved_paths.read_held(copied, 0, copied.size) == original
         assert descriptor["file_name"] == filename and descriptor["mime_type"] == mime
     assert media_processing.reconcile_all_media(vault) == 0
     assert page.read_bytes() == published
