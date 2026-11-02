@@ -7750,13 +7750,24 @@ def _source_of_part(vault_root: Path, path: str) -> str:
     is the Source's, taken by the same read.
     """
     from . import extraction_parts
+    from .vault import parse_frontmatter, read_guarded_text
 
     try:
         resolved = _resolve_memory_identifier(vault_root, path, serve_stale=True)
     except (ValueError, OSError):
         return path
-    source = extraction_parts.source_page_for(Path(vault_root) / resolved)
-    return source.relative_to(vault_root).as_posix() if source is not None else path
+    page = Path(vault_root) / resolved
+    source = extraction_parts.source_page_for(page)
+    if source is None:
+        return path
+    try:
+        content, _guard = read_guarded_text(vault_root, page)
+    except (OSError, UnicodeError):
+        return path
+    # The same rule as search: only a page carrying `part_of` reads as its Source.
+    if "part_of" not in parse_frontmatter(content)[0]:
+        return path
+    return source.relative_to(vault_root).as_posix()
 
 
 def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -> dict:
@@ -7784,10 +7795,16 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     if content_hash(raw) != result["content_hash"]:
         raise ValueError("SOURCE_CHANGED: the page changed during the read; read it again")
     frontmatter, stored, _ = parse_frontmatter(raw)
+    if not note_types.Basis(vault_root).selects(str(frontmatter.get("type") or "").casefold(), note_types.raw):
+        return _refuse_unused_offset(result, offset)
     first = _preserve_module().extracted_text(stored)
     if extraction_parts.count_of(frontmatter) == 1 and len(first) <= extraction_parts.WINDOW_CHARS:
         return _refuse_unused_offset(result, offset)
-    if body != stored and body != provenance_module.withheld_prose(stored, owner_path=path):
+    # The served body has normalised line endings; a CRLF page is still the stored page.
+    served = body.replace("\r\n", "\n")
+    if served != stored.replace("\r\n", "\n") and served != provenance_module.withheld_prose(
+        stored, owner_path=path
+    ).replace("\r\n", "\n"):
         if offset:
             raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
         return result

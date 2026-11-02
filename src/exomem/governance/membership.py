@@ -393,9 +393,9 @@ def _source_of_part(page: ParsedPage) -> ParsedPage | None:
     audience that may read it, is its Source's: decided here for every evaluation, from the
     part's path. A Source page that cannot be read leaves the part's membership unresolved.
     """
-    from .. import extraction_parts
-
-    source = extraction_parts.source_page_for(Path(page.rel_path))
+    # The same rule as search (`ParsedPage.part_of`): a page at a part's path without the
+    # `part_of` field a written part carries is governed as itself, never as its neighbour.
+    source = page.part_of
     if source is None:
         return None
     if page.vault_root is None:

@@ -326,6 +326,43 @@ def test_a_part_belongs_to_the_scopes_of_its_source(vault, monkeypatch) -> None:
     assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
 
 
+def test_a_page_at_a_part_path_that_is_not_a_part_is_governed_as_itself(vault) -> None:
+    from exomem import find_corpus
+    from exomem.governance import membership, policy
+
+    kb = vault / "Knowledge Base" / "Notes"
+    kb.mkdir(parents=True, exist_ok=True)
+    (kb / "garden-plan.md").write_text("---\ntype: insight\n---\nBeds and paths.\n", encoding="utf-8")
+    planted = kb / ".garden-plan.parts" / "part-02.md"
+    planted.parent.mkdir()
+    planted.write_text("---\ntype: insight\ntags: [secret]\n---\nSalary review, confidential.\n", encoding="utf-8")
+    scope_file = vault / "Knowledge Base" / "_Governance" / "scopes" / "secret.yaml"
+    scope_file.parent.mkdir(parents=True)
+    scope_file.write_text('governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\ntags: ["secret"]\n', encoding="utf-8")
+    rel = planted.relative_to(vault).as_posix()
+
+    scopes = membership.evaluate(find_corpus.parse_page(planted, planted.stat().st_mtime, vault), policy.load(vault))
+
+    assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAW"})
+    # Never served as its neighbour note: an unlisted dot-folder page is not a readable memory.
+    with pytest.raises(ValueError, match="NOT_FOUND"):
+        commands.op_read_memory(vault, path=rel)
+
+
+def test_a_source_page_with_crlf_line_endings_still_reads_in_windows(vault, monkeypatch) -> None:
+    stub, text = _small_parted_source(vault, monkeypatch)
+    page = vault / stub.sidecar_path
+    page.write_bytes(page.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+    pieces, offset = [], 0
+    while offset is not None:
+        result = commands.op_read_memory(vault, path=stub.sidecar_path, offset=offset)
+        pieces.append(result["body"])
+        offset = result["window"]["next_offset"]
+
+    assert "".join(pieces).replace("\r\n", "\n") == text
+
+
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
     stub, _text = _small_parted_source(vault, monkeypatch)
     page = vault / stub.sidecar_path
