@@ -13617,7 +13617,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
 #: tests/test_plain_write_outcomes.py fails until it declares one. The keys are command names.
 _COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingProxyType({  # nosemgrep: ep-word-dict -- the registry's own command names, each mapped to a closed contract verb.
     "add": "saved", "adopt": "saved", "audit_fix": "updated", "reconcile": "updated",
-    "edit": "updated", "replace": "replaced", "link": "updated", "preserve": "saved",
+    "edit": "updated", "replace": "replaced", "link": "saved", "preserve": "saved",
     "note": "saved", "create_file": "saved", "move_file": "moved", "delete": "deleted",
     "append_to_file": "updated", "recover_from_trash": "restored",
     "remember": "saved", "edit_memory": "updated", "replace_memory": "replaced",
