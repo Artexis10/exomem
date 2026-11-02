@@ -847,6 +847,146 @@ def test_a_page_written_during_its_own_read_is_read_again_and_adopted_as_residue
     _assert_matches_a_fresh_rebuild(root)
 
 
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED, reason="ctime does not move on a write here"
+)
+def test_a_fold_under_writes_that_outpace_content_rechecks_converges_on_generations(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a fold that re-reads every page to recheck it: on a live vault that pass is
+    # slower than the gap between writes, never comes back clean, and the standby misses
+    # its warm budget.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    # The fixture's pages are seconds old; a live vault's are older than the racy window.
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0, raising=True)
+    real_snapshot = vault_module._read_bounded_guarded_snapshot
+    candidates = [f"{GENERATED}/generated-note-{i:04d}.md" for i in range(NOTE_COUNT)]
+    read: set[str] = set()
+    rewritten: list[str] = []
+    pages_read = [0]
+
+    def one_write_per_corpus_read(vault_root, target, limit):
+        # Every guarded read and every content recheck reads a page's bytes here. One
+        # editor save lands per NOTE_COUNT pages read: writes arrive at the pace of the
+        # proof's reading, as they do while a slow pass runs.
+        result = real_snapshot(vault_root, target, limit)
+        if Path(vault_root) == root:
+            read.add(target)
+            pages_read[0] += 1
+            if pages_read[0] % NOTE_COUNT == 0:
+                rel = next(
+                    rel
+                    for rel in candidates
+                    if rel in read and rel not in rewritten and rel != target
+                )
+                with (root / rel).open("a", encoding="utf-8") as page:
+                    page.write("\n- saved by an editor\n")
+                rewritten.append(rel)
+        return result
+
+    monkeypatch.setattr(
+        vault_module, "_read_bounded_guarded_snapshot", one_write_per_corpus_read, raising=True
+    )
+
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", False, raising=True)
+    hashed = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    assert hashed.reason == "sources_kept_moving", "premise: content rechecks never settle"
+
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", True, raising=True)
+    hashed_writes = len(rewritten)
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+
+    assert adoption.adopted is True, adoption.reason
+    assert len(rewritten) > hashed_writes, "writes must land during the folding proof too"
+    assert set(adoption.residue) == set(rewritten), (
+        "S1 plus the residue must equal the disk: every page saved during either proof"
+    )
+
+
+def _edit_keeping_size_and_mtime_after_a_later_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch, edited: str, trigger: str
+) -> list[bool]:
+    """Once the proof has read `trigger`, change `edited` in place with its size and mtime kept.
+
+    Returns the premise: whether size, mtime and inode came out as they were.
+    """
+    real_read = vault_module.read_bounded_guarded_bytes
+    premise: list[bool] = []
+
+    def edited_after_its_read(vault_root, target, **kwargs):
+        result = real_read(vault_root, target, **kwargs)
+        if target == trigger and not premise:
+            page = root / edited
+            before = os.lstat(page)
+            page.write_bytes(page.read_bytes().replace(b"Synthetic body", b"Synthetic BODY", 1))
+            os.utime(page, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = os.lstat(page)
+            premise.append(
+                (after.st_size, after.st_mtime_ns, after.st_ino)
+                == (before.st_size, before.st_mtime_ns, before.st_ino)
+            )
+        return result
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes", edited_after_its_read, raising=True
+    )
+    return premise
+
+
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED, reason="ctime does not move on a write here"
+)
+def test_a_same_size_edit_with_its_mtime_put_back_moves_the_generation_into_the_residue(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a generation recheck that keys on size and mtime alone: it adopts a same-size
+    # edit whose mtime was put back on the stale bytes its row holds.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    # The fixture's pages are seconds old; a live vault's are older than the racy window.
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0, raising=True)
+    edited = f"{GENERATED}/generated-note-0003.md"
+    premise = _edit_keeping_size_and_mtime_after_a_later_read(
+        root, monkeypatch, edited, f"{GENERATED}/generated-note-0010.md"
+    )
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+
+    assert premise == [True], "the edit must keep size, mtime and inode"
+    assert adoption.adopted is True, adoption.reason
+    assert adoption.residue == (edited,)
+
+
+def test_without_a_trusted_generation_a_same_size_edit_with_its_mtime_put_back_is_hashed(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a fold that binds pages by generation where ctime does not move on a write
+    # (Windows): there the same edit leaves the generation as it was, and only the
+    # content shows it.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0, raising=True)
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", False, raising=True)
+    # What a generation is where ctime is the creation time: a write leaves it.
+    monkeypatch.setattr(
+        vault_module,
+        "stat_generation",
+        lambda info: (info.st_size, info.st_mtime_ns, 0),
+        raising=True,
+    )
+    edited = f"{GENERATED}/generated-note-0003.md"
+    premise = _edit_keeping_size_and_mtime_after_a_later_read(
+        root, monkeypatch, edited, f"{GENERATED}/generated-note-0010.md"
+    )
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+
+    assert premise == [True], "the edit must keep size, mtime and inode"
+    assert adoption.adopted is True, adoption.reason
+    assert adoption.residue == (edited,)
+
+
 def _land_a_batch_without_fanout(root: Path) -> None:
     """Canonical bytes and a new checkpoint generation; the sidecar is untouched."""
     from exomem import vault as vault_module
