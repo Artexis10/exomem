@@ -6,7 +6,12 @@ Successful product mutations return a compact decisive terminal by default. Its
 first key, `user_summary`, is one plain sentence for the user: `Saved -> <path>`,
 `Updated -> <path>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
 `Replaced -> <new path>, was <old path>`, `Discarded -> <path>` or `Restored -> <path>`.
-Several files read `Saved 3 files -> first.md and 2 more`. A result whose status is
+Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
+failed or was already stored counts each state, and `Saved` covers only the files that
+this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,
+`Already saved -> <path>`, or `Nothing saved; 2 files could not be saved`. A single file
+whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
+carry the codes and reasons. A result whose status is
 `replayed` reads `Already saved -> <path>`. Each sentence ends with the name of the store
 that took the write, such as `Saved -> <path> (personal Exomem)`; the bootstrap's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
