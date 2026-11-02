@@ -2144,7 +2144,7 @@ def test_reserved_identity_guard_does_not_fsync_diagnostic_holder_metadata(
         pass
 
     assert first_generation != second_generation
-    assert read_generation == second_generation
+    assert read_generation is None  # the domain-only path reads no token
     assert observed_generation == second_generation
 
 
