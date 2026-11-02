@@ -978,9 +978,9 @@ def commit_import_items(
                 root,
                 top_index_text=top_text,
                 pending_paths=[row["source_path"] for row in copied],
+                include_sources_index=False,  # The Sources index write above supplies that page.
                 sources_counts=pre_counts,
             )
-            sub_writes = [write for write in sub_writes if write.path != sources_index]
             writes.append(
                 PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8"))
             )
