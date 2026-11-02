@@ -18,10 +18,9 @@ safe because it yields per page: it stops before the next page on the first
 foreground request or vault change. The worker reports the blocking signal and
 `waiting_since`, so a hold is visible rather than silent.
 
-The sensor child has its own gate (`sensor_gate`): the operator's posture and
-host pressure only. It runs in its own process at the lowest priority, with
-its own CPU and memory budgets, so the tick's idle and graph holds do not
-apply to it.
+The sensor child has its own gate (`sensor_gate`): the operator's posture
+only. It runs in its own process at the lowest priority, with its own CPU and
+memory budgets, so the tick's idle and graph holds do not apply to it.
 
 Every number states what it prevents. Constants live here with no environment
 knob: a tunable nobody reviews is a control nobody can reason about.
@@ -92,7 +91,6 @@ class TickSignals:
 
     setting: str
     standby: bool
-    compute_mode: str
     pressure: bool | None
     #: Seconds since the last foreground request ended; 0 while one is live.
     idle_seconds: float
@@ -177,6 +175,21 @@ def _wait(reason: str, remaining: float | None = None) -> Decision:
     return Decision(False, reason, 0, sleep)
 
 
+def _posture_hold(signals: TickSignals) -> Decision | None:
+    """The wait for the operator's setting or the service's standby, else None.
+
+    The one place both gates read it, so the tick and the sensor child cannot
+    disagree about what off, paused and standby mean.
+    """
+    if signals.setting not in {"on", "paused"}:
+        return _wait("off")
+    if signals.setting == "paused":
+        return _wait("paused")
+    if signals.standby:
+        return _wait("standby")
+    return None
+
+
 def decide(signals: TickSignals) -> Decision:
     """Whether a tick may run now, and why not when it may not.
 
@@ -185,12 +198,9 @@ def decide(signals: TickSignals) -> Decision:
     the graph, then the dreamer's own budgets. Only the idle and settle
     preferences yield to `MAX_DEFER_SECONDS`; every other gate stays hard.
     """
-    if signals.setting not in {"on", "paused"}:
-        return _wait("off")
-    if signals.setting == "paused":
-        return _wait("paused")
-    if signals.standby:
-        return _wait("standby")
+    posture = _posture_hold(signals)
+    if posture is not None:
+        return posture
     if signals.pressure is True:
         return _wait("pressure")
     if signals.idle_seconds <= 0.0:
@@ -223,18 +233,10 @@ def decide(signals: TickSignals) -> Decision:
 def sensor_gate(signals: TickSignals) -> Decision:
     """Whether the sensor child may run now, and why not when it may not.
 
-    The operator's posture and host pressure only. The child is a separate
-    CPU-only process at the lowest priority with its own CPU, judgement and
-    memory budgets, so quiet mode, the foreground, a settling vault, graph debt,
-    an index backlog and the tick's own CPU budget do not stop it. A pressure
-    probe that was not gathered (None) reads as no pressure.
+    The operator's posture only. The child is a separate CPU-only process at
+    the lowest priority with its own CPU, judgement and memory budgets, so quiet
+    mode, the foreground, a settling vault, graph debt, an index backlog and the
+    tick's own CPU budget do not stop it. Pressure is not read: it measures GPU
+    headroom, and the child never uses the GPU.
     """
-    if signals.setting not in {"on", "paused"}:
-        return _wait("off")
-    if signals.setting == "paused":
-        return _wait("paused")
-    if signals.standby:
-        return _wait("standby")
-    if signals.pressure is True:
-        return _wait("pressure")
-    return Decision(True, "ready", 0, 0.0)
+    return _posture_hold(signals) or Decision(True, "ready", 0, 0.0)

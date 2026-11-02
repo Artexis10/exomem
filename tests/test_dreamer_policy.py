@@ -20,7 +20,6 @@ def _ready(**overrides) -> policy.TickSignals:
     base = policy.TickSignals(
         setting="on",
         standby=False,
-        compute_mode="normal",
         pressure=False,
         idle_seconds=3600.0,
         vault_quiet_seconds=3600.0,
@@ -85,13 +84,6 @@ def test_each_gate_signal_blocks_a_tick(overrides, reason) -> None:
     assert decision.reason == reason
     assert decision.page_budget == 0
     assert decision.sleep_s > 0
-
-
-def test_quiet_mode_does_not_stop_a_tick() -> None:
-    # Quiet keeps the GPU and model preload off. A tick loads no model.
-    decision = policy.decide(_ready(compute_mode="quiet"))
-    assert decision.run is True
-    assert decision.page_budget == policy.PAGES_PER_TICK
 
 
 def test_settle_tracks_the_last_whole_vault_pass() -> None:
@@ -185,7 +177,6 @@ def test_graph_debt_and_the_other_hard_gates_hold_past_the_bound() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"compute_mode": "quiet"},
         {"idle_seconds": 0.0},
         {"vault_quiet_seconds": 0.0},
         {"graph_debt": True},
@@ -193,10 +184,9 @@ def test_graph_debt_and_the_other_hard_gates_hold_past_the_bound() -> None:
         {"freshness_live": False},
         {"hour_cpu_used": policy.HOURLY_CPU_SECONDS},
         {"consecutive_failures": 3, "seconds_since_failure": 1.0},
-        {"pressure": None},
+        {"pressure": True},
     ],
     ids=[
-        "quiet",
         "live_request",
         "settling",
         "graph_debt",
@@ -204,12 +194,12 @@ def test_graph_debt_and_the_other_hard_gates_hold_past_the_bound() -> None:
         "freshness_unavailable",
         "tick_cpu_budget",
         "backoff",
-        "pressure_not_probed",
+        "gpu_pressure",
     ],
 )
 def test_the_sensor_child_runs_whatever_holds_a_tick(overrides) -> None:
-    # The child is its own process with its own budgets: nothing the tick waits
-    # for stops it, and an unprobed pressure reads as none.
+    # The child is its own process with its own budgets, and CPU only: nothing
+    # the tick waits for stops it, and GPU pressure does not apply to it.
     assert policy.sensor_gate(_ready(**overrides)).run is True
 
 
@@ -219,10 +209,9 @@ def test_the_sensor_child_runs_whatever_holds_a_tick(overrides) -> None:
         ({"setting": "off"}, "off"),
         ({"setting": "paused"}, "paused"),
         ({"standby": True}, "standby"),
-        ({"pressure": True}, "pressure"),
     ],
 )
-def test_the_sensor_child_waits_for_posture_and_pressure(overrides, reason) -> None:
+def test_the_sensor_child_waits_for_the_operators_posture(overrides, reason) -> None:
     assert policy.sensor_gate(_ready()).run is True
     decision = policy.sensor_gate(_ready(**overrides))
     assert (decision.run, decision.reason) == (False, reason)

@@ -16,9 +16,9 @@ sensed epistemic model (`sensed_model`), which projects the readings ledger into
 its own disposable file, and the loop supervises the sensor worker
 (`sensor_worker`), a separate child process. Only that child ever loads or runs
 a model. The dreamer thread starts it, gates it and kills it. The child has its
-own gate (`dreamer_policy.sensor_gate`): the operator's posture and host
-pressure, not the tick's idle and graph holds, and it admits itself against the
-host's available memory before it launches.
+own gate (`dreamer_policy.sensor_gate`): the operator's posture, not the tick's
+idle and graph holds, and it admits itself against the host's available memory
+before it launches. A Cloud cell never launches it.
 
 When it runs. A tick starts only when no foreground request is live and the
 graph owes nothing (`dreamer_policy.decide`); graph work strictly outranks
@@ -141,8 +141,9 @@ class _State:
     loops: int = 0
     vault_generation: int | None = None
     vault_changed_at: float = field(default_factory=_time.monotonic)
-    #: Monotonic time the worker thread started, and when its last tick returned
-    #: (None before the first). `seconds_since_tick` counts from the later one.
+    #: Monotonic time the worker thread started, and when its last tick did upkeep
+    #: or found none (None before the first). `seconds_since_tick` counts from the
+    #: later one.
     started_mono: float = field(default_factory=_time.monotonic)
     last_tick_mono: float | None = None
     ledger: CpuLedger = field(default_factory=CpuLedger)
@@ -372,8 +373,8 @@ def _wait(vault_root: Path, clock: Clock, stop_event: threading.Event, sleep: fl
     """Sleep until the next loop. True when the worker was told to stop.
 
     While a sensor child lives, its gate is re-read every
-    `POLL_WHILE_ALIVE_SECONDS` without running a tick, so standby, a pause or
-    pressure stops the child promptly and the dreamer's own schedule and CPU
+    `POLL_WHILE_ALIVE_SECONDS` without running a tick, so standby or a pause
+    stops the child promptly and the dreamer's own schedule and CPU
     budget are unchanged.
     """
     deadline = _time.monotonic() + max(0.0, sleep)
@@ -486,7 +487,7 @@ def _record_waiting(vault_root: Path, clock: Clock) -> None:
 
 def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickSignals:
     """Probe the gate once. The costly probes run only when the cheap ones pass."""
-    from . import mode, service_standby
+    from . import service_standby
 
     clock = clock or Clock()
     now = clock.monotonic()
@@ -515,7 +516,6 @@ def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickS
     signals = policy.TickSignals(
         setting=current,
         standby=service_standby.in_standby(),
-        compute_mode=mode.resolve_mode(),
         pressure=None,
         idle_seconds=foreground_activity.idle_seconds(vault_root),
         vault_quiet_seconds=quiet,
@@ -817,7 +817,10 @@ def _record_tick(
     with _LOCK:
         state = _STATE
         state.ledger.add(now_mono, cpu)
-        state.last_tick_mono = now_mono
+        # A tick cut off at page 0 by a request or a vault change did no upkeep,
+        # so it must not restart the bound that keeps upkeep from going stale.
+        if processed or stop not in {"foreground", "generation"}:
+            state.last_tick_mono = now_mono
         state.ticks += 1
         state.pages_processed += len(processed)
         state.last_tick_at = clock.time()

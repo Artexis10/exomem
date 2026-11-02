@@ -104,7 +104,7 @@ def test_launches_only_with_every_gate_open(tmp_path: Path, monkeypatch) -> None
     assert len(launcher.children) == 1
 
 
-@pytest.mark.parametrize("reason", ["pressure", "standby", "paused", "off"])
+@pytest.mark.parametrize("reason", ["standby", "paused", "off"])
 def test_a_closed_gate_kills_the_child(tmp_path: Path, monkeypatch, reason: str) -> None:
     sf.enable(monkeypatch)
     now = [1000.0]
@@ -144,6 +144,21 @@ def test_a_launch_needs_available_memory_above_the_recorded_peak(
     assert _step(sup) == "launched"
 
 
+def test_a_peak_recorded_for_another_instrument_does_not_block_a_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    assert _step(sup) == "launched"
+    _record_peak(vault, launcher, sup)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK - 1)
+    assert _step(sup) == "memory"
+    sf.enable(monkeypatch, sf.with_identity(revision="9"))
+    assert _step(sup) == "launched", "the old peak says nothing about the new model"
+    assert sup.peak_rss_bytes() is None
+
+
 def test_a_host_that_cannot_read_free_memory_still_launches(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     vault = tmp_path / "vault"
@@ -173,7 +188,7 @@ def test_a_running_child_is_never_killed_for_memory(tmp_path: Path, monkeypatch)
     sup, launcher = _supervisor(vault, [1000.0])
     sensor_worker._write_json(
         sensing_ledger.ledger_path(vault).with_name(sensor_worker.PEAK_FILE),
-        {"peak_rss_bytes": PEAK},
+        {"peak_rss_bytes": PEAK, "key": sensor_worker._refusal_key()},
     )
     monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK * 2)
     assert _step(sup) == "launched"
@@ -232,6 +247,18 @@ def test_the_child_reports_its_peak_memory_where_the_host_gives_one(
     monkeypatch.setattr(runtime_resources, "peak_rss_bytes", lambda: None)
     assert sf.sense(vault, sf.StubInstrument(sf.default_table())) == sensor_worker.EXIT_IDLE
     assert "peak_rss_bytes" not in json.loads(spend_path.read_text())
+
+
+def test_a_cloud_cell_never_launches_the_child(tmp_path: Path, monkeypatch) -> None:
+    """Until the Cloud placement exists, cells write no readings."""
+    sf.enable(monkeypatch)
+    sup, launcher = _supervisor(tmp_path / "vault", [1000.0])
+    assert _step(sup) == "launched"
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    assert _step(sup) == "cloud_placement"
+    assert launcher.children[0].terminated
+    assert _step(sup) == "cloud_placement"
+    assert len(launcher.children) == 1, "no relaunch while the cell stays a Cloud cell"
 
 
 def test_turning_sensing_off_kills_the_child(tmp_path: Path, monkeypatch) -> None:

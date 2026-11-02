@@ -412,6 +412,31 @@ def test_the_bound_counts_from_the_last_completed_tick(
     assert dreamer.gather_signals(vault, clock).seconds_since_tick < 5.0
 
 
+def test_a_tick_cut_off_at_page_zero_does_not_restart_the_bound(
+    tmp_path: Path, monkeypatch, recorder
+) -> None:
+    """On a busy vault each tick is cut off at once by the next request. If that
+    restarted the bound, the next tick would wait again and upkeep would starve."""
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    vault = _vault(tmp_path, 2)
+    skew = [dreamer_policy.MAX_DEFER_SECONDS + 1.0]
+    clock = dreamer.Clock(monotonic=lambda: time.monotonic() + skew[0])
+    with foreground_activity.foreground_scope(vault):
+        pass  # a request has just ended: busy, not idle
+    real_foreground_since = foreground_activity.foreground_since
+    monkeypatch.setattr(foreground_activity, "foreground_since", lambda *args, **kwargs: True)
+
+    dreamer._loop_once(vault, clock)
+    dreamer._loop_once(vault, clock)
+    assert dreamer.status()["ticks"] == 2, "the second loop ran a tick despite the first cut-off"
+    assert not recorder.pages
+    assert dreamer.gather_signals(vault, clock).seconds_since_tick >= dreamer_policy.MAX_DEFER_SECONDS
+
+    monkeypatch.setattr(foreground_activity, "foreground_since", real_foreground_since)
+    dreamer._loop_once(vault, clock)
+    assert recorder.pages, "a tick that was not cut off processed pages"
+
+
 def test_a_stopped_worker_never_comes_back(tmp_path: Path, monkeypatch) -> None:
     """A worker stopped mid-tick past the join timeout finishes that tick and
     exits: a later start runs a new worker, never the old one again."""
