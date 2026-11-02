@@ -116,7 +116,7 @@ def test_an_accepted_write_commits_once_when_the_boundary_frees_and_a_resend_get
     assert done.arguments is None, "a committed intent keeps no arguments"
 
     again = _remember(manager, vault, kwargs, idempotency_key="applies-once")
-    assert again == done.terminal
+    assert again == {**done.terminal, "intent_id": done.intent_id}
     assert len(list(vault.rglob("accepted-save-20*.md"))) == 1
 
 
@@ -147,7 +147,7 @@ def test_an_accepting_caller_inside_its_window_gets_the_terminal_the_moment_the_
         answer = _remember(manager, vault, _draft_kwargs(vault, 21), idempotency_key="in-window")
         elapsed = time.monotonic() - started
         ender.join(30)
-    assert answer == terminal
+    assert answer == {**terminal, "intent_id": answer["intent_id"]}
     assert elapsed < intent_accept.ACCEPT_DEADLINE_SECONDS + 1.0
 
 
@@ -231,7 +231,7 @@ def test_a_resend_with_the_original_arguments_after_a_rewrite_gets_the_intent_no
     assert (vault / "Knowledge Base/Notes/rewrite-moved.md").is_file()
     assert not (vault / "Knowledge Base/Notes/rewrite-original.md").exists()
 
-    assert send() == done.terminal
+    assert send() == {**done.terminal, "intent_id": done.intent_id}
 
 
 def test_an_applied_intent_whose_target_is_reserved_is_refused_as_the_synchronous_path_refuses(vault: Path) -> None:

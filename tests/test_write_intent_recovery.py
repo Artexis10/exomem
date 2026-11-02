@@ -134,7 +134,7 @@ def test_a_caller_killed_after_its_row_committed_still_gets_one_commit_and_a_res
     assert done.state == "committed", done.conflict
     assert len(_pages(vault, 60)) == 1
     with _no_applier(monkeypatch):
-        assert _remember(manager, vault, kwargs, idempotency_key="crash-row") == done.terminal
+        assert _remember(manager, vault, kwargs, idempotency_key="crash-row") == {**done.terminal, "intent_id": done.intent_id}
     assert len(_pages(vault, 60)) == 1
 
 
