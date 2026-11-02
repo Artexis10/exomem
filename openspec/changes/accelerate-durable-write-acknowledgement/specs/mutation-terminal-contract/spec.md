@@ -21,7 +21,7 @@ resolvable for at least as long as the corresponding mutation terminal remains
 replayable; cleanup MUST NOT strand a replayed reference. `user_summary` SHALL be
 one plain sentence built only from fields the stored terminal holds, so a repeat
 request with the same idempotency key returns the same text: a verb, then the
-path, or the first path and the count of the others. A batch with per-file states SHALL read them from its projected rows: `Saved` SHALL cover only the files this call stored, a batch with a failed or already-stored file SHALL read "Saved S of T files -> <first stored path> and S-1 more; F files could not be saved" plus "K already saved" when K > 0, and a batch that stored nothing SHALL NOT read as "Saved" ("Already saved -> <path>", "Nothing saved; F files could not be saved", or both counts). The sentence SHALL carry no code, id or reason. Every write operation SHALL
+path, or the first path and the count of the others. A batch with per-file states SHALL read them from its projected rows: `Saved` SHALL cover only the files this call stored, a batch with a failed or already-stored file SHALL read "Saved S of T files -> <first stored path> and S-1 more; F files could not be saved" plus "K already saved" when K > 0, and a batch that stored nothing SHALL NOT read as "Saved" ("Already saved -> <path>", "Nothing saved; F files could not be saved", or both counts). A single file whose bytes were already stored SHALL read "Already saved -> <path>". The sentence SHALL carry no code, id or reason. Every write operation SHALL
 declare its verb from a closed set (saved, updated, moved, deleted, replaced,
 discarded or restored), and a write that declares none SHALL carry no
 `user_summary`. A replacement leads with the new page and names the old one. A
@@ -56,6 +56,7 @@ the compatibility window.
 - **WHEN** a batch of three files stores two and fails one
 - **THEN** `user_summary` reads "Saved 2 of 3 files -> <first stored path> and 1 more; 1 file could not be saved"
 - **AND** a batch that stores nothing reads "Already saved -> <path>" or "Nothing saved; 1 file could not be saved", never "Saved"
+- **AND** a single file whose bytes were already stored reads "Already saved -> <path>"
 - **AND** a repeat request with the same idempotency key returns the same text
 
 #### Scenario: Pending is not failed

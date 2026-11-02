@@ -404,6 +404,26 @@ def test_a_batch_that_stored_every_file_keeps_its_summary(
     assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more"
 
 
+def test_preserving_bytes_that_are_already_stored_says_already_saved(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "preserve_evidence")
+    letter = {"scope": "case", "category": "letters", "content": "Please withdraw the notice."}
+    first = writer_lease.invoke_command(
+        command, vault, filename="letter.txt", idempotency_key="letter-first", **letter
+    )
+
+    again = writer_lease.invoke_command(
+        command, vault, filename="letter-copy.txt", idempotency_key="letter-again", **letter
+    )
+
+    assert first["user_summary"] == f"Saved -> {first['path']}"
+    assert not (vault / "Knowledge Base/Evidence/case/letters/letter-copy.txt").exists()
+    assert again["user_summary"] == f"Already saved -> {first['path']}"
+
+
 def test_a_repeated_partial_batch_returns_the_same_summary_as_the_first(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1920,7 +1920,7 @@ def split_response_detail(
 
 
 def _batch_rows(
-    artifact_receipt: Mapping[str, Any], media: Mapping[str, Any]
+    leaf: Any, artifact_receipt: Mapping[str, Any], media: Mapping[str, Any]
 ) -> list[tuple[str, str]]:
     """One (state, path) pair per attempted file of a batch, read from the projected rows.
 
@@ -1928,6 +1928,8 @@ def _batch_rows(
     sentence cannot claim more than the rows the agent reads. `replayed` is a file an earlier call
     committed, so it counts with `already_stored`. `unselected` files were never attempted.
     A media row is `failed` or it was accepted; the media contract has no duplicate state.
+    One file written alone has no rows; its stored leaf says `already_stored` when the bytes were
+    already there, and names the earlier copy it resolved to.
     """
     rows = []
     for item in artifact_receipt.get("files", ()):
@@ -1937,6 +1939,14 @@ def _batch_rows(
             rows.append((state, item.get("stored_path", "")))
     for item in media.get("media_results", ()):
         rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
+    if (
+        not rows
+        and isinstance(leaf, Mapping)
+        and leaf.get("state") == "already_stored"
+        and isinstance(leaf.get("stored_path"), str)
+        and isinstance(leaf.get("duplicate_of"), Mapping)
+    ):
+        rows.append(("already_stored", leaf["stored_path"]))
     return rows
 
 
@@ -2046,7 +2056,7 @@ def project_terminal(
     artifact_receipt = _artifact_receipt_projection(leaf)
     media_projection = _media_result_projection(leaf)
     user_summary = _user_summary(
-        result, outcome_verb, _batch_rows(artifact_receipt, media_projection)
+        result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
     )
     if user_summary is not None:
         compact["user_summary"] = user_summary
