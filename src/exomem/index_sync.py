@@ -908,7 +908,9 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
         if (
             component.component == "embeddings"
             and component.outcome == "accepted"
-            and component.code in {"embeddings_disabled", "no_eligible_paths"}
+            # A backend switched off or never installed leaves keyword search whole: no full replay is
+            # owed, and the per-path semantic receipt still carries the vector backfill.
+            and component.code in {"embeddings_disabled", "embeddings_import_unavailable", "no_eligible_paths"}
         ):
             continue
         if component.component == "epistemic_graph" and component.outcome in {
@@ -1235,6 +1237,14 @@ def _drain_graph_receipts(
         # The pass ran per path. A failed batch, isolated below, says nothing
         # about readiness either way.
         graph_drain.note_per_path_repair(vault_root, admissible=True)
+    if report.get("commit_race"):
+        # A live commit beat the batch to the lock: no page's fault, so there is
+        # nothing to isolate. A replay per receipt would hold the boundary once
+        # per page and, with its siblings still queued, withhold its publication
+        # after rewriting the catalogue rows -- minutes of lock for nothing. The
+        # receipts stay queued and the next tick runs one batch again.
+        log.info("deferred graph batch lost to a commit; work remains queued")
+        return 0, True
     covered = set(report.get("indexed", ()))
     if covered:
         done = [receipt for receipt in receipts if receipt.rel_path in covered]

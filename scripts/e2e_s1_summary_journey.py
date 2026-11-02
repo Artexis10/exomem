@@ -2133,7 +2133,9 @@ def inspect_compatible_launcher(args: argparse.Namespace) -> int:
     target = asyncio.run(runtime.inspect({"python": str(python), "version": identity["version"]}))
     migrate, reason = runtime.migration_required(target)
     expect(not migrate, "the earlier application requires a state migration", reason)
-    expect(runtime._collections_declared(target) == "none", "the supplied application declares general migration")
+    # Releases since GA declare collections-migrate-v1, and finishing a staged migration is supported;
+    # the store, marker and fence checks below prove that SQLite authority survives the rollback.
+    expect(runtime._collections_declared(target) != "probe_failed", "the earlier application's migration probe failed")
     expect(runtime.child is None and runtime.standby is None, "candidate inspection started an application")
     fence = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).collection_store_fence()
     expect(fence.enrolled, "the compatible rollback retired the store fence")

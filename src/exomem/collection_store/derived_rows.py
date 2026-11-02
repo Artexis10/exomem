@@ -71,11 +71,20 @@ SOURCE_MISSING = "DERIVED_SOURCE_MISSING"
 #: A step also ends after the batch that spends ``STEP_SECONDS``, or when its caller asks (``step``).
 REBUILD_STEP_ROWS = 2000
 #: Seconds of row work one transaction of derived rows may spend holding the vault mutation
-#: boundary. Import and rebuild batches are sized from the collection's last batch, so a request
-#: waits about this long behind them whatever a row costs on this machine and collection.
+#: boundary. Import and rebuild batches are sized from the collection's last batch, within the
+#: row ceilings below, so a request waits about this long behind them on a machine that is not
+#: starved for CPU.
 STEP_SECONDS = 0.15
 #: Rows a collection's first batch takes, before its pace is known.
 FIRST_BATCH_ROWS = 50
+#: Rows one rebuild batch takes at most. A batch cannot stop part-way, and on a loaded host the
+#: writer thread can wait in the run queue far longer than the last batch's pace predicts, so
+#: the step loop checks its deadline between small batches instead. 32 rows is about 10 ms of
+#: row work at a typical 0.3 ms per row, so a batch overruns the budget only under a severe stall.
+REBUILD_BATCH_ROWS = 32
+#: Rows one import batch takes at most, for the same reason. It is larger than a rebuild batch
+#: because each import batch pays tens of milliseconds of setup outside the hold.
+IMPORT_BATCH_ROWS = 100
 #: This file's own layout; a file of another one is discarded, and its rows rebuild from the log.
 LAYOUT = 3
 
@@ -1079,7 +1088,8 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str
                 started = time.perf_counter()
                 # A later batch of the step takes only what is left of its budget.
                 batch = importer._next_batch(reader, plan, reader.pending, order, limit=store.batch_rows(
-                    collection_id, importer.MAX_BATCH_ROWS, STEP_SECONDS - (started - began)))
+                    collection_id, min(importer.MAX_BATCH_ROWS, REBUILD_BATCH_ROWS),
+                    STEP_SECONDS - (started - began)))
                 if batch.stop is not None:
                     stopped = True  # a logged member never stopped its import
                     break

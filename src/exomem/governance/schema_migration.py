@@ -17,6 +17,7 @@ from ..kbdir import kb_dirname
 from ..vocabulary_admission import VocabularyAdmissionError
 from . import (
     authorization_custody,
+    catalog_publication,
     legacy_v3_placement,
     membership,
     policy,
@@ -188,21 +189,6 @@ def _deterministic_ulid(*, timestamp: int, entropy: bytes) -> str:
     )
 
 
-def _search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
-    fields = {"title": page.title}
-    for name, value in (
-        ("body", page.body),
-        ("status", page.frontmatter.get("status")),
-        ("type", page.page_type),
-        ("updated", page.updated),
-        ("media_type", page.frontmatter.get("media_type")),
-        ("parent_media", page.frontmatter.get("parent_media")),
-    ):
-        if value:
-            fields[name] = str(value)
-    return fields
-
-
 def _source_store_snapshot(vault_root: Path) -> tuple[bytes, str]:
     source = store.open_readonly_connection(vault_root)
     if source is None:
@@ -331,7 +317,7 @@ def _catalog_items(
                 scope_ids=scope_ids,
                 policy=compiled,
                 projector_schema_version=key.projector_schema_version,
-                full_search_fields=_search_fields(parsed),
+                full_search_fields=catalog_publication.search_fields(parsed),
             )
         except ForwardMigrationUnavailable:
             raise

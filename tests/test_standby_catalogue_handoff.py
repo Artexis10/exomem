@@ -369,7 +369,9 @@ def _stub_graph_and_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "adopt_published_snapshot",
-        lambda self, **_kwargs: epistemic_graph.SnapshotAdoption(True, reason="adopted"),
+        lambda self, **_kwargs: epistemic_graph.SnapshotAdoption(
+            True, reason="adopted", proved_token="checkpoint-1"
+        ),
         raising=True,
     )
 

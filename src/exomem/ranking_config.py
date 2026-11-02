@@ -83,7 +83,7 @@ class RankingConfig:
     # rather than in the compiler for the same reason every other threshold is:
     # so the eval harness can sweep them without editing retrieval code.
     #
-    # `vector_band` is corpus-relative (`working_set_resolve.semantic_band`): a
+    # `vector_band` is corpus-relative (`chance_band.semantic_band`): a
     # signature bands when its similarity to the turn clears the level the
     # largest of N unrelated similarities exceeds with probability
     # `working_set_semantic_alpha`, measured from the catalogue's own median and
@@ -97,6 +97,17 @@ class RankingConfig:
     # the same coverage floor `collection_claims.MIN_CLAIM_COVERAGE` uses: one
     # shared word is a coincidence, two is a reference.
     working_set_lexical_min_terms: int = 2
+
+    # ---- CLIP lane chance band ----
+    # The CLIP lane admits an image only when its similarity to the query clears
+    # the chance maximum of every indexed image (`chance_band.semantic_band`).
+    # Text queries and visual ones share one cosine range, so no cosine is fixed
+    # here. Below `clip_semantic_min_population` images there is no chance level
+    # and the lane ranks its top images unbanded.
+    # The working set's own alpha: one unrelated query in a hundred may still clear.
+    clip_semantic_alpha: float = 0.01
+    # The working set's own floor: the median and MAD of fewer images are noise.
+    clip_semantic_min_population: int = 50
 
     def note_type_factor(self, role: str | None) -> float:
         """The ranking knob a note-type role takes; no role, or `evidence`, is neutral.

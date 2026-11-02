@@ -1124,9 +1124,9 @@ def test_a_queue_that_only_loses_races_to_commits_is_never_rebuilt_whole(
 
     def refused_or_raced(self: EpistemicGraphIndex, paths: list[Path]) -> dict[str, Any]:
         nonlocal drains
-        # One receipt queued, so a pass is a batch call and then one replay. This
-        # cycle makes the passes: batch refused; batch raced, replay raced;
-        # batch raced, replay refused.
+        # A pass is one batch call: a refused or raced batch ends it, and a
+        # raced batch is not replayed. This cycle loses five passes in a row,
+        # three to the race and two to the refusal.
         busy = writing and ("busy", "race", "race", "race", "busy")[drains % 5] == "busy"
         drains += 1
         if busy:
@@ -1192,6 +1192,62 @@ def test_a_queue_that_only_loses_races_to_commits_is_never_rebuilt_whole(
 
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_batch_that_loses_a_commit_race_is_retried_whole_not_replayed_per_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit race is not a poison page, so it must not cost a lock hold per receipt.
+
+    A write landed between the drain's checkpoint sample and its lock. The
+    batch returned `moved_before_pass` and the drain replayed every receipt
+    alone, each in its own hold of the mutation boundary: 194 s of lock on a
+    live vault, against 12 s for the batch. The next tick runs one batch.
+    """
+    vault = _published_vault(tmp_path)
+    notes = vault / "Knowledge Base/Notes/Insights"
+    rels = []
+    for name in ("one", "two", "three"):
+        page = notes / f"{name}.md"
+        page.write_text(_page(name, f"{name} links to [[a]]."), encoding="utf-8")
+        freshness.on_files_changed(vault, changed=[page])
+        rels.append(page.relative_to(vault).as_posix())
+    deferred_index.add_graph_receipts(vault, rels)
+
+    racing = True
+    real_snapshot = find_module.recall_resolver_snapshot
+    real_drain = EpistemicGraphIndex.drain_paths
+    batches: list[int] = []
+
+    def racing_snapshot(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal racing
+        resolver = real_snapshot(*args, **kwargs)
+        if racing:
+            racing = False
+            page = vault / rels[0]
+            page.write_text(_page("one", "one links to [[b]]."), encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[page])
+            deferred_index.add_graph_receipts(vault, [rels[0]])
+        return resolver
+
+    def counted(self: EpistemicGraphIndex, paths: list[Path]) -> dict[str, Any]:
+        batches.append(len(paths))
+        return real_drain(self, paths)
+
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", racing_snapshot)
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", counted)
+
+    graph_drain._work_once(vault)
+
+    assert batches == [3], "the lost race was replayed per receipt instead of retried whole"
+    assert sorted(deferred_index.list_graph_paths(vault)) == sorted(rels)
+    assert graph_drain.per_path_repair_raced(vault), "the race verdict was not recorded"
+
+    graph_drain._work_once(vault)
+
+    assert batches == [3, 3], "the next pass was not one batch"
+    assert deferred_index.list_graph_paths(vault) == []
 
 
 def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(

@@ -35,7 +35,6 @@ RELATIONSHIP_MARKERS = re.compile(
     r"mention(?:s|ed)?)\b",
     re.IGNORECASE,
 )
-EXACT_LEADING = re.compile(r"^(who|whose|what|which)\b", re.IGNORECASE)
 
 PageOf = Callable[[str], object | None]
 
@@ -453,8 +452,6 @@ def classify_intent(query: str) -> str:
     if not q:
         return "conceptual"
     if '"' in q or "[[" in q:
-        return "exact"
-    if EXACT_LEADING.match(q):
         return "exact"
     if is_temporal_query(q):
         return "temporal"

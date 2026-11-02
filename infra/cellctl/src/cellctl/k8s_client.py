@@ -59,6 +59,7 @@ from .manifests import (
     ROW_GENERATION_ANNOTATION,
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
+    cell_id_from_namespace,
     hold_job_name,
     namespace_name,
     snapshot_backup_name,
@@ -903,7 +904,7 @@ class ClusterClient:
             )
             namespace = pv_namespace.get(pv_name) if pv_name else None
             attachments.append(AttachmentReservation(node=node, volume=pv_name or attachment.metadata.name,
-                                                     cell_id=_capacity_cell_id(namespace)))
+                                                     cell_id=cell_id_from_namespace(namespace)))
             if namespace is None or not namespace.startswith(NAMESPACE_PREFIX):
                 non_cell_attachments[node] = non_cell_attachments.get(node, 0) + 1
 
@@ -926,7 +927,7 @@ class ClusterClient:
                     taints=tuple((taint.key, taint.value or "", taint.effect) for taint in node.spec.taints or []))
             workers = [node for node in nodes if (node.metadata.labels or {}).get("exomem.io/shared-profile") == shared_policy.profile]
             for pv in pvs:
-                cell_id = _capacity_cell_id(pv_namespace.get(pv.metadata.name))
+                cell_id = cell_id_from_namespace(pv_namespace.get(pv.metadata.name))
                 if not cell_id or not shared_policy.selects(cell_id):
                     continue
                 if (not pv.spec.csi or pv.spec.csi.driver != csi_driver
@@ -942,7 +943,7 @@ class ClusterClient:
                     continue
                 cpu, memory = effective_pod_requests(pod)
                 pods.append(PodReservation(node=pod.spec.node_name or None,
-                                           cell_id=_capacity_cell_id(pod.metadata.namespace), cpu=cpu, memory=memory))
+                                           cell_id=cell_id_from_namespace(pod.metadata.namespace), cpu=cpu, memory=memory))
                 target = pod.spec.node_name or (workers[0].metadata.name if len(workers) == 1 else None)
                 if target:
                     for volume in pod.spec.volumes or []:
@@ -956,7 +957,7 @@ class ClusterClient:
                         # A not-yet-bound claim is conservatively one volume.
                         attachments.append(AttachmentReservation(
                             node=target, volume=pv.metadata.name if pv else f"pvc:{pod.metadata.namespace}/{claim.claim_name}",
-                            cell_id=_capacity_cell_id(pod.metadata.namespace)))
+                            cell_id=cell_id_from_namespace(pod.metadata.namespace)))
         return CapacityObservation(nodes=observations, pods=tuple(pods), attachments=tuple(attachments),
                                    incompatible_cells=frozenset(incompatible), allocatable=allocatable,
                                    attachments_used=attachments_used, non_cell_attachments=non_cell_attachments,
@@ -1000,7 +1001,7 @@ class ClusterClient:
         cell_nodes: dict[str, str] = {}
         for pv in self._core.list_persistent_volume().items:
             claim = pv.spec.claim_ref if pv.spec else None
-            cell_id = _capacity_cell_id(claim.namespace) if claim else None
+            cell_id = cell_id_from_namespace(claim.namespace) if claim else None
             node = _pinned_node(pv, local.topology_key) if pv.spec.storage_class_name == local.class_name else None
             if cell_id and node and claim.name == "cell-data":
                 current = current_claims.get((claim.namespace, claim.name))
@@ -1129,12 +1130,6 @@ def _general_node(node) -> bool:
         and node.status is not None
         and any(condition.type == "Ready" and condition.status == "True" for condition in (node.status.conditions or []))
     )
-
-
-def _capacity_cell_id(namespace: str | None) -> str | None:
-    if namespace and re.fullmatch(r"exo-cell-[a-z2-7]{16}", namespace):
-        return namespace[len(NAMESPACE_PREFIX):]
-    return None
 
 
 def _pinned_node(pv, topology_key: str) -> str | None:

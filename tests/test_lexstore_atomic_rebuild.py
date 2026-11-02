@@ -55,6 +55,7 @@ import pytest
 
 from exomem import file_watcher, find_types, freshness, lexstore, reserved_paths, writer_lease
 from exomem import find as find_module
+from exomem.vault import VaultLockError
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -626,13 +627,36 @@ def test_a_replay_that_cannot_prove_a_page_names_what_ended_it(
     assert store._last_decline_cause == cause
 
 
-def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _publication_barrier_held(store: lexstore.LexicalStore) -> bool:
+    """Whether this thread holds the publication barrier: it cannot take it twice.
+
+    Only a nested acquire raises `VAULT_LOCK_NESTED`; a barrier that another
+    thread holds raises a timeout, so a replay on another thread reads false.
+    """
+    try:
+        with store._publication_lock(timeout=0):
+            return False
+    except VaultLockError as error:
+        return error.code == "VAULT_LOCK_NESTED"
+
+
+def _delta_names(delta: Any, page: Path) -> bool:
+    return any(Path(name) == page for name in (*delta.changed, *delta.deleted))
+
+
+def _live_contents(store: lexstore.LexicalStore) -> str:
+    with sqlite3.connect(store.path) as live:
+        return " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
+
+
+def test_a_page_rewritten_after_every_replay_is_deferred_not_chased(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A writer that rewrites P each time the build's replay reads it keeps P
-    from ever proving its target, although the registry observes each write
-    soon after. The replay must stop after a bounded number of retargets and
-    keep the live catalogue, not follow the writer for as long as it writes.
+    """An import rewrites P each time the build's replay applies it, and the
+    registry observes each write. The replay used to follow P and decline after
+    three rounds. It now publishes at the target it started from, leaves P as
+    ordinary lag, reports one deferred page on the worker's finish line, and
+    the catch-up that follows serves P's newest content.
     """
     p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
     _seed(tmp_path, [p])
@@ -640,8 +664,6 @@ def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it
     store = lexstore.get_store(tmp_path)
     real_materialize = store._materialize_catalog
     real_apply_rows = store._apply_delta_rows
-    writer_stopped = threading.Event()
-    late_events: list[threading.Timer] = []
     rewrites = 0
 
     def rewrite_p() -> None:
@@ -649,42 +671,105 @@ def test_a_page_rewritten_after_every_replay_ends_the_pass_instead_of_chasing_it
         rewrites += 1
         p.write_text(_page_text("p", f"- [config] prewrite{rewrites} ^u1"), encoding="utf-8")
         _touch_future(p)
+        freshness.on_files_changed(tmp_path, changed=[p])
 
     def materialize_then_rewrite_p(*args: Any, **kwargs: Any) -> Any:
         built = real_materialize(*args, **kwargs)
         rewrite_p()
-        freshness.on_files_changed(tmp_path, changed=[p])
         return built
 
-    def apply_rows_then_rewrite_p_with_a_late_event(conn: sqlite3.Connection, delta: Any) -> None:
+    def apply_rows_then_rewrite_p(conn: sqlite3.Connection, delta: Any) -> None:
         real_apply_rows(conn, delta)
-        if writer_stopped.is_set():
-            return
         rewrite_p()
-        late = threading.Timer(
-            0.2, freshness.on_files_changed, args=(tmp_path,), kwargs={"changed": [p]}
-        )
+
+    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
+    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p)
+    caplog.set_level("INFO", logger="exomem.lexstore")
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    finished = [
+        record.fields
+        for record in caplog.records
+        if getattr(record, "event", None) == "lexical_repair_finished"
+    ]
+    full = [fields for fields in finished if fields["kind"] == "full"]
+    assert [fields["result"] for fields in full] == ["published"]
+    assert full[0]["deferred"] == 1
+    # P is published at the target the final replay started from, behind the registry.
+    for scope in ("kb", "vault"):
+        stored = store.catalog_checkpoint(scope)
+        assert stored != freshness.recall_checkpoint(tmp_path, scope)
+        assert _delta_names(freshness.recall_delta_since(tmp_path, scope, stored), p)
+    # A later catch-up applies P's newest state.
+    monkeypatch.undo()
+    lexstore.ensure_fresh(tmp_path)
+    assert f"prewrite{rewrites}" in _live_contents(store)
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+
+
+def test_a_barrier_refusal_on_a_page_still_publishing_goes_to_the_catch_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write rewrites P while the pass holds the publication barrier, and its
+    publication intent for P stays open until the registry holds the event. The
+    barrier never waits, so it refuses. It used to end the pass there. It now
+    hands P to the off-barrier catch-up, which waits for the event.
+    """
+    p = _kb_file(tmp_path, "p.md", "- [config] pbefore ^u1")
+    _seed(tmp_path, [p])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_rebase = store._rebase_detached_catalog
+    real_apply_rows = store._apply_delta_rows
+    state = {"barrier": False, "done": False}
+    late_events: list[threading.Timer] = []
+
+    def note_barrier(*args: Any, **kwargs: Any) -> Any:
+        # The replay that runs under the publication barrier is the one that
+        # finds the barrier taken. Give it a delta to replay.
+        state["barrier"] = _publication_barrier_held(store)
+        if state["barrier"] and not state["done"]:
+            p.write_text(_page_text("p", "- [config] pmiddle ^u1"), encoding="utf-8")
+            _touch_future(p)
+            freshness.on_files_changed(tmp_path, changed=[p])
+        return real_rebase(*args, **kwargs)
+
+    def apply_rows_then_publish_p_late(conn: sqlite3.Connection, delta: Any) -> None:
+        real_apply_rows(conn, delta)
+        if not state["barrier"] or state["done"]:
+            return
+        state["done"] = True
+        p.write_text(_page_text("p", "- [config] pafter ^u1"), encoding="utf-8")
+        _touch_future(p)
+        descriptor = os.open(p, os.O_RDONLY)
+        try:
+            (intent,) = file_watcher.register_publication_intents(
+                tmp_path, [(p, descriptor, hashlib.sha256(p.read_bytes()).hexdigest())]
+            )
+        finally:
+            os.close(descriptor)
+
+        def publish_and_close() -> None:
+            freshness.on_files_changed(tmp_path, changed=[p])
+            file_watcher.finalize_publication_intents((intent,))
+
+        late = threading.Timer(0.3, publish_and_close)
         late_events.append(late)
         late.start()
 
-    monkeypatch.setattr(store, "_materialize_catalog", materialize_then_rewrite_p)
-    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_rewrite_p_with_a_late_event)
-    outcome: dict[str, bool] = {}
-    build = threading.Thread(target=lambda: outcome.setdefault("published", store.rebuild_atomic()))
-    with _a_write_in_flight(tmp_path):
-        build.start()
-        build.join(timeout=_OBSERVE_SECONDS)
-        finished = not build.is_alive()
-        writer_stopped.set()
-        build.join()
-    for late in late_events:
-        late.join()
-    assert finished, "the replay kept chasing a page that never stopped changing"
-    assert outcome["published"] is False
-    assert store._last_decline_cause == lexstore.DeclineCause.RETARGETS_EXHAUSTED
-    with sqlite3.connect(store.path) as live:
-        contents = " ".join(row[0] for row in live.execute("SELECT content FROM semantic_units"))
-    assert "pbefore" in contents and "prewrite" not in contents
+    monkeypatch.setattr(store, "_rebase_detached_catalog", note_barrier)
+    monkeypatch.setattr(store, "_apply_delta_rows", apply_rows_then_publish_p_late)
+    try:
+        published = store.rebuild_atomic()
+    finally:
+        for late in late_events:
+            late.join()
+        file_watcher.clear_self_write_registry()
+    assert state["done"], "the barrier replay never ran"
+    assert published is True
+    assert "pafter" in _live_contents(store)
 
 
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(

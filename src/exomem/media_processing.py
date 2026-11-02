@@ -1583,8 +1583,9 @@ def _preservable_notes(body: str) -> str | None:
     record. Only regenerated scaffolding is dropped: the title/locator lines and
     an empty ``## Extracted text`` anchor.
     """
-    body = with_newline(body, "\n")
     preserve = _preserve_module()
+    # The OCR words a sidecar withheld from search must not come back as searchable notes.
+    body = preserve.without_low_confidence_ocr(with_newline(body, "\n"))
     kept: list[str] = []
     owned_boundary = f"{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n{_PRESERVED_HEADING}"
     segments = (

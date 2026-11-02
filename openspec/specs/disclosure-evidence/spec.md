@@ -4,7 +4,9 @@
 Provide durable, plaintext-free, tamper-evident evidence for governed egress,
 credential and token lifecycle, and governed deletion/recovery while keeping
 ordinary ungoverned recall state-free.
+
 ## Requirements
+
 ### Requirement: Proportional plaintext-free receipts
 
 Governed egress, withhold-token lifecycle, and governed content lifecycle events
@@ -67,8 +69,8 @@ aliases SHALL contribute outcomes to the request-scoped collector and SHALL NOT
 emit before the outer representation is finalized. An internal append retry
 within that invocation SHALL reuse its minted id; a new external invocation
 SHALL mint a new id. The universal terminal postfilter SHALL remain
-side-effect-free because some transports invoke it more than once, and the
-second MCP filter pass SHALL emit zero events.
+side-effect-free because a result can pass it more than once, and a repeated
+filter pass SHALL emit zero events.
 
 Coverage SHALL be derived from content-returning operation/mode branches and
 registered reduction adapters, not only top-level command names. Adding a new
@@ -82,10 +84,12 @@ If append reports an error, the boundary SHALL fail closed with a content-free
 retryable service error and SHALL NOT return the unreceipted payload. Read-path
 events need not fsync and SHALL make no whole-system power-loss durability claim.
 
-#### Scenario: MCP's second filter pass does not duplicate evidence
+A governed boundary that collects no outcome SHALL still emit one receipt with an empty outcome list when the caller is restricted, so that a receipt-store failure refuses it exactly as it refuses a boundary that touched an item. A caller that is not restricted SHALL keep the receipt-free path for a boundary that collects no outcome, and that decision SHALL NOT add a policy load to the boundary.
 
-- **WHEN** an MCP response runs both the universal dispatcher filter and the MCP
-  filter pass
+#### Scenario: A repeated filter pass does not duplicate evidence
+
+- **WHEN** a response runs the universal dispatcher filter and the same filter
+  runs again over its result
 - **THEN** the governed decision produces one receipt, not two
 
 #### Scenario: Aggregate withholding is receipted where reduced
@@ -121,6 +125,18 @@ events need not fsync and SHALL make no whole-system power-loss durability claim
 - **WHEN** a content-returning mode is added to an existing product command
   without registering its reduction/projection adapter
 - **THEN** registry-derived receipt coverage fails
+
+#### Scenario: A probe that touches nothing is receipted
+
+- **WHEN** a restricted caller reads a missing path or runs a search with no hits
+- **THEN** the boundary emits one disclosure receipt with an empty outcome list
+- **AND** when the receipt store is unavailable, the call refuses with the same retryable error as a call that touched an item
+
+#### Scenario: An unrestricted owner read that touches nothing stays receipt-free
+
+- **WHEN** the owner, with no connector ceiling, reads a missing path or asks `coordination_status`, on a governed or an ungoverned vault
+- **THEN** no receipt is appended
+- **AND** a receipt-store failure does not refuse the call
 
 ### Requirement: Per-machine hash-chained log with truncation detection
 
@@ -287,6 +303,8 @@ intents without writing. The write-capable
 verifying the complete chain and MAY append an idempotent terminal only when
 current state exactly matches the intent's prior or target fingerprint.
 
+Verification SHALL report, for each instance, whether a local anchor covers it, and SHALL count the unanchored instances. An unanchored instance SHALL NOT make the chain invalid, because each machine anchors only its own instance and an imported vault starts without anchors. The audit category SHALL report each unanchored instance as a warning, never as a verified pass.
+
 #### Scenario: Audit verifies the chain
 
 - **WHEN** the governance-receipts audit category runs on an intact log
@@ -304,6 +322,12 @@ current state exactly matches the intent's prior or target fingerprint.
   unresolved-intent repair
 - **THEN** it reports the exact proposed repair without changing JSONL,
   tombstones, derived state, or sidecar
+
+#### Scenario: A copied chain reads as unanchored, not verified
+
+- **WHEN** chain verification runs on a vault whose instance has records but no local anchor
+- **THEN** it reports that instance with `anchored: false` and counts it in `unanchored_instances`
+- **AND** the audit category reports a warning for it
 
 ### Requirement: Governance sidecar migrations are monotonic
 

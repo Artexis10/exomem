@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from exomem import embeddings, extract
+from exomem.ocr_models import OcrReading
 
 SAMPLES = Path(__file__).parent / "fixtures" / "media-samples"
 
@@ -33,7 +34,7 @@ def test_real_heic_decodes_at_ocr_and_image_embedding_boundaries(monkeypatch):
             assert image.size == size
             assert image.getextrema()[0][0] < image.getextrema()[0][1]
         ocr_calls.append(True)
-        return phrase
+        return OcrReading(phrase, ())
 
     class Encoder:
         def encode(self, image, **_kwargs):

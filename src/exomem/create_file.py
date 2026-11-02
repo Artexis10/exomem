@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,8 @@ class CreateFileResult:
 class CreateFileError(Exception):
     code: str
     reason: str
+    #: The request fields the caller must add, for a refusal that names them.
+    missing: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"code": self.code, "reason": self.reason}
@@ -347,6 +349,8 @@ def create_file(
                 draft_id=identity,
                 draft_token=token,
                 relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         except semantic_writes.SemanticWriteError as error:
             raise CreateFileError(error.code, error.reason) from error
@@ -395,7 +399,8 @@ def create_file(
             semantic_writes.SemanticWriteError,
             relation_review.RelationReviewError,
         ) as error:
-            raise CreateFileError(error.code, error.reason) from error
+            raise CreateFileError(error.code, error.reason, list(error.missing)) from error
+        warnings.extend(committed.review_field_warnings())
         creation = committed.as_dict()
     elif existing_file and overwrite and is_markdown:
         try:

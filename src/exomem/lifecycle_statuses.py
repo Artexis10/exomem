@@ -193,6 +193,20 @@ class Classification:
         return self.require() in {"live", "abandoned"}
 
 
+def canonical_class(value: object) -> str | None:
+    """The lifecycle class a label has from the shipped pack alone, or None.
+
+    A blank or non-text value is live (parser compatibility: structural validation
+    owns malformed raw values). None means the label is not canonical, so only the
+    page's own registry instance can classify it. `Basis.classify` applies this
+    rule first, and a caller that stores labels asks it instead of copying it.
+    """
+    if value is None or not isinstance(value, str) or not value.strip():
+        return "live"
+    canonical = registry.load(SPEC, None).entries.get(registry.token(value))
+    return None if canonical is None else str(canonical.attributes["class"])
+
+
 @dataclass
 class Basis:
     """One operation's lazy, admitted registry; canonical labels need only the pack."""
@@ -212,16 +226,10 @@ class Basis:
         pages in one request builds it once, so the policy is read once instead of once per
         page. It answers what `egress.quick_page_visible` answers; without it that is asked.
         """
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return Classification("live")
-        if not isinstance(value, str):
-            # Parser compatibility: structural validation owns malformed raw values.
-            return Classification("live")
-        key = registry.token(value)
-        public = registry.load(SPEC, None)
-        canonical = public.entries.get(key)
+        canonical = canonical_class(value)
         if canonical is not None:
-            return Classification(str(canonical.attributes["class"]))
+            return Classification(canonical)
+        key = registry.token(str(value))
         from .vocabulary import instances
         from .vocabulary.contract import admission_refusal
 

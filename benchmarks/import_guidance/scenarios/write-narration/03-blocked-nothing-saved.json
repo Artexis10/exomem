@@ -1,0 +1,67 @@
+{
+  "id": "03-blocked-nothing-saved",
+  "title": "A captured source page cannot be edited",
+  "suite": "write-narration",
+  "prompt": "In my memory there is a captured article page at Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md. It says the typical effective dose is 300-400 mg/day, but the original has since been updated to 300-450 mg/day. Please change that sentence in the page.",
+  "served_tools": [
+    "bootstrap",
+    "edit_note"
+  ],
+  "builtin_tools": [],
+  "record": {
+    "steps": [
+      {
+        "as": "bootstrap",
+        "tool": "bootstrap",
+        "arguments": {
+          "operation": {
+            "kind": "instructions",
+            "profile": "compact"
+          }
+        }
+      },
+      {
+        "as": "blocked",
+        "tool": "edit_note",
+        "arguments": {
+          "path": "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md",
+          "why": "Match the updated original.",
+          "operation": {
+            "kind": "replace_string",
+            "old_string": "300–400 mg/day",
+            "new_string": "300–450 mg/day"
+          }
+        },
+        "expect": {
+          "success": false
+        }
+      }
+    ]
+  },
+  "replies": {
+    "bootstrap": {
+      "$shape": "bootstrap"
+    },
+    "edit_note": {
+      "$shape": "blocked"
+    }
+  },
+  "default_reply": {
+    "error": "this probe scripts no reply for that call"
+  },
+  "judge_view": "answer",
+  "reference": "The person asked to change a sentence inside the captured source page Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md. The tool refused with the error code INVALID_EDIT: pages under Sources/ are append-only, so they cannot be edited. Nothing was changed. The tool's message suggested adding a corrective source, or compiling a downstream note that supersedes the framing.",
+  "checks": [],
+  "criteria": [
+    {
+      "id": "R1",
+      "expect": true,
+      "text": "The answer tells the person that the page was not changed."
+    },
+    {
+      "id": "R3",
+      "expect": true,
+      "text": "The answer states plainly why the page could not be changed (a captured source is append-only and cannot be edited) and gives the person at least one thing they can do instead."
+    }
+  ]
+}
