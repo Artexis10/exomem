@@ -42,10 +42,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
 # The `offset` window cursor on read_memory lets an agent read a long Source's extracted text in
 # windows, so the budget rises 150 B.
-# The record_episode description and the `decided` parameter carry the close step (update the changed
-# pages first, link each decided item to its page, read the response's compile block), so the budget
-# rises 150 B and record_episode 150 B.
-TOTAL_BUDGET = 165_550
+# The record_episode description and the `decided` parameter carry the close step (link each decided
+# item to its page, read the response's compile block), so the budget rises 100 B and record_episode 100 B.
+TOTAL_BUDGET = 165_500
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -95,7 +94,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_review": 7550,
     "read_schema": 16700,
     "recall_context": 2950,
-    "record_episode": 4300,
+    "record_episode": 4250,
     "record_memory": 4600,
     "repair_memory": 6050,
     "review_item_context": 1300,

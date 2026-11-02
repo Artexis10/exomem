@@ -8,7 +8,9 @@ updated yet.
 It claims nothing the server cannot know. The episode ledger binds recap inputs
 only and ordinary writes carry no episode key, so the server cannot tell when a
 session started or which writes belong to it: "updated this session" is the
-agent's judgement, never a field here.
+agent's judgement, never a field here. The `outcome` states the result only; a
+next step rides separately and only when live policy permits capture, so a recap
+request never orders a page write that the policy forbids.
 
 A page the caller may not see, or a link that resolves to no page, is left out
 and never counted, so a withheld page reads exactly like an absent one.
@@ -22,16 +24,24 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import access, find, memory_refs, vault
+from . import access, capture_sweep, find, memory_refs, vault
 
 log = logging.getLogger(__name__)
 
-# Where a page's reported update time came from. The two values are this module's
-# own report of which branch of `_updated` answered, not a vocabulary a vault defines.
+# Where a page's reported update time came from. The three values are this module's
+# own report of which branch of `_page` answered, not a vocabulary a vault defines.
 _FROM_FRONTMATTER = "frontmatter"
 _FROM_FILE = "file_mtime"
+_UNREADABLE = "unreadable"
 
-_CLOSE_STEP = "record again with each decided item linked to its page"
+# What `updated` holds for a page that resolved but cannot be read: unknown is a
+# visible state, never a date and never absent.
+_UNKNOWN_TIME = "unknown"
+
+# The one next step, sent only when live policy permits capture. It is a
+# condition for the agent to judge, because the server cannot tell which listed
+# pages this session already updated.
+_NEXT_STEP = "If a decided item changes a listed page that this session has not updated, update that page."
 
 
 def linked_pages(
@@ -46,8 +56,9 @@ def linked_pages(
 
     Call this before the recap is written: the write leaves the resolver cache
     behind its own change until the terminal's fanout catches it up. The resolver
-    is the writers' own (`edit_note` takes it the same way), so a cold cache
-    costs the walk those writers pay.
+    is the writers' own snapshot, taken without the disk fallback: a cold cache
+    would cost a walk of the whole vault on every record, so the snapshot
+    declines and the links are reported unchecked instead.
     """
     targets = [
         [
@@ -60,7 +71,10 @@ def linked_pages(
         return tuple(() for _ in decided)
     root = Path(vault_root)
     try:
-        resolver = find.writer_resolver_snapshot(root)
+        resolver = find.writer_resolver_snapshot(root, allow_disk=False)
+        if resolver is None:
+            # `normalize_wikilink` would build its own resolver from disk: never reach it.
+            return None
         keep = vault.writer_link_visibility(root)
         resolved = [[_resolved(root, page, resolver, keep) for page in pages] for pages in targets]
         return tuple(tuple(dict.fromkeys(path for path in paths if path)) for paths in resolved)
@@ -99,14 +113,21 @@ def _updated(root: Path, path: str, frontmatter: Mapping[str, Any]) -> tuple[str
     return modified.isoformat(timespec="seconds"), _FROM_FILE
 
 
-def _page(root: Path, path: str, ref: str | None) -> tuple[dict[str, str], str] | None:
-    """One page's ref, path, title and update time, plus the time's source; `None` if unreadable."""
+def _page(root: Path, path: str, ref: str | None) -> tuple[dict[str, str], str]:
+    """One page's ref, path, title and update time, plus the time's source.
+
+    A page that resolved but cannot be read stays listed with an unknown time:
+    it must not read as a page the recap does not name.
+    """
+    frontmatter: Mapping[str, Any] = {}
+    body = ""
+    updated, source = _UNKNOWN_TIME, _UNREADABLE
     try:
         text, _guard = vault.read_guarded_text(root, root / path)
         frontmatter, body, _raw = vault.parse_frontmatter(text)
         updated, source = _updated(root, path, frontmatter)
     except (OSError, ValueError):
-        return None
+        log.debug("episode compile page unreadable: %s", path, exc_info=True)
     if ref is None:
         memory_id = memory_refs.normalize_id(str(frontmatter.get("exomem_id") or ""))
         ref = memory_refs.memory_ref(memory_id) if memory_id else None
@@ -119,16 +140,14 @@ def _page(root: Path, path: str, ref: str | None) -> tuple[dict[str, str], str] 
 
 
 def _outcome(pages: int, unlinked: int | None) -> str:
+    """The result of the recap's links, never an instruction."""
     if unlinked is None:
-        return f"This recap committed, but its page links were not checked. Update the pages this session changed, then {_CLOSE_STEP}."
-    if not pages:
-        return f"This recap names no page. Update the page each decided item changes, then {_CLOSE_STEP}."
-    names = f"{pages} page" if pages == 1 else f"{pages} pages"
-    head = f"This recap names {names}. Update any that a decided item changes and this session has not updated yet"
+        return "This recap's links were not checked."
+    names = "no page" if not pages else f"{pages} page" if pages == 1 else f"{pages} pages"
     if not unlinked:
-        return f"{head}."
+        return f"This recap names {names}."
     clause = "1 decided item names" if unlinked == 1 else f"{unlinked} decided items name"
-    return f"{head}; {clause} no page."
+    return f"This recap names {names}; {clause} no page."
 
 
 def block(
@@ -144,33 +163,30 @@ def block(
     `decided_links` are `linked_pages` for its Decided items. Never raises: the
     recap is already committed.
     """
-    if not decided and not about_paths:
-        return None
     root = Path(vault_root)
     try:
         keep = vault.writer_link_visibility(root)
         pages: dict[str, dict[str, str]] = {}
         sources: dict[str, str] = {}
 
-        def add(path: str, ref: str | None = None) -> bool:
+        def add(path: str, ref: str | None = None) -> None:
             if path not in pages:
-                found = _page(root, path, ref)
-                if found is None:
-                    return False
-                pages[path], sources[path] = found
-            return True
+                pages[path], sources[path] = _page(root, path, ref)
 
         for ref, path in about_paths.items():
             if keep is None or keep(path):
                 add(path, ref)
-        unlinked: int | None = None
-        if decided_links is not None:
-            # `add` runs for every link of an item, so the listing never depends on short-circuiting.
-            unlinked = sum(
-                not any([add(path) for path in paths]) for paths in decided_links
-            )
+        for paths in decided_links or ():
+            for path in paths:
+                add(path)
+        if not pages and not decided:
+            return None
+        unlinked = None if decided_links is None else sum(not paths for paths in decided_links)
+        # A next step only when policy permits capture, and only with a page to act on.
+        permitted = capture_sweep._proactive_capture_permitted()  # noqa: SLF001
         return {
             "outcome": _outcome(len(pages), unlinked),
+            **({"next_step": _NEXT_STEP} if pages and permitted else {}),
             "pages": list(pages.values()),
             **({"unlinked_decided": unlinked} if unlinked is not None else {}),
             "diagnostics": {

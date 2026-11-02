@@ -53,21 +53,41 @@ agent compares it with the session it remembers.
   block, byte for byte. The egress twin test pins this.
 - With no listed page and no Decided item, the response has no `compile` key.
 
-### Resolution runs before the write
+### Resolution runs before the write, and never walks the vault
 
 The write leaves the resolver cache behind its own change until the terminal's
-fanout catches it up. So `record` resolves the links before it writes. The
-resolver is the one that `edit_note` takes, so a cold cache costs the walk that
-those writers already pay. A resolution failure never refuses a recap: the block
-then says that its links were not checked and omits `unlinked_decided`. Unknown
-is never zero.
+fanout catches it up. So `record` resolves the links before it writes. It takes
+the writers' resolver snapshot with `allow_disk=False`. On a cold cache the
+disk fallback walks the whole vault, which measured 3.9 to 5.9 seconds on a
+5,000-page vault, and every record would pay it, not only the first. So the
+snapshot declines and the block reports its links as unchecked, before any
+`normalize_wikilink` call can build a resolver of its own. A resolution failure
+or a declined snapshot never refuses a recap: the block says that its links were
+not checked and omits `unlinked_decided`. Unknown is never zero. The state
+follows the resolver cache, not the pages, so it leaks nothing about a withheld
+page.
+
+### The outcome states the result, and one conditional step follows it
+
+The `outcome` sentence states the result only, for example "This recap names 2
+pages; 1 decided item names no page." It never orders a write and never asks for
+a second record: a recap request alone does not authorize page edits at `off`,
+and a second revision would double the recap.
+
+When the block lists a page and live policy permits proactive capture (the check
+that `episode_due` already uses), a separate `next_step` says: "If a decided item
+changes a listed page that this session has not updated, update that page." It is
+a condition the agent judges, because the server cannot know which listed pages
+the session updated. The Stop hook ask follows the same rule: its page step
+begins "If live policy permits capture".
 
 ### Diagnostics stay out of the sentence
 
-The `outcome` sentence names counts and the next action. The time source of each
-page and the link-check state sit in the block's own `diagnostics` part. The
-block is one entry of the compact envelope's episode fields, so it reaches every
-client, and `user_summary` still leads the response.
+The time source of each page and the link-check state sit in the block's own
+`diagnostics` part. The block is one entry of the compact envelope's episode
+fields, so it reaches every client, and `user_summary` still leads the response.
+A listed page that cannot be read keeps its place with `updated: unknown` and the
+source `unreadable`: an unreadable page is not a page the recap fails to name.
 
 ### Spec placement
 
@@ -84,8 +104,15 @@ Writing it there keeps this change independent of the open tasks of
 
 - An agent can ignore the close step. The block and the Stop hook repeat it, and
   the real-model task measures how often agents follow it.
-- A cold resolver adds a vault walk to the first record. `edit_note` pays the
-  same cost.
+- A cold resolver cache makes the block report its links as unchecked, with no
+  page counted from the Decided items. The `about` pages still list. The
+  `compile` block is advisory, so the cost is a weaker hint, not a slower or
+  refused record.
+- A recap is an immutable Source and may now carry `[[...]]` links. A link whose
+  target is missing or ambiguous stays in the recap, and no agent can repair it.
+  The audit's link check does not exclude `Sources/Episodes/`. It reports such a
+  link as `forward_reference` or `broken_wikilink` at `info` severity, marked
+  immutable and not repairable in place. This change leaves the audit as it is.
 - A link to a page that the session did not change appears in the block.
   Linking is the agent's claim that the item belongs to that page, and the
   agent judges whether the page needs an update.
@@ -94,6 +121,7 @@ Writing it there keeps this change independent of the open tasks of
 
 - Unit and integration tests in `tests/test_episode_compile.py` cover the
   listing, the egress twin, the unlinked count, the omitted block, the failed
-  link check and the compact envelope of a real MCP call.
+  and the declined link check, the unreadable page, the conditional next step
+  and the compact envelope of a real MCP call.
 - The real-model task runs the close step on the real models with realistic and
   hostile sessions, and adds each failure as a permanent regression case.
