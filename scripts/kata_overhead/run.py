@@ -43,9 +43,9 @@ RUNTIMES = ("runc", "kata")
 BLOCK_ARM = "kata-blk"
 # The same arm under a tuned Kata configuration (see the workflow): a second file next to the shipped one, which
 # the harness switches to by repointing the `configuration.toml` symlink before the arm's containers start.
-TUNED_ARM = "kata-blk-tuned"
 KATA_CONFIG_DIR = Path("/opt/kata/share/defaults/kata-containers")
-KATA_CONFIGS = {BLOCK_ARM: "configuration-qemu.toml", TUNED_ARM: "configuration-tuned.toml", "kata": "configuration-qemu.toml"}
+KATA_CONFIGS = {"kata": "configuration-qemu.toml", BLOCK_ARM: "configuration-qemu.toml",
+                "kata-blk-tuned": "configuration-tuned.toml", "kata-blk-tuned2": "configuration-tuned2.toml"}
 KATA_RUNTIME_BIN = "/opt/kata/bin/kata-runtime"
 MEDIA_DIR = "Knowledge Base/Sources/Media"
 # Both arms run the cell with /data on a real Docker volume. The wrapper only creates the scratch
@@ -70,7 +70,7 @@ class HarnessError(RuntimeError):
 
 
 def is_block_arm(arm: str) -> bool:
-    return arm in (BLOCK_ARM, TUNED_ARM)
+    return arm.startswith(BLOCK_ARM)
 
 
 def docker_runtime(arm: str) -> str:

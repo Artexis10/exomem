@@ -32,10 +32,16 @@ env:
   PHASES: "measure"
   # kata-blk: the shipped QEMU configuration (plus the block-device key). kata-blk-tuned: the same arm with the
   # configuration built below from the shipped file of KATA_HYPERVISOR plus KATA_CONFIG_EDITS.
-  ARMS: "runc,kata-blk,kata-blk-tuned"
-  # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line).
+  ARMS: "runc,kata-blk-tuned,kata-blk-tuned2"
+  # The tuning round: qemu or clh, and the "key = value" lines that replace the shipped values (one per line)
+  # in the configuration of arm kata-blk-tuned.
   KATA_HYPERVISOR: "qemu"
   KATA_CONFIG_EDITS: |
+    reclaim_guest_freed_memory = true
+    virtio_fs_cache_size = 1024
+  # An optional second tuned arm (kata-blk-tuned2); leave KATA_HYPERVISOR_2 empty for none.
+  KATA_HYPERVISOR_2: "clh"
+  KATA_CONFIG_EDITS_2: |
     reclaim_guest_freed_memory = true
   # "1" also boots a cell with and without psi=1 on the guest kernel command line and prints the PSI files.
   PSI_PROBE: "0"
@@ -73,12 +79,13 @@ jobs:
           sudo mv opt/kata /opt/kata
           dir=/opt/kata/share/defaults/kata-containers
           mkdir -p "$RUNNER_TEMP/shipped"
-          cp "$dir/configuration-qemu.toml" "$dir/configuration-${KATA_HYPERVISOR}.toml" "$RUNNER_TEMP/shipped/"
+          cp "$dir/configuration-qemu.toml" "$dir/configuration-${KATA_HYPERVISOR}.toml" \
+            "$dir/configuration-${KATA_HYPERVISOR_2:-qemu}.toml" "$RUNNER_TEMP/shipped/"
           # The block-volume arm needs the runtime to hot-plug a host block device; the shipped default switches
           # that off. The key does nothing for a mount that is not a block device.
           sudo sed -i -E 's/^disable_block_device_use *= *true/disable_block_device_use = false/' "$dir/configuration-qemu.toml"
           diff "$RUNNER_TEMP/shipped/configuration-qemu.toml" "$dir/configuration-qemu.toml" || true
-          # The tuned arm: the hypervisor's shipped configuration, the same block key, then the edits. A key that
+          # The tuned arms: the hypervisor's shipped configuration, the same block key, then the edits. A key that
           # is not in the file stops the job, so a misspelt key cannot pass as a measured variant.
           edit_config() {
             local file="$1" line key value
@@ -89,11 +96,16 @@ jobs:
               sudo sed -i -E "s|^${key}[[:space:]]*=.*|${key} = ${value}|" "$file"
             done
           }
-          sudo cp "$dir/configuration-${KATA_HYPERVISOR}.toml" "$dir/configuration-tuned.toml"
-          edit_config "$dir/configuration-tuned.toml" <<< "disable_block_device_use = false"
-          edit_config "$dir/configuration-tuned.toml" <<< "$KATA_CONFIG_EDITS"
-          echo "--- tuned against the shipped ${KATA_HYPERVISOR} configuration"
-          diff "$RUNNER_TEMP/shipped/configuration-${KATA_HYPERVISOR}.toml" "$dir/configuration-tuned.toml" || true
+          build_variant() {
+            local name="$1" hypervisor="$2" edits="$3"
+            sudo cp "$dir/configuration-${hypervisor}.toml" "$dir/configuration-${name}.toml"
+            edit_config "$dir/configuration-${name}.toml" <<< "disable_block_device_use = false"
+            edit_config "$dir/configuration-${name}.toml" <<< "$edits"
+            echo "--- ${name} against the shipped ${hypervisor} configuration"
+            diff "$RUNNER_TEMP/shipped/configuration-${hypervisor}.toml" "$dir/configuration-${name}.toml" || true
+          }
+          build_variant tuned "$KATA_HYPERVISOR" "$KATA_CONFIG_EDITS"
+          if [ -n "${KATA_HYPERVISOR_2:-}" ]; then build_variant tuned2 "$KATA_HYPERVISOR_2" "$KATA_CONFIG_EDITS_2"; fi
           ls -l /opt/kata/bin
           /opt/kata/bin/kata-runtime --version
           /opt/kata/bin/containerd-shim-kata-v2 --version || true
@@ -212,9 +224,13 @@ jobs:
         run: |
           dir=/opt/kata/share/defaults/kata-containers
           mkdir -p "$RUNNER_TEMP/kv-out/kata-config"
-          cp "$dir/configuration-tuned.toml" "$dir/configuration-qemu.toml" "$RUNNER_TEMP/kv-out/kata-config/"
+          cp "$dir"/configuration-tuned*.toml "$dir/configuration-qemu.toml" "$RUNNER_TEMP/kv-out/kata-config/"
           diff "$RUNNER_TEMP/shipped/configuration-${KATA_HYPERVISOR}.toml" "$dir/configuration-tuned.toml" \
             > "$RUNNER_TEMP/kv-out/kata-config/tuned-against-shipped.diff" || true
+          if [ -n "${KATA_HYPERVISOR_2:-}" ]; then
+            diff "$RUNNER_TEMP/shipped/configuration-${KATA_HYPERVISOR_2}.toml" "$dir/configuration-tuned2.toml" \
+              > "$RUNNER_TEMP/kv-out/kata-config/tuned2-against-shipped.diff" || true
+          fi
           diff "$RUNNER_TEMP/shipped/configuration-qemu.toml" "$dir/configuration-qemu.toml" \
             > "$RUNNER_TEMP/kv-out/kata-config/default-arm-against-shipped.diff" || true
 
