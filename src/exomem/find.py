@@ -1354,7 +1354,9 @@ def _with_catalog_scope(function):
             )
             if values["catalog_proof_out"] is not None:
                 values["catalog_proof_out"].clear()
-            # Initial warm admission precedes catalogue access and repair.
+            # Initial warm admission precedes catalogue access and repair. A
+            # warm that already proved its catalogue reads `unavailable`, not
+            # `warming`, and serves the published catalogue below.
             if (
                 readiness.retrieval_admission()["state"] == "warming"
                 and not readiness.required_warm_finished()

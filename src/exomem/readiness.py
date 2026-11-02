@@ -58,13 +58,14 @@ _warm_finished = False
 _required_finished = False
 _runtime_managed = False
 #: This process has proved its recall catalogue exactly (strict equality with
-#: the live projection) since its managed warm began. It is what lets health
-#: keep answering ready while the catalogue later lags a projection that
-#: per-request recall can still serve; a process that never proved it has no
-#: such standing. Only a managed process can hold it: a standby's `mark_ready`
-#: runs unmanaged, and a flag it left behind could satisfy the promotion wait
-#: before the promoted worker proves anything. Every transition that starts a
-#: new proof epoch clears it.
+#: the live projection) since its managed warm began. From then on, even while
+#: the rest of the warm runs, a later strict failure reads as after the warm:
+#: recall serves the published catalogue and health reports the lag as
+#: serving. A process that never proved it has no such standing. Only a
+#: managed process can hold it: a standby's `mark_ready` runs unmanaged, and a
+#: flag it left behind could satisfy the promotion wait before the promoted
+#: worker proves anything. Every transition that starts a new proof epoch
+#: clears it.
 _retrieval_proven = False
 _started_at: float | None = None
 _retrieval_generation = 0
@@ -234,23 +235,15 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     Supplying the configured runtime vault adds a read-only projection proof.
     A ready bit cannot outlive either authoritative recall scope; loss or a
     policy-identity mismatch revokes it before health or a request can claim
-    admission.  After managed warm-up has finished, the same exact proof may
-    restore a late-published catalog whose one background promotion callback
-    lost a race.  The check never walks or reprojects the corpus.
+    admission.  Once re-proof is allowed (see `_reprove_allowed_locked`), the
+    same exact proof may restore a late-published catalog whose one background
+    promotion callback lost a race.  The check never walks or reprojects the
+    corpus.
     """
     global _retrieval_generation, _retrieval_proven
     with _lock:
-        if _events["retrieval_catalog"].is_set():
-            admission = {"state": "ready", "admitted": True}
-        elif _warm_active and not _warm_finished:
-            admission = {"state": "warming", "admitted": False}
-        elif _warm_finished:
-            admission = {"state": "unavailable", "admitted": False}
-        elif _runtime_managed:
-            admission = {"state": "warming", "admitted": False}
-        else:
-            admission = {"state": "unverified", "admitted": False}
-        managed_recovery = _runtime_managed and (_warm_finished or _required_finished)
+        admission = _retrieval_admission_locked()
+        managed_recovery = _reprove_allowed_locked()
         proof_generation = _retrieval_generation
     if vault_root is None or not (admission["admitted"] or managed_recovery):
         return admission
@@ -269,7 +262,7 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             # after this proof began.  Its newer decision wins.
             return _retrieval_admission_locked()
         if proof_current and not admission["admitted"]:
-            if not (_runtime_managed and (_warm_finished or _required_finished)):
+            if not _reprove_allowed_locked():
                 return _retrieval_admission_locked()
             # Retrieval has no deferred payload queue: its event is pure
             # admission.  Publish the exact proof only if no newer invalidation
@@ -293,8 +286,8 @@ class _ProofFlight:
         self.current = False
 
 
-#: Catalogue proofs in progress, by (vault, generation, admitted). Once the
-#: required warm is done every unadmitted request re-proves, and each proof
+#: Catalogue proofs in progress, by (vault, generation, admitted). Once re-proof
+#: is allowed every unadmitted request re-proves, and each proof
 #: takes reserved-state locks: callers that arrive while one runs for the same
 #: generation share its answer instead of queueing proofs of their own. A
 #: finished flight is never reused; the next caller proves again.
@@ -335,6 +328,12 @@ def _retrieval_admission_locked() -> dict[str, object]:
     """Return the current retrieval state while the caller holds ``_lock``."""
     if _events["retrieval_catalog"].is_set():
         return {"state": "ready", "admitted": True}
+    if _retrieval_proven:
+        # Checked before the warm: a process that proved its catalogue in this
+        # warm serves a later strict failure as it would after the warm, so
+        # recall and health judge it by the published catalogue, not by the
+        # graph handoff, corpus or model preloads still running.
+        return {"state": "unavailable", "admitted": False}
     if _warm_active and not _warm_finished:
         return {"state": "warming", "admitted": False}
     if _warm_finished:
@@ -342,6 +341,18 @@ def _retrieval_admission_locked() -> dict[str, object]:
     if _runtime_managed:
         return {"state": "warming", "admitted": False}
     return {"state": "unverified", "admitted": False}
+
+
+def _reprove_allowed_locked() -> bool:
+    """Whether a failed or missing catalogue proof may be re-proved and published.
+
+    After the required warm stages, or once this process proved its catalogue
+    in this warm. Before either, the warm's own catalogue step must run first:
+    it heals an adopted catalogue and rebases its lineage before admitting, and
+    every later managed proof comes from a repair or bounded apply in that
+    lineage. The caller holds ``_lock``.
+    """
+    return _runtime_managed and (_warm_finished or _required_finished or _retrieval_proven)
 
 
 def should_defer(component: str) -> bool:

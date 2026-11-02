@@ -554,11 +554,12 @@ def _served_catalogue_lag(
     Strict admission is the only thing that reports `ready`. This reports a
     lag only for a managed process that proved the catalogue exactly since its
     warm began, and only while recall serves the published catalogue: `find`
-    does that in the strict state `unavailable`, which begins when the whole warm
-    has finished, and refuses with `warming` until then. Health follows that
-    state, and requires both live projections present with a published
-    catalogue for each, under an unchanged identity. Anything else keeps the
-    strict answer, so a fresh process or a lost projection stays not ready.
+    does that in the strict state `unavailable`, which such a process reaches
+    from its proof on, even while the rest of its warm runs, and refuses with
+    `warming` otherwise. Health follows that state, and requires both live
+    projections present with a published catalogue for each, under an
+    unchanged identity. Anything else keeps the strict answer, so a fresh
+    process or a lost projection stays not ready.
     """
     from . import freshness, lexstore, readiness
 
