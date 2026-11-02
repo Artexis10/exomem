@@ -897,15 +897,15 @@ _PUBLICATION_CATCHUP_RETRIES = 2
 # rewrites, such as an index or the activity log, is then often mid-write when
 # an off-barrier replay proves it or the final census walks it, and a new page
 # of an import batch is on disk before the registry lists it. The replay waits
-# for the registry to observe the newer state and replays that, a bounded
-# number of times per call, but only while a write can still be publishing: a
-# path that differs with no write in flight is drift no event will report, and
-# it refuses the replay or the census at once.
-_REPLAY_RETARGETS = 3  # A page rewritten after every retarget ends the pass instead of holding it.
+# once for the registry to observe the newer state, but only while a write can
+# still be publishing: a path that differs with no write in flight is drift no
+# event will report, and it refuses the replay or the census at once. It then
+# records its original target and leaves the page to the next replay, so a page
+# that an import rewrites on every call cannot keep a pass from publishing.
 # One batch's snapshot-to-publication span (up to 23 s on a 2-CPU cell, 2026-10-31).
-# The deadline is shared by every path of one round, so a call waits at most
-# 3 x 30 s = 90 s, and the census waits once more, up to 30 s, before each of
-# its replays: up to 6 off-barrier calls and 3 censuses in one pass, 630 s in all.
+# The deadline is shared by every path of one replay call, so a call waits at most
+# 30 s, and the census waits once more, up to 30 s, before each of its replays:
+# up to 6 off-barrier calls and 3 censuses in one pass, 270 s in all.
 _REPLAY_OBSERVATION_WAIT_SECONDS = 30.0
 _REPLAY_OBSERVATION_POLL_SECONDS = 0.05
 
@@ -973,10 +973,9 @@ _MAX_FULL_REBUILDS_PER_FLIGHT = 1
 #: meets a gap within its work plus five minutes, where the default floor allows
 #: twice its work. That bound covers parking only. A pass also waits for the
 #: registry to observe a write that is still publishing, up to
-#: `_REPLAY_OBSERVATION_WAIT_SECONDS` x 21 across its 6 off-barrier replay calls
-#: and 3 censuses (630 s), so its worst case exceeds the 900 s stalled-recall
-#: alert. It waits only while a write is publishing; `retargeted` and `parked_s`
-#: in its finish line show what it spent.
+#: `_REPLAY_OBSERVATION_WAIT_SECONDS` x 9 across its 6 off-barrier replay calls
+#: and 3 censuses (270 s). It waits only while a write is publishing;
+#: `awaited` and `parked_s` in its finish line show what it spent.
 _REPAIR_WAIT_SHARE = 0.9
 _REPAIR_MAX_PARKED_SECONDS = 300.0
 #: Affected identities a contended publication declined, awaiting current-state replay.
@@ -1032,12 +1031,10 @@ class DeclineCause(enum.StrEnum):
 
     A closed set that this code implements, so a log line separates the bound
     that ended the pass: `observation_timed_out` (a write was still publishing
-    when the wait ran out), `retargets_exhausted` (the replay's retargets ran
-    out), and `unobserved_drift` (the source differs and no write is publishing).
+    when the wait ran out), and `unobserved_drift` (the source differs and no write is publishing).
     """
 
     OBSERVATION_TIMED_OUT = "observation_timed_out"
-    RETARGETS_EXHAUSTED = "retargets_exhausted"
     UNOBSERVED_DRIFT = "unobserved_drift"
 
 
@@ -1082,7 +1079,8 @@ def _log_repair_finished(
     started: float,
     *,
     excused: int = 0,
-    retargeted: int = 0,
+    awaited: int = 0,
+    deferred: int = 0,
     parked_s: float = 0.0,
     declined_for: DeclineCause | None = None,
     promoted: bool | None = None,
@@ -1091,9 +1089,11 @@ def _log_repair_finished(
 
     Every field is a closed token or a count, so a hosted cell keeps the line.
     `excused` counts the distinct paths that the pass's source censuses
-    excused, across both scopes and every census in the pass. `retargeted`
+    excused, across both scopes and every census in the pass. `awaited`
     counts the times the pass's detached replays, the census replay included,
-    waited for the registry to observe a newer write and replayed it.
+    waited for the registry to observe a newer write; a replay call waits once.
+    `deferred` counts the distinct paths that the pass's last replay published
+    behind a newer observed write, and is 0 for a pass that published nothing.
     `parked_s` is the part of `duration_s` that the pass's rebuild waited at its
     yields for foreground work, such as an apply that holds the mutation boundary.
     `declined_for` names the bound that ended a pass that declined for a moving
@@ -1105,7 +1105,8 @@ def _log_repair_finished(
         "stage": str(stage),
         "duration_s": round(max(0.0, time.monotonic() - started), 3),
         "excused": excused,
-        "retargeted": retargeted,
+        "awaited": awaited,
+        "deferred": deferred,
         "parked_s": round(max(0.0, parked_s), 3),
     }
     if declined_for is not None:
@@ -1504,6 +1505,14 @@ def checkpoint_state(checkpoint) -> tuple | None:
         checkpoint.policy_version,
         checkpoint.access_policy_fingerprint,
     )
+
+
+def _scope_column(scope: str) -> int:
+    """The position of `scope` in a `_membership` tuple and in `freshness.SCOPES`.
+
+    Two scopes exist and the code implements both, so the position is not data.
+    """
+    return 0 if scope == "kb" else 1
 
 
 CATALOG_RETRY_AFTER_MS = 250
@@ -2462,6 +2471,14 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         return False
     try:
         if not catch_up():
+            # A round that writes outran still advanced the stored checkpoint,
+            # which is progress and not a decline: queue a lag-only catch-up for
+            # the events after it. Only a full pass closes a gap with no progress.
+            if getattr(store, "_last_catch_up_advanced", False):
+                _schedule_runtime_catalog_repair(
+                    vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
+                return True
             return False
         if _admit_if_current(vault_root):
             return True
@@ -2643,17 +2660,20 @@ def _schedule_repair(
                         with _REPAIRS_LOCK:
                             _yield_targeted_repair(key, paths, error, lag_only=True)
                         return
+                    # "advanced" is not "targeted": the stored checkpoint moved but
+                    # the registry is still ahead, so a lag-only catch-up follows.
+                    if caught_up and getattr(store, "_last_catch_up_advanced", False):
+                        catch_up_result = "advanced"
+                    else:
+                        catch_up_result = "targeted" if caught_up else "declined"
                     _log_repair_finished(
-                        "catch_up",
-                        "targeted" if caught_up else "declined",
-                        RepairStage.TARGETED,
-                        catch_up_started,
+                        "catch_up", catch_up_result, RepairStage.TARGETED, catch_up_started
                     )
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
                         # next iteration consumes it with its own cause.
                         rebuild = False
-                        outcome = "targeted"
+                        outcome = catch_up_result
                         if not paths:
                             continue
                 pass_kind = "full" if rebuild else "targeted"
@@ -2774,7 +2794,12 @@ def _schedule_repair(
                     else RepairStage.TARGETED,
                     pass_started,
                     excused=len(getattr(store, "_last_census_excused", ())) if full_pass else 0,
-                    retargeted=getattr(store, "_last_replay_retargets", 0) if full_pass else 0,
+                    awaited=getattr(store, "_last_replay_awaits", 0) if full_pass else 0,
+                    deferred=(
+                        len(getattr(store, "_last_replay_deferred", ()))
+                        if full_pass and repaired
+                        else 0
+                    ),
                     parked_s=getattr(store, "_last_parked_seconds", 0.0) if full_pass else 0.0,
                     declined_for=getattr(store, "_last_decline_cause", None) if full_pass else None,
                     promoted=promoted,
@@ -4745,6 +4770,21 @@ class _CatchUpStep:
     paths: frozenset[str]
 
 
+@dataclass(frozen=True)
+class _CatchUpPlan:
+    """One scope's lag as a catch-up round planned it.
+
+    `stored` is the checkpoint the catalogue held, `target` the registry
+    checkpoint the delta bridged to, `paths` every registry path of that delta,
+    and `deleted` the paths among them that are absent at `target`.
+    """
+
+    stored: object
+    target: object
+    paths: frozenset[str]
+    deleted: frozenset[str]
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -4782,9 +4822,17 @@ class LexicalStore:
         self._last_rebuild_stage = RepairStage.BUILD
         self._last_census_excused: set[str] = set()
         # How many times the pass's detached replays, the census replay
-        # included, waited for the registry to observe a newer write and
-        # replayed it (`_await_observed_rewrites`).
-        self._last_replay_retargets = 0
+        # included, waited for the registry to observe a newer write
+        # (`_await_observed_rewrites`), and the path keys that the last replay
+        # published behind such a write (`_rebase_detached_catalog`).
+        self._last_replay_awaits = 0
+        self._last_replay_deferred: set[str] = set()
+        # Whether the last refused replay met a page that a write still held an
+        # open publication intent for.
+        self._last_replay_publishing = False
+        # Whether the last catch-up round moved a stored checkpoint without
+        # reaching the registry's, so that a lag-only catch-up must follow.
+        self._last_catch_up_advanced = False
         # Which bound ended the last pass that declined for a moving source.
         self._last_decline_cause: DeclineCause | None = None
         # Seconds the last rebuild waited at its yields for foreground work:
@@ -5340,10 +5388,12 @@ class LexicalStore:
         Under steady traffic the watcher blesses the live catalogue between the
         build's start capture and the barrier, while the next event is still
         unblessed, so live rarely equals the rebased target exactly. The temp
-        holds this registry's exact state at `target` (its start capture plus
-        every retained generation replayed up to it, proved by the final
-        census), so it contains any state the same registry and policy attested
-        at or below `target`. Publishing therefore advances live.
+        holds this registry's state at `target` (its start capture plus every
+        retained generation replayed up to it, proved by the final census),
+        except for the pages the registry names after `target`: their rows
+        hold the state at `target` or a newer one (`_defer_unproven`). So it
+        contains any state the same registry and policy attested at or below
+        `target`. Publishing therefore advances live.
         """
         if before is None:
             return False
@@ -6903,7 +6953,10 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
-        lagging = self._lagging_catch_up_paths()
+        self._last_catch_up_advanced = False
+        plans: list[dict[str, _CatchUpPlan]] = [{}]
+        rows_at_start: dict[str, tuple[bool, bool]] = {}
+        lagging = self._lagging_catch_up_paths(plans[0], rows_at_start)
         if lagging is None:
             return False
         cap = CATALOG_FOREGROUND_DELTA_CAP
@@ -6917,6 +6970,17 @@ class LexicalStore:
             pending = pending or sorted(lagging)[:cap]
             while pending:
                 if taken >= budget:
+                    # Writes outran the round, but its steps may still have
+                    # applied everything up to a registry checkpoint.
+                    if self._stamp_outpaced_round(plans, steps, rows_at_start):
+                        self._last_catch_up_advanced = True
+                        log.info(
+                            "lexical catch-up advanced (outpaced) paths=%d steps=%d;"
+                            " queueing a lag-only catch-up",
+                            len(lagging),
+                            taken,
+                        )
+                        return False
                     return _log_catch_up_decline("outpaced", paths=len(lagging), steps=taken)
                 taken += 1
                 chunk, pending = pending[:cap], pending[cap:]
@@ -6938,15 +7002,121 @@ class LexicalStore:
                 if not applied:
                     return _log_catch_up_decline("replay_failed", paths=len(chunk))
                 steps.append(_CatchUpStep(marks, frozenset(chunk)))
-            lagging = self._lagging_catch_up_paths()
+            plans.append({})
+            lagging = self._lagging_catch_up_paths(plans[-1], rows_at_start)
             if lagging is None:
                 return False
         return True
 
-    def _lagging_catch_up_paths(self) -> set[str] | None:
+    def _stamp_outpaced_round(
+        self,
+        plans: Sequence[Mapping[str, _CatchUpPlan]],
+        steps: Sequence[_CatchUpStep],
+        rows_at_start: Mapping[str, tuple[bool, bool]],
+    ) -> bool:
+        """Record the newest registry checkpoint an outpaced round fully applied.
+
+        Keeps the invariant of a lagging catalogue: for its stored checkpoint,
+        every row equals the registry's state there, except pages the registry
+        names after it, whose rows hold that state or a newer one. A plan's
+        target qualifies per scope when every path of its delta was applied by
+        a committed step that read the page after the target (its mark is at or
+        after the target), or that no event has touched since the step's mark
+        (`_settled_catch_up_paths`). Any other applied path is not enough: an
+        event between that read and the target would leave a stale row under
+        the stamp.
+
+        A page absent at the target also needs no row in the scope, because
+        absence is the one state that can recur exactly: a row that outlived it
+        would sit behind a checkpoint that readers take as current. A page is
+        absent at the target when the delta deletes it, or when the delta does
+        not name it and the scope held no row for it when the round started
+        (`rows_at_start`). So no row may exist for such a page that a step of
+        the round applied.
+
+        Readers that need a current catalogue still compare the stored
+        checkpoint with the registry, so the rest of the lag stays visible and
+        the next catch-up replays it. A scope without lag has nothing to
+        record. Returns whether every lagging scope moved a stored checkpoint;
+        a scope that stays frozen outpaces the round, whatever its sibling did.
+        """
+        from . import freshness as freshness_module
+        from .vault import VaultLockError, VaultLockTimeout
+
+        if not steps or not plans[0]:
+            return False
+        applied = set().union(*(step.paths for step in steps))
+        moved = False
+        frozen = False
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
+                conn = self._connect()
+                try:
+                    identity = catalog_semantic_identity(self.vault_root)
+                    if not self._schema_is_current(conn):
+                        return False
+                    if self._meta_catalog_identity(conn) != identity:
+                        return False
+                    settled = self._settled_catch_up_paths(steps)
+                    for scope in freshness_module.SCOPES:
+                        column = _scope_column(scope)
+                        stored = self._meta_checkpoint(conn, scope)
+                        # A plan that targets the stored checkpoint, or that a
+                        # step or another writer outdated, has nothing to record.
+                        candidates = [
+                            plan[scope]
+                            for plan in reversed(plans)
+                            if scope in plan
+                            and plan[scope].stored == stored
+                            and plan[scope].target != stored
+                        ]
+                        for scope_plan in candidates:
+                            proven = settled.union(
+                                *(
+                                    step.paths
+                                    for step in steps
+                                    if getattr(step.marks.get(scope), "generation", -1)
+                                    >= scope_plan.target.generation
+                                )
+                            )
+                            if not scope_plan.paths <= proven:
+                                continue
+                            absent = scope_plan.deleted | {
+                                path
+                                for path in applied - scope_plan.paths
+                                if not rows_at_start.get(path, (False, False))[column]
+                            }
+                            held = self._held_memberships(conn, absent)
+                            if any(flags[column] for flags in held.values()):
+                                continue  # a row outlived the page it holds
+                            with self._lock:
+                                self._bless(conn, scope, scope_plan.target, identity=identity)
+                            moved = True
+                            break
+                        else:
+                            frozen = frozen or bool(candidates)  # it lags; no plan qualified
+                finally:
+                    conn.close()
+        except VaultLockTimeout:
+            raise
+        except VaultLockError as error:
+            log.info("lexical catch-up stamp deferred (%s)", error)
+        except sqlite3.Error as error:
+            return _log_catch_up_decline("store_error", error=type(error).__name__)
+        return moved and not frozen
+
+    def _lagging_catch_up_paths(
+        self,
+        plan: dict[str, _CatchUpPlan] | None = None,
+        rows: dict[str, tuple[bool, bool]] | None = None,
+    ) -> set[str] | None:
         """The registry paths both scopes' stored checkpoints miss, or None.
 
         None means a refusal that keeps the full pass; this logs which one.
+        A caller that passes `plan` gets each scope's stored checkpoint, target
+        and delta paths recorded in it. A caller that passes `rows` gets the
+        scopes that hold a row for each path it has not seen yet, which is read
+        before any step of the round writes that path.
         """
         from . import freshness as freshness_module
 
@@ -6994,6 +7164,18 @@ class LexicalStore:
                         )
                         return None
                     lagging |= delta.changed | delta.deleted
+                    if plan is not None:
+                        plan[scope] = _CatchUpPlan(
+                            stored,
+                            delta.to,
+                            frozenset(delta.changed | delta.deleted),
+                            frozenset(delta.deleted),
+                        )
+                if rows is not None:
+                    unseen = lagging - rows.keys()
+                    held = self._held_memberships(conn, unseen)
+                    for path in unseen:
+                        rows[path] = held.get(freshness_module._digest_path(path), (False, False))
             finally:
                 conn.close()
         except sqlite3.Error as error:
@@ -7645,7 +7827,9 @@ class LexicalStore:
         self._last_rebuild_result = None
         self._last_rebuild_stage = RepairStage.BUILD
         self._last_census_excused = set()
-        self._last_replay_retargets = 0
+        self._last_replay_awaits = 0
+        self._last_replay_deferred = set()
+        self._last_replay_publishing = False
         self._last_decline_cause = None
         self._last_parked_seconds = 0.0
         if backend() == "python":
@@ -7900,10 +8084,12 @@ class LexicalStore:
                     start_identity,
                 )
                 if rebased_targets is None:
+                    # A page that a write still publishes is replayed once its
+                    # event lands, so the off-barrier catch-up owns it.
                     needs_off_barrier_catchup = (
                         self._last_rebuild_result == "delta_unavailable"
-                        and catchup_attempts < _PUBLICATION_CATCHUP_RETRIES
-                    )
+                        or self._last_replay_publishing
+                    ) and catchup_attempts < _PUBLICATION_CATCHUP_RETRIES
                     if not needs_off_barrier_catchup:
                         return False
                 else:
@@ -8717,12 +8903,14 @@ class LexicalStore:
         reserved for off-barrier background catch-up; every final call under the
         publication barrier retains the foreground cap.
 
-        Each replayed path proves its target signature or absence; an event
-        that lands later on another path does not void the replay; the next
-        replay carries it (see `_delta_target_still_current`). Off the barrier,
-        a path whose proof fails because the registry has not yet observed a
-        newer write to it is replayed again once the registry observes that
-        write (`_await_observed_rewrites`), up to `_REPLAY_RETARGETS` times.
+        Each replayed path proves its target signature or absence once, after
+        its rows apply. A path that fails is deferred, never chased: the
+        replacement records the delta's original target, and the registry must
+        name the path after that target, so the next replay applies the newer
+        state (`_defer_unproven`). Off the barrier the replay waits once for
+        the registry to name such a path (`_await_observed_rewrites`); under the
+        barrier it never waits. An event that lands on another path does not
+        void the replay (see `_delta_target_still_current`).
         """
         from . import freshness as freshness_module
 
@@ -8730,11 +8918,10 @@ class LexicalStore:
             self._last_rebuild_result = "identity_changed"
             return None
 
-        # Waiting for the registry never holds the publication barrier, and
-        # every call under the barrier keeps the foreground cap.
-        retargets_left = _REPLAY_RETARGETS if max_paths is None else 0
+        self._last_replay_publishing = False
         checkpoints: dict[str, object] = {}
         deltas: dict[str, object] = {}
+        bridged: dict[str, object] = {}  # every delta-backed scope, advanced or not
         touched: set[str] = set()
         updated = dict(scope_targets)
         for scope, (kind, _prior_delta, checkpoint, _triple) in scope_targets.items():
@@ -8759,13 +8946,7 @@ class LexicalStore:
             if max_paths is not None and len(touched) > max_paths:
                 self._last_rebuild_result = "delta_unavailable"
                 return None
-            # A replay that may retarget proves after applying its rows, so a
-            # write still publishing overlaps the apply instead of aborting it.
-            if not retargets_left and not self._delta_target_still_current(
-                scope, delta, bind_registry=False
-            ):
-                self._last_rebuild_result = "source_changed"
-                return None
+            bridged[scope] = delta
             if delta.to != checkpoint:
                 checkpoints[scope] = checkpoint
                 deltas[scope] = delta
@@ -8783,39 +8964,28 @@ class LexicalStore:
                 self._last_rebuild_result = "identity_changed"
                 return None
             stale_result = "source_changed"
+            deferred: set[str] = set()
             try:
                 with conn:
+                    # A page's rows are shared by both scopes: note which scope
+                    # held each touched page before the rows change.
+                    held = self._held_memberships(conn, touched)
                     for delta in deltas.values():
                         self._apply_delta_rows(conn, delta)
-                    # Every scope proves in one round with no rows applied after
-                    # it. A page's rows are shared by both scopes, so a retarget
-                    # in one scope sends every scope through the proof again.
-                    while True:
-                        if catalog_semantic_identity(self.vault_root) != expected_identity:
+                    if catalog_semantic_identity(self.vault_root) != expected_identity:
+                        raise _DeltaReplayStale
+                    unproven = {
+                        scope: paths
+                        for scope, delta in deltas.items()
+                        if (paths := set(self._unproven_delta_paths(scope, delta)))
+                    }
+                    if unproven:
+                        deferred = self._defer_unproven(
+                            unproven, bridged, checkpoints, held, off_barrier=max_paths is None
+                        )
+                        if deferred is None:
+                            stale_result = self._last_rebuild_result
                             raise _DeltaReplayStale
-                        unproven = {
-                            scope: paths
-                            for scope, delta in deltas.items()
-                            if (paths := set(self._unproven_delta_paths(scope, delta)))
-                        }
-                        if not unproven:
-                            break
-                        if not retargets_left:
-                            if max_paths is None:
-                                self._last_decline_cause = DeclineCause.RETARGETS_EXHAUSTED
-                            raise _DeltaReplayStale
-                        retargets_left -= 1
-                        self._last_replay_retargets += 1
-                        deadline = time.monotonic() + _REPLAY_OBSERVATION_WAIT_SECONDS
-                        for scope, paths in unproven.items():
-                            observed = self._await_observed_rewrites(
-                                scope, checkpoints[scope], deltas[scope], paths, deadline
-                            )
-                            if observed is None:
-                                stale_result = self._last_rebuild_result
-                                raise _DeltaReplayStale
-                            deltas[scope], newer = observed
-                            self._apply_delta_rows(conn, newer)
                     for scope, delta in deltas.items():
                         if delta.to.triple is not None:
                             conn.execute(
@@ -8837,7 +9007,100 @@ class LexicalStore:
         if not folded or wal.exists() or shm.exists():
             self._last_rebuild_result = "fold_failed"
             return None
+        self._last_replay_deferred = deferred
         return updated
+
+    def _held_memberships(self, conn: sqlite3.Connection, paths) -> dict[str, tuple[bool, bool]]:
+        """The scopes that held each path's stored row, keyed by the freshness digest."""
+        from . import freshness as freshness_module
+
+        held: dict[str, tuple[bool, bool]] = {}
+        for sp in paths:
+            rel = self._rel(Path(sp))
+            if rel is None:
+                continue
+            row = conn.execute(
+                "SELECT in_kb, in_vault FROM pages WHERE path = ?", (rel,)
+            ).fetchone()
+            if row is not None:
+                held[freshness_module._digest_path(sp)] = (bool(row[0]), bool(row[1]))
+        return held
+
+    def _defer_unproven(
+        self,
+        unproven: dict[str, set[str]],
+        bridged: dict[str, object],
+        checkpoints: dict[str, object],
+        held: dict[str, tuple[bool, bool]],
+        *,
+        off_barrier: bool,
+    ) -> set[str] | None:
+        """Defer the paths whose replay did not prove, or refuse the replay.
+
+        Returns the digest keys of the deferred paths, or None with the result
+        set. A path defers only when the registry names it after the target of
+        every scope whose rows it shares: the published rows may then be newer
+        than the checkpoint, and an event after it will replay them. A scope
+        that proved the path itself needs no such event. A delta that needs a
+        source proof defers nothing, because its target came from a walk.
+        Off the barrier the replay waits once, up to a shared deadline, for the
+        registry to name them; under the barrier it reads the registry once.
+        """
+        from . import file_watcher
+        from . import freshness as freshness_module
+
+        if any(getattr(delta, "requires_source_proof", False) for delta in bridged.values()):
+            self._last_rebuild_result = "source_changed"
+            self._last_decline_cause = DeclineCause.UNOBSERVED_DRIFT
+            return None
+        # A deferred page that is absent at its target holds no row: the apply
+        # dropped the row of every deleted path and never reinserted it. A row
+        # cannot outlive a deletion behind a checkpoint that readers take as current.
+        candidates = set().union(*unproven.values())
+        digest = freshness_module._digest_path
+        needed: dict[str, set[str]] = {}
+        for scope, delta in bridged.items():
+            index = _scope_column(scope)
+            named = {digest(path) for path in (*delta.changed, *delta.deleted)}
+            wanted = set(unproven.get(scope, ()))
+            for path in candidates - wanted:
+                if digest(path) in named:
+                    continue  # this scope proved the path itself
+                # Both scopes share one row. Co-published registries name a page in
+                # both, so a scope that holds it and does not is behind: fail closed.
+                if held.get(digest(path), (False, False))[index] or self._membership(
+                    Path(path)
+                )[index]:
+                    wanted.add(path)
+            if wanted:
+                needed[scope] = wanted
+        deadline = time.monotonic() + _REPLAY_OBSERVATION_WAIT_SECONDS
+        waited = False
+        for scope, wanted in needed.items():
+            checkpoint = checkpoints.get(scope) or bridged[scope].from_
+            if off_barrier:
+                if not waited:
+                    waited = True
+                    self._last_replay_awaits += 1
+                if self._await_observed_rewrites(
+                    scope, checkpoint, bridged[scope], wanted, deadline
+                ) is None:
+                    return None
+                continue
+            fresh = freshness_module.recall_delta_since(self.vault_root, scope, checkpoint)
+            newer = (
+                self._newer_part(bridged[scope], fresh)
+                if self._replayable_delta(fresh, checkpoint, max_paths=None)
+                else None
+            )
+            missing = wanted if newer is None else self._uncovered_paths(wanted, newer)
+            if missing:
+                self._last_rebuild_result = "source_changed"
+                self._last_replay_publishing = file_watcher.publication_in_flight(
+                    self.vault_root, missing
+                )
+                return None
+        return {digest(path) for path in candidates}
 
     @staticmethod
     def _replayable_delta(delta, checkpoint, *, max_paths: int | None) -> bool:
@@ -8961,7 +9224,7 @@ class LexicalStore:
             missing = self._uncovered_paths(disagreeing, delta)
             if not missing:
                 continue
-            self._last_replay_retargets += 1
+            self._last_replay_awaits += 1
             if self._await_observed_rewrites(scope, checkpoint, delta, missing, deadline) is None:
                 self._last_rebuild_stage = RepairStage.CENSUS
                 return False
@@ -9152,36 +9415,22 @@ class LexicalStore:
         except VaultLockError:
             return
 
-    def _delta_target_still_current(
-        self, scope: str, delta, *, bind_registry: bool = True
-    ) -> bool:
+    def _delta_target_still_current(self, scope: str, delta) -> bool:
         """Prove a bounded delta still names the registry and filesystem target.
 
         The registry checkpoint catches a later observed event. Captured signatures
         catch an edit/delete that happened after `delta_since` but before its event
         reached this process. Both are checked before and after row materialization.
-
-        `bind_registry=False` is for a detached temp catalogue only. A later
-        observed event there leaves the temp behind the registry, never wrong:
-        every replayed path still proves its signature or absence, and the next
-        replay or the published lag carries the newer event. The live catalogue
-        keeps the registry binding, because readers trust its checkpoint. An
-        off-barrier detached replay proves only after its rows, through
-        `_unproven_delta_paths` (see `_rebase_detached_catalog`).
+        A detached replay does not use this: it proves after its rows and defers
+        a page that the registry names later (`_rebase_detached_catalog`).
         """
         from . import freshness as freshness_module
 
-        if (
-            bind_registry
-            and freshness_module.recall_checkpoint(self.vault_root, scope) != delta.to
-        ):
+        if freshness_module.recall_checkpoint(self.vault_root, scope) != delta.to:
             return False
         if next(self._unproven_delta_paths(scope, delta), None) is not None:
             return False
-        return (
-            not bind_registry
-            or freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
-        )
+        return freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
 
     def _unproven_delta_paths(self, scope: str, delta) -> Iterator[str]:
         """Yield each path of `delta` that does not prove its target on disk.
@@ -9196,7 +9445,7 @@ class LexicalStore:
 
         expected = dict(getattr(delta, "target_signatures", ()))
         yield from set(expected) ^ set(delta.changed)
-        scope_index = 0 if scope == "kb" else 1
+        scope_index = _scope_column(scope)
         for sp, signature in expected.items():
             path = Path(sp)
             if (

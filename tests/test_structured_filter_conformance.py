@@ -9,6 +9,7 @@ import yaml
 
 from exomem import bm25, embeddings, lexstore, readiness, semantic_language_registry
 from exomem import find as find_module
+from exomem.clip_index import ClipSearch
 from exomem.structured_filters import FilterError
 
 PROBE_METADATA: dict[str, dict[str, Any]] = {
@@ -440,21 +441,27 @@ def test_optional_clip_backend_receives_and_cannot_escape_exact_eligibility(
         def has_vectors(self):
             return True
 
-        def search(
+        def search_above_chance(
             self,
             _query_vec: np.ndarray,
             *,
             k: int,
             allowed_paths: set[str] | None = None,
-        ) -> list[tuple[str, float | None, float]]:
+            alpha: float,
+            min_population: int,
+        ) -> ClipSearch:
             assert k > 0
             assert allowed_paths == expected_allowed
             # A defensive shared post-filter must still reject a backend that
             # violates the allowlist it was given.
-            return [
-                ("Knowledge Base/Evidence/ineligible.jpg", None, 1.0),
-                ("Knowledge Base/Evidence/eligible.jpg", None, 0.9),
-            ]
+            return ClipSearch(
+                [
+                    ("Knowledge Base/Evidence/ineligible.jpg", None, 1.0),
+                    ("Knowledge Base/Evidence/eligible.jpg", None, 0.9),
+                ],
+                0,
+                "off",
+            )
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(readiness, "should_defer", lambda _component: False)

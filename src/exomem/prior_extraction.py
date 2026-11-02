@@ -117,4 +117,8 @@ def render(
         text,
         "",
     ]
+    withheld = preserve.low_confidence_text(before)
+    if withheld:
+        # The words OCR withheld stay with the extraction they belong to.
+        lines += [preserve.low_confidence_block(preserve._cap_low_confidence_text(withheld))]
     return "\n".join(lines)

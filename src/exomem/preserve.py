@@ -42,6 +42,7 @@ from typing import IO, TYPE_CHECKING, BinaryIO
 from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import kb_prefix
+from .ocr_facts import OcrFacts
 from .source_inspection import Inspection, inspect_source
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -81,6 +82,21 @@ def _extract_module():
 # every search and degrades ALL lookups. Longer text continues on hidden part pages of the
 # same size (`extraction_parts`), so no text is dropped. Env-overridable.
 _MAX_EXTRACT_BYTES = int(os.environ.get("EXOMEM_MAX_EXTRACT_BYTES", 512 * 1024))
+
+
+def _cap_low_confidence_text(text: str) -> str:
+    """Truncate withheld OCR words to `_MAX_EXTRACT_BYTES` (UTF-8), keeping the start.
+
+    The words under `## Low-confidence OCR` stay on the Source page, outside the extraction's
+    parts, so this cap keeps that page within the page size bound. Extracted text is never cut:
+    it continues on part pages.
+    """
+    raw = text.encode("utf-8")
+    if len(raw) <= _MAX_EXTRACT_BYTES:
+        return text
+    kept = raw[:_MAX_EXTRACT_BYTES].decode("utf-8", errors="ignore").rstrip()
+    log.warning("low-confidence OCR words %d bytes exceed cap %d; truncated", len(raw), _MAX_EXTRACT_BYTES)
+    return f"{kept}\n\n[... truncated: kept the first {_MAX_EXTRACT_BYTES // 1024} KB of the withheld words ...]"
 
 
 def _parts_module():
@@ -1510,6 +1526,13 @@ def ensure_artifact_page(
 
 
 _EXTRACTED_HEADING = "## Extracted text"
+#: The section after the extracted text that holds the OCR words under the confidence floor. It
+#: stays in the sidecar, and no search field reads it (`without_low_confidence_ocr`).
+LOW_CONFIDENCE_OCR_HEADING = "## Low-confidence OCR"
+#: The machine-written line before that heading, and the cut for the section: a heading proves no
+#: ownership, because the OCR text may hold one, as the notes and artifact sentinels below show.
+SIDECAR_LOW_CONFIDENCE_SENTINEL = "<!-- exomem:sidecar-low-confidence-ocr -->"
+OCR_CONFIDENCE_FIELD = "ocr_confidence"
 SIDECAR_ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
 SIDECAR_PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
 _LEGACY_ARTIFACT_BLOCK_RE = re.compile(
@@ -1548,14 +1571,66 @@ def _extraction_end(content: str, start: int) -> tuple[int, str]:
     return len(content), _END_OF_FILE
 
 
+def low_confidence_block(words: str) -> str:
+    """The section that holds `words`, from its sentinel to its last line."""
+    return f"{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n{LOW_CONFIDENCE_OCR_HEADING}\n\n{words}\n"
+
+
+def _low_confidence_start(content: str, start: int, end: int) -> int | None:
+    """Where the low-confidence section begins inside the extraction that spans `[start, end)`."""
+    found = content.rfind(f"\n{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n", start, end + 1)
+    return None if found == -1 else found + 1
+
+
 def extracted_text(content: str) -> str:
-    """The text under `## Extracted text`, up to the sidecar's machine-owned boundary."""
+    """The text under `## Extracted text`, up to the sidecar's machine-owned boundary.
+
+    The low-confidence OCR section is not part of it: it is the words the extraction withheld.
+    """
     content = with_newline(content, "\n")
     heading = content.find(_EXTRACTED_HEADING)
     if heading == -1:
         return ""
     start = heading + len(_EXTRACTED_HEADING)
-    return content[start : _extraction_end(content, start)[0]].strip()
+    end = _extraction_end(content, start)[0]
+    section = _low_confidence_start(content, start, end)
+    return content[start : end if section is None else section].strip()
+
+
+def low_confidence_text(content: str) -> str:
+    """The words under `## Low-confidence OCR`, or an empty string when the sidecar has none."""
+    content = with_newline(content, "\n")
+    heading = content.find(_EXTRACTED_HEADING)
+    if heading == -1:
+        return ""
+    start = heading + len(_EXTRACTED_HEADING)
+    end = _extraction_end(content, start)[0]
+    section = _low_confidence_start(content, start, end)
+    if section is None:
+        return ""
+    opening = f"{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n{LOW_CONFIDENCE_OCR_HEADING}"
+    return content[section:end].removeprefix(opening).strip()
+
+
+def without_low_confidence_ocr(content: str) -> str:
+    """`content` without its `## Low-confidence OCR` section; unchanged when it has none.
+
+    This is the one cut every search field reads through (`find_types.ParsedPage.search_body`).
+    The section runs to the machine-owned boundary after the extraction, so the artifact block
+    and the preserved notes behind it stay.
+    """
+    if SIDECAR_LOW_CONFIDENCE_SENTINEL not in content:
+        return content
+    text = with_newline(content, "\n")
+    heading = text.find(_EXTRACTED_HEADING)
+    if heading == -1:
+        return content
+    start = heading + len(_EXTRACTED_HEADING)
+    end = _extraction_end(text, start)[0]
+    section = _low_confidence_start(text, start, end)
+    if section is None:
+        return content
+    return text[:section] + text[end:].lstrip("\n")
 
 
 def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
@@ -1589,6 +1664,7 @@ def update_sidecar_extraction(
     speakers: list[dict] | None = None,
     speaker_verification: str | None = None,
     attempts: int | None = None,
+    ocr: OcrFacts | None = None,
     defer_index_fanout: bool = False,
     defer_graph_completion: bool = False,
 ) -> list[Path] | DeferredGraphCompletion:
@@ -1617,6 +1693,7 @@ def update_sidecar_extraction(
         speakers=speakers,
         speaker_verification=speaker_verification,
         attempts=attempts,
+        ocr=ocr,
     )
     result = commit_media_sidecar_writes(
         vault_root,
@@ -1683,7 +1760,7 @@ _SPEAKER_FIELDS = ("speakers", "speaker_verification")
 _ASR_FIELD_PREFIX = "asr_"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
-    "processing_retryable", "processing_next_action", *_SPEAKER_FIELDS,
+    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD, *_SPEAKER_FIELDS,
 })
 
 
@@ -1701,6 +1778,7 @@ def render_sidecar_extraction(
     speaker_verification: str | None = None,
     attempts: int | None = None,
     asr: AsrFacts | None = None,
+    ocr: OcrFacts | None = None,
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
     parts: Layout | None = None,
@@ -1711,7 +1789,9 @@ def render_sidecar_extraction(
     part pages that hold the rest, as `extraction_parts.layout` gives it.
 
     `asr` records what the speech engine decided; facts of an earlier extraction never
-    survive into the new one. `prior_extractions` lists, in order, the vault-relative
+    survive into the new one. `ocr` records the confidence of an image's OCR and holds the
+    words it withheld under `## Low-confidence OCR`; an extraction without it records neither.
+    `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
     `reset_speakers` drops the speaker fields of the replaced transcript, whose labels
     do not describe the new one.
@@ -1750,13 +1830,16 @@ def render_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
+    content = _set_ocr_confidence(content, ocr)
     if prior_extractions:
         links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
         content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
     content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
     for field, value in _part_fields(parts):
         content = _set_frontmatter_field(content, field, value)
-    content = _set_extracted_text(content, text)
+    content = _set_extracted_text(
+        content, text, _cap_low_confidence_text(ocr.low_confidence_text) if ocr is not None else ""
+    )
     return with_newline(content, newline)
 
 
@@ -1776,6 +1859,13 @@ def asr_language_pin(content: str) -> tuple[str | None, bool]:
     if isinstance(pinned, str) and pinned:
         return pinned, False
     return None, fields.get(_ASR_MODE_FIELD) == LANGUAGE_MODE_MULTILINGUAL
+
+
+def _set_ocr_confidence(content: str, ocr: OcrFacts | None) -> str:
+    """Record the mean word confidence of this extraction's OCR, or drop the one an earlier extraction left."""
+    if ocr is None or ocr.confidence is None:
+        return _remove_frontmatter_fields(content, lambda key: key == OCR_CONFIDENCE_FIELD)
+    return _set_frontmatter_field(content, OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
 
 
 def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
@@ -2027,9 +2117,14 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
     return original if updated == content else with_newline(updated, newline)
 
 
-def _set_extracted_text(content: str, text: str) -> str:
-    """Replace extracted text through a sidecar-owned boundary, or EOF."""
+def _set_extracted_text(content: str, text: str, low_confidence: str = "") -> str:
+    """Replace extracted text through a sidecar-owned boundary, or EOF.
+
+    `low_confidence` is the OCR words withheld from `text`; they follow it as their own section.
+    """
     block = f"{_EXTRACTED_HEADING}\n\n{text}\n"
+    if low_confidence:
+        block += "\n" + low_confidence_block(low_confidence)
     idx = content.find(_EXTRACTED_HEADING)
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import datetime
 import errno
+import functools
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import ssl
 import subprocess
@@ -21,7 +23,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from exomem import cloud_export, vault_portability
+from exomem import cloud_containment, cloud_export, cloud_grant, vault_portability
 
 # The export Job runs only on a Linux cell: it measures its volume with statvfs.
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the cell export Job runs only on Linux cells")
@@ -264,3 +266,44 @@ def test_a_refusal_that_suppresses_its_context_reports_no_errno(vault, tmp_path,
     report = json.loads(log.read_text())
     assert status == 1
     assert report["diagnostic"] == {"type": "ExportRefused", "function": "upload_refused"}
+
+
+def _export_args(vault, log, *extra):
+    return ["--export-id", str(uuid.uuid4()), "--part-bytes", "65536", "--max-bytes", "1048576", "--vault", str(vault),
+            "--termination-log", str(log), *extra]
+
+
+def test_an_export_without_a_grant_still_runs_and_logs_the_missing_grant(vault, tmp_path, monkeypatch, caplog):
+    """Report mode: a Job rendered today carries no grant and must keep exporting."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setattr(cloud_export, "run_export", lambda *_args, **_kwargs: {"parts": 1})
+    caplog.set_level(logging.INFO)
+    log = tmp_path / "termination-log"
+    assert cloud_export.main(_export_args(vault, log, "--part-url", "https://unused.example/part")) == 0
+    events = [record.fields for record in caplog.records
+              if getattr(record, "event", None) == cloud_containment.OPERATION_EVENT]
+    assert {"grant_missing"} <= {fields["reason"] for fields in events}
+    assert {fields["verdict"] for fields in events} == {"would_refuse"}
+
+
+def test_enforce_mode_stops_an_export_before_any_part_moves(vault, tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setattr(cloud_grant, "authorize_operation", functools.partial(cloud_grant.authorize_operation, enforce=True))
+    monkeypatch.setattr(cloud_export, "run_export", lambda *_args, **_kwargs: pytest.fail("a part moved"))
+    log = tmp_path / "termination-log"
+    assert cloud_export.main(_export_args(vault, log, "--part-url", "https://unused.example/part")) == 1
+    assert json.loads(log.read_text())["error"] == "EXPORT_FAILED"
+
+
+def test_enforce_mode_stops_the_verification_read_before_it_starts(vault, tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setenv("EXOMEM_EXPORT_VERIFY_URL", "https://unused.example/archive")
+    monkeypatch.setattr(cloud_grant, "authorize_operation", functools.partial(cloud_grant.authorize_operation, enforce=True))
+    monkeypatch.setattr(cloud_export, "verify_remote_export", lambda *_args, **_kwargs: pytest.fail("a byte was read"))
+    log = tmp_path / "termination-log"
+    status = cloud_export.main(_export_args(vault, log, "--verify", "--archive-bytes", "10",
+                                            "--archive-sha256", "0" * 64))
+    assert status == 1 and json.loads(log.read_text())["error"] == "EXPORT_FAILED"

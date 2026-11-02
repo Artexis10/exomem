@@ -6295,7 +6295,7 @@ def _find_semantic(
                     if fpage is not None:
                         keyword_excerpt = _make_excerpt(fpage, query_norm)
                 if keyword_excerpt is None:
-                    body = page.body.strip()
+                    body = page.body_stripped
                     keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
             selected.append((rel_path, page, keyword_excerpt))
             if len(selected) >= target_n:
@@ -6503,7 +6503,7 @@ def _find_semantic(
                             passages.append(ctext)
                         else:
                             pg = _page_of(h.path)
-                            body = (pg.body if pg else "") or h.excerpt
+                            body = (pg.search_body if pg else "") or h.excerpt
                             passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
                     scores = emb.rerank_pairs(query, passages)
                     if len(scores) != len(rerank_prefix):

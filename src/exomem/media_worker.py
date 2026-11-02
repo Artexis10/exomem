@@ -70,6 +70,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
+from .ocr_facts import OcrFacts
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -844,7 +845,7 @@ class MediaWorker:
                 next_action=_FAILED_ACTION,
             )
             return self._publication_outcome(committed, FAILED, error)
-        text = _within_result_limit(result.text.strip() or "(no text detected)", job.sidecar_path.name)
+        text = _within_result_limit(result.sidecar_text, job.sidecar_path.name)
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
                 BLOCKED,
@@ -872,6 +873,7 @@ class MediaWorker:
                     speakers=result.speakers,
                     speaker_verification=result.speaker_verification or "unavailable",
                     asr=result.asr,
+                    ocr=result.ocr,
                     replaces=replaces,
                 )
             except preserve.PreserveError as exc:
@@ -1203,6 +1205,7 @@ class MediaWorker:
         speakers: list[dict] | None = None,
         speaker_verification: str | None = None,
         asr: AsrFacts | None = None,
+        ocr: OcrFacts | None = None,
         replaces: str | None = None,
     ) -> bool:
         if self._store is not None:
@@ -1214,6 +1217,10 @@ class MediaWorker:
             }
             if asr is not None and asr.reported:
                 payload["asr"] = asr.as_payload()
+            if ocr is not None:
+                payload["ocr"] = OcrFacts(
+                    ocr.confidence, preserve._cap_low_confidence_text(ocr.low_confidence_text)
+                ).as_payload()
             if replaces is not None:
                 payload["replaces"] = replaces
             return self._store.record_result(
@@ -1262,6 +1269,7 @@ class MediaWorker:
                 speakers=speakers,
                 speaker_verification=speaker_verification,
                 asr=asr,
+                ocr=ocr,
                 reprocessing=replaces is not None,
             )
             receipts = deferred_index.add_full_receipts(
@@ -1297,6 +1305,7 @@ class MediaWorker:
         speakers: list[dict] | None,
         speaker_verification: str | None,
         asr: AsrFacts | None,
+        ocr: OcrFacts | None,
         reprocessing: bool,
     ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
         """The writes for a finished extraction, and the part pages to retire once they commit.
@@ -1312,6 +1321,7 @@ class MediaWorker:
             speaker_verification=speaker_verification,
             attempts=max(1, job.attempts),
             asr=asr,
+            ocr=ocr,
         )
         if not reprocessing:
             plan, write = preserve.sidecar_extraction_writes(
@@ -2268,6 +2278,7 @@ class MediaWorker:
             try:
                 if result.kind == "extraction":
                     asr = result.payload.get("asr")
+                    ocr = result.payload.get("ocr")
                     writes, surplus = self._extraction_writes(
                         job,
                         before,
@@ -2277,6 +2288,7 @@ class MediaWorker:
                         speakers=list(result.payload.get("speakers", [])),
                         speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
                         asr=AsrFacts.from_payload(asr) if asr is not None else None,
+                        ocr=OcrFacts.from_payload(ocr) if ocr is not None else None,
                         reprocessing=replaces is not None,
                     )
                     target = writes[0].content
