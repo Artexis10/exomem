@@ -15,17 +15,19 @@ repository=${GITHUB_REPOSITORY:-Artexis10/exomem}
 # The journey re-reads the wheel that the provenance record names, so the wheel stays in place.
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/exomem-release.XXXXXX")
 
-curl -fsSL -o "$work/release.json" "https://pypi.org/pypi/exomem/$version/json"
+curl -fsSL --retry 3 -o "$work/release.json" "https://pypi.org/pypi/exomem/$version/json"
 wheel_url=$(jq -r '[.urls[] | select(.filename | endswith(".whl"))][0].url' "$work/release.json")
 wheel="$work/$(basename "$wheel_url")"
-curl -fsSL -o "$wheel" "$wheel_url"
+curl -fsSL --retry 3 -o "$wheel" "$wheel_url"
 echo "$sha  $wheel" | sha256sum -c -
 
 mkdir "$work/project"
 for file in pyproject.toml uv.lock; do
-  curl -fsSL -o "$work/project/$file" "https://raw.githubusercontent.com/$repository/v$version/$file"
+  curl -fsSL --retry 3 -o "$work/project/$file" "https://raw.githubusercontent.com/$repository/v$version/$file"
 done
-(cd "$work/project" && uv export --quiet --frozen --no-dev --no-emit-project -o "$work/locked.txt")
+# --no-config ignores the tag's uv version pin; the frozen export needs none of its uv settings.
+(cd "$work/project" && uv export --quiet --no-config --frozen --no-dev --no-emit-project -o "$work/locked.txt")
+# --require-hashes needs --hash; the #sha256 fragment puts the digest into the provenance record.
 echo "exomem @ file://$wheel#sha256=$sha --hash=sha256:$sha" >> "$work/locked.txt"
 
 uv venv "$venv" --python 3.13
