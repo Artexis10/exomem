@@ -1745,12 +1745,11 @@ class StoreServer:
         starved = self._starved("views", time.monotonic())
         owed, self._views_owed = self._views_owed, False  # this tick runs the owed pass, unless it yields
         if self.runtime is not None and self._idle_released():
-            # Decided before any store read, from the release and a rollback seen earlier. Proven work goes on
-            # to the checks below, which read the store, so a rollback not seen yet still ends the tick there.
-            rolled_back = capability.disabled_seen(self.root)
-            views = capability.collection_views_enabled() and not rolled_back
+            # Decided before any store read, from the release alone. Proven work goes on to the checks below,
+            # which read the store, so a per-vault rollback still ends the tick there.
+            views = capability.collection_views_enabled()
             self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
-            if rolled_back or not self._view_work_needs_lease(views, owed):
+            if not self._view_work_needs_lease(views, owed):
                 return IMPORT_IDLE_SECONDS
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS

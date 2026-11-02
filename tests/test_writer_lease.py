@@ -905,6 +905,13 @@ def test_single_host_coordinator_redirect_cannot_forward_authority_to_another_or
             self.end_headers()
             self.wfile.write(b'{"holder":null,"expires_at":null,"fencing_token":0}')
 
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            port = self.server.server_port if same_origin else target.server_port
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port}/redirected")
+            self.end_headers()
+
         def log_message(self, *_args):
             pass
 
@@ -927,6 +934,15 @@ def test_single_host_coordinator_redirect_cannot_forward_authority_to_another_or
         with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
             client.status()
         assert received == []
+        # A POST carries the same bearer through the redirect-guarded opener, which follows a same-origin
+        # redirect only and never goes through the environment's proxy.
+        if same_origin:
+            assert client.release(1).holder is None
+            assert received == ["Bearer writer-secret"]
+        else:
+            with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+                client.release(1)
+            assert received == []
     finally:
         for server, thread in zip((target, origin), threads, strict=True):
             server.shutdown()
