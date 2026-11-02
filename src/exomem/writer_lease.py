@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import hashlib
+import http.client
 import ipaddress
 import json
 import logging
@@ -2423,6 +2424,8 @@ class LeaseCoordinatorClient:
         if not config.enabled:
             raise ValueError("coordinator client requires enabled configuration")
         self.config = config
+        # Each thread keeps its own connection, so no request waits on another thread's.
+        self._kept = threading.local()
 
     def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
         body = {
@@ -2719,6 +2722,49 @@ class LeaseCoordinatorClient:
             ).open
         return open_request(request, timeout=self.config.timeout_seconds)
 
+    def _get_kept_alive(self, request: urllib.request.Request) -> Any:
+        """The JSON of a GET to the loopback coordinator, over this thread's one open connection.
+
+        Every status RPC otherwise pays a new opener and a new TCP connection. A GET changes nothing,
+        so a connection that the coordinator closed while idle is replaced once and the GET repeats.
+        The answer is never cached, `http.client` never uses a proxy, and no status outside 2xx is
+        followed: a redirect refuses like any other status.
+        """
+        origin = urllib.parse.urlsplit(self.config.url or "")
+        connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
+        for attempt in (1, 2):
+            connection = getattr(self._kept, "connection", None)
+            reused = connection is not None
+            if connection is None:
+                connection = connect(origin.hostname, origin.port, timeout=self.config.timeout_seconds)
+                self._kept.connection = connection
+            try:
+                connection.request("GET", request.selector, headers=dict(request.header_items()))
+                response = connection.getresponse()
+                data = response.read()
+            except ConnectionError as error:
+                self._drop_kept_connection()
+                if reused and attempt == 1:
+                    continue
+                raise urllib.error.URLError(error) from None
+            except http.client.HTTPException as error:
+                self._drop_kept_connection()
+                raise urllib.error.URLError(error) from None
+            except BaseException:
+                self._drop_kept_connection()
+                raise
+            if response.will_close:
+                self._drop_kept_connection()
+            if not 200 <= response.status < 300:
+                raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, None)
+            return json.loads(data.decode("utf-8"))
+        raise AssertionError("the second attempt returns or raises")
+
+    def _drop_kept_connection(self) -> None:
+        connection, self._kept.connection = getattr(self._kept, "connection", None), None
+        if connection is not None:
+            connection.close()
+
     def _json_request(self, method: str, route: str, body: dict | None) -> urllib.request.Request:
         url = f"{self.config.url}{route}"
         headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
@@ -2740,8 +2786,11 @@ class LeaseCoordinatorClient:
     ) -> dict[str, Any]:
         request = self._json_request(method, route, body)
         try:
-            with self._open_request(request) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            if method == "GET" and self.config.topology == "single-host":
+                payload = self._get_kept_alive(request)
+            else:
+                with self._open_request(request) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
             return payload
