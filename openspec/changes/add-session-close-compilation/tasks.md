@@ -1,17 +1,17 @@
 ## 1. The close step in the contract text
 
-- [ ] 1.1 Replace the record-only step in the scaffold skill and the engagement reference with the two-part close step, kept generic.
-- [ ] 1.2 Add the compile-first sentences to the `episode_memory` tool description, the Stop-hook episode ask and the `episode_due` advisory; raise the Stop-hook byte ceilings by the added words only.
+- [x] 1.1 Replace the record-only step in the scaffold skill and the engagement reference with the two-part close step, kept generic.
+- [x] 1.2 Add the compile-first sentences to the `record_episode` tool description, the Stop-hook episode ask and the `episode_due` advisory; raise the Stop-hook and tool-schema byte ceilings by the added words only.
 
 ## 2. The `compile` block
 
-- [ ] 2.1 Add `episode_compile.py`: resolve Decided-item links over the visible pages before the write, then build the block after the commit.
-- [ ] 2.2 Return the block from `episode_memory.record` and register it in the compact episode envelope fields.
-- [ ] 2.3 Add tests in `tests/test_episode_compile.py`: listing, egress twin, unlinked count, omitted block, failed link check and the compact envelope of a real MCP call.
+- [x] 2.1 Add `episode_compile.py`: resolve Decided-item links over the visible pages before the write, then build the block after the commit.
+- [x] 2.2 Return the block from `episode_memory.record` and register it in the compact episode envelope fields.
+- [x] 2.3 Add tests in `tests/test_episode_compile.py`: listing, egress twin, unlinked count, omitted block, failed link check and the compact envelope of a real MCP call.
 
 ## 3. Derived artifacts
 
-- [ ] 3.1 Regenerate the Claude Code plugin copies, the hosted plugin render, the hosted v5 candidate, `docs/capabilities.md` and the Cloud plugin build, and run their checks.
+- [x] 3.1 Refresh the skill contract stamp, the Claude Code plugin copies, the MCP schema baseline with its fingerprint, `docs/capabilities.md` and the Cloud plugin build, and run their checks. Move both pending fingerprints in the ChatGPT contract to the new digest.
 
 ## 4. Real-model proof
 
