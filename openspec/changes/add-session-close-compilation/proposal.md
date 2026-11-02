@@ -32,10 +32,14 @@ Cloud, so a response change reaches Cloud.
 - Code: `src/exomem/episode_compile.py` (new), `episode_memory.py`,
   `episode_capture.py`, `mutation_terminal.py`, the Stop hook
   `src/exomem/_hooks/exomem_capture_nudge.py`, `episode_nudge.py`, the tool
-  description in `commands.py` and the scaffold skill under
-  `src/exomem/_scaffold/_Schema/`.
+  descriptions in `operation_entries.py` and `commands.py` and the scaffold
+  skill under `src/exomem/_scaffold/_Schema/`.
 - Generated: the Claude Code plugin copies, the hosted plugin renders, the
   hosted v5 candidate, `docs/capabilities.md` and the tool surface contract.
 - The Stop hook episode ask rises from 189 to 248 bytes and its MCP block from
   at most 310 to at most 365 bytes. The ceilings in `tests/test_nudge_diet.py`
   rise to match.
+- The MCP `record_episode` description and its `decided` parameter grow by 149
+  bytes. The tool surface fingerprint changes, so the ChatGPT connector must
+  refresh before the new text reaches it. The per-tool and total schema budgets
+  rise by 150 bytes each.
