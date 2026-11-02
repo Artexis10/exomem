@@ -101,6 +101,14 @@ def test_checks_fail_a_missing_update_and_a_write_the_key_forbids() -> None:
     }
 
 
+def test_an_optional_recap_left_unwritten_owes_no_links() -> None:
+    key = {**KEY, "recap": "optional"}
+    updated = {"changed": {PERSON: "diff"}, "removed": [], "created": {}, "recaps": {}, "order": "no_recap"}
+    verdicts = {o.check: o.verdict for o in session_score.check_row(key, {"observed": updated})}
+    assert verdicts["recap"] == checks.PASS
+    assert verdicts["recap_must_link"] == checks.PASS
+
+
 def test_judge_view_shows_turns_reference_and_diffs_but_not_the_arm_or_the_recap() -> None:
     observed = {
         "changed": {PERSON: "+No meetings before 10:00.\n"},

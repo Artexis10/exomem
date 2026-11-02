@@ -8,7 +8,7 @@ did not run it, into each case file's `answer_key` slot (shape below); a run hol
       "must_change":      pages (relative to the knowledge base) that must differ after the session,
       "must_not_change":  seeded pages that must stay as they were,
       "recap":            "required", "forbidden" or "optional",
-      "recap_must_link":  seeded pages that a recap must link,
+      "recap_must_link":  seeded pages that each written recap must link (nothing when no recap was written),
       "new_pages":        "none" (no page besides the recap) or "allowed"
     }
 
@@ -107,7 +107,12 @@ def check_row(key: dict, row: dict) -> list[checks.Outcome]:
         outcome("must_change", not missing, f"not changed: {missing}" if missing else "all changed"),
         outcome("must_not_change", not wrong, f"touched: {wrong}" if wrong else "none touched"),
         outcome("recap", recap_held, f"{len(recaps)} recap(s); the key says {key['recap']}"),
-        outcome("recap_must_link", not absent, f"not linked: {absent}" if absent else "all linked"),
+        # The rule binds the recaps a run wrote; with no recap there is nothing to link (`recap` judges absence).
+        outcome(
+            "recap_must_link",
+            not recaps or not absent,
+            "no recap written" if not recaps else f"not linked: {absent}" if absent else "all linked",
+        ),
         outcome(
             "new_pages",
             key["new_pages"] == "allowed" or not other_pages,
