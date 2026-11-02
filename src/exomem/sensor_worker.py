@@ -128,6 +128,9 @@ class Supervisor:
         self._window: deque[_Charge] = deque()
         self._refusal: tuple[str, str] | None = None
         self._refusal_key: str | None = None
+        #: The instrument key of the running child, taken at launch, so its peak
+        #: is filed under the model it loaded.
+        self._launch_key: str | None = None
         self.last_action: str = "off"
         #: The recorded peak as (instrument key, bytes), loaded once from `PEAK_FILE`.
         self._peak: tuple[str, int] | None = None
@@ -164,21 +167,24 @@ class Supervisor:
             return None
         return spend
 
+    def _recorded_peak(self, key: str) -> int | None:
+        if not self._peak_loaded:
+            stored = _read_json(_state_file(self.vault_root, PEAK_FILE)) or {}
+            peak = _peak_value(stored.get("peak_rss_bytes"))
+            stored_key = stored.get("key")
+            self._peak = (stored_key, peak) if peak is not None and isinstance(stored_key, str) else None
+            self._peak_loaded = True
+        if self._peak is None or self._peak[0] != key:
+            return None
+        return self._peak[1]
+
     def peak_rss_bytes(self) -> int | None:
         """The recorded child peak in bytes for the active instrument, else None.
 
         A peak recorded under another instrument key says nothing about the
         model that would load now, so it is ignored.
         """
-        if not self._peak_loaded:
-            stored = _read_json(_state_file(self.vault_root, PEAK_FILE)) or {}
-            peak = _peak_value(stored.get("peak_rss_bytes"))
-            key = stored.get("key")
-            self._peak = (key, peak) if peak is not None and isinstance(key, str) else None
-            self._peak_loaded = True
-        if self._peak is None or self._peak[0] != _refusal_key():
-            return None
-        return self._peak[1]
+        return self._recorded_peak(_instrument_key())
 
     def _note_peak(self, spend: dict[str, Any]) -> None:
         """Keep a child's reported peak. A final report replaces the last one.
@@ -188,10 +194,10 @@ class Supervisor:
         reported = _peak_value(spend.get("peak_rss_bytes"))
         if reported is None:
             return
-        recorded = self.peak_rss_bytes()
+        key = self._launch_key or _instrument_key()
+        recorded = self._recorded_peak(key)
         if recorded is not None and not spend.get("final"):
             reported = max(reported, recorded)
-        key = _refusal_key()
         self._peak = (key, reported)
         with contextlib.suppress(OSError):
             _write_json(
@@ -308,6 +314,7 @@ class Supervisor:
                     )
                 return self._act("memory")
         self._allotment = (cpu_left, judgements_left)
+        self._launch_key = _instrument_key()
         try:
             self._child = self._launch(self.vault_root, cpu_left, judgements_left)
         except OSError:
@@ -342,15 +349,17 @@ def _peak_value(value: Any) -> int | None:
     return None
 
 
-def _refusal_key() -> str:
-    """The setting and active instruments: what a refusal and a recorded peak hold for.
-
-    A refused child is tried again, and a recorded peak is read again, only
-    while this key is unchanged.
-    """
+def _instrument_key() -> str:
+    """The active instruments: what a recorded peak holds for."""
     from . import sensed_model
 
-    return json.dumps([sensing.setting(), sorted(sensed_model.active_instruments())])
+    return json.dumps(sorted(sensed_model.active_instruments()))
+
+
+def _refusal_key() -> str:
+    """The setting and active instruments: a refused child is tried again only
+    when this changes."""
+    return json.dumps([sensing.setting(), json.loads(_instrument_key())])
 
 
 #: The only variables the child inherits: where state, logs and the model

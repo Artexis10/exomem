@@ -261,6 +261,22 @@ def test_a_cloud_cell_never_launches_the_child(tmp_path: Path, monkeypatch) -> N
     assert len(launcher.children) == 1, "no relaunch while the cell stays a Cloud cell"
 
 
+def test_turning_sensing_off_mid_run_keeps_the_recorded_peak(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    sup, launcher = _supervisor(vault, [1000.0])
+    assert _step(sup) == "launched"
+    _record_peak(vault, launcher, sup)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK + 1)
+    assert _step(sup) == "launched"
+    launcher.children[-1].write({"cpu": 0.1, "judgements": 0, "peak_rss_bytes": 80 << 20})
+    monkeypatch.setenv("EXOMEM_SENSING", "off")
+    assert _step(sup) == "off"
+    sf.enable(monkeypatch)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: PEAK - 1)
+    assert _step(sup) == "memory", "a cut-off report under the setting change must not erase the peak"
+
+
 def test_turning_sensing_off_kills_the_child(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     sup, launcher = _supervisor(tmp_path / "vault", [1000.0])
