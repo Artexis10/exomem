@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import hashlib
+import http.client
 import ipaddress
 import json
 import logging
@@ -2427,6 +2428,8 @@ class LeaseCoordinatorClient:
         if not config.enabled:
             raise ValueError("coordinator client requires enabled configuration")
         self.config = config
+        # Each thread keeps its own connection, so no request waits on another thread's.
+        self._kept = threading.local()
 
     def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
         body = {
@@ -2723,6 +2726,51 @@ class LeaseCoordinatorClient:
             ).open
         return open_request(request, timeout=self.config.timeout_seconds)
 
+    def _get_kept_alive(self, request: urllib.request.Request) -> Any:
+        """The JSON of a GET to the loopback coordinator, over this thread's one open connection.
+
+        Every status RPC otherwise pays a new opener and a new TCP connection. A GET changes nothing,
+        so a connection that the coordinator closed while idle is replaced once, and the GET repeats.
+        The answer is never cached, `http.client` never uses a proxy, and no status outside 2xx is
+        followed: a redirect refuses like any other status.
+        """
+        reused = getattr(self._kept, "connection", None) is not None
+        try:
+            response, data = self._exchange(request)
+        except ConnectionError:
+            if not reused:
+                raise
+            response, data = self._exchange(request)
+        if not 200 <= response.status < 300:
+            raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, None)
+        return json.loads(data.decode("utf-8"))
+
+    def _exchange(self, request: urllib.request.Request) -> tuple[http.client.HTTPResponse, bytes]:
+        connection = getattr(self._kept, "connection", None)
+        if connection is None:
+            origin = urllib.parse.urlsplit(self.config.url or "")
+            connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
+            connection = self._kept.connection = connect(
+                origin.hostname, origin.port, timeout=self.config.timeout_seconds)
+        try:
+            connection.request("GET", request.selector, headers=dict(request.header_items()))
+            response = connection.getresponse()
+            data = response.read()
+        except BaseException as error:
+            self._drop_kept_connection()
+            # A protocol error is no OSError, which the caller maps; a reset is one, and stays one to retry.
+            if isinstance(error, http.client.HTTPException) and not isinstance(error, ConnectionError):
+                raise urllib.error.URLError(error) from None
+            raise
+        if response.will_close:
+            self._drop_kept_connection()
+        return response, data
+
+    def _drop_kept_connection(self) -> None:
+        connection, self._kept.connection = getattr(self._kept, "connection", None), None
+        if connection is not None:
+            connection.close()
+
     def _json_request(self, method: str, route: str, body: dict | None) -> urllib.request.Request:
         url = f"{self.config.url}{route}"
         headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
@@ -2744,8 +2792,11 @@ class LeaseCoordinatorClient:
     ) -> dict[str, Any]:
         request = self._json_request(method, route, body)
         try:
-            with self._open_request(request) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            if method == "GET" and self.config.topology == "single-host":
+                payload = self._get_kept_alive(request)
+            else:
+                with self._open_request(request) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
             return payload
@@ -8404,10 +8455,13 @@ def _collection_store_thread(func):
                     if routed is not None:
                         return get_manager()._attempt_store_write(func, command, injected, kwargs, routed)
                     return func(command, *injected, **kwargs)
-                server = store_runtime.route(command.name, injected[0], kwargs)
+                routing = store_runtime.route_with_proof(command.name, injected[0], kwargs)
+                server = routing.server
                 if server is not None:
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
+                        # A read hands the proof that routed it to the store thread, which skips its own.
+                        initial=routing.proof if read_only else None,
                         # A read cannot start a job, revise a declaration or leave views pending; waking
                         # every tick after it kept the store thread busy beside the next request.
                         wake_maintenance=not (read_only or import_status),

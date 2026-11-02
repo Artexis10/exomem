@@ -905,6 +905,13 @@ def test_single_host_coordinator_redirect_cannot_forward_authority_to_another_or
             self.end_headers()
             self.wfile.write(b'{"holder":null,"expires_at":null,"fencing_token":0}')
 
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            port = self.server.server_port if same_origin else target.server_port
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port}/redirected")
+            self.end_headers()
+
         def log_message(self, *_args):
             pass
 
@@ -923,18 +930,85 @@ def test_single_host_coordinator_redirect_cannot_forward_authority_to_another_or
             "EXOMEM_WRITER_LEASE_TOKEN": "writer-secret",
         })
         client = writer_lease_module.LeaseCoordinatorClient(config)
+        # A local coordinator never redirects, so any 3xx is refused, whichever origin it names.
+        with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+            client.status()
+        assert received == []
+        # A POST carries the same bearer through the redirect-guarded opener, which follows a same-origin
+        # redirect only and never goes through the environment's proxy.
         if same_origin:
-            assert client.status().holder is None
+            assert client.release(1).holder is None
             assert received == ["Bearer writer-secret"]
         else:
             with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
-                client.status()
+                client.release(1)
             assert received == []
     finally:
         for server, thread in zip((target, origin), threads, strict=True):
             server.shutdown()
             thread.join()
             server.server_close()
+
+
+@contextmanager
+def _loopback_coordinator(*, close_after_answer):
+    """A loopback coordinator that answers every GET with an unheld lease and counts its connections.
+
+    `close_after_answer` closes the socket after each answer without announcing it, as a coordinator does that
+    restarts or drops an idle connection.
+    """
+    connections = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def setup(self):
+            connections.append(self.client_address)
+            super().setup()
+
+        def do_GET(self):
+            body = b'{"holder":null,"expires_at":null,"fencing_token":0}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.close_connection = close_after_answer
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = LeaseConfig.from_env({
+            "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+            "EXOMEM_WRITER_LEASE_URL": f"http://127.0.0.1:{server.server_port}",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main", "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+            "EXOMEM_WRITER_LEASE_TOKEN": "writer-secret",
+        })
+        yield writer_lease_module.LeaseCoordinatorClient(config), connections
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def test_single_host_status_reads_share_one_connection_to_the_coordinator():
+    """Defect: every status read opens a new TCP connection, which costs the store thread a handshake per read."""
+    with _loopback_coordinator(close_after_answer=False) as (client, connections):
+        assert client.status().holder is None
+        assert client.status().holder is None
+    assert len(connections) == 1
+
+
+def test_single_host_status_read_reconnects_once_when_the_coordinator_dropped_the_connection():
+    """Defect: a coordinator restart leaves the kept connection dead, so the next status read refuses as
+    unavailable until a later one happens to open a new connection."""
+    with _loopback_coordinator(close_after_answer=True) as (client, connections):
+        assert client.status().holder is None
+        assert client.status().holder is None
+    assert len(connections) == 2
 
 
 def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:

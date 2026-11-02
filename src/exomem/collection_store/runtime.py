@@ -20,6 +20,7 @@ from contextlib import AbstractContextManager, ExitStack, closing, contextmanage
 from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 from .. import call_spans, foreground_priority, state_paths
 from . import connection, legacy_originals, replica, schema
@@ -828,8 +829,20 @@ def serve(vault_root, manager):
         _server(root)
 
 
+class Routed(NamedTuple):
+    """The store thread a request runs on (None for file collections) and the ownership proof that chose it, if any."""
+
+    server: StoreServer | None
+    proof: object = None
+
+
 def route(command, vault_root, arguments):
-    """The store thread a request must run on, or None when file collections answer it.
+    """The store thread a request must run on, or None when file collections answer it; see ``route_with_proof``."""
+    return route_with_proof(command, vault_root, arguments).server
+
+
+def route_with_proof(command, vault_root, arguments):
+    """The store thread a request must run on, or None when file collections answer it, with the proof.
 
     A selector the vault's marker routes to the store, a NEW summary collection's create,
     Records discovery, and a curation or episode command that runs a Records step or
@@ -843,11 +856,11 @@ def route(command, vault_root, arguments):
 
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
-        return None
+        return Routed(None)
     if command in _CURATION_COMMANDS:
-        return _curation_route(command, root, arguments)
+        return Routed(_curation_route(command, root, arguments))
     if command not in _STORE_COMMANDS:
-        return None
+        return Routed(None)
     from . import ownership
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
@@ -870,17 +883,17 @@ def route(command, vault_root, arguments):
     ):
         # Both public store tools need the service writer for global inventory.
         server = None if proof.marker is None else _server(root)
-        return server if server is not None and server.runtime is not None else None
+        return Routed(server, proof) if server is not None and server.runtime is not None else Routed(None)
     elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
-        return None
+        return Routed(None)
     server = _server(root)
     if server is None and not summary:
-        return None  # Collection resolution decides visibility before reporting an unavailable store.
+        return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
         raise OpError(
             "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
         )
-    return server
+    return Routed(server, proof)
 
 
 def _curation_route(command, root, arguments):
@@ -1095,13 +1108,14 @@ def notify_view_change(root, path, *, destination=None, directory=False):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work, *, wake_maintenance=True, read_only=False):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None):
         import contextvars
 
         self.context = contextvars.copy_context()
         self.work = work
         self.wake_maintenance = wake_maintenance
         self.read_only = read_only
+        self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
         self.taken = False
         self.done = threading.Event()
         self.result = self.error = None
@@ -1166,11 +1180,13 @@ class StoreServer:
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None):
+    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None, initial=None):
         """Run ``work`` on the store thread and return its result or raise its error.
 
         ``read_only`` says the work changes nothing, so it runs under one view of path
-        placement, host configuration and governance policy (``_serve``). ``extend`` lets a
+        placement, host configuration and governance policy (``_serve``). ``initial`` is the
+        ownership proof the caller routed this read on: the read starts from it instead of proving
+        again, and its release proves afresh and refuses the read when the two differ. ``extend`` lets a
         write that is still waiting at its acceptance deadline keep its place: it takes the
         completion deadline and returns a later acceptance deadline, or None to refuse.
         ``on_refusal(error, waited_seconds)`` hears a write refusal this queue makes
@@ -1193,7 +1209,7 @@ class StoreServer:
                 on_refusal(error, time.monotonic() - entry)
             return error
 
-        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
+        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial)
         with self._condition:
             if not self._closed:
                 self._requests.append(request)
@@ -1433,6 +1449,7 @@ class StoreServer:
     def _serve(self, request):
         from ..cli_ops import OpError
         from ..governance import policy
+        from . import ownership
         from .preview import preview_store
 
         def bound():
@@ -1448,6 +1465,10 @@ class StoreServer:
                     scope.enter_context(state_paths.resolution_scope())
                     scope.enter_context(policy.request_policy_snapshot())
                 scope.enter_context(preview_store(self.root, self.runtime))
+                if request.read_only and request.initial is not None:
+                    # After the checkout, so its own ownership reads still prove afresh. The release in
+                    # `invoke_command` proves again and compares, so a change since routing withholds the read.
+                    scope.enter_context(ownership.read_scope(self.root, initial=request.initial))
                 self._scope = scope
                 try:
                     return request.work()
@@ -1507,7 +1528,8 @@ class StoreServer:
         from ..governance import principal
         from . import admission, authority, capability
 
-        if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self.session is None or self._idle_released() \
+                or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             # The resume migrates a store an earlier release left with this intent; until then only its head reads.
@@ -1537,7 +1559,7 @@ class StoreServer:
         from . import capability, derived_rows, importer
         from .preview import preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             # A plain read first: an idle store takes no lease and no checkout.
@@ -1569,7 +1591,7 @@ class StoreServer:
         from . import capability, index_migrations
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
@@ -1616,15 +1638,13 @@ class StoreServer:
 
         # The running rebuild's pass continues only from a step that advanced; any other return ends it.
         rebuild, self._derived_pass = self._derived_pass, None
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 if reader.execute("SELECT 1 FROM collections WHERE derived=1 LIMIT 1").fetchone() is None:
                     return IMPORT_IDLE_SECONDS
-            # An idle release retires the handle without changing the store, so it needs no new reconcile.
-            if self._derived_handle is not None \
-                    and (self._derived_handle is self.runtime._handle or self._idle_released()) \
+            if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
             if rebuild is not None:
@@ -1724,13 +1744,18 @@ class StoreServer:
         # A starved tick runs one bounded turn whatever else is going on; any other yields at its next seam.
         starved = self._starved("views", time.monotonic())
         owed, self._views_owed = self._views_owed, False  # this tick runs the owed pass, unless it yields
+        if self.runtime is not None and self._idle_released():
+            # Decided before any store read, from the release alone. Proven work goes on to the checks below,
+            # which read the store, so a per-vault rollback still ends the tick there.
+            views = capability.collection_views_enabled()
+            self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
+            if not self._view_work_needs_lease(views, owed):
+                return IMPORT_IDLE_SECONDS
         if self.runtime is None or not capability.views_published(self.root):
             self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
         views = capability.collection_views_enabled(self.root)
         self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
-        if self._idle_released() and not self._view_work_needs_lease(views, owed):
-            return IMPORT_IDLE_SECONDS
         if views and (self._edit_back is None or self._edit_handle is not self.runtime._handle):
             self._edit_back = edit_back.EditBack()
         with self._condition:
@@ -1831,6 +1856,8 @@ class StoreServer:
     def _idle_released(self):
         """Whether this process released the lease on idle and has not taken it again.
 
+        While it holds, a tick opens neither the store nor the lease: the release drained the work, and
+        a request takes the lease again (a views tick also, for work it proved without it).
         A lost lease or a standby store is not this: its ticks run as before."""
         return self.manager._store_released and self.manager._fencing_token is None
 
