@@ -19,6 +19,7 @@ from cellctl.capacity import GIB
 from cellctl.exports import ExportRow, ExportSize, ExportStorage
 from cellctl.imports import ImportRow, ImportStorage
 from cellctl.manifests import (
+    MAX_GRANT_CHARS,
     CellManifestSpec,
     render_export_job,
     render_import_job,
@@ -44,18 +45,19 @@ def _public_pem(private_key=None) -> str:
     ).decode("ascii")
 
 
-def _import_job(**anchors) -> dict:
+def _import_job(*, grant: str | None = None, phase: str = "import", **anchors) -> dict:
     spec = _spec(**anchors)
     item = ImportRow(str(uuid.uuid4()), spec.cell_id, "adopt", 23, 1, "uploaded", NOW,
-                     ciphertext_sha256="a" * 64, ciphertext_bytes=256)
-    return render_import_job(spec, item, "import", deadline_seconds=120, url="https://storage.example/ciphertext")
+                     ciphertext_sha256="a" * 64, ciphertext_bytes=256, operation_grant=grant)
+    return render_import_job(spec, item, phase, deadline_seconds=120,
+                             url="https://storage.example/ciphertext" if phase == "import" else None)
 
 
-def _export_job(*, verify: bool, **anchors) -> dict:
+def _export_job(*, verify: bool, grant: str | None = None, **anchors) -> dict:
     spec = CellManifestSpec(cell_id=CELL_ID, image="registry.example/cell@sha256:" + "a" * 64, replicas=0,
                             read_only=False, storage_gib=20, hold_kind="export", hold_started_at=NOW.isoformat(),
                             **anchors)
-    item = ExportRow(str(uuid.uuid4()), CELL_ID, "requested", NOW,
+    item = ExportRow(str(uuid.uuid4()), CELL_ID, "requested", NOW, operation_grant=grant,
                      **({"archive_version_id": "v1", "archive_bytes": 5, "archive_sha256": "b" * 64} if verify else {}))
     size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
     return render_export_job(spec, item, size, part_urls=["https://storage.example/part"], deadline_seconds=1800)
@@ -86,6 +88,45 @@ def test_an_anchor_that_is_not_configured_is_not_rendered(render) -> None:
     assert {ENDPOINT_ENV, BUCKET_ENV, GRANT_KEY_ENV}.isdisjoint(_env(render()))
     env = _env(render(object_store_endpoint="https://s3.example", object_store_bucket="cells-bucket"))
     assert GRANT_KEY_ENV not in env and env[BUCKET_ENV] == "cells-bucket"
+
+
+# The grant Substrate signed for an operation (src/exomem/cloud_grant.py verifies it); cellctl relays it opaquely.
+GRANT = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJvcGVyYXRpb24iOiJleHBvcnQifQ.c2lnbmF0dXJl"
+
+
+def _grant_arguments(job: dict) -> list[str]:
+    return [argument for argument in job["spec"]["template"]["spec"]["containers"][0]["command"]
+            if argument.startswith("--grant")]
+
+
+@pytest.mark.parametrize("render", _JOBS)
+def test_a_job_receives_the_grant_of_its_request_row_and_none_without_one(render) -> None:
+    assert _grant_arguments(render(grant=GRANT)) == [f"--grant={GRANT}"]
+    assert _grant_arguments(render()) == []
+
+
+def test_an_import_job_before_the_data_moves_receives_no_grant() -> None:
+    assert _grant_arguments(_import_job(grant=GRANT, phase="prepare")) == []
+
+
+@pytest.mark.parametrize("render", _JOBS)
+def test_a_grant_with_shell_metacharacters_reaches_the_job_only_as_its_own_argument(render) -> None:
+    """Defect: the grant lands in the `sh -c` string, so a crafted value runs a command in the cell's Job."""
+    hostile = "a;$(touch /data/pwned)`id`'\"\\| &>x"
+    command = render(grant=hostile)["spec"]["template"]["spec"]["containers"][0]["command"]
+    shell, flag, script, process_name, *arguments = command
+    assert (shell, flag, process_name) == ("sh", "-c", "cell-process")
+    assert script.endswith('exec "$@"') and hostile not in script
+    assert arguments.count(f"--grant={hostile}") == 1
+
+
+@pytest.mark.parametrize("grant", ["", "g" * (MAX_GRANT_CHARS + 1), "line\nbreak", "gr\u00e4nt"])
+def test_a_grant_that_is_no_printable_ascii_token_within_the_limit_is_dropped_and_never_logged(grant, caplog) -> None:
+    job = _import_job(grant=grant)
+
+    assert _grant_arguments(job) == []
+    assert any("operation grant" in record.getMessage() for record in caplog.records)
+    assert not grant or grant not in caplog.text
 
 
 def test_the_serving_pod_and_its_init_container_receive_no_anchor() -> None:

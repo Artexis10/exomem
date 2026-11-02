@@ -7759,6 +7759,122 @@ def _op_activate_context_body(
     return packet
 
 
+def _source_of_part(vault_root: Path, path: str) -> str:
+    """The path of the Source page when `path` names one of its part pages, else `path`.
+
+    A part is the Source's own text, so reading it is reading the Source: the access decision
+    is the Source's, taken by the same read.
+    """
+    from . import extraction_parts, memory_refs
+    from .vault import parse_frontmatter, read_guarded_text
+
+    # A plain path that is not at a part's path needs no resolution here: the read resolves it
+    # once, as before parts existed. Only a ref, or a path at a part's path, is looked at first.
+    if memory_refs.parse_memory_ref(path) is None and extraction_parts.source_page_for(Path(path)) is None:
+        return path
+    try:
+        resolved = _resolve_memory_identifier(vault_root, path, serve_stale=True)
+    except (ValueError, OSError):
+        return path
+    page = Path(vault_root) / resolved
+    source = extraction_parts.source_page_for(page)
+    if source is None:
+        return path
+    try:
+        content, _guard = read_guarded_text(vault_root, page)
+    except (OSError, UnicodeError):
+        return path
+    # The same rule as search: only a page carrying `part_of` reads as its Source.
+    if "part_of" not in parse_frontmatter(content)[0]:
+        return path
+    return source.relative_to(vault_root).as_posix()
+
+
+def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -> dict:
+    """Return one window of a long Source's extracted text instead of its whole body.
+
+    Only a page released in full is windowed, and only when the released body is the stored
+    one or that body without its origin carriers: positions count the stored text, and a
+    window never shows what the release withheld. The window is part of the page, not the
+    page, so it carries no `content_hash` and cannot guard a write of the whole body.
+    """
+    from . import extraction_parts
+    from .vault import content_hash, parse_frontmatter, read_guarded_text
+
+    if offset is not None and type(offset) is not int:  # a bool is an int to Python, never an offset
+        raise ValueError("INVALID_OFFSET: offset must be a whole number of characters")
+    body = result.get("body")
+    if not (isinstance(body, str) and "content_hash" in result):
+        return _refuse_unused_offset(result, offset)
+    # Decide from what the read released before touching the file again, so an ordinary read
+    # takes exactly the one guarded read it took before parts existed.
+    released = result.get("frontmatter")
+    released = released if isinstance(released, dict) else {}
+    if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
+        return _refuse_unused_offset(result, offset)
+    if (
+        extraction_parts.count_of(released) == 1
+        and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS
+    ):
+        return _refuse_unused_offset(result, offset)
+    path = str(result["path"])
+    page = Path(vault_root) / path
+    try:
+        raw, _guard = read_guarded_text(vault_root, page)
+    except (OSError, UnicodeError):
+        return _refuse_unused_offset(result, offset)
+    frontmatter, stored, _ = parse_frontmatter(raw)
+    first = _preserve_module().extracted_text(stored)
+    # A read whose hash is not the file's served something other than the stored page (a
+    # projected collection summary, or a page that changed meanwhile): it passes through whole.
+    if content_hash(raw) != result["content_hash"]:
+        if offset:
+            raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
+        return result
+    # The served body has normalised line endings; a CRLF page is still the stored page.
+    served = body.replace("\r\n", "\n")
+    if served != stored.replace("\r\n", "\n") and served != provenance_module.withheld_prose(
+        stored, owner_path=path
+    ).replace("\r\n", "\n"):
+        if offset:
+            raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
+        return result
+    try:
+        window = extraction_parts.read_window(
+            vault_root,
+            page,
+            frontmatter,
+            first,
+            offset or 0,
+            withhold=lambda text: egress_module.carrier_spans_for_caller(vault_root, text, owner_path=path),
+        )
+    except ValueError as error:
+        raise ValueError(f"INVALID_OFFSET: {error}") from error
+    except OSError as error:
+        raise ValueError(
+            "PART_MISSING: part of the extracted text is missing; reconcile the vault to rebuild it"
+        ) from error
+    whole_page_only = ("content_hash", "evidence_version")
+    return {
+        **{key: value for key, value in result.items() if key not in whole_page_only},
+        "body": window.text,
+        "body_truncated": True,
+        "window": {
+            "offset": window.offset,
+            "next_offset": window.next_offset,
+            "total_chars": window.total_chars,
+            "part": window.part,
+            "parts": window.parts,
+        },
+    }
+
+
+def _refuse_unused_offset(result: dict, offset: int | None) -> dict:
+    if offset:
+        raise ValueError("INVALID_OFFSET: this page has no extracted text longer than one window")
+    return result
+
+
 def op_read_memory(
     vault_root: Path,
     path: str,
@@ -7772,6 +7888,7 @@ def op_read_memory(
     history_continuation: str | None = None,
     continuation: _OptionalViewContinuation = None,
     follow_corrections: bool = True,
+    offset: int | None = None,
 ) -> dict:
     """Read a page, exact unit, or exomem://map view.
 
@@ -7790,14 +7907,15 @@ def op_read_memory(
         history_continuation: Position from the previous revision_history envelope.
         continuation: Next-page token of a view.
         follow_corrections: False reads the historical Source; unit reads stay exact.
+        offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
     if context_views_module.in_view_namespace(path):
-        if unit_ref is not None or frontmatter_only or include_history or links or include_raw:
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw or offset is not None:
             raise ValueError(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
-                "unit_ref, frontmatter_only, include_history, links, or include_raw"
+                "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
         return context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
@@ -7819,14 +7937,15 @@ def op_read_memory(
                 history_continuation=history_continuation,
                 continuation=continuation,
                 follow_corrections=follow_corrections,
+                offset=offset,
             )
     if continuation is not None:
         raise context_views_module.invalid_continuation()
     if unit_ref is not None:
-        if frontmatter_only or links or include_raw:
+        if frontmatter_only or links or include_raw or offset is not None:
             raise ValueError(
                 "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
-                "frontmatter_only, links, or include_raw"
+                "frontmatter_only, links, include_raw, or offset"
             )
         resolved_path = _resolve_memory_identifier(vault_root, path, serve_stale=True)
         try:
@@ -7906,13 +8025,17 @@ def op_read_memory(
         return out
     result = op_get(
         vault_root,
-        path=path,
+        path=_source_of_part(vault_root, path),
         frontmatter_only=frontmatter_only,
         include_history=include_history,
         links=links,
         include_raw=include_raw,
         follow_corrections=follow_corrections,
     )
+    if not (frontmatter_only or include_raw):
+        result = _window_extracted_text(vault_root, result, offset)
+    elif offset is not None:
+        raise ValueError("INVALID_OFFSET: offset applies to the extracted text, which this read does not return")
     if include_history and "content_hash" in result:
         from . import compiled_history
 
@@ -11005,10 +11128,11 @@ def op_maintain_memory(
     """Maintain vault health; several modes write.
 
     Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    A remote fix, backfill-ids or reconcile write runs as a maintenance job: preview with
-    dry_run=true, then repeat with dry_run=false, that plan_id and a why; it returns a run_id.
+    A remote fix, backfill-ids or reconcile runs as a maintenance job and returns a run_id.
+    The owner's preview (dry_run=true) is a job: its receipt holds the plan_id. Then repeat
+    with dry_run=false, that plan_id and a why to write.
     maintenance-job reads one job's state and receipt (run_id) or lists them; the receipt's
-    next_cursor, passed as cursor, reads the written paths page by page;
+    next_cursor, passed as cursor, reads the planned or written paths page by page;
     maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
     writes for its run. A remote collections-store-export apply returns
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.

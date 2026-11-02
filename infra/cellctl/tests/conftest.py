@@ -28,6 +28,7 @@ from cellctl.control_test_contract import (
     export_test_sql,
     import_test_sql,
     media_key_test_sql,
+    operation_grant_test_sql,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -205,6 +206,8 @@ async def _create_cell_db(server: PostgresServer) -> str:
         # Mirrors Substrate migration 0081 (media key columns) and its grants stanza, which the
         # pinned Substrate commit does not have yet. It must follow the grants, which revoke.
         await owner_connection.execute(media_key_test_sql(FIXTURES))
+        # Mirrors Substrate migration 0082 (the export and import grant columns) and its grants stanzas.
+        await owner_connection.execute(operation_grant_test_sql(FIXTURES))
     finally:
         await owner_connection.close()
     return name

@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `read_review/triage_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `read_connections/change_connections`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids` or `reconcile` write runs as a job: preview, start with its `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
+| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids` or `reconcile` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `read_schema/change_schema`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
@@ -235,7 +235,8 @@ is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 
 Warming, busy, acknowledgement-pending, and committed-acknowledgement-uncertain outcomes
-remain structured errors. Retrying must retain the same identity and payload:
+remain structured errors. (A file of a committed batch that failed with `MUTATION_BUSY`
+is not such an error; see `mutation-results.md`.) Retrying must retain the same identity and payload:
 wait before retrying `MUTATION_WARMING` or `MUTATION_BUSY`; never revise a pending payload; and after
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, reconcile and retry only with the
 same identity rather than creating a new write.
@@ -809,7 +810,9 @@ migration.
 
 ### Procedure
 1. Call `check_memory(operation={'kind': 'backfill-ids'})`; the default `dry_run=true`
-   reports affected pages and identity problems without writing.
+   reports affected pages and identity problems without writing. A remote owner gets a
+   `run_id`: follow it with `maintenance-job`; the receipt holds the `plan_id` and lists
+   the affected pages page by page.
 2. Review the complete proposal and resolve duplicate or malformed IDs first.
 3. After explicit confirmation, repeat with `dry_run=false`. A remote client sends the
    preview's `plan_id` and a `why` with `repair_memory`, follows the returned `run_id` with

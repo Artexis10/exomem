@@ -1111,7 +1111,8 @@ def chunk_text(title: str, body: str) -> list[str]:
 
     - Split on blank-line paragraph boundaries.
     - Drop empty/whitespace-only chunks.
-    - Truncate overlong chunks at word boundary so the tokenizer doesn't lop.
+    - Split a paragraph of more than `MAX_WORDS_PER_CHUNK` words into consecutive chunks of at
+      most that many words, so the tokenizer doesn't lop and no word is left out of the index.
     - A paragraph the word cap cannot bound (mostly unspaced text, more unspaced
       text than the cap, or a single word longer than the cap) is split instead,
       into pieces of at most `MAX_UNSPACED_CHARS_PER_CHUNK` characters at sentence
@@ -1130,10 +1131,12 @@ def chunk_text(title: str, body: str) -> list[str]:
             out.extend(f"{title}\n\n{piece}" if title else piece for piece in _split_by_characters(p))
             continue
         words = p.split()
-        if len(words) > MAX_WORDS_PER_CHUNK:
-            p = " ".join(words[:MAX_WORDS_PER_CHUNK])
-        chunk = f"{title}\n\n{p}" if title else p
-        out.append(chunk)
+        pieces = (
+            [" ".join(words[at : at + MAX_WORDS_PER_CHUNK]) for at in range(0, len(words), MAX_WORDS_PER_CHUNK)]
+            if len(words) > MAX_WORDS_PER_CHUNK
+            else [p]
+        )
+        out.extend(f"{title}\n\n{piece}" if title else piece for piece in pieces)
     return out
 
 

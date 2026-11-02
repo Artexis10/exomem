@@ -5767,6 +5767,10 @@
                   "description": "False reads the historical Source; unit reads stay exact.",
                   "type": "boolean",
                   "default": true
+                },
+                "offset": {
+                  "type": "integer",
+                  "description": "Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`."
                 }
               },
               "required": [

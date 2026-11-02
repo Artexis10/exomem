@@ -32,6 +32,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Copies of the ci.yml pins; tests/test_ci_reliability_contract.py keeps them equal.
   # The store-blind release the collection-store gate runs as an actual older
   # interpreter (tests/test_collection_store_s1_gate.py fails without it).
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"

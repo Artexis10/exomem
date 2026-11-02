@@ -3101,6 +3101,43 @@ def _commit_existing(
     from .writer_lease import active_manager, active_mutation_request_id, log_active_mutation_phase
 
     operation_label = str(preflight.operation)
+    from .writer_lease import read_commit_generation
+
+    # A stamp that is already stale is revalidated here, with the boundary free: the walk
+    # it may cost then blocks no other writer. The in-boundary check below stays as the
+    # fallback for a commit that lands after this point.
+    census_token = preflight.census_token
+    current_generation = read_commit_generation(root)
+    # A missing stamp or generation is structural (a restricted principal, an unreadable
+    # generation): an early run could not produce a stamp the boundary accepts, so it
+    # goes straight to the in-boundary revalidation, as before.
+    revalidated_early = (
+        census_token is not None
+        and current_generation is not None
+        and current_generation != census_token[1]
+    )
+    if revalidated_early:
+        log_active_mutation_phase("semantic_revalidate_before_boundary")
+        if timings is not None:
+            timings.annotate(
+                "commit.revalidate",
+                before_boundary=True,
+                captured_generation=census_token[1],
+                current_generation=current_generation,
+            )
+        with (
+            _write_metric("exomem_write_revalidate_ms", operation_label),
+            mutation_timing_span(timings, "commit.revalidate"),
+        ):
+            preflight = _revalidate_existing_preflight(
+                root, preflight, status_basis=status_basis, timings=timings
+            )
+        if preflight.contract_result.should_block:
+            raise SemanticWriteError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                _blocking_reason(preflight.contract_result),
+                preflight.contract_result.blocking_findings,
+            )
     with _timed_boundary(
         timings,
         active_manager().mutation_guard(
@@ -3117,8 +3154,6 @@ def _commit_existing(
         # today. Otherwise re-run preflight_existing warm, surfacing
         # STALE_SEMANTIC_WRITE/SEMANTIC_CONTRACT_BLOCKED exactly as the
         # existing cross-invocation replay path already does.
-        from .writer_lease import read_commit_generation
-
         if not preflight.manifest_install_required:
             activation_manifest.ensure_manifest(root, commit_point=False)
         with mutation_timing_span(timings, "commit.stamp_check"):
@@ -3129,6 +3164,15 @@ def _commit_existing(
             )
         if not stamp_current:
             log_active_mutation_phase("semantic_revalidate_start")
+            if timings is not None:
+                timings.annotate(
+                    "commit.revalidate",
+                    before_boundary=False,
+                    captured_generation=(
+                        None if preflight.census_token is None else preflight.census_token[1]
+                    ),
+                    current_generation=read_commit_generation(root),
+                )
             with (
                 _write_metric("exomem_write_revalidate_ms", operation_label),
                 mutation_timing_span(timings, "commit.revalidate"),
@@ -3142,7 +3186,7 @@ def _commit_existing(
                     _blocking_reason(preflight.contract_result),
                     preflight.contract_result.blocking_findings,
                 )
-        elif timings is not None:
+        elif timings is not None and not revalidated_early:
             timings.skipped("commit.revalidate")
 
         try:

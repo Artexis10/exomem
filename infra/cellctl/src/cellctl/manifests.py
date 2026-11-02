@@ -12,6 +12,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ from .backup_source import VAULT_CHECK_COMMAND
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
+
+logger = logging.getLogger("cellctl")
 
 # D4: part of every cell's render digest. Bump it whenever the manifests this
 # module renders change, so a new cellctl release reaches cells that have
@@ -289,6 +292,9 @@ class CellManifestSpec:
     # The PEM public half of the gateway's artifact signing pair, or "" for a cell
     # that does not serve the upload handoff. Public material, so it renders as a value.
     upload_public_key: str = ""
+    # contain-cloud-controller-compromise D1: the same public key, for the proof the gateway signs for every
+    # cell. It selects no feature, so every cell receives it and the upload key still marks the upload cells.
+    proof_public_key: str = ""
     # contain-cloud-controller-compromise D2/D4: the anchors an import or export Job checks its grant and
     # presigned URLs against. Only those Jobs receive them. The endpoint and the bucket are the ones
     # cellctl itself presigns for; the grant key is "" until Substrate signs grants.
@@ -322,6 +328,7 @@ class CellManifestSpec:
         check_media_edge_url(self.media_edge_url)
         check_media_slot_url(self.media_slot_url)
         check_upload_public_key(self.upload_public_key)
+        _check_ed25519_public_key(self.proof_public_key, "cell proof public key")
         check_grant_public_key(self.grant_public_key)
         if self.media_edge_url and not (
             self.media_edge_credential and self.media_age_identity and self.media_recipient
@@ -786,6 +793,29 @@ def check_model_env(model_env: object) -> None:
             raise ValueError(f"cell model environment may not set {key}")
 
 
+# The longest signed object the cell reads (src/exomem/cloud_origin.py MAX_TOKEN_CHARS). cellctl is a separate
+# package and cannot import it; a longer value is no grant the cell would accept.
+MAX_GRANT_CHARS = 8 * 1024
+
+
+def _grant_args(grant: str | None, *, kind: str, operation_id: str) -> list[str]:
+    """The argument that hands a Job the grant Substrate signed for its operation, or none.
+
+    The grant is an opaque string: the Job verifies it, cellctl does not. A value that is no printable
+    ASCII token within the cell's length limit is dropped with a log line that names the operation but never
+    the value, and the Job then reports or refuses a missing grant. It travels as one argument and
+    `_cell_command` runs it as a positional of `exec "$@"`, so no shell parses it.
+    """
+    if grant is None:
+        return []
+    if not (0 < len(grant) <= MAX_GRANT_CHARS and grant.isascii() and grant.isprintable()):
+        logger.warning("%s %s has an operation grant that is not a printable ASCII token of at most %d characters; "
+                       "the Job runs without it", kind, operation_id, MAX_GRANT_CHARS)
+        return []
+    # The joined form keeps a value that begins with "-" from reading as an option.
+    return [f"--grant={grant}"]
+
+
 def _cell_command(command: list[str], *, scratch: bool = True) -> list[str]:
     """Disable core files before any cell process; content scratch stays outside backup roots."""
     setup = "ulimit -c 0 && "
@@ -835,6 +865,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": "EXOMEM_CLOUD_MEDIA_SLOT_URL", "value": spec.media_slot_url})
     if spec.upload_public_key:
         env.append({"name": "EXOMEM_CLOUD_UPLOAD_PUBLIC_KEY", "value": spec.upload_public_key})
+    if spec.proof_public_key:
+        env.append({"name": "EXOMEM_CLOUD_PROOF_PUBLIC_KEY", "value": spec.proof_public_key})
     env.extend(
         [
             {"name": "EXOMEM_VAULT_PATH", "value": CELL_VAULT_PATH},
@@ -1432,7 +1464,8 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
     if phase == "cleanup":
         command.append("--keep-adoption")
     if phase == "import":
-        command += ["--request", json.dumps(item.request(), separators=(",", ":")), "--url", url]
+        command += ["--request", json.dumps(item.request(), separators=(",", ":")), "--url", url,
+                    *_grant_args(item.operation_grant, kind="import", operation_id=item.import_id)]
     pod = _job_pod_spec(spec, job_kind="import", command=[], data_read_only=False, repo="")
     container = pod["containers"][0]
     container["command"] = _cell_command(command)
@@ -1476,6 +1509,7 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
     if verify:
         command += ["--verify", "--archive-bytes", str(item.archive_bytes),
                     "--archive-sha256", item.archive_sha256, "--archive-version-id", item.archive_version_id]
+    command += _grant_args(item.operation_grant, kind="export", operation_id=item.export_id)
     # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
     # read a WAL-mode store on a read-only mount once its -shm file is gone, and
     # the export reads the collection store. The hold keeps the runtime stopped.

@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from . import lifecycle_statuses, memory_refs, preserve
+from .extraction_parts import Layout
 from .vault import parse_frontmatter, with_newline, yaml_scalar
 
 
@@ -58,11 +59,21 @@ def next_page(sidecar: Path, listed: Iterable[str] = ()) -> tuple[Path, int]:
     return sidecar.with_name(f"{prefix}{ordinal}.md"), ordinal
 
 
-def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, date_iso: str) -> str:
+def render(
+    before: str,
+    *,
+    artifact_name: str,
+    sidecar_link: str,
+    ordinal: int,
+    date_iso: str,
+    text: str,
+    parts: Layout | None = None,
+) -> str:
     """The page that keeps the extraction `before` holds, marked as superseded by the sidecar.
 
     The page is a former extraction of the same source, so it takes the sidecar's own
-    `type`, `source_type` and `tags`.
+    `type`, `source_type` and `tags`. `text` is the first part of that extraction and `parts`
+    the layout of the part pages that hold the rest, as `extraction_parts.layout` gives it.
     """
     before = with_newline(before, "\n")
     frontmatter = parse_frontmatter(before)[0]
@@ -91,6 +102,7 @@ def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, 
         f'  - "[[{sidecar_link}]]"',
         f"updated: {date_iso}",
         *extraction,
+        *preserve._part_field_lines(parts),
         "tags: [" + ", ".join(yaml_scalar(tag) for tag in tags) + "]",
         "ingested_into: []",
         "---",
@@ -102,11 +114,11 @@ def render(before: str, *, artifact_name: str, sidecar_link: str, ordinal: int, 
         "",
         preserve._EXTRACTED_HEADING,
         "",
-        preserve._cap_extracted_text(preserve.extracted_text(before)),
+        text,
         "",
     ]
     withheld = preserve.low_confidence_text(before)
     if withheld:
         # The words OCR withheld stay with the extraction they belong to.
-        lines += [preserve.low_confidence_block(preserve._cap_extracted_text(withheld))]
+        lines += [preserve.low_confidence_block(preserve._cap_low_confidence_text(withheld))]
     return "\n".join(lines)

@@ -589,6 +589,20 @@ def _delete_file_local(
     # Explicit deletion retires the binding; cache eviction never calls here.
     forget_original(vault_root, rel_path)
 
+    # The part pages of a long extraction go to Trash beside their page, so a recovery brings
+    # them back; only emptying Trash removes them. A failed move leaves them in place.
+    carried_parts: list[str] = []
+    if rel_path.lower().endswith(".md"):
+        from . import extraction_parts
+
+        try:
+            carried_parts = [before for before, _after in extraction_parts.carry(vault_root, rel_path, trash_rel)]
+        except OSError:
+            log.warning("the part pages of %s stayed in place", rel_path, exc_info=True)
+            warnings.append(
+                f"trashed the page; its part pages stayed in {extraction_parts.folder_for(Path(rel_path)).as_posix()}"
+            )
+
     if prior_markdown is not None:
         from . import due_state
 
@@ -606,7 +620,7 @@ def _delete_file_local(
         fanout_unverified = False
         try:
             from . import index_sync
-            raw_report = index_sync.delete_after_remove(vault_root, [rel_path])
+            raw_report = index_sync.delete_after_remove(vault_root, [rel_path, *carried_parts])
             report = (
                 raw_report
                 if isinstance(raw_report, index_sync.IndexSyncReport)

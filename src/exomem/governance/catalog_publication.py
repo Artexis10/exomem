@@ -244,10 +244,14 @@ def _relative_markdown_path(vault_root: Path, path: str) -> str:
 
 
 def _is_catalog_markdown_path(path: str) -> bool:
+    from .. import extraction_parts
+
     candidate = PurePosixPath(path)
     if (
         candidate.name.casefold().endswith(".md")
         and ".sync-conflict-" not in candidate.name
+        # A part page is more of its Source's text, governed as the Source, never an item of its own.
+        and extraction_parts.source_page_for(Path(path)) is None
         and not any(
             part in find_corpus.EXCLUDED_DIR_NAMES
             or part.startswith(find_corpus.EXCLUDED_DIR_PREFIXES)

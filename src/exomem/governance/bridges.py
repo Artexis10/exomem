@@ -519,8 +519,13 @@ def strip_provenance(
                 # Builders cut an excerpt or a bounded body by length before this strip, so a cut can
                 # start or end inside a link or path to a stripped source, and the whole-identity
                 # match never sees the fragment. Withhold every excerpt and every cut body rather than
-                # trust each builder to mark its cuts.
-                if (name == "excerpt" and not whole_excerpts) or (name == "body" and body_cut):
+                # trust each builder to mark its cuts. A hit's passage is cut by length too, by a
+                # builder that never withholds, so it goes whole.
+                if (
+                    (name == "excerpt" and not whole_excerpts)
+                    or (name == "body" and body_cut)
+                    or name == "passage"
+                ):
                     continue
                 if name in {"nodes", "seeds"} and isinstance(value, list):
                     value = [
