@@ -91,3 +91,16 @@ def test_entity_index_includes_extension_folders_and_rebuilds_on_registry_change
     assert "place" not in second_counts
     assert second_counts["venue"] == 1
     assert "Entities/Venues/|Venues" in second_index
+
+
+def test_recent_captures_keeps_the_newest_entries_up_to_the_cap() -> None:
+    """An import of thousands of Sources grew this list without limit, and every capture re-read all of it."""
+    text = "# Sources - Index\n\n## Recent captures\n\n<!-- Most recent first. -->\n\n## Later\n\nkept\n"
+    for number in range(indexes.RECENT_ACTIVITY_CAP + 10):
+        text = indexes._prepend_recent_capture(text, date_iso="2026-11-02", rel_source_path=f"Sources/a/n{number}")
+
+    bullets = [line for line in text.splitlines() if line.startswith("- ")]
+    newest = indexes.RECENT_ACTIVITY_CAP + 9
+    assert len(bullets) == indexes.RECENT_ACTIVITY_CAP
+    assert bullets[0] == f"- 2026-11-02 — [[Sources/a/n{newest}]]"
+    assert "<!-- Most recent first. -->" in text and text.endswith("## Later\n\nkept\n")
