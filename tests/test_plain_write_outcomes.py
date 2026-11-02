@@ -316,7 +316,7 @@ def test_a_batch_that_stored_two_files_and_lost_one_says_so(
     assert [row["state"] for row in out["files"]] == ["stored", "stored", "failed"]
     assert next(iter(out)) == "user_summary"
     assert out["user_summary"] == (
-        f"Saved 2 of 3 files -> {_RAW}/a.bin and 1 more; 1 file could not be saved"
+        f"Saved 2 of 3 files -> {_RAW}/a.bin and 1 more; 1 file could not be saved (personal Exomem)"
     )
 
 
@@ -334,7 +334,9 @@ def test_a_batch_that_found_a_copy_and_lost_a_file_never_says_saved(
     )
 
     assert [row["state"] for row in out["files"]] == ["already_stored", "failed"]
-    assert out["user_summary"] == "Nothing new saved; 1 already saved, 1 file could not be saved"
+    assert out["user_summary"] == (
+        "Nothing new saved; 1 already saved, 1 file could not be saved (personal Exomem)"
+    )
 
 
 def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
@@ -353,6 +355,7 @@ def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
     assert [row["state"] for row in out["files"]] == ["stored", "already_stored", "failed"]
     assert out["user_summary"] == (
         f"Saved 1 of 3 files -> {_RAW}/new.bin; 1 file could not be saved; 1 already saved"
+        " (personal Exomem)"
     )
 
 
@@ -366,7 +369,7 @@ def test_a_batch_of_copies_says_already_saved_and_names_the_first(
     )
 
     assert [row["state"] for row in out["files"]] == ["already_stored"]
-    assert out["user_summary"] == f"Already saved -> {_RAW}/a.bin"
+    assert out["user_summary"] == f"Already saved -> {_RAW}/a.bin (personal Exomem)"
 
 
 def test_a_batch_that_stored_every_file_keeps_its_summary(
@@ -380,7 +383,7 @@ def test_a_batch_that_stored_every_file_keeps_its_summary(
         idempotency_key="all-stored",
     )
 
-    assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more"
+    assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more (personal Exomem)"
 
 
 def test_preserving_bytes_that_are_already_stored_says_already_saved(
@@ -398,9 +401,9 @@ def test_preserving_bytes_that_are_already_stored_says_already_saved(
         command, vault, filename="letter-copy.txt", idempotency_key="letter-again", **letter
     )
 
-    assert first["user_summary"] == f"Saved -> {first['path']}"
+    assert first["user_summary"] == f"Saved -> {first['path']} (personal Exomem)"
     assert not (vault / "Knowledge Base/Evidence/case/letters/letter-copy.txt").exists()
-    assert again["user_summary"] == f"Already saved -> {first['path']}"
+    assert again["user_summary"] == f"Already saved -> {first['path']} (personal Exomem)"
 
 
 def test_a_repeated_partial_batch_returns_the_same_summary_as_the_first(
