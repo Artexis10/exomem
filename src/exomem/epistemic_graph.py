@@ -285,9 +285,14 @@ _SNAPSHOT_PROOFS_LOCK = threading.Lock()
 #: than each paying the O(corpus) proof: a blocking reader waits for its
 #: verdict, a `SINGLE_FLIGHT` reader serves without the graph instead.
 _PROOFS_IN_FLIGHT: dict[str, tuple[threading.Event, int]] = {}
-#: `prove` mode for a request path: prove inline when no proof is running for
-#: the sidecar, refuse as `unproven` when another reader's proof already is.
+#: `prove` mode for a request path: refuse as `unproven` when another reader's
+#: proof is running for the sidecar; otherwise prove inline in a one-shot
+#: process, or start the proof in the background in a managed service.
 SINGLE_FLIGHT = "single_flight"
+#: The background proof a managed request started, per sidecar, so concurrent
+#: requests start one proof thread rather than one each.
+_BACKGROUND_PROOFS: dict[str, threading.Thread] = {}
+_BACKGROUND_PROOF_THREAD_NAME = "exomem-graph-proof"
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -1461,6 +1466,53 @@ class _TrackedSidecarConnection(sqlite3.Connection):
                 _release_sidecar_reader(key, self)
 
 
+def _request_proves_in_background() -> bool:
+    """Whether a `SINGLE_FLIGHT` request hands its cold proof to a background thread.
+
+    A managed service has later requests to serve, and its first request after a
+    promotion paid the O(corpus) proof on its own thread while readiness said
+    ready. A one-shot caller has no later request, so it keeps the inline proof
+    and the graph lane. The same split as the vector lane's `defer_cold_load`.
+    """
+    from . import readiness
+
+    return readiness.runtime_managed()
+
+
+def _start_background_proof(vault_root: Path, registry_key: str) -> None:
+    """Start the one background proof of this sidecar unless it is already running."""
+    with _SNAPSHOT_PROOFS_LOCK:
+        running = _BACKGROUND_PROOFS.get(registry_key)
+        if running is not None and running.is_alive():
+            return
+        thread = threading.Thread(
+            target=_run_background_proof,
+            args=(Path(vault_root), registry_key),
+            name=_BACKGROUND_PROOF_THREAD_NAME,
+            daemon=True,
+        )
+        _BACKGROUND_PROOFS[registry_key] = thread
+        # Started under the lock, so a concurrent request sees it alive.
+        thread.start()
+
+
+def _run_background_proof(vault_root: Path, registry_key: str) -> None:
+    """Prove the sidecar as a bulk pass; the next request reads the remembered verdict.
+
+    A bulk pass yields to requests between pages. `available()` claims the
+    proof slot, or waits for and reuses a proof that another reader started.
+    """
+    try:
+        with foreground_priority.bulk():
+            EpistemicGraphIndex(vault_root).available()
+    except Exception:  # noqa: BLE001 - the next request starts another proof
+        log.info("graph background proof failed", exc_info=True)
+    finally:
+        with _SNAPSHOT_PROOFS_LOCK:
+            if _BACKGROUND_PROOFS.get(registry_key) is threading.current_thread():
+                _BACKGROUND_PROOFS.pop(registry_key, None)
+
+
 def _await_publication_hold(key: str) -> None:
     """Block a new reader for the bounded replacement window, then proceed.
 
@@ -2199,8 +2251,9 @@ class EpistemicGraphIndex:
         """`prove_cold_snapshots` is the default `prove` mode of every public
         read on this index when no remembered verdict covers the sidecar: True
         proves (waiting for a proof already running), False refuses, and
-        `SINGLE_FLIGHT` proves unless another reader's proof is running, then
-        refuses -- for a request path that must not stack proofs (#1454)."""
+        `SINGLE_FLIGHT` refuses while another reader's proof is running, and
+        otherwise proves inline, or in the background in a managed service --
+        for a request path that must not stack or pay proofs (#1454)."""
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self._prove_cold_snapshots = prove_cold_snapshots
@@ -2628,9 +2681,10 @@ class EpistemicGraphIndex:
         is remembered per sidecar identity and recall projection identity
         (#1454), and one proof runs at a time per sidecar. ``prove`` defaults to
         the index's ``prove_cold_snapshots``: False refuses instead of proving
-        when nothing is remembered, ``SINGLE_FLIGHT`` refuses only while another
-        reader's proof is running, and True waits for that proof. A refusal
-        appends ``"unproven"`` to ``outcome_out``.
+        when nothing is remembered, ``SINGLE_FLIGHT`` refuses while another
+        reader's proof is running (and, in a managed service, starts the proof
+        in the background and refuses), and True waits for that proof. A
+        refusal appends ``"unproven"`` to ``outcome_out``.
 
         ``allow_cold_projection=False`` uses only a live event checkpoint for
         current projection checks, including checkpointless publications.
@@ -2841,16 +2895,20 @@ class EpistemicGraphIndex:
                 # back to the claim: the running proof may have raised or
                 # answered another identity, and then exactly one waiter
                 # claims the slot rather than all of them proving at once.
+                defer_to_background = prove == SINGLE_FLIGHT and _request_proves_in_background()
                 while True:
                     in_flight: threading.Event | None = None
                     mine: threading.Event | None = None
                     self_owned = False
+                    background = False
                     with _SNAPSHOT_PROOFS_LOCK:
                         remembered = _SNAPSHOT_PROOFS.get(registry_key)
                         covered = remembered is not None and remembered[0] == proof_identity
                         if not covered and prove:
                             claim = _PROOFS_IN_FLIGHT.get(registry_key)
-                            if claim is None:
+                            if claim is None and defer_to_background:
+                                background = True
+                            elif claim is None:
                                 mine = threading.Event()
                                 _PROOFS_IN_FLIGHT[registry_key] = (mine, threading.get_ident())
                             elif claim[1] == threading.get_ident():
@@ -2862,7 +2920,13 @@ class EpistemicGraphIndex:
                     if covered and remembered is not None:
                         current = remembered[1]
                         break
-                    if not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
+                    if background:
+                        _start_background_proof(self.vault_root, registry_key)
+                    if (
+                        not prove
+                        or background
+                        or (in_flight is not None and prove == SINGLE_FLIGHT)
+                    ):
                         if outcome_out is not None:
                             outcome_out.append("unproven")
                         conn.close()
@@ -10469,9 +10533,10 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     rebuild atomically replaces the SQLite file, preventing generation ABA.
 
     `prove` is the index's cold-proof mode (#1454). A request passes
-    `SINGLE_FLIGHT`: it proves inline unless another reader's proof is running,
-    and then an unproven sidecar answers `("unproven",)`, a key of its own,
-    since that request serves without the graph lane.
+    `SINGLE_FLIGHT`: it proves inline in a one-shot process, starts the proof in
+    the background in a managed service, and never waits on another reader's
+    proof. An unproven sidecar answers `("unproven",)`, a key of its own, since
+    that request serves without the graph lane.
     """
     idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
     outcome: list[str] = []
