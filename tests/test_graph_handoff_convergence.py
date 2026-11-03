@@ -941,6 +941,30 @@ def test_a_proof_stops_inside_a_round_once_its_deadline_passes(
     )
 
 
+def test_a_seeded_proof_stops_inside_its_seal_once_its_deadline_passes(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a seal recheck that never looks at the clock. The promotion re-proof is
+    # seeded, so it skips the initial walk, and the seal's walk is its long step.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    held = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    assert held.proof_reads is not None, held
+    _admission_slowed_per_page(monkeypatch, 0.05)
+
+    started = time.monotonic()
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(
+        apply_residue=False, prior_reads=held.proof_reads, deadline=started + 0.5
+    )
+    elapsed = time.monotonic() - started
+
+    assert adoption.reason == "proof_deadline_passed", adoption
+    assert elapsed < 5.0, (
+        f"the seeded proof ran {elapsed:.1f}s past a 0.5 s deadline; its seal must "
+        "stop at the next walked page"
+    )
+
+
 @pytest.mark.parametrize(
     ("request_seconds", "budget"),
     [

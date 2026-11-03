@@ -443,7 +443,8 @@ def register_asset_routes(
                         ):
                             raise ValueError("request_seconds must be a positive number")
                         request_seconds = float(budget)
-            except (ValueError, UnicodeDecodeError):
+            # A huge integer makes `math.isfinite` raise OverflowError: a bad request too.
+            except (ValueError, OverflowError, UnicodeDecodeError):
                 return JSONResponse(
                     {"ok": False, "error": "invalid control request"},
                     status_code=400,

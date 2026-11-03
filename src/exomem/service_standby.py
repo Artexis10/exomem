@@ -115,6 +115,11 @@ PROMOTION_REPROOF_SHARE = 0.4
 #: `request_seconds`. A seamless upgrade replaces only the worker, so a new
 #: worker meets such a supervisor until the launcher's next offline update.
 LEGACY_PROMOTE_REQUEST_SECONDS = 10.0
+#: What promotion keeps of its request after the catalogue barrier wait, for
+#: the identity catalogue, the residue and the response. The barrier wait is
+#: capped at the time left before this reserve, so a busy barrier hands the
+#: catalogue to the ordinary repair instead of running the request past its cap.
+PROMOTION_REQUEST_RESERVE_SECONDS = 2.0
 #: The re-proof clock; a seam for tests.
 _clock = time.monotonic
 
@@ -756,7 +761,7 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
     return True
 
 
-def _adopt_detached_catalog(vault_root: Path) -> str | None:
+def _adopt_detached_catalog(vault_root: Path, *, deadline: float | None = None) -> str | None:
     """Publish the catalogue this standby built, now that it owns the vault.
 
     Returns the handoff record's verdict, or None when nothing was built. A
@@ -773,8 +778,9 @@ def _adopt_detached_catalog(vault_root: Path) -> str | None:
         _detached_built = False
     if detached is None:
         return None
+    timeout = None if deadline is None else deadline - time.monotonic()
     try:
-        adopted = lexstore.adopt_detached_catalog(vault_root, detached)
+        adopted = lexstore.adopt_detached_catalog(vault_root, detached, timeout=timeout)
     except Exception:  # noqa: BLE001 - the coalesced repair owns an unadopted catalogue
         log.warning("promoted worker could not adopt its detached catalogue", exc_info=True)
         adopted = False
@@ -1245,7 +1251,10 @@ def _promote_owned(
     _acquire_ownership()
     # Owned now, and the worker that kept an earlier release's catalogue current
     # has exited, so the catalogue this standby built may replace it.
-    catalogue = _adopt_detached_catalog(Path(vault_root))
+    catalogue = _adopt_detached_catalog(
+        Path(vault_root),
+        deadline=started + request_seconds - PROMOTION_REQUEST_RESERVE_SECONDS,
+    )
     if catalogue is not None:
         record["lexical_catalogue"] = catalogue
     # The private-identity inventory this process built while warming was proved

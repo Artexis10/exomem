@@ -1156,6 +1156,10 @@ def test_the_promote_endpoint_hands_the_supervisors_request_budget_to_the_standb
     assert absent.status_code == 200
     assert received == [30.0, None]
 
-    invalid = client.post("/control/promote", json={"migrated": False, "request_seconds": 0})
-    assert invalid.status_code == 400
+    # JSON `true` is a Python int, and a huge integer overflows `math.isfinite`.
+    for unusable in (0, True, 10**400):
+        invalid = client.post(
+            "/control/promote", json={"migrated": False, "request_seconds": unusable}
+        )
+        assert invalid.status_code == 400, unusable
     assert received == [30.0, None], "an unusable budget must not reach promotion"
