@@ -1,16 +1,16 @@
-## 1. The close step in the contract text
+## 1. The compile signal
 
-- [x] 1.1 Replace the record-only step in the scaffold skill and the engagement reference with the two-part close step, kept generic.
-- [x] 1.2 Add the link-and-compile sentence to the `record_episode` tool description, and the compile-first sentences to the Stop-hook episode ask (page step conditional on live policy) and the `episode_due` advisory; raise the Stop-hook and tool-schema byte ceilings by the added words only.
-- [x] 1.3 Add to the skill and the engagement reference that a recap request alone does not authorize page edits at `off`, and that a link with the page's file name works when a title is long.
+- [x] 1.1 Port `episode_capture.parse`, so that a recap body reads back into its fields, and the `window_days` and `acted` parts of the dispositions effect block.
+- [x] 1.2 Add `episode_coverage.py`: an episode's revisions, the cited revisions through `source_coverage.evaluate` with the caller's `lookup`, and the open Decided lines by exact equality.
+- [x] 1.3 Add the `uncompiled_episode` backlog family, default `off`, outside the default attention union, with the recap skip kept in `unprocessed_source`. Bump the due-state schema version.
+- [x] 1.4 Add tests: the revision chain, the egress twin, the write delta against the full rebuild, the default disposition and attention, and `acted` against `cleared`.
 
-## 2. The `compile` block
+## 2. The close step
 
-- [x] 2.1 Add `episode_compile.py`: resolve Decided-item links over the visible pages before the write, then build the block after the commit.
-- [x] 2.2 Return the block from `episode_memory.record` and register it in the compact episode envelope fields.
-- [x] 2.3 State only the result in `outcome`, add the conditional `next_step` only when live policy permits capture, and never ask for a second record.
-- [x] 2.4 Take the writers' resolver snapshot without the disk fallback and report the links unchecked when it declines; keep an unreadable page listed with an unknown time.
-- [x] 2.5 Add tests in `tests/test_episode_compile.py`: listing, egress twin, unlinked count, omitted block, declined and failed link checks, unreadable page, conditional next step and the compact envelope of a real MCP call.
+- [x] 2.1 Rewrite `episode_compile.py` to report the ref to cite, the Decided count and the open count, with no link resolution and no vault walk. Report `unchecked` when the count cannot be read.
+- [x] 2.2 State only the result in `outcome`, add the conditional `next_step` only when live policy permits capture, and never ask for a second record.
+- [x] 2.3 Replace the compile-first sentences in the scaffold skill, the engagement reference, the Stop hook episode ask, the `episode_due` advisory and the `record_episode` tool description with record-then-cite.
+- [x] 2.4 Test the real `record_episode` tool: the open count, the count after a citing page, the cold snapshot, the gated next step and the empty recap.
 
 ## 3. Derived artifacts
 
@@ -19,3 +19,7 @@
 ## 4. Real-model proof
 
 - [ ] 4.1 Run the close step on the real models with realistic and hostile sessions, including a tool-only client with no hook. Add each failure found as a permanent regression case. The orchestrator runs this task.
+
+## 5. The session-close suite
+
+- [x] 5.1 Replace `recap_must_link` with `recap_cited` and add the `--hook-turn` mode, with tests on hand-built run snapshots.
