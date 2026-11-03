@@ -4,7 +4,7 @@
 
 The audit and the due-state projection SHALL carry the family `uncompiled_episode`, with one item per episode whose live recap holds at least one Decided line that no cited revision holds. Revisions of one episode SHALL be the recap Sources that share its frontmatter `episode` key and filename group. A revision SHALL be cited when `source_coverage.evaluate` finds a live compiled page that the caller can see and that names it in `sources:`. A Decided line SHALL be read back with `episode_capture.parse` and SHALL be open when, by exact string equality, no cited revision holds it. A body that parse does not accept SHALL yield no lines.
 
-The item SHALL carry the episode key, the live revision ref, `captured`, `due_since` (equal to `captured`, with no grace period), the Decided count, the open count and a `signal_version` over the live revision, the sorted open lines and the citing pages. A citing page that the caller cannot see SHALL read as absent, so the caller's item equals the item of a vault without that page. The family SHALL describe its result as "cited by a live page (citation only; items unassessed)" and SHALL NOT claim that a page states a decided item. Entity, plan and record pages hold no `sources:` claim, so a compile into one SHALL leave its line open. Recaps SHALL stay out of `unprocessed_source`, so that dismissing a recap never arms the quiet offer on a real Source. The family SHALL sort after `unprocessed_source` in the projection.
+The item SHALL carry the episode key, the live revision ref, `captured`, `due_since` (equal to `captured`, with no grace period), the Decided count, the open count and a `signal_version` over the live revision, the sorted open lines and the citing pages. A citing page that the caller cannot see SHALL read as absent, so the caller's item equals the item of a vault without that page. The family SHALL describe its result as "cited by a live page (citation only; items unassessed)" and SHALL NOT claim that a page states a decided item. Entity, plan and record pages hold no `sources:` claim, so a compile into one SHALL leave its line open. Recaps SHALL stay out of `unprocessed_source`, so that dismissing a recap never arms the quiet offer on a real Source. The family SHALL sort after `unprocessed_source` in the projection. The due-state projection SHALL serve the family to the owner only, because its stored rows count lines against the owner's view of the citing pages. Another bound audience SHALL receive the family from its own audit, never from the projection.
 
 #### Scenario: A later revision with the same lines is not due
 
@@ -42,6 +42,12 @@ The family `uncompiled_episode` SHALL ship with the disposition `off`, declared 
 - **AND** the default attention view and every due-state block omit it
 - **WHEN** the owner sets the family to `normal`
 - **THEN** an explicit review of the category lists the episode
+
+#### Scenario: A restricted caller is not served the stored rows
+
+- **WHEN** a live page that a restricted audience cannot see cites an earlier revision of an episode, and the owner has set the family to `normal`
+- **THEN** the due-state projection serves the family row to the owner and omits it for the restricted audience
+- **AND** the restricted audience's audit item equals the item of a vault without the withheld citing page
 
 ### Requirement: An uncompiled episode counts as acted only when a live page cites it
 

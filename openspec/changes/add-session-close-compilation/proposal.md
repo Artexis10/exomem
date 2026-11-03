@@ -24,8 +24,9 @@ so a response change reaches Cloud.
   `episode_coverage` reads that one signal over the revisions of an episode and
   names each Decided line that no cited revision holds.
 - The close step is record, then cite. The agent records the recap once. Then it
-  updates each page that a Decided item changes and cites the recap in that page's
-  `sources:`. The shipped skill, the engagement reference, the Stop hook episode
+  updates each page that a Decided item changes and cites the recap in the `sources:`
+  of each compiled note updated; an entity, plan or record page takes no citation.
+  The shipped skill, the engagement reference, the Stop hook episode
   ask, the `episode_due` advisory and the `record_episode` tool description carry
   this order. No text asks the agent to record again.
 - The `record` response gets a `compile` block with the ref to cite, the Decided

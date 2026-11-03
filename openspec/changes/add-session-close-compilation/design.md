@@ -74,7 +74,10 @@ the due-state projection, with one item per episode that has an open line.
   the sorted open lines and the citing pages. The `signal_version` makes a
   dismissal bind to the open set.
 - **Projection.** `due_state.SCHEMA_VERSION` rises to 4 and the family sorts after
-  `SOURCE_BACKLOG`. A write that cites or supersedes a recap refreshes the rows of
+  `SOURCE_BACKLOG`. The projection serves the family to the owner only: its stored
+  rows count lines against the owner's view of the citing pages, so a count served to
+  a restricted caller would move with a page withheld from it. A restricted caller
+  gets the family from its own audit, which reads a withheld citing page as absent. A write that cites or supersedes a recap refreshes the rows of
   the whole episode, because a citation of one revision changes the coverage of the
   live one. The write delta and a full rebuild agree.
 
@@ -96,24 +99,28 @@ with a message that names the range.
 `record` returns a `compile` block when the recap holds a Decided item. It carries:
 
 - `cite`: the ref of the recap just recorded, which the agent puts in the `sources:`
-  of each page that a decided item changes;
+  of each compiled note that it updates (an entity, plan or record page holds no
+  `sources:` claim and takes no citation);
 - `decided` and `open`: the Decided count and the count of lines that no cited
   revision holds;
 - `outcome`: one sentence that states the result only, for example "This recap has
   3 decided items; 1 is already cited by a live page." It never orders a write and
   never asks for a second record, because a second revision would double the recap;
-- `next_step`: "If a decided item changes a note, update that note and cite this
-  recap in its sources." It rides only when `capture_sweep._proactive_capture_permitted()`
+- `next_step`: update the note a decided item changes, and cite this recap in the
+  sources of each compiled note updated. It rides only when `capture_sweep._proactive_capture_permitted()`
   allows it, so a recap request alone never orders a page write at `off`.
 
 The count reads the revisions that the record already holds and the cached pages
 that cite them, through the writers' resolver snapshot taken without the disk
 fallback. A cold snapshot would cost a walk of the whole vault, so the record
-declines it. The block then reports `open: "unchecked"` and the outcome says that
-whether a live page cites the recap was not checked. Unknown is never 0. An
-unchecked or failed count never refuses the recap. The state follows the resolver
-cache, not the pages, so it leaks nothing about a withheld page. A recap with no
-Decided item carries no block.
+declines it. The record probes the snapshot before it reads any revision. When the
+snapshot is cold, every recap with Decided items reports `open: "unchecked"`, whatever
+its `ingested_into` holds, and the outcome says that whether a live page cites the
+recap was not checked. The state then depends on the snapshot alone, so a cold
+snapshot gives the same block whether a withheld page cites the recap or no page
+does. Unknown is never 0. An unchecked or failed count never refuses the recap. A
+live revision whose Decided count differs from the count just recorded is reported
+as `unchecked` too, never as cited. A recap with no Decided item carries no block.
 
 ### The contract text moves from compile-first to record-then-cite
 
@@ -147,7 +154,8 @@ requirement of `command-surface`.
 
 - An agent can ignore the close step. The block and the Stop hook repeat it, and
   the real-model task measures how often agents follow it.
-- A cold resolver cache makes the block report `open: "unchecked"`. The block is
+- A cold resolver snapshot makes the block report `open: "unchecked"`, and the first
+  write into a vault leaves the snapshot stale until it is warm again. The block is
   advisory, so the cost is a weaker hint, not a slower or refused record.
 - An episode compiled into an entity, plan or record page stays open. The family is
   off by default, and the owner decides whether the list is useful before it
