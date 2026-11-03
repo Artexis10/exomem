@@ -13,8 +13,11 @@ that the policy forbids.
 
 The record path never walks the vault. It reads the episode's own revisions
 and the cached pages that cite them, through the writers' resolver snapshot
-taken without the disk fallback. When a revision has a citing page and that
-snapshot is cold, the open count is unchecked (`None`), never 0.
+taken without the disk fallback. The snapshot is probed before any revision is
+read: when it is cold, the open count is unchecked (`None`) whatever the recap's
+`ingested_into` holds, so the block never tells a withheld citing page from none.
+A live revision whose Decided count differs from the count just recorded is
+unchecked too, never "already cited".
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import capture_sweep, episode_coverage, find, lifecycle_statuses, note_types, vault
+from . import capture_sweep, episode_coverage, find, lifecycle_statuses, note_types
 from .governance import egress
 
 log = logging.getLogger(__name__)
@@ -33,10 +36,6 @@ log = logging.getLogger(__name__)
 # condition for the agent to judge, because the server cannot tell which note
 # a decided item changes.
 _NEXT_STEP = "If a decided item changes a note, update that note and cite this recap in its sources."
-
-
-class _Unchecked(Exception):
-    """A citing page cannot be read without a walk of the vault."""
 
 
 def _outcome(decided: int, open_: int | None) -> str:
@@ -49,33 +48,28 @@ def _outcome(decided: int, open_: int | None) -> str:
     return f"This recap has {items}; {count} already cited by a live page."
 
 
-def _open(root: Path, revisions: Sequence[str]) -> int | None:
+def _open(root: Path, revisions: Sequence[str], decided: int) -> int | None:
     """The Decided lines of the newest revision that no cited revision holds, or `None` when unchecked."""
+    # Not `find.writer_resolver_snapshot(root)`: a cold cache would cost a walk of the vault.
+    snapshot = find.writer_resolver_snapshot(root, allow_disk=False)
+    if snapshot is None:
+        return None
     pages = [page for page in (find._CACHE.get(root / path, root) for path in revisions) if page is not None]  # noqa: SLF001
     keep = egress.visible_page_filter(root)
 
     def lookup(path: str) -> Any:
         return None if keep is not None and not keep(path) else find._CACHE.get(root / path, root)  # noqa: SLF001
 
-    def resolver() -> vault.WikilinkResolver:
-        # Not `find.writer_resolver_snapshot(root)`: a cold cache would cost a walk of the vault.
-        snapshot = find.writer_resolver_snapshot(root, allow_disk=False)
-        if snapshot is None:
-            raise _Unchecked
-        return snapshot
-
-    try:
-        coverage = episode_coverage.evaluate(
-            root,
-            pages,
-            lookup=lookup,
-            resolver=resolver,
-            status_basis=lifecycle_statuses.Basis(root),
-            type_basis=note_types.Basis(root),
-        )
-    except _Unchecked:
-        return None
-    return None if coverage is None else len(coverage.open)
+    coverage = episode_coverage.evaluate(
+        root,
+        pages,
+        lookup=lookup,
+        resolver=lambda: snapshot,
+        status_basis=lifecycle_statuses.Basis(root),
+        type_basis=note_types.Basis(root),
+    )
+    # The live revision read back holds a different Decided count than was recorded: claim nothing.
+    return None if coverage is None or coverage.decided != decided else len(coverage.open)
 
 
 def block(vault_root: Path, *, ref: str, revisions: Sequence[str], decided: int) -> dict[str, Any] | None:
@@ -88,7 +82,7 @@ def block(vault_root: Path, *, ref: str, revisions: Sequence[str], decided: int)
     if not decided:
         return None
     try:
-        open_ = _open(Path(vault_root), revisions)
+        open_ = _open(Path(vault_root), revisions, decided)
         permitted = capture_sweep._proactive_capture_permitted()  # noqa: SLF001
     except Exception:  # noqa: BLE001 - the recap already committed; the block is advisory
         log.debug("episode compile block unavailable", exc_info=True)
