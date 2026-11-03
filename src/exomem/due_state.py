@@ -3873,7 +3873,15 @@ def _served_entries_uncached(
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
     candidate_rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    # The episode backlog is the owner's compiler queue: its stored rows count lines against the
+    # owner's view of the citing pages, so a count served to a restricted caller would move with a
+    # page withheld from it. That caller gets the family from its own audit, which reads the page as absent.
+    owner_queue = not categories.get(EPISODE_BACKLOG) or egress_module.owner_only_aggregate(
+        vault_root, principal=principal
+    ) is None
     for category in PROJECTION_CATEGORIES:
+        if category == EPISODE_BACKLOG and not owner_queue:
+            continue
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by
             # another route, so a quiet family contributes nothing to `total`,

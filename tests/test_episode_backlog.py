@@ -9,8 +9,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_episode_coverage_citation import _cite
-from test_episode_memory_command import _episodes, _frontmatter, _record
+from test_episode_coverage_citation import _cite, _due
+from test_episode_memory_command import (
+    _audience,
+    _episodes,
+    _frontmatter,
+    _record,
+    _withhold_notes_from,
+)
 
 from exomem import commands, due_state, find, review_state
 from exomem.governance.principal import owner_principal, request_scope
@@ -87,6 +93,31 @@ def test_the_family_ships_off_is_not_in_attention_and_lists_once_set_to_normal(v
     assert recap not in listed(), "the default attention union never carries the family"
     assert due_state.served(vault)["categories"][FAMILY] == 1
     assert FAMILY not in {row["family"] for row in commands.op_review_memory(vault, mode="dispositions")["dispositions"]}
+
+
+def test_a_restricted_caller_is_not_served_the_stored_rows_and_its_audit_item_ignores_the_withheld_citer(
+    vault: Path,
+) -> None:
+    """The stored row counts lines against the owner's view of the citing pages, so serving it to a
+    restricted caller would show a count that moves with a page withheld from it. Its own audit
+    already reads as if the page did not exist."""
+    lines = ["Buy the brass lamp", "Ship by rail"]
+    first = _record(vault, decided=lines[:1])["source"]["path"]
+    _record(vault, decided=lines)
+    commands.op_triage_memory(vault, ref=FAMILY_REF, action="normal")
+    (twin,) = _due(vault)
+    _cite(vault, first, title="Withheld lamp pick")
+    _withhold_notes_from(vault, "client-a")
+    due_state.reconcile(vault)
+
+    assert due_state.served(vault)["categories"][FAMILY] == 1, "the owner is served the row"
+    with request_scope(_audience("client-a")):
+        restricted = due_state.served(vault)
+        (seen,) = _due(vault)
+
+    assert FAMILY not in ((restricted or {}).get("categories") or {})
+    assert (seen.meta["open"], seen.meta["decided"]) == (twin.meta["open"], twin.meta["decided"]) == (2, 2)
+    assert (seen.detail, seen.proposed_fix, seen.meta) == (twin.detail, twin.proposed_fix, twin.meta)
 
 
 def test_a_citation_counts_as_acted(vault: Path) -> None:
