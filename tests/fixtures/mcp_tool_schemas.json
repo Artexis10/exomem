@@ -6454,6 +6454,10 @@
                 "kind": {
                   "const": "dispositions",
                   "type": "string"
+                },
+                "window_days": {
+                  "type": "integer",
+                  "description": "Dispositions effect window in days, 1 to 90; default 7."
                 }
               },
               "required": [

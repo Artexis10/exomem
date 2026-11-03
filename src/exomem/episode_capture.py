@@ -70,6 +70,7 @@ _SECTIONS: tuple[tuple[str, str], ...] = (
     ("decided", "Decided"),
     ("open", "Open"),
 )
+_SAID_HEADING = "Said"
 
 
 @dataclass(frozen=True)
@@ -200,8 +201,50 @@ def _render(sections: dict[str, tuple[str, ...]], said: Sequence[str]) -> str:
         if items:
             blocks.append(f"### {heading}\n\n" + "\n".join(f"- {item}" for item in items))
     if said:
-        blocks.append("### Said\n\n" + "\n\n".join(f"> {statement}" for statement in said))
+        blocks.append(f"### {_SAID_HEADING}\n\n" + "\n\n".join(f"> {statement}" for statement in said))
     return "\n\n".join(blocks)
+
+
+@dataclass(frozen=True)
+class ParsedRecap:
+    """The agent's fields as `parse` read them back from a rendered body."""
+
+    sections: dict[str, tuple[str, ...]]
+    said: tuple[str, ...]
+
+
+def parse(body: str) -> ParsedRecap | None:
+    """The fields `_render` made `body` from, or `None` when it is anything else.
+
+    This parses the closed format the server itself writes, never free prose. A
+    body is accepted only if it renders back to the same bytes, so a recap that
+    anyone edited by hand yields nothing.
+    """
+    items: dict[str, list[str]] = {name: [] for name, _heading in _SECTIONS}
+    said: list[str] = []
+    bins = {heading: items[name] for name, heading in _SECTIONS}
+    bins[_SAID_HEADING] = said
+    current: list[str] | None = None
+    for line in body.split("\n"):
+        if line.startswith("### "):
+            current = bins.get(line[4:])
+            if current is None:
+                return None
+        elif current is not None and line[:2] in ("- ", "> "):
+            current.append(line[2:])
+        elif line:
+            return None
+    try:
+        sections = {
+            name: _lines(items[name], name, count=MAX_ITEMS, maximum=MAX_ITEM_CHARS)
+            for name, _heading in _SECTIONS
+        }
+        statements = _lines(said, "said", count=MAX_SAID, maximum=MAX_SAID_CHARS)
+    except EpisodeError:
+        return None
+    if not any(sections.values()) or _render(sections, statements) != body:
+        return None
+    return ParsedRecap(sections, statements)
 
 
 def prepare(

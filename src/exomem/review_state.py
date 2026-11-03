@@ -1106,25 +1106,39 @@ def manual_dismissal_events(payload: dict[str, Any] | None, family: str) -> int:
     return len(events)
 
 
-#: The effect window. One week spans a working cycle and shows a change within
-#: days; the dispositions contract fixes it, so the response states it.
+#: The default effect window. One week spans a working cycle and shows a change
+#: within days; the response states the window it used.
 EFFECT_WINDOW_DAYS = 7
+#: The window a caller may ask for: a day shows a change, a quarter bounds the read.
+EFFECT_WINDOW_MIN_DAYS = 1
+EFFECT_WINDOW_MAX_DAYS = 90
 
 UNKNOWN = "unknown"
 
 
-def effect_window() -> tuple[dt.datetime, dt.datetime, dict[str, Any]]:
+def effect_window(
+    days: int = EFFECT_WINDOW_DAYS,
+) -> tuple[dt.datetime, dt.datetime, dict[str, Any]]:
     """The effect window: whole UTC days, today included, as `(since, until, stated)`.
 
     Events count from `since` 00:00Z through `until`, the time of the read. The
     block states only the dates, so its bytes change when a count does or at a
     UTC midnight; a window stated to the second changed them every second.
     """
+    if (
+        isinstance(days, bool)
+        or not isinstance(days, int)
+        or not EFFECT_WINDOW_MIN_DAYS <= days <= EFFECT_WINDOW_MAX_DAYS
+    ):
+        raise ValueError(
+            f"INVALID_WINDOW_DAYS: window_days must be a whole number of days from "
+            f"{EFFECT_WINDOW_MIN_DAYS} to {EFFECT_WINDOW_MAX_DAYS}, got {days!r}"
+        )
     until = dt.datetime.now(dt.UTC)
-    first_day = until.date() - dt.timedelta(days=EFFECT_WINDOW_DAYS - 1)
+    first_day = until.date() - dt.timedelta(days=days - 1)
     since = dt.datetime.combine(first_day, dt.time(), dt.UTC)
     return since, until, {
-        "days": EFFECT_WINDOW_DAYS,
+        "days": days,
         "since": first_day.isoformat(),
         "through": until.date().isoformat(),
     }
@@ -1138,6 +1152,7 @@ def effect_counts(
     current: Mapping[str, frozenset[str] | set[str]],
     extra_surfaced: Iterable[tuple[str, str, str, dt.datetime]] = (),
     unknown: Mapping[str, str] | None = None,
+    acted: Mapping[str, frozenset[str] | set[str]] | None = None,
 ) -> dict[str, Any]:
     """What each family surfaced, and what became of it, over one window. Pure.
 
@@ -1149,8 +1164,11 @@ def effect_counts(
     - `dismissed`, `snoozed`: items with a manual decision of that action and
       family updated in the window.
     - `cleared`: surfaced in the window, no decision on the item, and the item
-      id is no longer in the family's current set. It is not "acted": deleting
-      or withholding a page clears an item too.
+      id is no longer in the family's current set, and not in its `acted` set.
+      Deleting or withholding a page clears an item without acting on it.
+    - `acted`: as `cleared`, and the id is in the family's `acted` set, which
+      only a family that can tell a change from a re-read supplies. Every other
+      family reports `unknown`, never 0.
     - `open`: surfaced in the window, no decision, still in the current set.
 
     `current` holds the item ids of each family whose current set can be read
@@ -1183,6 +1201,7 @@ def effect_counts(
                     "dismissed": 0,
                     "snoozed": 0,
                     "cleared": UNKNOWN,
+                    "acted": UNKNOWN,
                     "open": UNKNOWN,
                     "unknown_reason": unknown[family],
                 },
@@ -1195,6 +1214,7 @@ def effect_counts(
                 "dismissed": 0,
                 "snoozed": 0,
                 "cleared": 0 if known else UNKNOWN,
+                "acted": 0 if known and family in (acted or {}) else UNKNOWN,
                 "open": 0 if known else UNKNOWN,
             },
         )
@@ -1234,7 +1254,12 @@ def effect_counts(
         counts["surfaced"] += 1
         if family not in current or item_id in decided:
             continue
-        counts["open" if item_id in current[family] else "cleared"] += 1
+        if item_id in current[family]:
+            counts["open"] += 1
+        elif item_id in (acted or {}).get(family, ()):
+            counts["acted"] += 1
+        else:
+            counts["cleared"] += 1
 
     # Two of this store's own `VALID_ACTIONS`, a closed set it defines, named as
     # the effect contract's columns.
