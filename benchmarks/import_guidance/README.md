@@ -34,7 +34,7 @@ Limits:
 
 ## Session-close suite
 
-This suite asks whether a session that settled something durable about an existing page updates that page before or with its recap, and whether the agent still writes nothing when nothing durable happened or the person or policy forbids a write. It compares two checkouts (arms) on the same turns in `scenarios/session-close/`.
+This suite asks whether a session that settled something durable about an existing page records its recap and cites that recap in the page's `sources:`, and whether the agent still writes nothing when nothing durable happened or the person or policy forbids a write. It compares two checkouts (arms) on the same turns in `scenarios/session-close/`.
 
 The scripted harness serves recorded replies to one prompt, so this suite adds two modules instead of using it:
 
@@ -52,7 +52,7 @@ The answer key is `null` until its writer fills it. `session-score` refuses to s
 
 Run it:
 
-1. Run `python -m benchmarks.import_guidance run --suite session-close --product-root baseline=<checkout> --product-root candidate=<checkout> --model sonnet --repeats 2 --out <dir outside every repository>` from the repository root, with `PYTHONPATH` unset. Add `--dry-run` to seed each case on each arm and start no agent. Add `--scenario c01` to run one case.
+1. Run `python -m benchmarks.import_guidance run --suite session-close --product-root baseline=<checkout> --product-root candidate=<checkout> --model sonnet --repeats 2 --out <dir outside every repository>` from the repository root, with `PYTHONPATH` unset. Add `--dry-run` to seed each case on each arm and start no agent. Add `--scenario c01` to run one case. Add `--hook-turn` to send the arm's own episode ask (`EPISODE_ASK`, read from the arm's Stop hook script) as one more user turn after the close turn.
 2. Run `python -m benchmarks.import_guidance session-score <out>/runs.jsonl --baseline baseline --candidate candidate --out <score dir>` to get `scores.jsonl` and `report.md`.
 
 How a run is made:
@@ -60,13 +60,14 @@ How a run is made:
 - The server runs with `PYTHONPATH=<arm>/src`, a state tree under the run folder, embeddings off and `EXOMEM_PROMINENCE` set to the case's engagement. The agent reads the arm's `SKILL.md` and `references/engagement.md` as its system prompt and has the server's tools only.
 - The arm's own Stop and UserPromptSubmit hooks (from its `plugins/claude-code/hooks/hooks.json`) run with `EXOMEM_RETRIEVE_INJECT=mcp` and a hook home under the run folder.
 - The first turn waits 15 seconds so the index warm (`RETRIEVAL_INDEX_WARMING`) ends. A row counts the warming replies that remain.
-- The row holds the pages changed (as diffs), the pages created, each recap with the pages it links (`seeded`, `created`, `dangling`, `ambiguous`), where the last write of each changed page falls against the recap's write (`order`), the `compile` block of each `record_episode` reply, the hook counts and the cost.
+- The row holds the pages changed (as diffs), the pages created, each recap, for each changed page whether it is of a compiled note type and which written recaps its `sources:` cites (`pages`), where the last write of each changed page falls against the recap's write (`order`), the `compile` block of each `record_episode` reply, the hook counts and the cost.
 
 Judge: it reads the person's turns, the key's `reference` and the page diffs, and answers J1 (the changes are correct) and J2 (the changes are appropriately scoped). It never sees the arm, the model, the recap or a tool reply.
 
 Limits:
 
-- The agent has no shell, so the Stop hook's episode check never fires, because it asks only after a landing. The suite measures the hookless close.
+- The agent has no shell, so the Stop hook's episode check never fires, because it asks only after a landing. Without `--hook-turn` the suite measures the hookless close; with it, the close turn is followed by the hook's own ask, and the row records that text as `hook_turn`.
+- `recap_cited` is `not_applicable` when no recap was written or no compiled page changed, and the verdict leaves it out. A change to an entity page never counts, because entity pages hold no `sources:` claim.
 - The agent has `references/engagement.md` in its prompt, where a real agent would read it on demand.
 - `order` uses the last write of a page. A page written twice shows its later write.
 - Sonnet is the agent. The judge is Opus.

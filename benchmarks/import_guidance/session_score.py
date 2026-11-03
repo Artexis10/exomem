@@ -8,9 +8,11 @@ did not run it, into each case file's `answer_key` slot (shape below); a run hol
       "must_change":      pages (relative to the knowledge base) that must differ after the session,
       "must_not_change":  seeded pages that must stay as they were,
       "recap":            "required", "forbidden" or "optional",
-      "recap_must_link":  seeded pages that each written recap must link (nothing when no recap was written),
       "new_pages":        "none" (no page besides the recap) or "allowed"
     }
+
+The recap is cited, not linked: a Source that a live compiled page names in `sources:` counts as compiled. The check
+`recap_cited` needs no key field, because it reads the pages the run changed.
 
 The judge sees the person's turns, the reference and the page diffs. It never sees the arm, the model or a tool reply.
 """
@@ -32,7 +34,7 @@ from .report import read_rows
 from .session_close import Case, load_cases
 from .store_report import paired_interval
 
-KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "recap_must_link", "new_pages"}
+KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages"}
 RECAP_RULES = ("required", "forbidden", "optional")
 NEW_PAGE_RULES = ("none", "allowed")
 #: Both are about the changes to existing pages; `expect` true means the criterion holds when the run is good.
@@ -78,7 +80,7 @@ def key_problems(case: Case) -> list[str]:
     if key["new_pages"] not in NEW_PAGE_RULES:
         problems.append(f"new_pages must be one of {NEW_PAGE_RULES}")
     seeded = {p.relative_to(case.seed).as_posix() for p in case.seed.rglob("*.md")}
-    for name in ("must_change", "must_not_change", "recap_must_link"):
+    for name in ("must_change", "must_not_change"):
         listed = key[name]
         if not isinstance(listed, list) or not all(isinstance(p, str) for p in listed):
             problems.append(f"{name} must be a list of page paths")
@@ -93,7 +95,7 @@ def check_row(key: dict, row: dict) -> list[checks.Outcome]:
     changed = set(seen["changed"])
     touched = changed | set(seen["removed"])
     recaps = seen["recaps"]
-    linked = {p for recap in recaps.values() for p in recap["links"]["seeded"]}
+    compiled = {p: page["cites"] for p, page in seen["pages"].items() if page["compiled"]}
     other_pages = [p for p in seen["created"] if p not in recaps]
 
     def outcome(name: str, held: bool, detail: str) -> checks.Outcome:
@@ -101,24 +103,29 @@ def check_row(key: dict, row: dict) -> list[checks.Outcome]:
 
     missing = sorted(set(key["must_change"]) - changed)
     wrong = sorted(set(key["must_not_change"]) & touched)
-    absent = sorted(set(key["recap_must_link"]) - linked)
+    uncited = sorted(p for p, cites in compiled.items() if not cites)
     recap_held = {"required": bool(recaps), "forbidden": not recaps, "optional": True}[key["recap"]]
     return [
         outcome("must_change", not missing, f"not changed: {missing}" if missing else "all changed"),
         outcome("must_not_change", not wrong, f"touched: {wrong}" if wrong else "none touched"),
         outcome("recap", recap_held, f"{len(recaps)} recap(s); the key says {key['recap']}"),
-        # The rule binds the recaps a run wrote; with no recap there is nothing to link (`recap` judges absence).
-        outcome(
-            "recap_must_link",
-            not recaps or not absent,
-            "no recap written" if not recaps else f"not linked: {absent}" if absent else "all linked",
-        ),
+        # Not applicable without a recap or a changed compiled page: coverage by citation has nothing to count.
+        checks.Outcome("recap_cited", *cited_verdict(recaps, compiled, uncited)),
         outcome(
             "new_pages",
             key["new_pages"] == "allowed" or not other_pages,
             f"pages besides the recap: {other_pages}" if other_pages else "none besides the recap",
         ),
     ]
+
+
+def cited_verdict(recaps: dict, compiled: dict, uncited: list[str]) -> tuple[str, str]:
+    """The verdict and detail of `recap_cited`: every changed compiled page names a written recap in its `sources:`."""
+    if not recaps or not compiled:
+        return checks.NOT_APPLICABLE, "no recap written" if not recaps else "no compiled page changed"
+    if uncited:
+        return checks.FAIL, f"changed compiled pages that cite no recap: {uncited}"
+    return checks.PASS, "every changed compiled page cites a recap"
 
 
 def judge_view(case: Case, key: dict, row: dict) -> str:

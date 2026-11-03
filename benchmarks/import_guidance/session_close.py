@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import importlib.util
 import json
 import os
 import queue
@@ -21,9 +22,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TextIO
 
 from epistemic.journeys.f27_replay import (
     REPO_ROOT,
@@ -35,7 +38,7 @@ from epistemic.journeys.f27_replay import (
 )
 from membench.trackc.witness_join import parse_stream_json_transcript
 
-from exomem import prominence
+from exomem import memory_refs, note_types, prominence, source_closure
 
 from . import checks
 from .recording import Arm, checkout_sha, worker_env
@@ -196,13 +199,6 @@ def resolve_link(target: str, pages: dict[str, dict]) -> list[str]:
     return []
 
 
-def body_links(text: str) -> list[str]:
-    from exomem.vault import iter_body_wikilinks, parse_frontmatter
-
-    _meta, body, _raw = parse_frontmatter(text)
-    return [m.group(1) for m in iter_body_wikilinks(body)]
-
-
 def unified(before: str, after: str, name: str) -> str:
     return "".join(
         difflib.unified_diff(
@@ -215,8 +211,8 @@ def unified(before: str, after: str, name: str) -> str:
 
 
 def diff_vault(before: dict[str, dict], after: dict[str, dict]) -> dict:
-    """Raw observations of what the session left: seeded pages changed or removed, pages created, and for each recap
-    what it links. Nothing here is judged."""
+    """Raw observations of what the session left: seeded pages changed or removed, pages created, the recaps among
+    them, and for each changed page its note type's role and the recaps it cites. Nothing here is judged."""
     changed = {
         p: unified(before[p]["text"], after[p]["text"], p)
         for p in before
@@ -224,27 +220,35 @@ def diff_vault(before: dict[str, dict], after: dict[str, dict]) -> dict:
     }
     removed = sorted(p for p in before if p not in after)
     created = {p: after[p]["text"] for p in sorted(after) if p not in before}
-    recaps = {}
-    for path, text in created.items():
-        if not path.startswith(RECAP_FOLDER):
-            continue
-        links = {"seeded": [], "created": [], "dangling": [], "ambiguous": []}
-        for target in body_links(text):
-            hits = resolve_link(target, after)
-            if not hits:
-                links["dangling"].append(target)
-            elif len(hits) > 1:
-                links["ambiguous"].append(target)
-            else:
-                links["seeded" if hits[0] in before else "created"].append(hits[0])
-        recaps[path] = {"text": text, "links": {k: sorted(set(v)) for k, v in links.items()}}
+    recaps = {path: {"text": text} for path, text in created.items() if path.startswith(RECAP_FOLDER)}
     return {
         "changed": changed,
         "removed": removed,
         "created": created,
         "recaps": recaps,
+        "pages": {p: changed_page(after[p]["text"], after, recaps) for p in changed},
         "order": write_order(changed, recaps, after),
     }
+
+
+def changed_page(text: str, after: dict[str, dict], recaps: dict) -> dict:
+    """Whether a changed seeded page is of a compiled note type, and which written recaps its `sources:` claim names.
+    A claim names a recap by memory ref, or by path, file name or title as a wikilink does."""
+    from exomem.vault import parse_frontmatter
+
+    meta, _body, _raw = parse_frontmatter(text)
+    # The shipped pack alone: the seeds use shipped types only, and an arm adds no type of its own.
+    basis = note_types.Basis(None)
+    refs = {
+        memory_refs.memory_ref(id_): path
+        for path in recaps
+        if (id_ := memory_refs.normalize_id(parse_frontmatter(after[path]["text"])[0].get("exomem_id")))
+    }
+    cited = set()
+    for claim in source_closure.claims_in(meta, basis):
+        hits = [refs[claim.lower()]] if claim.lower() in refs else resolve_link(claim, after)
+        cited.update(path for path in hits if path in recaps)
+    return {"compiled": basis.selects(meta.get("type"), note_types.compiled), "cites": sorted(cited)}
 
 
 def write_order(changed: dict, recaps: dict, after: dict[str, dict]) -> str:
@@ -358,10 +362,16 @@ def user_message(text: str) -> str:
 
 
 def drive_session(
-    argv: list[str], cwd: Path, env: dict[str, str], turns: tuple[str, ...], stream_path: Path
+    argv: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    turns: tuple[str, ...],
+    stream_path: Path,
+    hook_turn: Callable[[str], str] | None = None,
 ) -> SimpleNamespace:
     """Start the agent, hold the first turn for the index warm, then send each turn after the previous one's `result`
-    event. Returns the whole stream, the exit code and why it stopped early, if it did."""
+    event. With `hook_turn`, one more turn follows the last: its text is built from the session id of the stream.
+    Returns the whole stream, the exit code and why it stopped early, if it did."""
     lines: queue.Queue[str | None] = queue.Queue()
     proc = subprocess.Popen(  # noqa: S603
         argv,
@@ -381,38 +391,45 @@ def drive_session(
     stderr: list[str] = []
     threading.Thread(target=read_stdout, daemon=True).start()
     threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True).start()
-    stream, stopped, finished = [], None, 0
+    stream, finished = [], 0
     time.sleep(WARM_HOLD_SECONDS)
+
+    def exchange(number: int, turn: str, sink: TextIO) -> str | None:
+        """One user turn and the agent's answer to it; the reason the session stopped, or None."""
+        nonlocal finished
+        try:
+            proc.stdin.write(user_message(turn) + "\n")
+            proc.stdin.flush()
+        except OSError:
+            return f"the agent closed its input before turn {number}"
+        deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
+        while True:
+            try:
+                raw = lines.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                return f"turn {number} timed out after {TURN_TIMEOUT_SECONDS:.0f} s"
+            if raw is None:
+                return f"the agent exited during turn {number}"
+            stream.append(raw)
+            sink.write(raw)
+            sink.flush()
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                finished += 1
+                return None
+
+    stopped, hook_text = None, None
     with stream_path.open("w", encoding="utf-8") as sink:
         for number, turn in enumerate(turns, start=1):
-            try:
-                proc.stdin.write(user_message(turn) + "\n")
-                proc.stdin.flush()
-            except OSError:
-                stopped = f"the agent closed its input before turn {number}"
-                break
-            deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
-            while True:
-                try:
-                    raw = lines.get(timeout=max(0.1, deadline - time.monotonic()))
-                except queue.Empty:
-                    stopped = f"turn {number} timed out after {TURN_TIMEOUT_SECONDS:.0f} s"
-                    break
-                if raw is None:
-                    stopped = f"the agent exited during turn {number}"
-                    break
-                stream.append(raw)
-                sink.write(raw)
-                sink.flush()
-                try:
-                    event = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(event, dict) and event.get("type") == "result":
-                    finished += 1
-                    break
+            stopped = exchange(number, turn, sink)
             if stopped:
                 break
+        if not stopped and hook_turn is not None:
+            hook_text = hook_turn(str(init_field("".join(stream), "session_id")))
+            stopped = exchange(len(turns) + 1, hook_text, sink)
     try:
         proc.stdin.close()
     except OSError:
@@ -428,7 +445,18 @@ def drive_session(
         returncode=proc.returncode,
         stopped=stopped,
         finished=finished,
+        hook_turn=hook_text,
     )
+
+
+def hook_ask(arm: Arm, session_id: str) -> str:
+    """The arm's own episode ask for this session, read from the arm's hook script: the Stop hook sends it in live
+    closes, so no copy lives here. The key is the one the hook derives from the client and the session id."""
+    path = arm.root / "src" / "exomem" / "_hooks" / "exomem_capture_nudge.py"
+    spec = importlib.util.spec_from_file_location(f"episode_ask_{arm.label}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.EPISODE_ASK.replace("{key}", module.episode_key("claude", session_id))
 
 
 def tool_trail(stdout: str) -> dict:
@@ -505,6 +533,7 @@ def run_session(
     out: Path,
     executable: Path,
     stamp: dict[str, str],
+    hooked: bool = False,
 ) -> dict:
     work = out / "work" / model / arm.label / f"{case.id}-{repeat}"
     shutil.rmtree(work, ignore_errors=True)
@@ -521,6 +550,7 @@ def run_session(
         "skill_sha256": hashlib.sha256(files["skill"].read_bytes()).hexdigest(),
         "engagement": case.engagement,
         "turns": list(case.turns),
+        "hooked": hooked,
         "stream": str(work / "stream.jsonl"),
         "error": None,
         **{k: v for k, v in stamp.items() if k != "product_shas"},
@@ -534,17 +564,19 @@ def run_session(
             agent_env(work, case),
             case.turns,
             work / "stream.jsonl",
+            hook_turn=(lambda session_id: hook_ask(arm, session_id)) if hooked else None,
         )
         time.sleep(2)  # the server exits with the agent; the vault is read after its last write
         transcript = parse_stream_json_transcript(done.stdout.splitlines())
         row["error"] = (
             done.stopped
             or fault_reason(done, transcript)
-            or (None if done.finished == len(case.turns) else "a turn returned no result")
+            or (None if done.finished == len(case.turns) + hooked else "a turn returned no result")
         )
         trail = tool_trail(done.stdout)
         invocations, firings = count_hook_activity(done.stdout)
         row.update(
+            hook_turn=done.hook_turn,
             observed=diff_vault(before, snapshot(work / "vault")),
             replies=replies_by_turn(done.stdout),
             calls=trail["calls"],
@@ -578,7 +610,14 @@ def server_state(stdout: str) -> object:
 
 
 def run_all(
-    cases: list[Case], *, model: str, repeats: int, out: Path, arms: list[Arm], repeat_offset: int = 0
+    cases: list[Case],
+    *,
+    model: str,
+    repeats: int,
+    out: Path,
+    arms: list[Arm],
+    repeat_offset: int = 0,
+    hooked: bool = False,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
     out = refuse_unsafe_out_dir(out)
@@ -602,6 +641,7 @@ def run_all(
                         out=out,
                         executable=envelope.executable,
                         stamp=stamp,
+                        hooked=hooked,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
@@ -617,9 +657,10 @@ def run_all(
     return rows
 
 
-def dry_run(case: Case, arm: Arm, scratch: Path) -> list[str]:
+def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False) -> list[str]:
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
-    server, skill and hook files stage. Returns the problems found."""
+    server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
+    problems found."""
     problems: list[str] = []
     work = scratch / f"{arm.label}-{case.id}"
     shutil.rmtree(work, ignore_errors=True)
@@ -629,7 +670,9 @@ def dry_run(case: Case, arm: Arm, scratch: Path) -> list[str]:
     try:
         seed_vault(case, arm, work, env)
         stage_agent_files(arm, work, env)
-    except (OSError, RuntimeError, KeyError, subprocess.TimeoutExpired) as error:
+        if hooked:
+            hook_ask(arm, "dry-run")
+    except (OSError, RuntimeError, KeyError, AttributeError, subprocess.TimeoutExpired) as error:
         return [f"{type(error).__name__}: {error}"]
     seeded = snapshot(work / "vault")
     wanted = {p.relative_to(case.seed).as_posix() for p in case.seed.rglob("*.md")}

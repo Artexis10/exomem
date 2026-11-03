@@ -11,14 +11,15 @@ from import_guidance.session_close import Case
 SEED = session_close.suite_dir() / "seeds" / "c01"
 PERSON = "Entities/People/Tavi Brennock.md"
 OTHER = "Entities/People/Corin Haldane.md"
+ROUTINE = "Notes/Patterns/sunday-meal-prep-routine.md"
 RECAP = "Sources/Episodes/2026-11-03-recap.md"
+RECAP_ID = "11111111-2222-5333-8444-555555555555"
 
 KEY = {
     "reference": "Tavi's meeting-free mornings belong on her person page.",
     "must_change": [PERSON],
     "must_not_change": [OTHER],
     "recap": "required",
-    "recap_must_link": [PERSON],
     "new_pages": "none",
 }
 
@@ -50,65 +51,84 @@ def test_every_shipped_case_loads_and_the_variants_change_only_engagement() -> N
     assert all(c.turns[-1].startswith("That's all for today") for c in cases.values())
 
 
-def test_diff_reports_changed_pages_recap_links_and_write_order() -> None:
+def routine(sources: str) -> str:
+    return f"---\ntype: pattern\nsources: {sources}\n---\n\n# Sunday meal-prep routine\n\nOrder groceries on Friday.\n"
+
+
+def test_diff_reports_changed_pages_and_which_recaps_a_compiled_page_cites_and_the_write_order() -> None:
     before = {
         PERSON: page("---\ntype: entity\n---\n\n# Tavi Brennock\n\nPrefers short updates.\n", 1),
         OTHER: page("---\ntype: entity\n---\n\n# Corin Haldane\n", 1),
+        ROUTINE: page(routine("[]"), 1),
     }
-    recap = (
-        "---\ntype: source\n---\n\n## Decided\n"
-        "- Plan around [[Tavi Brennock]]'s mornings.\n"
-        "- Ask [[Entities/People/Corin Haldane]] about the rota; see [[Nobody Here]].\n"
-    )
+    recap = f"---\ntype: source\nexomem_id: {RECAP_ID}\n---\n\n## Decided\n- Order on Friday.\n"
     after = {
         PERSON: page(before[PERSON]["text"] + "No meetings before 10:00.\n", 5),
         OTHER: before[OTHER],
+        ROUTINE: page(routine(f"[exomem://memory/{RECAP_ID}]"), 6),
         RECAP: page(recap, 9),
     }
     seen = session_close.diff_vault(before, after)
-    assert list(seen["changed"]) == [PERSON]
+    assert list(seen["changed"]) == [PERSON, ROUTINE]
     assert "+No meetings before 10:00." in seen["changed"][PERSON]
-    assert seen["recaps"][RECAP]["links"] == {
-        "seeded": [OTHER, PERSON],
-        "created": [],
-        "dangling": ["Nobody Here"],
-        "ambiguous": [],
-    }
+    assert list(seen["recaps"]) == [RECAP]
+    # An entity page is not of a compiled type, and a ref names the recap as a wikilink to its path does.
+    assert seen["pages"] == {PERSON: {"compiled": False, "cites": []}, ROUTINE: {"compiled": True, "cites": [RECAP]}}
+    after[ROUTINE] = page(routine("['[[Sources/Episodes/2026-11-03-recap]]']"), 6)
+    assert session_close.diff_vault(before, after)["pages"][ROUTINE]["cites"] == [RECAP]
     assert seen["order"] == "before"
     # The same edit after the recap is reported as after, not as before.
     after[PERSON] = page(after[PERSON]["text"], 12)
+    after[ROUTINE] = page(after[ROUTINE]["text"], 12)
     assert session_close.diff_vault(before, after)["order"] == "after"
 
 
+def observed(*, pages: dict, recaps: bool) -> dict:
+    return {
+        "changed": {p: "diff" for p in pages},
+        "removed": [],
+        "created": {},
+        "recaps": {RECAP: {"text": ""}} if recaps else {},
+        "pages": pages,
+        "order": "before",
+    }
+
+
+def verdicts_of(key: dict, seen: dict) -> dict[str, str]:
+    return {o.check: o.verdict for o in session_score.check_row(key, {"observed": seen})}
+
+
 def test_checks_fail_a_missing_update_and_a_write_the_key_forbids() -> None:
-    nothing = {"changed": {}, "removed": [], "created": {}, "recaps": {}, "order": "no_change"}
-    verdicts = {o.check: o.verdict for o in session_score.check_row(KEY, {"observed": nothing})}
+    nothing = {"changed": {}, "removed": [], "created": {}, "recaps": {}, "pages": {}, "order": "no_change"}
+    verdicts = verdicts_of(KEY, nothing)
     assert verdicts["must_change"] == checks.FAIL
     assert verdicts["recap"] == checks.FAIL
     assert verdicts["must_not_change"] == checks.PASS
-    wrote = {
-        "changed": {PERSON: "diff", OTHER: "diff"},
-        "removed": [],
-        "created": {"Notes/extra.md": "x"},
-        "recaps": {RECAP: {"text": "", "links": {"seeded": [], "created": [], "dangling": [], "ambiguous": []}}},
-        "order": "before",
-    }
-    verdicts = {o.check: o.verdict for o in session_score.check_row(KEY, {"observed": wrote})}
-    assert verdicts == {
+    wrote = observed(pages={PERSON: {"compiled": False, "cites": []}, OTHER: {"compiled": False, "cites": []}}, recaps=True)
+    wrote["created"] = {"Notes/extra.md": "x"}
+    assert verdicts_of(KEY, wrote) == {
         "must_change": checks.PASS,
         "must_not_change": checks.FAIL,
         "recap": checks.PASS,
-        "recap_must_link": checks.FAIL,
+        "recap_cited": checks.NOT_APPLICABLE,
         "new_pages": checks.FAIL,
     }
 
 
-def test_an_optional_recap_left_unwritten_owes_no_links() -> None:
-    key = {**KEY, "recap": "optional"}
-    updated = {"changed": {PERSON: "diff"}, "removed": [], "created": {}, "recaps": {}, "order": "no_recap"}
-    verdicts = {o.check: o.verdict for o in session_score.check_row(key, {"observed": updated})}
-    assert verdicts["recap"] == checks.PASS
-    assert verdicts["recap_must_link"] == checks.PASS
+def test_recap_cited_passes_fails_and_is_not_applicable_by_what_the_run_changed() -> None:
+    """A run that cited nothing must not read as a pass, and a run with nothing to cite must not read as one either."""
+    cited = {ROUTINE: {"compiled": True, "cites": [RECAP]}}
+    uncited = {ROUTINE: {"compiled": True, "cites": []}}
+    entity = {PERSON: {"compiled": False, "cites": []}}
+    assert verdicts_of(KEY, observed(pages=cited, recaps=True))["recap_cited"] == checks.PASS
+    assert verdicts_of(KEY, observed(pages=cited | uncited | {OTHER: {"compiled": True, "cites": []}}, recaps=True))["recap_cited"] == checks.FAIL
+    assert verdicts_of(KEY, observed(pages=uncited, recaps=True))["recap_cited"] == checks.FAIL
+    assert verdicts_of(KEY, observed(pages=entity, recaps=True))["recap_cited"] == checks.NOT_APPLICABLE
+    assert verdicts_of(KEY, observed(pages=uncited, recaps=False))["recap_cited"] == checks.NOT_APPLICABLE
+    # Not applicable leaves a run's verdict to the other checks.
+    outcomes = [checks.Outcome("recap_cited", checks.NOT_APPLICABLE, ""), checks.Outcome("recap", checks.PASS, "")]
+    assert checks.verdict(None, outcomes, []) == checks.PASS
+    assert checks.verdict(None, [checks.Outcome("recap_cited", checks.NOT_APPLICABLE, "")], []) == checks.UNKNOWN
 
 
 def test_judge_view_shows_turns_reference_and_diffs_but_not_the_arm_or_the_recap() -> None:
@@ -116,7 +136,7 @@ def test_judge_view_shows_turns_reference_and_diffs_but_not_the_arm_or_the_recap
         "changed": {PERSON: "+No meetings before 10:00.\n"},
         "removed": [],
         "created": {RECAP: "A recap by the candidate arm."},
-        "recaps": {RECAP: {"text": "A recap by the candidate arm.", "links": {}}},
+        "recaps": {RECAP: {"text": "A recap by the candidate arm."}},
         "order": "before",
     }
     row = {"arm": "candidate", "model": "sonnet", "observed": observed, "compile_blocks": [{"outcome": "x"}]}

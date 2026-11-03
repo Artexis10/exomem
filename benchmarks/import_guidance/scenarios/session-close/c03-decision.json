@@ -19,9 +19,6 @@
       "Entities/Organizations/Lantern Street Book Club.md"
     ],
     "recap": "optional",
-    "recap_must_link": [
-      "Entities/Decisions/Use a shared calendar for the book club.md"
-    ],
     "new_pages": "none"
   }
 }

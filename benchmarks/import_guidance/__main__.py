@@ -53,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--dry-run", action="store_true", help="check files, tools and logging; start no model"
     )
+    run.add_argument(
+        "--hook-turn",
+        action="store_true",
+        help="session-close only: after the close turn, send the arm's own episode ask (the Stop hook's text) as one more turn",
+    )
     rep = sub.add_parser(
         "report", help="leak and pass rates per case, model and arm from runs.jsonl"
     )
@@ -100,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     arms = [parse_arm(text) for text in args.product_root]
+    if args.hook_turn and args.suite != session_close.SUITE:
+        raise SystemExit("--hook-turn applies to the session-close suite only")
     if args.suite == session_close.SUITE:
         return run_session_close(args, arms)
     scenarios = runner.load_scenarios(args.scenario, args.suite)
@@ -150,7 +157,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         with tempfile.TemporaryDirectory(prefix="ig-dry-") as scratch:
             for case in cases:
                 for arm in arms:
-                    problems = session_close.dry_run(case, arm, Path(scratch))
+                    problems = session_close.dry_run(case, arm, Path(scratch), hooked=args.hook_turn)
                     print(f"{arm.label}: {case.id}: {'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}")
                     failed += bool(problems)
         return 1 if failed else 0
@@ -161,6 +168,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         out=args.out,
         arms=arms,
         repeat_offset=args.repeat_offset,
+        hooked=args.hook_turn,
     )
     return 1 if any(row["error"] for row in rows) else 0
 
