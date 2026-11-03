@@ -2922,7 +2922,11 @@ class EpistemicGraphIndex:
                         break
                     if background:
                         _start_background_proof(self.vault_root, registry_key)
-                    if not prove or background or (in_flight is not None and prove == SINGLE_FLIGHT):
+                    if (
+                        not prove
+                        or background
+                        or (in_flight is not None and prove == SINGLE_FLIGHT)
+                    ):
                         if outcome_out is not None:
                             outcome_out.append("unproven")
                         conn.close()

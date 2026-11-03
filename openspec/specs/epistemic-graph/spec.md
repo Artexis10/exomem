@@ -333,7 +333,9 @@ when no proof is running, so a lone cold reader keeps the graph lane. In a
 managed service, graph recall SHALL NOT run the proof on the request thread:
 when no proof is running it SHALL start one background proof of the sidecar.
 Graph recall SHALL NOT wait on a running proof: it proceeds without the graph
-lane for that request and reports that lane as degraded. The graph drain SHALL act on a
+lane for that request and reports that lane as degraded. A find with a relation
+filter is a blocking reader in either process, because it cannot answer without
+the graph lane. The graph drain SHALL act on a
 declined verdict by scheduling one whole-vault rebuild through the existing
 marker path, and SHALL NOT re-prove the sidecar on each pass.
 
