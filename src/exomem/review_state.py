@@ -305,6 +305,7 @@ STORE_ERROR_CODES: frozenset[str] = frozenset(
         "INVALID_REVIEW_REFERENCE",
         "INVALID_SNOOZE_DATE",
         "INVALID_SURFACE",
+        "INVALID_WINDOW_DAYS",
         "REVIEW_STATE_INVALID",
     }
 )
