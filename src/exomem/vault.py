@@ -7113,6 +7113,50 @@ def walk_vault_md(vault_root: Path):
     yield from walk(vault_root)
 
 
+def walk_vault_md_with_subtree(vault_root: Path, subtree: Path):
+    """Yield `(path, in_vault, in_subtree)` for every page either of two walks yields.
+
+    `in_vault` says `walk_vault_md(vault_root)` yields the path, and `in_subtree`
+    says `find_corpus.walk_md(subtree)` does, where `subtree` lies under
+    `vault_root`. Each flag keeps its own walk's rules, so a folder that one
+    walk prunes is still entered for the other. A caller that needs both lists
+    each shared folder once instead of twice.
+    """
+    from . import foreground_priority, reserved_paths
+    from .find_corpus import _classify_walk_entry
+
+    anchor = Path(subtree)
+    subtree_entered = False
+
+    def walk(d: Path, in_vault: bool, in_subtree: bool):
+        nonlocal subtree_entered
+        foreground_priority.check_cancelled()
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            return
+        for child in children:
+            foreground_priority.check_cancelled()
+            vault_kind = _walk_vault_md_entry(vault_root, child) if in_vault else None
+            subtree_kind = (
+                _classify_walk_entry(anchor, child, reserved_paths)[0] if in_subtree else None
+            )
+            if vault_kind == "dir" and child == anchor:
+                # `walk_md(subtree)` lists the subtree's own children, whatever
+                # the vault walk's rules say about the folder itself.
+                subtree_entered = True
+                yield from walk(child, True, True)
+            elif vault_kind == "dir" or subtree_kind == "dir":
+                yield from walk(child, vault_kind == "dir", subtree_kind == "dir")
+            if vault_kind == "md" or subtree_kind == "md":
+                yield child, vault_kind == "md", subtree_kind == "md"
+
+    yield from walk(Path(vault_root), True, False)
+    if not subtree_entered and anchor.is_dir():
+        # The vault walk pruned the subtree folder or never reached it.
+        yield from walk(anchor, False, True)
+
+
 @dataclass
 class InboundLink:
     path: str  # vault-relative POSIX of the file containing the link

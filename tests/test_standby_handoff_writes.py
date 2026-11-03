@@ -23,6 +23,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from test_graph_handoff_convergence import _assert_matches_a_fresh_rebuild
 from test_graph_post_handoff_writes import (
     _QUEUED_COVERAGE_CODES,
     GENERATED,
@@ -31,6 +32,7 @@ from test_graph_post_handoff_writes import (
     _assert_incremental_latency,
     _build_vault,
     _run_child,
+    _seed_live_freshness,
 )
 
 #: `WorkerRuntime.transition`'s default `transition_timeout`: the window the
@@ -71,7 +73,10 @@ root = Path(sys.argv[1])
 retry_catalogue = len(sys.argv) > 2 and sys.argv[2] == "retry"
 reprove_graph = len(sys.argv) > 2 and sys.argv[2] == "reproof"
 promote_midproof = len(sys.argv) > 2 and sys.argv[2] == "midproof"
-watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] in ("seed", "retry", "reproof", "midproof")
+advanced = len(sys.argv) > 2 and sys.argv[2] == "advanced"
+watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] in (
+    "seed", "retry", "reproof", "midproof", "advanced"
+)
 generated = root / GENERATED
 
 passes = []
@@ -124,6 +129,15 @@ if reprove_graph:
     assert _run_child(root, root.parent, ["outgoing"])["available"]
     service_standby.REPROVE_INTERVAL_SECONDS = 0.0
     assert service_standby.reprove_graph_snapshot_if_due(root)
+if advanced:
+    # The serving worker keeps writing after the candidate's proof: it links a
+    # page and then creates it, and publishes S2, so promotion finds the
+    # snapshot advanced with a moved topology. A separate interpreter, so this
+    # registry stays the standby's own.
+    held = service_standby.proved_checkpoint()
+    assert held is not None
+    assert _run_child(root, root.parent, ["outgoing_live"])["available"]
+    assert service_standby.snapshot_token(root) != held
 observer = None
 if retry_catalogue:
     assert service_standby.cutover_components()["lexical"] == "waiting"
@@ -223,16 +237,44 @@ if retry_catalogue:
     service_readiness.manage_runtime()
     assert warmup.warm_retrieval_catalog(root)
 
+if advanced:
+    # What `release()` starts: the promoted worker's own warm clears readiness
+    # and re-marks what promotion carried. Every other component a writer waits
+    # on is marked ready, so the graph handoff alone decides admission, and an
+    # unkeyed write that it holds is refused at once.
+    from exomem import readiness as service_readiness, warmup  # noqa: E402
+
+    service_readiness.begin_warm()
+    for component in service_readiness.COMPONENTS:
+        if component != "graph_handoff":
+            service_readiness.mark_ready(component)
+    warmup._carry_forward_standby_readiness()
+
+from exomem.cli_ops import OpError  # noqa: E402
+
 acknowledgements = []
 per_write_rebuilds = []
+refusals = []
 for index in range(WRITE_COUNT):
     before = len(passes)
-    acknowledgements.append(
-        _governed_write(root, generated / f"generated-note-{{index:04d}}.md", "promoted")
-    )
+    try:
+        acknowledgements.append(
+            _governed_write(root, generated / f"generated-note-{{index:04d}}.md", "promoted")
+        )
+    except OpError as error:
+        refusals.append(error.code)
     per_write_rebuilds.append(len(passes) - before)
 
 graph_sync.drain_active_rebuilds(timeout=60.0)
+queued_after_drain = None
+if advanced:
+    service_readiness.finish_warm()
+    from exomem import deferred_index  # noqa: E402
+    from test_graph_handoff_convergence import _drain_to_empty  # noqa: E402
+
+    _drain_to_empty(root)
+    graph_sync.drain_active_rebuilds(timeout=60.0)
+    queued_after_drain = len(deferred_index.list_graph_paths(root))
 print(
     json.dumps(
         {{
@@ -242,6 +284,8 @@ print(
             "rebuilds": len(passes),
             "per_write_rebuilds": per_write_rebuilds,
             "acknowledgements": acknowledgements,
+            "refusals": refusals,
+            "queued_after_drain": queued_after_drain,
             "available": EpistemicGraphIndex(root).available(),
         }}
     )
@@ -330,6 +374,37 @@ def test_a_promotion_during_a_reproof_keeps_the_held_proof(
         f"the drain and the writes must stay incremental: {report['per_write_rebuilds']}"
     )
     assert report["available"] is True, report
+
+
+def test_a_snapshot_published_after_the_proof_still_admits_the_promoted_worker_s_writes(
+    handoff_vault: Path, tmp_path: Path
+) -> None:
+    """Under live writes the serving worker publishes after the standby's proof.
+
+    Promotion then finds the snapshot advanced. Carrying the graph handoff only
+    when the held proof was still current made the promoted worker run the
+    handoff in full, and every write meanwhile was refused `MUTATION_WARMING`.
+    Promotion re-proves the snapshot on disk instead, so the first write is
+    admitted, every write stays incremental, and the graph still drains to
+    what a fresh rebuild produces.
+    """
+    report = _run_standby(handoff_vault, tmp_path, "advanced")
+
+    promotion = report["promotion"]
+    assert promotion["snapshot"] == "current", promotion
+    assert promotion["reproved"] is True, promotion
+    assert "graph_handoff" in promotion["carried_from_standby"], promotion
+    assert report["refusals"] == [], (
+        f"the promoted worker refused writes while it warmed: {report['refusals']}"
+    )
+    assert report["per_write_rebuilds"] == [0] * WRITE_COUNT, (
+        f"rebuilds per write were {report['per_write_rebuilds']}"
+    )
+    assert report["rebuilds"] == 0, "the drain after the writes paid a whole-vault pass"
+    assert report["queued_after_drain"] == 0
+    assert report["available"] is True, report
+    _seed_live_freshness(handoff_vault)
+    _assert_matches_a_fresh_rebuild(handoff_vault)
 
 
 def test_a_promotion_after_a_deferred_write_is_still_incremental(
