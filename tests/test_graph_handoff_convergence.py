@@ -315,6 +315,28 @@ def test_one_walk_reads_each_membership_under_its_own_walks_rules(vault: Path) -
     assert EpistemicGraphIndex(vault)._recall_memberships() == separate
 
 
+def test_one_walk_still_lists_a_kb_folder_that_the_vault_walk_skips(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a shared walk that lists the KB only through the vault walk: with the
+    # KB folder configured to a name the vault walk skips, the KB membership would
+    # come up empty while the KB walk alone still lists its pages.
+    from exomem import find_corpus
+
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "_archive")
+    kb = vault / vault_module.kb_dirname()
+    (kb / "Notes").mkdir(parents=True, exist_ok=True)
+    (kb / "Notes" / "page.md").write_text("body\n", encoding="utf-8")
+
+    walked = list(vault_module.walk_vault_md_with_subtree(vault, kb))
+
+    assert {path for path, _in_vault, in_kb in walked if in_kb} == set(find_corpus.walk_md(kb))
+    assert kb / "Notes" / "page.md" in {path for path, _v, in_kb in walked if in_kb}
+    assert {path for path, in_vault, _k in walked if in_vault} == set(
+        vault_module.walk_vault_md(vault)
+    )
+
+
 def _decline_on_an_oversized_residue(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for i in range(3):
         page = root / GENERATED / f"generated-note-{80 + i:04d}.md"
