@@ -90,9 +90,13 @@ VALID_ACTIONS = frozenset({"dismiss", "snooze", "reopen", "competing"})
 VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed", "competing"})
 #: The three dispositions a registered signal family can be in. `normal` is the
 #: absence of a record, not a stored value, so setting it clears (mirroring
-#: `reopen`).
+#: `reopen`), except for a family in `DEFAULT_DISPOSITIONS`, whose `normal` is stored.
 DISPOSITIONS: tuple[str, ...] = ("normal", "quiet", "off")
 DISPOSITION_ACTIONS = frozenset(DISPOSITIONS)
+#: The families that ship with a disposition other than `normal`, until the owner decides.
+#: `uncompiled_episode` ships `off`: its threshold (a Decided line no live page cites) is
+#: the product's, and no owner has yet said that it is worth a daily nag.
+DEFAULT_DISPOSITIONS: dict[str, str] = {"uncompiled_episode": "off"}
 #: The closed triage-reason vocabulary. It rides the existing free-text `why` as
 #: a leading colon-terminated token, so no tool input parameter moves for it.
 #: `unspecified` is the fallback and is never an error for an item decision; a
@@ -789,6 +793,9 @@ class ReviewStateStore:
                     "origin": origin if origin in ORIGINS else MANUAL,
                 }
                 stored["cleared"] = record is not None
+                if family in DEFAULT_DISPOSITIONS:
+                    # The owner's `normal` must outlive the shipped default it overrides.
+                    dispositions[family] = {key: value for key, value in stored.items() if key != "cleared"}
                 # An explicit normal decision begins a new adaptation epoch
                 # without erasing the durable review history.
                 payload["adaptation_resets"][family] = timestamp
@@ -1034,11 +1041,17 @@ def _parse_stamp(value: Any) -> dt.datetime | None:
 
 
 def disposition_map(payload: dict[str, Any] | None) -> dict[str, str]:
-    """``family -> quiet|off`` for every family with a non-default disposition."""
+    """``family -> quiet|off`` for every family with a non-default disposition.
+
+    A family in `DEFAULT_DISPOSITIONS` reads as its default until a record of its own,
+    which may be `normal`, says otherwise.
+    """
     stored = (payload or {}).get("dispositions") or {}
     if not isinstance(stored, dict):
-        return {}
-    out: dict[str, str] = {}
+        stored = {}
+    out: dict[str, str] = {
+        family: value for family, value in DEFAULT_DISPOSITIONS.items() if family not in stored
+    }
     for family, record in stored.items():
         if not isinstance(record, dict):
             continue

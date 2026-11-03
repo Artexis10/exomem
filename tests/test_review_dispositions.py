@@ -1011,9 +1011,9 @@ def test_the_dismissal_and_effect_counts_are_served_to_the_owner_only(vault: Pat
 
     refusal = {"available": False, "reason": "audience_restricted"}
     assert restricted["effect"] == refusal
-    assert [row["manual_dismissals"] for row in restricted["dispositions"]] == [refusal]
+    assert {row["family"]: row["manual_dismissals"] for row in restricted["dispositions"]}[FAMILY] == refusal
     assert owner["effect"]["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
-    assert [row["manual_dismissals"] for row in owner["dispositions"]] == [0]
+    assert {row["family"]: row["manual_dismissals"] for row in owner["dispositions"]}[FAMILY] == 0
 
 
 def test_the_dispositions_view_counts_dismissals_without_an_audit(
