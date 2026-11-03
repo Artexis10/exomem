@@ -184,8 +184,8 @@ def _write(
     recap: episode_capture.Recap,
     when: Any,
     audience: str,
-) -> tuple[dict[str, str], bool]:
-    """The committed recap page for `recap`, writing it only when it is new.
+) -> tuple[dict[str, str], bool, list[str]]:
+    """The committed recap page for `recap`, writing it only when it is new, and the episode's recap paths.
 
     Identical to this audience's newest live revision means a retry: nothing is
     written. Otherwise the new page is written, ordered after every revision
@@ -202,7 +202,7 @@ def _write(
             live = [item for item in revisions if item.live]
             revision_counts["live_revisions"] = len(live)
         if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
-            return _source(live[-1].path, live[-1].frontmatter), True
+            return _source(live[-1].path, live[-1].frontmatter), True, [item.path for item in revisions]
         # Never before the newest revision on disk, whatever the clock says.
         order = episode_capture.order_token(
             when, after=revisions[-1].order if revisions else None
@@ -227,7 +227,11 @@ def _write(
                 raise
             continue
         query_log.log_write_call(tool="episode_memory", written_path=result.path, cited_sources=[])
-        return {"ref": result.ref, "path": result.path, "title": recap.subject}, False
+        return (
+            {"ref": result.ref, "path": result.path, "title": recap.subject},
+            False,
+            [*(item.path for item in revisions), result.path],
+        )
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -265,8 +269,6 @@ def record(
     original_recap = episode_capture.prepare(
         episode=episode, about=about, when=when, audience=audience, **fields
     )
-    # Before the write, which leaves the resolver cache behind until the terminal's fanout.
-    decided_links = episode_compile.linked_pages(vault_root, original_recap.decided)
     request_id = writer_lease.active_mutation_request_id()
     retry = writer_lease._active_capture_preparation_retry() if request_id is not None else None
 
@@ -357,7 +359,7 @@ def record(
                 # Reject before the first revision read or any canonical effect.
                 if preparation is not None and not preparation.current(vault_root, diagnostics=diagnostics):
                     continue
-                source, idempotent = _write(vault_root, source_schema, recap, when, audience)
+                source, idempotent, revision_paths = _write(vault_root, source_schema, recap, when, audience)
                 revision: int | None
                 ledger_warnings: list[str] = []
                 try:
@@ -421,10 +423,7 @@ def record(
         record_housekeeping()
     warnings = [*about_warnings, *ledger_warnings]
     compiled = episode_compile.block(
-        vault_root,
-        decided=len(recap.decided),
-        decided_links=decided_links,
-        about_paths={ref: about_paths[ref] for ref in recap.about if ref in about_paths},
+        vault_root, ref=source["ref"], revisions=revision_paths, decided=len(recap.decided)
     )
     return {
         "operation": "episode_memory",

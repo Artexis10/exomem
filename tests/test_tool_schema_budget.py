@@ -42,8 +42,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
 # The `offset` window cursor on read_memory lets an agent read a long Source's extracted text in
 # windows, so the budget rises 150 B.
-# The record_episode description and the `decided` parameter carry the close step (link each decided
-# item to its page, read the response's compile block), so the budget rises 100 B and record_episode 100 B.
+# The record_episode description carries the close step (cite the recap in the `sources:` of each page a
+# decided item changes, read the response's compile block), so the budget rises 100 B and record_episode 100 B.
 # The `window_days` field on the dispositions kind of read_review sizes the effect window, so the budget rises 150 B.
 TOTAL_BUDGET = 165_650
 

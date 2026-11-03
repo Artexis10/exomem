@@ -161,31 +161,27 @@ qualifies. A write response may carry a
 prompts a pass if one has not already been completed for that episode, never a
 demand that something be written.
 
-**Close the session: update the pages, then record the conversation.** At a decision
-or stopping point, you hold the most context, so write the pages first and the recap
-second.
+**Close the session: record the conversation, then cite it.** At a decision or
+stopping point, you hold the most context. The recap is a Source, and a live page that
+names it in `sources:` covers it.
 
-1. Update each page whose knowledge this session changed, with the ordinary writers
-   (`edit_note`, `change_observations`, `supersede_note`). The pages are entity
-   facets, decisions and workflow contracts. A page the session did not change needs
-   no write. At `off`, or when the user asked only for a recap, a recap request alone
-   does not authorize page edits.
-2. Record one bounded recap with `record_episode(operation={'kind': 'record'})`: a
+1. Record one bounded recap with `record_episode(operation={'kind': 'record'})`: a
    one-line subject and summary, what was worked on, decided and left open, and at
-   most three verbatim user statements worth keeping. Link each Decided item to its
-   existing page with `[[...]]`, and set `about` to the pages you updated. Link no
-   page that does not exist: a recap cannot be edited, so that link stays dangling
-   and the audit reports it. A short link form works: link with the page's file name
-   when its title is long, because each Decided item holds 200 characters and a
-   full-title link can fill most of them.
+   most three verbatim user statements worth keeping.
+2. Update each page whose knowledge a Decided item changed, with the ordinary writers
+   (`edit_note`, `change_observations`, `supersede_note`), and cite the recap in that
+   page's `sources:`. The pages are entity facets, decisions and workflow contracts.
+   A decided item that changes no page needs no write. At `off`, or when the user
+   asked only for a recap, a recap request alone does not authorize page edits.
 
 The recap is raw material about the conversation, not a compiled conclusion, and it
 is what the next session on any client sees first in `recent_context`. Its response
-may carry a `compile` block: the pages the recap names with each one's last update
-time, and how many Decided items name no page. Its `outcome` states that result. When
-live policy permits capture, a `next_step` asks you to update a listed page that a
-decided item changes and this session has not updated; the server cannot know which
-writes belong to this session, so you judge. Reuse the `episode` key a hook named or
+may carry a `compile` block: the `cite` ref of the recap, how many Decided items it
+holds, and how many of them no recap cited by a live page holds (`open`, or
+`unchecked` when the server did not check). Its `outcome` states that result and
+counts recaps and lines; it never says that a page states an item. When live policy
+permits capture, a `next_step` asks you to update the page a decided item changes and
+cite the recap. Never record again to cite. Reuse the `episode` key a hook named or
 an earlier record returned; an identical retry writes nothing. A Stop hook's episode
 check or an `episode_due` block in an activation packet is a reminder, not
 permission; skip it when nothing durable happened, and then write and record nothing.

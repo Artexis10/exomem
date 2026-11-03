@@ -8810,9 +8810,9 @@ def op_episode_memory(
     unknown policy. At a durable stop, one-line
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads recall_context recent_context. Same episode adds a revision,
-    retiring the previous one; identical retry writes nothing. Link each decided
-    item to its page as [[Page]]; the response's `compile` block lists the pages
-    the recap names and their update times.
+    retiring the previous one; identical retry writes nothing. The response's
+    `compile` block gives the ref to cite in the `sources:` of each page a decided
+    item changes, and counts the decided items no cited recap holds.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.
@@ -8825,7 +8825,7 @@ def op_episode_memory(
         subject: One line, max 120 characters.
         summary: One line, max 180.
         worked_on: Max 5 items, 200 characters each.
-        decided: Max 5 items, 200 characters each. Link each to its page as [[Page]].
+        decided: Max 5 items, 200 characters each.
         open: Max 5 items, 200 characters each. One of the three lists is required.
         said: Max 3 verbatim user statements, 300 characters.
         about: Max 3 `exomem://` refs.
@@ -10088,8 +10088,16 @@ def _dispositions_view(vault_root: Path, window_days: int | None = None) -> dict
     # are the owner's aggregate: another audience gets the refusal, not a number.
     refusal = egress.owner_only_aggregate(Path(vault_root))
     rows = []
-    for family in sorted(dispositions):
-        record = dispositions[family]
+    # A family that ships with a disposition is listed until its owner sets one.
+    records = {
+        **{
+            family: {"disposition": default, "why": "ships with this disposition until `normal` is set", "origin": "default"}
+            for family, default in review_state_module.DEFAULT_DISPOSITIONS.items()
+        },
+        **dispositions,
+    }
+    for family in sorted(records):
+        record = records[family]
         if not isinstance(record, dict):
             continue
         if str(record.get("disposition") or "") not in {"quiet", "off"}:
@@ -10158,11 +10166,12 @@ def _effect_block(
     upkeep family is listed with the counts it holds as unknown, and the block
     says why: an absent family would read as one that surfaced nothing.
 
-    No family can yet tell a change from a re-read, so each reports `acted` as unknown.
+    Only the uncompiled-episode family can tell a change from a re-read, because a
+    citation is a recorded act. No other family can, so each reports `acted` as unknown.
     """
     import datetime as dt
 
-    from . import dreamer_families, dreamer_store, due_state
+    from . import dreamer_families, dreamer_store, due_state, episode_coverage
 
     since, until, window = effect_window
     current: dict[str, set[str]] = {}
@@ -10196,6 +10205,16 @@ def _effect_block(
                 current.setdefault(family, set())
                 stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
                 extra.append((family, cid, fingerprint, stamp))
+    acted: dict[str, frozenset[str]] = {}
+    episode_family = due_state.EPISODE_BACKLOG
+    if projection is not None and any(
+        isinstance(entry, dict) and entry.get("family") == episode_family
+        for entry in (payload.get("surfaced") or {}).values()
+    ):
+        # An empty category is absent from the projection, and an emptied family is
+        # the one that acted: read it as an empty current set, not as unknown.
+        current.setdefault(episode_family, set())
+        acted[episode_family] = episode_coverage.acted_ids(vault_root)
     counts = review_state_module.effect_counts(
         payload,
         since=since,
@@ -10203,6 +10222,7 @@ def _effect_block(
         current={family: frozenset(ids) for family, ids in current.items()},
         extra_surfaced=extra,
         unknown=unknown,
+        acted=acted,
     )
     return {
         "dreamer_sidecar": sidecar,
@@ -10222,7 +10242,10 @@ def _effect_block(
                 "could list it"
             ),
             "acted": (
-                "unknown for every family: no family can yet tell a change from a re-read"
+                "only for uncompiled_episode, and unknown for every other family: as "
+                "cleared, with the recap still live and every one of its Decided lines "
+                "now held by a recap that a live page cites. A recap superseded or "
+                "deleted, or a line dropped, is cleared and never acted"
             ),
             "open": "surfaced in the window, no decision recorded, still in the current set",
         },

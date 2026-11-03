@@ -36,10 +36,10 @@ checkpoint = _load("exomem_continuation_checkpoint")
 #: Byte ceilings for what a hook injects (served-JSON is a few bytes larger).
 CEILINGS = {
     "capture short": (capture.REMINDER_SHORT, 285),
-    # 195 -> 270 (was 189 in use): the ask tells the agent to update the pages the session changed
-    # before it records, to link each decided item to its page, and puts both under the live-policy
-    # condition, because the hook fires at `light` where capture is not permitted: 78 bytes, reworded
-    # to the least that keeps the condition, the order and the link form.
+    # 195 -> 270 (was 189 in use): the ask tells the agent to record, then cite the recap in the
+    # sources of each page a decided item changes, and puts both under the live-policy condition,
+    # because the hook fires at `light` where capture is not permitted: 80 bytes, reworded to the
+    # least that keeps the condition, the order and the citation.
     "episode ask": (capture.EPISODE_ASK, 270),
     # 300 -> 332 (was 272 in use): the two rules the diet dropped (no repeat searches on a recurring
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
