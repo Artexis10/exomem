@@ -68,6 +68,7 @@ Limits:
 
 - The agent has no shell, so the Stop hook's episode check never fires, because it asks only after a landing. Without `--hook-turn` the suite measures the hookless close; with it, the close turn is followed by the hook's own ask, and the row records that text as `hook_turn`.
 - `recap_cited` is `not_applicable` when no recap was written or no compiled page changed, and the verdict leaves it out. A change to an entity page never counts, because entity pages hold no `sources:` claim.
+- Cases c02, c09 and c10 update a compiled note (a pattern, an insight and a research note), so `recap_cited` can pass or fail there. The other cases update entity pages or nothing.
 - The agent has `references/engagement.md` in its prompt, where a real agent would read it on demand.
 - `order` uses the last write of a page. A page written twice shows its later write.
 - Sonnet is the agent. The judge is Opus.
