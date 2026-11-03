@@ -263,7 +263,7 @@ def test_the_order_token_never_goes_back_past_the_newest_revision() -> None:
 
 
 def test_a_rendered_recap_parses_back_to_its_fields() -> None:
-    """`parse` is `_render`'s inverse, so the sensor reads exactly what the agent recorded."""
+    """`parse` is `_render`'s inverse, so coverage reads exactly what the agent recorded."""
     recap = _prepare(decided=["Buy the brass Harbor Lamp", "Skip the chrome one"])
 
     parsed = capture.parse(recap.body)

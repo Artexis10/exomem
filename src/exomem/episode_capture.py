@@ -86,7 +86,7 @@ class Recap:
     group: str
     stem: str
     about: tuple[str, ...] = ()
-    #: The validated Decided items, as written: the compile block reads their links.
+    #: The validated Decided items, as written: `episode_coverage` matches them to the cited revisions.
     decided: tuple[str, ...] = ()
     client: str | None = None
     frontmatter: dict[str, Any] = field(default_factory=dict)
