@@ -7,25 +7,23 @@ Exomem SHALL keep one SQLite table, the served-context record, in the vault stat
 - a row id, the derived session key that heat uses, and the time;
 - the caller's principal and view;
 - the map generation, never the map items;
-- the slice refs, each with its match value;
-- the guidance refs, each with its `why`;
-- the declared activity keys that resolved, and the count of unknown keys;
-- the declared entity refs that resolved, and the count of unknown entity refs, when `conversation.entities` exists;
-- the slice state and the guidance state;
+- the stance state and the refs of the stance lines that the block served, when the packet carries a stance block;
+- the slice refs, each with its match value, and the slice state;
+- the `next_action` state, when the response carries one;
 - the upkeep items that the response surfaced, each by the item id that the upkeep queue assigns, when the response carries any.
 
-A row SHALL hold refs, registry keys, counts and closed states only, never vault text or conversation text. An unknown activity key or entity ref SHALL be recorded as a count only. The table SHALL be append-only: no path SHALL update a row, and only the retention sweep SHALL delete one. Opens and cites SHALL NOT be copied into the record; they stay in heat under the same session key.
+A row SHALL hold refs, generations and closed states only, never vault text or conversation text. A slice ref that the turn's conversation reached SHALL be recorded as a served ref like any other, and no conversation field SHALL be recorded. The table SHALL be append-only: no path SHALL update a row, and only the retention sweep SHALL delete one. Opens and cites SHALL NOT be copied into the record; they stay in heat under the same session key.
 
 #### Scenario: A row holds refs and states, not text
 
-- **WHEN** a client declares `review-contract` and the packet serves one guidance item and three slice items
-- **THEN** the record gains one row with the map generation, the three slice refs with their match, the guidance ref with its `why`, the key `review-contract`, an unknown count of zero, slice state `ready` and guidance state `selected`
+- **WHEN** a maps packet serves two stance lines and three slice items, and the response carries no `next_action`
+- **THEN** the record gains one row with the map generation, stance state `ready` with the two line refs, the three slice refs with their match, and slice state `ready`, and no `next_action` state
 - **AND** no column holds the turn, a conversation field or any page text
 
-#### Scenario: An unknown key is only counted
+#### Scenario: A surfaced upkeep item is recorded by its id
 
-- **WHEN** a client declares one registered key and one unregistered key
-- **THEN** the row records the registered key and `unknown_activities = 1`, and no column holds the unregistered key
+- **WHEN** the response surfaces one upkeep item
+- **THEN** the row records the item id that the upkeep queue assigns, and no text of the item
 
 ### Requirement: Recording never slows or fails the activation
 
@@ -61,12 +59,12 @@ Rows SHALL live only in the vault state directory, which is tenant state in a ho
 
 ### Requirement: The owner reads the record through one command
 
-An owner-only command SHALL report, for each activity key and for the declared-nothing case, the served, opened and cited counts of guidance refs, with their sample sizes in rows and sessions. It SHALL join the record with heat `read` and `cite` events by session key and time, and it SHALL report the windows that both sources cover, because the heat ring can cover less time than the record. A count that a source could not cover SHALL be reported as unknown, never as zero. Given a `served_context_id`, the command SHALL show that one row, or report it as absent or expired. The command SHALL be reachable on the CLI and on the owner's REST facade over one leaf.
+An owner-only command SHALL report the served, opened and cited counts of slice refs, with their sample sizes in rows and sessions. It SHALL join the record with heat `read` and `cite` events by session key and time, and it SHALL report the windows that both sources cover, because the heat ring can cover less time than the record. A count that a source could not cover SHALL be reported as unknown, never as zero. Given a `served_context_id`, the command SHALL show that one row, or report it as absent or expired. The command SHALL be reachable on the CLI and on the owner's REST facade over one leaf.
 
 #### Scenario: An incident's row id resolves
 
 - **WHEN** the owner asks the command for a `served_context_id` that an incident links
-- **THEN** the command shows that row's map generation, slice refs and guidance refs, or reports that the row has expired
+- **THEN** the command shows that row's map generation, stance line refs and slice refs, or reports that the row has expired
 
 #### Scenario: The read-out names its windows
 
@@ -75,9 +73,9 @@ An owner-only command SHALL report, for each activity key and for the declared-n
 
 ### Requirement: The record learns nothing by itself
 
-The served-context record SHALL add no automatic learning: no path SHALL change a declaration, a registry entry, a ranking or a packet because of a row. Any later change built on the record SHALL reach the vault only through a proposal that the owner reviews.
+The served-context record SHALL add no automatic learning: no path SHALL change a stance line, a ranking or a packet because of a row. Any later change built on the record SHALL reach the vault only through a proposal that the owner reviews.
 
-#### Scenario: A guidance item that nobody opens stays declared
+#### Scenario: A slice ref that nobody opens keeps its selection
 
-- **WHEN** a guidance item is served in many rows and opened in none
-- **THEN** its declaration and its selection are unchanged until the owner edits them
+- **WHEN** a slice ref is served in many rows and opened in none
+- **THEN** its selection and its ranking are unchanged until the owner edits the vault

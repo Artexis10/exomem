@@ -2,7 +2,7 @@
 
 ### Requirement: Map items name their page date `updated`
 
-A map item SHALL carry its page's last update date in the field `updated`. No map item SHALL carry a field named `activity`, because `activities` names a kind of task in the same packet. The value, its source and its ordering role SHALL stay as they were under the old name. The paginated `exomem://map` view and the retrieve hook SHALL read the new name.
+A map item SHALL carry its page's last update date in the field `updated`. No map item SHALL carry a field named `activity`, because workflow contracts use `activities` for a kind of task, and the served unit already names the same date `updated`. The value, its source and its ordering role SHALL stay as they were under the old name. The paginated `exomem://map` view and the retrieve hook SHALL read the new name.
 
 #### Scenario: A map item carries `updated`
 
@@ -23,7 +23,7 @@ When the turn slice's state is `empty`, its `description` SHALL state that the m
 The packet builder's currency step SHALL read a unit's typed `as_of`, `until` and `check_by` keys (semantic-unit-language) and SHALL apply these rules in order, the first match winning:
 
 1. A superseded or archived unit is history, whatever its dates.
-2. A unit whose `until` is earlier than today is history. Nothing is written, its lifecycle stays live, and it is served with `history: true` where history is served. It is never served as guidance.
+2. A unit whose `until` is earlier than today is history. Nothing is written, its lifecycle stays live, and it is served with `history: true` where history is served.
 3. A unit whose `check_by` is earlier than today stays current and carries `review_due` with that date.
 4. A unit with no typed date stays current.
 

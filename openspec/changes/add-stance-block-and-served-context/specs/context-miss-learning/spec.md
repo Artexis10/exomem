@@ -27,4 +27,4 @@ A source-backed correction SHALL NOT require an incident record. When the user a
 #### Scenario: An incident links its delivered context by row id
 
 - **WHEN** the user asks to record a miss that followed a response carrying a `served_context_id`
-- **THEN** the incident links that id as its delivered context, and the owner read-out can resolve the id to the map generation, slice refs and guidance refs that the activation served
+- **THEN** the incident links that id as its delivered context, and the owner read-out can resolve the id to the map generation, stance line refs and slice refs that the activation served

@@ -34,37 +34,32 @@ not required of it; its measured headroom SHALL be recorded beside the ceiling c
 
 ## ADDED Requirements
 
-### Requirement: Bootstrap teaches the correction route
+### Requirement: Bootstrap teaches the stance-line route
 At `balanced` and `maximal`, the capture axis of the engagement contract SHALL name a
-behavioural correction as a capture class beside its existing classes. The
-client model SHALL judge whether a user statement corrects how the agent should
-behave, and which kind it is: a stance line that applies to every task, or a
-precedent or failure unit that applies to one activity. The agent SHALL propose the
-exact unit and cite the user's words as its source, either an episode `said` line or
-a captured Source, and SHALL write it only after the user confirms in the
-conversation, recording `guidance_origin: reviewed` (task-guidance). After the write,
-the agent SHALL call `recall_context` with `trigger = "task_refresh"` and
-`refresh_reason = "correction"`. A later correction SHALL replace an earlier one
-through `supersedes`, and a conflict SHALL be marked with `contradicts`. At `light`
-the agent SHALL write a correction only when asked, and at `off` it SHALL only
-propose. The server SHALL add no correction detector: no word list, cue list or
-classifier SHALL decide that a statement is a correction. Both `SKILL.md` copies,
-`prominence.py`, the scaffold's recall loop and the bootstrap `intent_boundary` and
-`capture_examples` SHALL carry the same rule, and the compact payload SHALL stay within
-its measured ceiling.
+behavioural correction that applies to every task as a capture class beside its existing
+classes. The client model SHALL judge whether a user statement corrects how the agent
+should behave on every task. The agent SHALL propose the exact stance line and cite the
+user's words as its source, either an episode `said` line or a captured Source, and SHALL
+write the line on a stance page (stance-block) only after the user confirms in the
+conversation. A later line SHALL replace an earlier one through `supersedes`. The agent
+SHALL NOT propose a rule for one kind of task or one entity as a stance line, because a
+stance line serves on every task. At `light` the agent SHALL write a stance line only
+when asked, and at `off` it SHALL only propose. The server SHALL add no correction
+detector: no word list, cue list or classifier SHALL decide that a statement is a
+correction. Both `SKILL.md` copies, `prominence.py`, the scaffold's recall loop and the
+bootstrap `intent_boundary` and `capture_examples` SHALL carry the same rule, and the
+compact payload SHALL stay within its measured ceiling.
 
 #### Scenario: A confirmed correction becomes a stance line
 - **WHEN** at `balanced` the user says that the agent must never treat a draft as final
   without a stated review, and confirms the agent's proposed stance line
-- **THEN** the agent writes the line on a stance page with `guidance_origin: reviewed`
-  and its source, refreshes with `refresh_reason = "correction"`, and the next packet's
-  stance block serves the line
+- **THEN** the agent writes the line on a stance page with its source, and the next maps
+  packet's stance block serves the line
 
-#### Scenario: An unconfirmed proposal is not served
-- **WHEN** the agent proposes a precedent unit for `reply-message` and the user does not
-  confirm it
-- **THEN** no reviewed declaration is written, and no packet serves the proposal
+#### Scenario: An unconfirmed proposal is not written
+- **WHEN** the agent proposes a stance line and the user does not confirm it
+- **THEN** no line is written, and no packet serves the proposal
 
 #### Scenario: Off only proposes
 - **WHEN** the engagement level is `off` and the user corrects the agent's behaviour
-- **THEN** the agent may propose the exact unit and its source, and writes nothing
+- **THEN** the agent may propose the exact stance line and its source, and writes nothing
