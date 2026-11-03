@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.158.1](https://github.com/Artexis10/exomem/compare/v0.158.0...v0.158.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **graph:** prove an inherited graph sidecar off a managed request thread ([#2393](https://github.com/Artexis10/exomem/issues/2393)) ([88645cb](https://github.com/Artexis10/exomem/commit/88645cb7843e91f30e06893cf362dcbba4c1969d))
+
 ## [0.158.0](https://github.com/Artexis10/exomem/compare/v0.157.1...v0.158.0) (2026-11-03)
 
 
