@@ -234,14 +234,17 @@ def test_a_page_still_on_disk_but_no_longer_indexed_still_declines(
 ) -> None:
     """Leaving the admitted set is not a residue the drain is proven to remove."""
     root = handoff_vault
-    real = EpistemicGraphIndex._indexed_recall_membership
+    real = EpistemicGraphIndex._recall_memberships
 
     def without_removed(self, **kwargs):
-        membership = real(self, **kwargs)
-        return None if membership is None else membership - {REMOVED}
+        memberships = real(self, **kwargs)
+        if memberships is None:
+            return None
+        resolver, indexed = memberships
+        return resolver, indexed - {REMOVED}
 
     monkeypatch.setattr(
-        EpistemicGraphIndex, "_indexed_recall_membership", without_removed, raising=True
+        EpistemicGraphIndex, "_recall_memberships", without_removed, raising=True
     )
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
     assert adoption.adopted is False
@@ -267,7 +270,7 @@ def test_an_unexplained_non_kb_title_change_alongside_a_residue_declines(
     )
     index = EpistemicGraphIndex(root)
     assert outsider in (index._recall_membership() or ()), "the resolver must see it"
-    assert outsider not in (index._indexed_recall_membership() or ())
+    assert outsider not in (index._recall_memberships() or ((), ()))[1]
 
     (root / GENERATED / "residue-created.md").write_text(_note(700, []), encoding="utf-8")
     (root / outsider).write_text("---\ntitle: Renamed Outsider\n---\n\nbody\n", encoding="utf-8")
@@ -276,6 +279,40 @@ def test_an_unexplained_non_kb_title_change_alongside_a_residue_declines(
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
     assert adoption.adopted is False
     assert adoption.reason == "resolver_topology_mismatch"
+
+
+def test_one_walk_reads_each_membership_under_its_own_walks_rules(vault: Path) -> None:
+    """Catches a shared walk that prunes both memberships under one rule set.
+
+    The vault-wide walk skips every `.obsidian` folder, while the KB walk skips
+    only the KB's own reserved folders and so admits a page under
+    `Knowledge Base/.obsidian/`. A walk that applied either rule set to both
+    would change one membership, and the proof would decline a corpus that
+    nothing moved, or adopt one that differs from what a rebuild indexes.
+    """
+    pages = {
+        "Knowledge Base/.obsidian/kb-only.md": "body\n",
+        "Notes/vault-only.md": "body\n",
+        "Knowledge Base/Notes/shared.md": "body\n",
+    }
+    for rel, text in pages.items():
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(text, encoding="utf-8")
+    kb = vault / vault_module.kb_dirname()
+    from exomem import find_corpus, recall_policy
+
+    separate = (
+        recall_policy.admitted_relative_paths(vault, vault_module.walk_vault_md(vault)),
+        recall_policy.admitted_relative_paths(vault, find_corpus.walk_md(kb)),
+    )
+    resolver, indexed = separate
+    assert "Knowledge Base/.obsidian/kb-only.md" in indexed - resolver, (
+        "the fixture must hold a page that only the KB walk yields"
+    )
+    assert "Notes/vault-only.md" in resolver - indexed
+    assert "Knowledge Base/Notes/shared.md" in resolver & indexed
+
+    assert EpistemicGraphIndex(vault)._recall_memberships() == separate
 
 
 def _decline_on_an_oversized_residue(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1962,6 +1962,10 @@ class _ProofDeadlinePassed(Exception):
     """A deadline-bound cold proof ran out of time; it declines and proves nothing."""
 
 
+class _ProofCancelled(Exception):
+    """A cold proof's owner no longer wants its answer; it declines and proves nothing."""
+
+
 @dataclass
 class _SealMovement:
     """What a collecting seal recheck found moved, for the cold proof to fold."""
@@ -3183,6 +3187,7 @@ class EpistemicGraphIndex:
         apply_residue: bool = True,
         prior_reads: _ProofReads | None = None,
         deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
 
@@ -3237,7 +3242,11 @@ class EpistemicGraphIndex:
         `prior_reads` starts the proof from an earlier adoption's reads, so it
         re-reads only the pages that moved since; see
         `_snapshot_sources_match_disk`. `deadline`, a `time.monotonic()` value,
-        bounds the proof: one that passes it declines `proof_deadline_passed`.
+        bounds the proof's walks, reads and rechecks: one that passes it
+        declines `proof_deadline_passed`. The topology check and the origin
+        adoption after a converged proof still run past it, about half a second
+        on a 12,700-page vault. `cancelled` declines `proof_cancelled` as soon
+        as it answers True.
         """
         from . import graph_drain
 
@@ -3269,6 +3278,7 @@ class EpistemicGraphIndex:
                 prior_reads=prior_reads,
                 reads_out=reads,
                 deadline=deadline,
+                cancelled=cancelled,
             )
         finally:
             conn.close()
@@ -3327,6 +3337,7 @@ class EpistemicGraphIndex:
         prior_reads: _ProofReads | None = None,
         reads_out: list[_ProofReads] | None = None,
         deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
 
@@ -3381,8 +3392,10 @@ class EpistemicGraphIndex:
         snapshot published after the earlier one re-reads only what moved in
         between. `reads_out` receives the pages and memberships a True answer
         ended on, for the next proof to start from. `deadline`, a
-        `time.monotonic()` value checked per page and per walked path, declines
-        `proof_deadline_passed` once passed.
+        `time.monotonic()` value checked per page, per rechecked guard and per
+        walked path, declines `proof_deadline_passed` once passed; `cancelled`,
+        checked at the same points, declines `proof_cancelled` once it answers
+        True.
 
         The invariant a True answer establishes: the snapshot S that `conn`'s
         read transaction sees, plus the residue R, equals the admitted pages as
@@ -3410,12 +3423,13 @@ class EpistemicGraphIndex:
             return False
 
         interrupt: Callable[[], None] | None = None
-        if deadline is not None:
-            bound = deadline
+        if deadline is not None or cancelled is not None:
 
             def interrupt() -> None:
-                if time.monotonic() >= bound:
+                if deadline is not None and time.monotonic() >= deadline:
                     raise _ProofDeadlinePassed
+                if cancelled is not None and cancelled():
+                    raise _ProofCancelled
 
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
@@ -3429,15 +3443,15 @@ class EpistemicGraphIndex:
             indexed_membership: frozenset[str] | None
             if seed is not None:
                 # The earlier proof converged on these memberships with every
-                # page read. The recheck below walks both memberships before
-                # any page is accepted, so a walk here would only repeat it.
+                # page read. The recheck below walks the vault before any page
+                # is accepted, so a walk here would only repeat it.
                 resolver_membership = seed.resolver_membership
                 indexed_membership = seed.indexed_membership
             else:
-                resolver_membership = self._recall_membership(interrupt=interrupt)
-                indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
-            if resolver_membership is None or indexed_membership is None:
-                return declined("recall_membership_unreadable")
+                memberships = self._recall_memberships(interrupt=interrupt)
+                if memberships is None:
+                    return declined("recall_membership_unreadable")
+                resolver_membership, indexed_membership = memberships
             stored_hashes = {
                 str(path): str(source_hash)
                 for path, source_hash in conn.execute(
@@ -3598,6 +3612,8 @@ class EpistemicGraphIndex:
             return True
         except _ProofDeadlinePassed:
             return declined("proof_deadline_passed")
+        except _ProofCancelled:
+            return declined("proof_cancelled")
         except Exception as error:  # noqa: BLE001 - an incomplete cold proof fails closed
             # The class at INFO, so a declined proof is diagnosable from the
             # service log; the traceback stays at DEBUG.
@@ -3686,8 +3702,10 @@ class EpistemicGraphIndex:
                 if movement_out is None:
                     raise
                 movement.failed.append((guard.target, error))
-        movement.resolver_membership = self._recall_membership(interrupt=interrupt)
-        movement.indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
+        memberships = self._recall_memberships(interrupt=interrupt)
+        movement.resolver_membership, movement.indexed_membership = (
+            (None, None) if memberships is None else memberships
+        )
         movement.policy_moved = (
             recall_policy.recall_policy_identity(self.vault_root) != seal.policy_identity
         )
@@ -5842,29 +5860,50 @@ class EpistemicGraphIndex:
                     ), interrupt,
                 ),
             )
-        except (_RepublicationDeferred, _ProofDeadlinePassed):
+        except (_RepublicationDeferred, _ProofDeadlinePassed, _ProofCancelled):
             raise
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
 
-    def _indexed_recall_membership(
+    def _recall_memberships(
         self, *, interrupt: Callable[[], None] | None = None,
-    ) -> frozenset[str] | None:
-        """Capture the exact admitted KB paths represented by graph file rows."""
-        kb = self.vault_root / kb_dirname()
+    ) -> tuple[frozenset[str], frozenset[str]] | None:
+        """Both memberships the cold proof compares, from one walk and one admission pass.
+
+        The first is `_recall_membership`'s, the vault-wide resolver scope. The
+        second is the admitted KB paths that graph file rows represent, as
+        `find_module._walk_md` walks the KB. Each keeps its own walk's rules
+        (see `vault.walk_vault_md_with_subtree`), and a page in both is
+        admitted once. None when either cannot be read whole.
+        """
+        walked: dict[Path, tuple[bool, bool]] = {}
+
+        def candidates() -> Iterator[Path]:
+            for path, in_vault, in_kb in vault_module.walk_vault_md_with_subtree(
+                self.vault_root, self.vault_root / kb_dirname()
+            ):
+                walked[path] = (in_vault, in_kb)
+                yield path
+
+        resolver: set[str] = set()
+        indexed: set[str] = set()
         try:
-            return recall_policy.admitted_relative_paths(
+            for path, rel in recall_policy.iter_admitted_relative(
                 self.vault_root,
                 _interruptible_source_paths(
-                    foreground_priority.yielding_in_bulk(
-                        find_module._walk_md(kb) if kb.is_dir() else ()
-                    ), interrupt,
+                    foreground_priority.yielding_in_bulk(candidates()), interrupt
                 ),
-            )
-        except (_RepublicationDeferred, _ProofDeadlinePassed):
+            ):
+                in_vault, in_kb = walked[path]
+                if in_vault:
+                    resolver.add(rel)
+                if in_kb:
+                    indexed.add(rel)
+        except (_RepublicationDeferred, _ProofDeadlinePassed, _ProofCancelled):
             raise
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
+        return frozenset(resolver), frozenset(indexed)
 
     def _resolver_source_versions(
         self,

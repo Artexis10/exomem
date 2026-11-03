@@ -1718,12 +1718,12 @@ def test_cold_source_proof_never_follows_post_admission_symlink(
     find_module.unload_ram_caches()
     outside = tmp_path / "outside.md"
     outside.write_text("# Outside\n\nSensitive external bytes.\n", encoding="utf-8", newline="\n")
-    real_indexed_membership = index._indexed_recall_membership
+    real_memberships = index._recall_memberships
     swapped = False
 
-    def swap_after_admission(**kwargs: object) -> frozenset[str] | None:
+    def swap_after_admission(**kwargs: object) -> tuple[frozenset[str], frozenset[str]] | None:
         nonlocal swapped
-        result = real_indexed_membership(**kwargs)
+        result = real_memberships(**kwargs)
         if not swapped:
             swapped = True
             source.unlink()
@@ -1739,7 +1739,7 @@ def test_cold_source_proof_never_follows_post_admission_symlink(
             followed_symlink = True
         return real_read_bytes(path)
 
-    monkeypatch.setattr(index, "_indexed_recall_membership", swap_after_admission)
+    monkeypatch.setattr(index, "_recall_memberships", swap_after_admission)
     monkeypatch.setattr(Path, "read_bytes", observe_unsafe_read)
 
     assert index.edges(source_path=A) == []

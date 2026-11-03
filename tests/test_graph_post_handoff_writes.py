@@ -2247,6 +2247,9 @@ _DECLINE_REASONS = {
     "proof_deadline_passed": (
         "a promotion re-proof ran out of time; the promoted worker runs the handoff in full"
     ),
+    "proof_cancelled": (
+        "a background proof stopped because promotion began; promotion re-proves on its own"
+    ),
     "proof_raised": "the proof itself failed; treat as unproven",
 }
 
@@ -2299,7 +2302,7 @@ def test_a_declined_adoption_names_the_condition_it_declined_on(
 
     cases = {
         "recall_membership_unreadable": lambda mp: mp.setattr(
-            EpistemicGraphIndex, "_recall_membership", lambda _self, **_kwargs: None, raising=True
+            EpistemicGraphIndex, "_recall_memberships", lambda _self, **_kwargs: None, raising=True
         ),
         "resolver_topology_mismatch": lambda mp: mp.setattr(
             epistemic_graph,
@@ -2308,7 +2311,7 @@ def test_a_declined_adoption_names_the_condition_it_declined_on(
             raising=True,
         ),
         "proof_raised": lambda mp: mp.setattr(
-            EpistemicGraphIndex, "_indexed_recall_membership", raises, raising=True
+            EpistemicGraphIndex, "_recall_memberships", raises, raising=True
         ),
     }
     for reason, arrange in cases.items():
@@ -2330,7 +2333,7 @@ def test_the_warm_up_reports_the_reason_an_adoption_declined(
     caplog.set_level("INFO", logger="exomem.warmup")
     monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
     monkeypatch.setattr(
-        EpistemicGraphIndex, "_recall_membership", lambda _self, **_kwargs: None, raising=True
+        EpistemicGraphIndex, "_recall_memberships", lambda _self, **_kwargs: None, raising=True
     )
 
     warmup.warm_graph_handoff(handoff_vault)
