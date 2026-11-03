@@ -852,8 +852,9 @@ _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
 _PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
 # A promoted standby adopts its detached catalogue inside the promotion request,
-# which the supervisor caps at ten seconds; a busier barrier leaves the live
-# catalogue to the ordinary repair instead of timing that request out.
+# which the supervisor caps (`service_manager.PROMOTE_REQUEST_SECONDS`, ten
+# seconds on an older supervisor); a busier barrier leaves the live catalogue to
+# the ordinary repair instead of timing that request out.
 _PUBLICATION_TIMEOUT_ADOPT = 5.0
 
 

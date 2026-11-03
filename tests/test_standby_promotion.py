@@ -1126,3 +1126,36 @@ def test_promotion_names_an_unreadable_token_as_the_cause(
     assert record["identity_catalogue_cause"] == "token-unreadable"
     assert reserved_paths.identity_catalogue_ready(vault_root) is False
     assert scheduled == [vault_root]
+
+
+def test_the_promote_endpoint_hands_the_supervisors_request_budget_to_the_standby(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Catches an endpoint that drops the budget: the standby would then bound its
+    # re-proof by the legacy ten-second cap and decline on a large vault for nothing.
+    from fastmcp import FastMCP
+    from starlette.testclient import TestClient
+
+    from exomem import server_assets
+
+    received: list[float | None] = []
+
+    def recorded(vault_root, *, migrated, request_seconds=None):
+        received.append(request_seconds)
+        return {"ok": True}
+
+    monkeypatch.setattr(service_standby, "promote", recorded)
+    mcp = FastMCP("promote-endpoint-test")
+    server_assets.register_asset_routes(mcp, vault_root=tmp_path)
+    client = TestClient(mcp.http_app())
+
+    sent = client.post("/control/promote", json={"migrated": False, "request_seconds": 30})
+    assert sent.status_code == 200
+    # A supervisor released before the field sends none.
+    absent = client.post("/control/promote", json={"migrated": False})
+    assert absent.status_code == 200
+    assert received == [30.0, None]
+
+    invalid = client.post("/control/promote", json={"migrated": False, "request_seconds": 0})
+    assert invalid.status_code == 400
+    assert received == [30.0, None], "an unusable budget must not reach promotion"

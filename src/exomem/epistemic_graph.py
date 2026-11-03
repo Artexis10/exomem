@@ -3240,13 +3240,13 @@ class EpistemicGraphIndex:
 
         An adoption returns the page reads its proof ended on in `proof_reads`.
         `prior_reads` starts the proof from an earlier adoption's reads, so it
-        re-reads only the pages that moved since; see
-        `_snapshot_sources_match_disk`. `deadline`, a `time.monotonic()` value,
-        bounds the proof's walks, reads and rechecks: one that passes it
-        declines `proof_deadline_passed`. The topology check and the origin
-        adoption after a converged proof still run past it, about half a second
-        on a 12,700-page vault. `cancelled` declines `proof_cancelled` as soon
-        as it answers True.
+        re-reads only the pages that moved since, wherever a page's guard binds
+        its bytes; see `_snapshot_sources_match_disk`. `deadline`, a
+        `time.monotonic()` value, bounds the proof's walks, reads and rechecks:
+        one that passes it declines `proof_deadline_passed`. The topology check,
+        the origin adoption and the resolver fork after a converged proof still
+        run past it, about half a second on a 12,700-page vault. `cancelled`
+        declines `proof_cancelled` as soon as it answers True.
         """
         from . import graph_drain
 
@@ -3387,10 +3387,12 @@ class EpistemicGraphIndex:
         earlier proof ended on, under the same policy identity, instead of a
         first membership walk and an empty read set. Nothing about the
         invariant changes: a seeded page is rechecked against its fold guard
-        like a page read in this proof, the recheck walks both memberships
-        again, and a page that moved or appeared is read, so a proof of a
-        snapshot published after the earlier one re-reads only what moved in
-        between. `reads_out` receives the pages and memberships a True answer
+        like a page read in this proof, the recheck walks the vault again for
+        both memberships, and a page that moved or appeared is read, so a proof
+        of a snapshot published after the earlier one re-reads only what moved
+        in between. A page whose guard compares content, every page where the
+        stat generation is not trusted and any page in the racy window, is read
+        again whether it moved or not. `reads_out` receives the pages and memberships a True answer
         ended on, for the next proof to start from. `deadline`, a
         `time.monotonic()` value checked per page, per rechecked guard and per
         walked path, declines `proof_deadline_passed` once passed; `cancelled`,

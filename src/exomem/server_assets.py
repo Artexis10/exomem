@@ -7,6 +7,7 @@ import base64
 import functools
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -422,6 +423,9 @@ def register_asset_routes(
             from . import service_standby
 
             migrated = False
+            # The supervisor's budget for this request; absent from a supervisor
+            # that predates it, and then the standby assumes that supervisor's cap.
+            request_seconds: float | None = None
             try:
                 raw = await request.body()
                 if len(raw) > 1024:
@@ -429,6 +433,16 @@ def register_asset_routes(
                 if raw:
                     body = json.loads(raw)
                     migrated = bool(body.get("migrated")) if isinstance(body, dict) else False
+                    budget = body.get("request_seconds") if isinstance(body, dict) else None
+                    if budget is not None:
+                        if (
+                            isinstance(budget, bool)
+                            or not isinstance(budget, (int, float))
+                            or not math.isfinite(budget)
+                            or budget <= 0
+                        ):
+                            raise ValueError("request_seconds must be a positive number")
+                        request_seconds = float(budget)
             except (ValueError, UnicodeDecodeError):
                 return JSONResponse(
                     {"ok": False, "error": "invalid control request"},
@@ -436,7 +450,9 @@ def register_asset_routes(
                     headers={"Cache-Control": "no-store"},
                 )
             try:
-                record = service_standby.promote(vault_root, migrated=migrated)
+                record = service_standby.promote(
+                    vault_root, migrated=migrated, request_seconds=request_seconds
+                )
             except RuntimeError:
                 return JSONResponse(
                     {"ok": False, "error": "this worker is not a standby"},

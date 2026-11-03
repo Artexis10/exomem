@@ -878,6 +878,121 @@ def test_a_promotion_reproof_that_runs_out_of_time_falls_back_to_the_full_handof
     _assert_matches_a_fresh_rebuild(root)
 
 
+def _admission_slowed_per_page(monkeypatch: pytest.MonkeyPatch, seconds: float) -> threading.Event:
+    """Make every admitted page cost `seconds`; the event is set at the first one."""
+    from exomem import recall_policy
+
+    real = recall_policy.iter_admitted_relative
+    started = threading.Event()
+
+    def slowed(vault_root, paths):
+        for admitted in real(vault_root, paths):
+            started.set()
+            time.sleep(seconds)
+            yield admitted
+
+    monkeypatch.setattr(recall_policy, "iter_admitted_relative", slowed, raising=True)
+    return started
+
+
+def test_a_proof_stops_inside_a_round_once_its_deadline_passes(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a deadline checked only between rounds: one round on the production vault
+    # outlasts the whole bound, so the promotion request would time out and discard
+    # the standby before the proof looked at the clock again.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    # One membership walk now takes NOTE_COUNT * 0.05 s, about ten seconds.
+    _admission_slowed_per_page(monkeypatch, 0.05)
+
+    started = time.monotonic()
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(
+        apply_residue=False, deadline=started + 0.5
+    )
+    elapsed = time.monotonic() - started
+
+    assert adoption.reason == "proof_deadline_passed", adoption
+    assert elapsed < 5.0, (
+        f"the proof ran {elapsed:.1f}s past a 0.5 s deadline; it must stop at the "
+        "next walked page, not at the end of the round"
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_seconds", "budget"),
+    [
+        # A supervisor released before the field caps the request at ten seconds.
+        (None, 10.0),
+        (30.0, 30.0),
+    ],
+)
+def test_the_promotion_reproof_takes_its_share_of_the_request_budget(
+    handoff_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_seconds: float | None,
+    budget: float,
+) -> None:
+    # Catches a re-proof bound that ignores the supervisor's request budget. Above an
+    # old supervisor's ten-second cap the request times out and discards the standby;
+    # below a new supervisor's budget a large vault's re-proof declines for nothing.
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    assert service_standby.prove_graph_snapshot(root) is True
+    edited = root / GENERATED / "generated-note-0007.md"
+    _governed_write(root, {edited: edited.read_text(encoding="utf-8") + "\n- after the proof\n"})
+    assert graph_sync.drain_active_rebuilds(timeout=120.0)
+    index_sync.drain_graph_work(root, limit=64)
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+    deadlines: list[float] = []
+
+    def recorded(self, **kwargs):
+        deadlines.append(kwargs["deadline"])
+        return real_adopt(self, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", recorded, raising=True)
+
+    before = time.monotonic()
+    record = service_standby.promote(root, migrated=False, request_seconds=request_seconds)
+
+    assert record["reproved"] is True, record
+    share = service_standby.PROMOTION_REPROOF_SHARE
+    assert len(deadlines) == 1
+    assert before + share * budget <= deadlines[0] <= time.monotonic() + share * budget
+
+
+def test_promotion_stops_a_background_proof_that_is_still_walking(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a background re-proof that runs on through promotion: its result is
+    # dropped, and meanwhile it competes with the promotion's own bounded re-proof.
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    walking = _admission_slowed_per_page(monkeypatch, 0.05)
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+    outcomes: list[epistemic_graph.SnapshotAdoption] = []
+
+    def recorded(self, **kwargs):
+        outcomes.append(real_adopt(self, **kwargs))
+        return outcomes[-1]
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", recorded, raising=True)
+    background = threading.Thread(target=service_standby.prove_graph_snapshot, args=(root,))
+    background.start()
+    try:
+        assert walking.wait(30), "the background proof never reached its walk"
+        record = service_standby.promote(root, migrated=False)
+        background.join(5.0)
+        assert not background.is_alive(), "the background proof walked on after promotion"
+    finally:
+        background.join()
+
+    assert record["snapshot"] == "unproven", record
+    assert [outcome.reason for outcome in outcomes] == ["proof_cancelled"]
+
+
 def test_a_page_rewritten_after_every_read_declines_instead_of_folding_forever(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

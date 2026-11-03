@@ -13,6 +13,7 @@
 
 - [x] 3.1 Add failing tests: a snapshot published after the standby's proof promotes as current with the graph handoff carried, re-reading only the moved page; the promoted worker's first ten writes are admitted and served incrementally, and the drained graph matches a fresh rebuild; a re-proof that runs out of time promotes as advanced and the full handoff converges.
 - [x] 3.2 Implement in `epistemic_graph.py` (seeded and deadline-bound proof), `service_standby.py` (the promotion re-proof) and `service_manager.py` (the shared promotion request bound); document the record fields in `docs/managed-service-upgrades.md`.
+- [x] 3.3 Fit the re-proof to the production vault: walk the vault once per round for both memberships, have the supervisor send its promotion request budget and the standby bound its re-proof by a share of it, size that budget from a re-proof measured at 13,000 pages, and stop a background proof when promotion starts.
 
 ## 4. Closure
 

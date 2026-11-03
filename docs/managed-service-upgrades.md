@@ -661,13 +661,29 @@ proof would add seconds to the one window this sequence exists to shorten.
 
 When the pair moved, the old worker published after the standby's proof, which
 is the usual case under live writes. Promotion then re-proves the snapshot on
-disk from the page reads of the standby's proof. It reads only the pages that
-moved since. Each of its one or two rounds costs a stat of each page and two
-walks of the vault, not a read of every page. An adoption records `current`
-with `reproved: true`. The re-proof has a deadline of 4 s, 40% of the
-supervisor's 10 s promotion request. A decline
+disk from the page reads of the standby's proof. Each of its one or two rounds
+walks the vault once and checks the stat of every page. It reads again only the
+pages that moved since, where the stat generation binds a page's bytes. On
+Windows, and for a page written less than 2 s before its read, the check reads
+the page's bytes again. An adoption records `current` with `reproved: true`.
+
+The supervisor sends the budget of its promotion request as `request_seconds`
+in the request body, at most 30 s. The re-proof may spend 40% of that budget,
+so at most 12 s, and it stops at the first page it reaches after that. A decline
 records `advanced` with the reason in `promotion.reproof_declined`, for example
-`proof_deadline_passed`, and the promoted worker runs the handoff in full.
+`proof_deadline_passed`, and the promoted worker runs the handoff in full. On a
+synthetic 13,000-page vault, on a host at load 8, the re-proof of one moved
+page took 2.2 to 2.6 s.
+
+Requests wait at the supervisor during the re-proof, and none is refused. The
+re-proof adds its own time to `ready_after_ms` and `unavailable_ms`, and up to
+12 s when it declines. Without it, the promoted worker refused every write as
+warming while it ran the handoff in full, about 100 s on a large vault.
+
+The supervisor runs from the launcher venv, so a supervisor that predates
+`request_seconds` stays in place after a seamless upgrade. It caps the request
+at 10 s and sends no budget, and the re-proof then has 4 s. The 12 s bound takes
+effect after the offline maintenance that changes the stable supervisor.
 
 ### A collection store schema change
 

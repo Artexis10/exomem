@@ -104,13 +104,17 @@ REPROVE_INTERVAL_SECONDS = 30.0
 #: How often the standby looks at the graph for movement: a stat of the durable
 #: checkpoint and of the sidecar, and a sidecar read only when one moved.
 REPROVE_POLL_SECONDS = 1.0
-#: The share of the supervisor's promotion request
-#: (`service_manager.PROMOTE_REQUEST_SECONDS`) that promotion may spend
-#: re-proving a snapshot published after the held proof. Ownership, the
-#: catalogue and the residue still run inside the same request, and a request
-#: that times out fails the upgrade after the old worker has stopped. A
-#: re-proof that runs out of time records `advanced`, as before it existed.
+#: The share of the supervisor's promotion request that promotion may spend
+#: re-proving a snapshot published after the held proof. The supervisor sends
+#: the request's budget as `request_seconds`. Ownership, the catalogue and the
+#: residue still run inside the same request, and a request that times out
+#: discards this standby after the old worker has stopped. A re-proof that runs
+#: out of time records `advanced`, as before it existed.
 PROMOTION_REPROOF_SHARE = 0.4
+#: The promotion request cap of a supervisor whose promote request carries no
+#: `request_seconds`. A seamless upgrade replaces only the worker, so a new
+#: worker meets such a supervisor until the launcher's next offline update.
+LEGACY_PROMOTE_REQUEST_SECONDS = 10.0
 #: The re-proof clock; a seam for tests.
 _clock = time.monotonic
 
@@ -318,7 +322,16 @@ def _read_snapshot_token(vault_root: Path, *, quiet: bool) -> str | None:
         conn.close()
 
 
-def prove_graph_snapshot(vault_root: Path) -> bool:
+def _proof_stopped() -> bool:
+    """Whether promotion or discard began, so a background proof should stop.
+
+    Read without `_lock`: the proof calls this for every page, and a stale
+    answer costs only one more page before the next check sees the flag.
+    """
+    return _promoting or _promoted or _discarded
+
+
+def prove_graph_snapshot(vault_root: Path, *, prior_reads: Any = None) -> bool:
     """Prove and adopt the inherited snapshot, retaining what it established.
 
     Adoption is what makes the promoted worker's first governed write
@@ -337,6 +350,10 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     the worker still serving owns both until this one is promoted. Making the
     checkpoint the delta origin is process-local, so the adoption still does
     everything that removes the promoted worker's whole-vault pass.
+
+    `prior_reads` starts the proof from an earlier adoption's page reads. The
+    proof stops with `proof_cancelled` as soon as promotion or discard begins:
+    its result would be dropped, and promotion re-proves on its own.
     """
     global _proved_token, _adoption, _proof_signal, _proof_marker
     global _attempt_signal, _attempt_stat, _attempt_ended_at
@@ -356,7 +373,9 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     try:
         adoption = epistemic_graph.EpistemicGraphIndex(
             vault_root
-        ).adopt_published_snapshot(apply_residue=False)
+        ).adopt_published_snapshot(
+            apply_residue=False, prior_reads=prior_reads, cancelled=_proof_stopped
+        )
     except Exception:  # noqa: BLE001 - an unadopted snapshot is a waiting component
         log.warning("standby graph snapshot adoption failed", exc_info=True)
         adoption = epistemic_graph.SnapshotAdoption(False, reason="adoption_raised")
@@ -519,6 +538,7 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         return False
     with _lock:
         held = _proved_token
+        held_reads = getattr(_adoption, "proof_reads", None)
     if held is not None:
         if signal[1] != held:
             # A snapshot published since the one the held proof names.
@@ -536,8 +556,9 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         # origin, which only widens the first delta. The proof itself reads
         # disk, so the residue it returns covers the generation that landed. A
         # decline keeps the held proof, and a result that lands after promotion
-        # is dropped in `prove_graph_snapshot`.
-        proved = prove_graph_snapshot(vault_root)
+        # is dropped in `prove_graph_snapshot`. The held proof's page reads
+        # seed it, so only pages that moved since are read again.
+        proved = prove_graph_snapshot(vault_root, prior_reads=held_reads)
         log.info("standby graph snapshot re-proof over the held proof adopted=%s", proved)
         return proved
     if not _invalidate_graph_proof():
@@ -1088,13 +1109,17 @@ def _acquire_ownership() -> None:
     start_server_lifecycle()
 
 
-def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
+def promote(
+    vault_root: Path, *, migrated: bool, request_seconds: float | None = None
+) -> dict[str, Any]:
     """Take ownership after the previous worker and its descendants have exited.
 
     Re-validates the proved checkpoint against disk first.  A checkpoint that
-    advanced is re-proved from the held proof's page reads, within a share of
-    the supervisor's promotion request; one whose re-proof declines is recorded
-    as `advanced`. A proof that now fails is recorded and promotion proceeds
+    advanced is re-proved from the held proof's page reads, within
+    `PROMOTION_REPROOF_SHARE` of `request_seconds`, the budget of the
+    supervisor's promotion request (`LEGACY_PROMOTE_REQUEST_SECONDS` when the
+    supervisor sent none). One whose re-proof declines is recorded as
+    `advanced`. A proof that now fails is recorded and promotion proceeds
     anyway, leaving the repair to the coalesced rebuild path.
     """
     global _promoting
@@ -1111,6 +1136,9 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         return _promote_owned(
             Path(vault_root),
             migrated=migrated,
+            request_seconds=(
+                LEGACY_PROMOTE_REQUEST_SECONDS if request_seconds is None else request_seconds
+            ),
             proved=proved,
             proof_marker=proof_marker,
             proof_generation=proof_generation,
@@ -1127,6 +1155,7 @@ def _promote_owned(
     vault_root: Path,
     *,
     migrated: bool,
+    request_seconds: float,
     proved: str | None,
     proof_marker: tuple[int, int] | None,
     proof_generation: Any,
@@ -1187,15 +1216,13 @@ def _promote_owned(
                 # run the handoff in full with every write refused meanwhile.
                 # A decline keeps `advanced` and the held adoption, and the
                 # promoted worker's warm runs the handoff in full as before.
-                from .service_manager import PROMOTE_REQUEST_SECONDS
-
                 # Generation before marker, the order the warm-time proof samples in.
                 generation = _durable_generation(Path(vault_root))
                 marker = _observe_full_marker(Path(vault_root))
                 reproof = _reprove(
                     Path(vault_root),
                     prior_reads=reads,
-                    deadline=started + PROMOTE_REQUEST_SECONDS * PROMOTION_REPROOF_SHARE,
+                    deadline=started + request_seconds * PROMOTION_REPROOF_SHARE,
                 )
                 record["reproved"] = True
                 if reproof.adopted:
