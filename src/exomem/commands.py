@@ -8811,8 +8811,8 @@ def op_episode_memory(
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads recall_context recent_context. Same episode adds a revision,
     retiring the previous one; identical retry writes nothing. The response's
-    `compile` block gives the ref to cite in the `sources:` of each page a decided
-    item changes, and counts the decided items no cited recap holds.
+    `compile` block gives the ref to cite in the `sources:` of each compiled note
+    you update, and counts the decided items no cited recap holds.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.

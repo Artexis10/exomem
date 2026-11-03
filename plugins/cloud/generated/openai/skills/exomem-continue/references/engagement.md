@@ -169,10 +169,12 @@ names it in `sources:` covers it.
    one-line subject and summary, what was worked on, decided and left open, and at
    most three verbatim user statements worth keeping.
 2. Update each page whose knowledge a Decided item changed, with the ordinary writers
-   (`edit_note`, `change_observations`, `supersede_note`), and cite the recap in that
-   page's `sources:`. The pages are entity facets, decisions and workflow contracts.
-   A decided item that changes no page needs no write. At `off`, or when the user
-   asked only for a recap, a recap request alone does not authorize page edits.
+   (`edit_note`, `change_observations`, `supersede_note`). Cite the recap in the
+   `sources:` of each compiled note you update, such as an insight, pattern or research
+   note. An entity, plan or record page holds no `sources:` list: update it without a
+   citation, and the recap's line stays open by design. A decided item that changes no
+   page needs no write. At `off`, or when the user asked only for a recap, a recap
+   request alone does not authorize page edits.
 
 The recap is raw material about the conversation, not a compiled conclusion, and it
 is what the next session on any client sees first in `recent_context`. Its response
@@ -181,7 +183,7 @@ holds, and how many of them no recap cited by a live page holds (`open`, or
 `unchecked` when the server did not check). Its `outcome` states that result and
 counts recaps and lines; it never says that a page states an item. When live policy
 permits capture, a `next_step` asks you to update the page a decided item changes and
-cite the recap. Never record again to cite. Reuse the `episode` key a hook named or
+cite the recap from each compiled note. Never record again to cite. Reuse the `episode` key a hook named or
 an earlier record returned; an identical retry writes nothing. A Stop hook's episode
 check or an `episode_due` block in an activation packet is a reminder, not
 permission; skip it when nothing durable happened, and then write and record nothing.

@@ -1,10 +1,11 @@
 """The `compile` block of a recorded recap: what the close step has left to cite.
 
 A recap is a Source. A live compiled note that names it in `sources:` covers it
-(`episode_coverage`), so the close step is: record the recap, then update the
-note a decided item changes and cite the recap in that note's `sources:`. This
-block reports the recap's ref to cite, how many Decided items it holds and how
-many no recap cited by a live page holds.
+(`episode_coverage`), so the close step is: record the recap, then update the note a
+decided item changes, and cite the recap from each compiled note updated. An entity,
+plan or record page holds no `sources:` claim, so it is updated without a citation and
+its line stays open. This block reports the recap's ref to cite, how many Decided items
+it holds and how many no recap cited by a live page holds.
 
 It claims nothing about a note's content. Coverage counts recaps and lines, so
 the `outcome` states that result only; a next step rides separately and only
@@ -35,7 +36,10 @@ log = logging.getLogger(__name__)
 # The one next step, sent only when live policy permits capture. It is a
 # condition for the agent to judge, because the server cannot tell which note
 # a decided item changes.
-_NEXT_STEP = "If a decided item changes a note, update that note and cite this recap in its sources."
+_NEXT_STEP = (
+    "If a decided item changes a note, update that note. Cite this recap in the sources "
+    "of each compiled note you update; entity, plan and record pages take no citation."
+)
 
 
 def _outcome(decided: int, open_: int | None) -> str:

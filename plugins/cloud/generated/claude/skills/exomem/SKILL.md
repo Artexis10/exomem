@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 6e6351ccd2b5db7a21476903388900817014cf0dc1e8f811e728aa40a331f871
+  skill_contract: 7df6e727f7c1fd41170922515a97f7396003b378a2e13a16dbdb3eddd6ba5e64
   version: "0.32.0"
 ---
 
@@ -143,8 +143,10 @@ conversation's decision or stopping point, close in two steps, only when request
 or permitted by the live proactive-capture disposition. First record one bounded recap
 with `record_episode/read_episode`; its response names the ref to cite. Then update
 each page whose knowledge a Decided item changed (entity facets, decisions, workflow
-contracts) with `edit_note`, `change_observations` or `supersede_note`, and cite the
-recap in that page's `sources:`. A recap is never recorded twice for this. At `off`,
+contracts) with `edit_note`, `change_observations` or `supersede_note`. Cite the recap
+in the `sources:` of each compiled note you update; an entity, plan or record page
+holds no `sources:`, so update it without a citation. A recap is never recorded twice
+for this. At `off`,
 or when the user asked only for a recap, a recap request alone does not authorize page
 edits. The recap is what the next session on any client sees first. Nothing durable
 happened: record nothing.

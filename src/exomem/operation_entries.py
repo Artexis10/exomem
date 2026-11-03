@@ -549,7 +549,7 @@ _TOOL_HELP = {
     "change_observations": ("write", "Change observations", "Add, update or remove a semantic unit with the existing review and fingerprint guards."),
     "change_settings": ("write", "Change settings", "Set or clear saved engagement only on an explicit user setting-change request. Inspect settings through bootstrap first."),
     "read_episode": ("read", "Read episode", "Inspect episode recaps, candidates or source coverage without writing."),
-    "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow. The record response's compile block gives the ref to cite in a page's sources."),
+    "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow. The record response's compile block gives the ref to cite in a compiled note's sources."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
     "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true."),

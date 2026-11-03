@@ -2911,8 +2911,8 @@ def _check_uncompiled_episodes(
                     f"in no recap {episode_coverage.WORDING}"
                 ),
                 proposed_fix=(
-                    "Update the note a decided item changes and cite this recap in its "
-                    "`sources:`; otherwise dismiss."
+                    "Update the note a decided item changes and cite this recap in the "
+                    "`sources:` of each compiled note you update; otherwise dismiss."
                 ),
                 meta={
                     "episode": coverage.key,

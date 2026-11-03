@@ -210,7 +210,7 @@ REMINDER_SHORT = (
 EPISODE_ASK = (
     "[Exomem episode check] Decision or stopping point? If live policy permits capture, "
     'record_episode once: operation.kind="record", episode="{key}", subject, summary, '
-    "worked_on/decided/open; cite it in the sources of each page a decided item changes. "
+    "worked_on/decided/open; cite it in the sources of each compiled note you update. "
     "Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the

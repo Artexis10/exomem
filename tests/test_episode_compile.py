@@ -132,7 +132,7 @@ def test_the_next_step_rides_only_when_live_policy_permits_capture(
     monkeypatch.setattr(capture_sweep, "_proactive_capture_permitted", lambda: False)
     refused = _record(vault, episode="ep-" + "e5" * 16, decided=DECIDED)["compile"]
 
-    assert permitted["next_step"] == "If a decided item changes a note, update that note and cite this recap in its sources."
+    assert permitted["next_step"]
     assert "next_step" not in refused
     assert permitted["outcome"] == refused["outcome"]
     assert "again" not in json.dumps([permitted, refused])

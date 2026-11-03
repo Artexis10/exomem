@@ -37,7 +37,7 @@ checkpoint = _load("exomem_continuation_checkpoint")
 CEILINGS = {
     "capture short": (capture.REMINDER_SHORT, 285),
     # 195 -> 270 (was 189 in use): the ask tells the agent to record, then cite the recap in the
-    # sources of each page a decided item changes, and puts both under the live-policy condition,
+    # sources of each compiled note it updates, and puts both under the live-policy condition,
     # because the hook fires at `light` where capture is not permitted: 80 bytes, reworded to the
     # least that keeps the condition, the order and the citation.
     "episode ask": (capture.EPISODE_ASK, 270),
