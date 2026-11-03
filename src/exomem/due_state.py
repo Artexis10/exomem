@@ -123,7 +123,7 @@ SOURCE_BACKLOG = "unprocessed_source"
 #: The second backlog family: a conversation recap whose live revision holds a Decided line
 #: that no recap cited by a live page holds. It is a sibling of `SOURCE_BACKLOG`, not part of
 #: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
-EPISODE_BACKLOG = "uncompiled_episode"
+EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
 
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote

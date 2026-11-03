@@ -93,10 +93,13 @@ VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed", "competing"})
 #: `reopen`), except for a family in `DEFAULT_DISPOSITIONS`, whose `normal` is stored.
 DISPOSITIONS: tuple[str, ...] = ("normal", "quiet", "off")
 DISPOSITION_ACTIONS = frozenset(DISPOSITIONS)
+#: The family of conversation recaps with a Decided line that no live page cites. Named here, with
+#: its shipped disposition, because `due_state` and `audit` both import this module and it imports neither.
+EPISODE_BACKLOG = "uncompiled_episode"
 #: The families that ship with a disposition other than `normal`, until the owner decides.
-#: `uncompiled_episode` ships `off`: its threshold (a Decided line no live page cites) is
+#: `EPISODE_BACKLOG` ships `off`: its threshold (a Decided line no live page cites) is
 #: the product's, and no owner has yet said that it is worth a daily nag.
-DEFAULT_DISPOSITIONS: dict[str, str] = {"uncompiled_episode": "off"}
+DEFAULT_DISPOSITIONS: dict[str, str] = {EPISODE_BACKLOG: "off"}
 #: The closed triage-reason vocabulary. It rides the existing free-text `why` as
 #: a leading colon-terminated token, so no tool input parameter moves for it.
 #: `unspecified` is the fallback and is never an error for an item decision; a

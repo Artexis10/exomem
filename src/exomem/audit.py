@@ -125,6 +125,7 @@ from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
 from . import provenance as provenance_module
+from . import review_state as review_state_module
 from . import vault as vault_module
 from .collection_store import ownership
 from .collection_store.preview import canonical_read, selected_writer
@@ -149,7 +150,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "forward_reference",
     "orphan_entity",
     "unprocessed_source",
-    "uncompiled_episode",
+    review_state_module.EPISODE_BACKLOG,
     "unresolved_source_citation",
     "index_drift",
     "tag_inconsistency",
@@ -248,7 +249,7 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # A third kind of backlog, held back for the second reason above: a conversation
     # recap with a Decided line that no live page cites is a threshold the product
     # chose, and the family ships dark (`review_state.DEFAULT_DISPOSITIONS`).
-    "uncompiled_episode",
+    review_state_module.EPISODE_BACKLOG,
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
@@ -576,14 +577,19 @@ def audit(
         findings.extend(_check_wikilinks(vault_root, pages, link_categories))
     if "orphan_entity" in selected:
         findings.extend(_check_orphan_entities(vault_root, pages))
+    @lru_cache(maxsize=1)
+    def backlog_resolver() -> vault_module.WikilinkResolver:
+        # One snapshot, built on first use, for both backlog checks.
+        return find_module.writer_resolver_snapshot(vault_root)
+
     if "unprocessed_source" in selected:
         findings.extend(
             _check_unprocessed_sources(
-                vault_root, pages, today=today, source_context=source_context
+                vault_root, pages, today=today, source_context=source_context, resolver=backlog_resolver
             )
         )
-    if "uncompiled_episode" in selected:
-        findings.extend(_check_uncompiled_episodes(vault_root, pages))
+    if review_state_module.EPISODE_BACKLOG in selected:
+        findings.extend(_check_uncompiled_episodes(vault_root, pages, resolver=backlog_resolver))
     if "unresolved_source_citation" in selected:
         findings.extend(_check_unresolved_source_citations(vault_root, pages))
     if "index_drift" in selected:
@@ -2897,7 +2903,7 @@ def _check_uncompiled_episodes(
         captured = _parse_fm_date(coverage.captured)
         rows.append(
             AuditFinding(
-                category="uncompiled_episode",
+                category=review_state_module.EPISODE_BACKLOG,
                 severity="info",
                 path=coverage.path,
                 detail=(
