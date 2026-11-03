@@ -328,10 +328,12 @@ Status and readiness probes SHALL NOT run the proof. They SHALL report the
 remembered verdict, or `unproven` when no verdict covers the current identity.
 At most one proof SHALL run per sidecar at a time. A blocking reader that
 finds a proof running SHALL wait for it and reuse its verdict rather than
-start a second proof. Graph recall SHALL prove inline when no proof is
-running, so a lone cold reader keeps the graph lane, and SHALL NOT wait on
-another reader's running proof: it proceeds without the graph lane for that
-request and reports that lane as degraded. The graph drain SHALL act on a
+start a second proof. In a one-shot process, graph recall SHALL prove inline
+when no proof is running, so a lone cold reader keeps the graph lane. In a
+managed service, graph recall SHALL NOT run the proof on the request thread:
+when no proof is running it SHALL start one background proof of the sidecar.
+Graph recall SHALL NOT wait on a running proof: it proceeds without the graph
+lane for that request and reports that lane as degraded. The graph drain SHALL act on a
 declined verdict by scheduling one whole-vault rebuild through the existing
 marker path, and SHALL NOT re-prove the sidecar on each pass.
 
@@ -362,5 +364,11 @@ marker path, and SHALL NOT re-prove the sidecar on each pass.
 
 #### Scenario: A lone cold reader keeps the graph lane
 
-- **WHEN** graph recall runs over an inherited sidecar no proof has covered and no proof is running
+- **WHEN** graph recall runs in a one-shot process over an inherited sidecar no proof has covered and no proof is running
 - **THEN** recall proves the sidecar inline once, remembers the verdict, and serves with the graph lane
+
+#### Scenario: A managed request never pays the proof
+
+- **WHEN** graph recall runs in a managed service over an inherited sidecar no proof has covered and no proof is running
+- **THEN** recall starts one background proof, returns without the graph lane, and reports `graph` as degraded
+- **AND** the next recall after that proof finishes uses its remembered verdict and serves with the graph lane

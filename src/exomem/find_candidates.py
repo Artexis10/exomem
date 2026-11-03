@@ -945,8 +945,9 @@ def collect_candidates(
                         ):
                             graph_seeds.append(p)
             # A request never stacks the O(corpus) cold proof of an inherited
-            # sidecar (#1454): it proves inline when no proof is running, and
-            # serves without the lane while another reader's proof is.
+            # sidecar (#1454): a one-shot caller proves inline when no proof is
+            # running; a managed service proves in the background. Until a
+            # verdict exists, the request serves without the lane.
             graph_index = epistemic_graph.EpistemicGraphIndex(
                 vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT
             )
