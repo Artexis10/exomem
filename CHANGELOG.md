@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.158.0](https://github.com/Artexis10/exomem/compare/v0.157.1...v0.158.0) (2026-11-03)
+
+
+### Features
+
+* **readiness:** serve a catalogue lag once the warm has proved its catalogue ([#2385](https://github.com/Artexis10/exomem/issues/2385)) ([0874c34](https://github.com/Artexis10/exomem/commit/0874c34b76678010d79d0494e5aad343d922f723))
+
+
+### Bug Fixes
+
+* **contract:** name the store in write results and the session bootstrap ([#2382](https://github.com/Artexis10/exomem/issues/2382)) ([83ffcfd](https://github.com/Artexis10/exomem/commit/83ffcfd3d184c2c89dd43f3359892334c5f8fe34))
+* **contract:** report partial and already-stored writes honestly in user_summary ([#2376](https://github.com/Artexis10/exomem/issues/2376)) ([4b3e9fe](https://github.com/Artexis10/exomem/commit/4b3e9fe97741d73a432bf86816f0e9342701e073))
+* **dreamer:** run upkeep on a busy vault, in quiet mode and in Cloud cells ([#2386](https://github.com/Artexis10/exomem/issues/2386)) ([b5593a6](https://github.com/Artexis10/exomem/commit/b5593a64dec1da72aab3c69ccfd3542d82b82bf6))
+* **standby:** keep the graph proof through a re-proof, and apply the watcher's lexical change first ([#2384](https://github.com/Artexis10/exomem/issues/2384)) ([9c419ae](https://github.com/Artexis10/exomem/commit/9c419aef684eb9d76809027d287e3d86af5f1a4f))
+* **standby:** re-prove a snapshot published after the proof at promotion, so writes are admitted ([#2390](https://github.com/Artexis10/exomem/issues/2390)) ([228e78b](https://github.com/Artexis10/exomem/commit/228e78bec5835650b287c27ebc88662b14281bff))
+
+
+### Performance
+
+* **import:** patch the corpus resolver per commit and write the run object compactly ([#2388](https://github.com/Artexis10/exomem/issues/2388)) ([b72c88e](https://github.com/Artexis10/exomem/commit/b72c88e691ec7a6d0772dfa28d1fa772315c2c61))
+
 ## [0.157.1](https://github.com/Artexis10/exomem/compare/v0.157.0...v0.157.1) (2026-11-02)
 
 
