@@ -106,8 +106,10 @@ _NORMALIZE_RE = re.compile(r"[\s-]+")
 # here for the same reason `category` does: they are governed metadata, so a
 # `## Prediction` carrying only a verdict must still report `empty_rich_unit`
 # rather than pass as authored.
+# Closed metadata keys of the semantic-unit language, shared with the writer.
+GOVERNED_UNIT_METADATA_KEYS = ("verdict", "check_by", "as_of", "until")
 _RESERVED_METADATA_KEYS = frozenset(
-    {"category", "id", "tags", "context", "relations", "verdict", "check_by"}
+    {"category", "id", "tags", "context", "relations", *GOVERNED_UNIT_METADATA_KEYS}
 )
 
 

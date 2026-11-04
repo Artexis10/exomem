@@ -153,9 +153,12 @@ def note_withheld_pages(command_name, result, vault_root):
         warming["components"] = sorted({*warming.get("components", ()), find._STORE_UNAVAILABLE_COMPONENT})
         return {**out, "warming": warming}
     if command_name == "activate_context" and isinstance(result, dict) and isinstance(result.get("generation"), dict):
-        from .. import activation_result
+        from .. import activation_result, context_views
 
-        return {**result, "generation": {**result["generation"], "collection_store": activation_result.UNAVAILABLE}}
+        out = {**result, "generation": {**result["generation"], "collection_store": activation_result.UNAVAILABLE}}
+        if "map" in out and isinstance(out.get("budget"), dict):
+            out["budget"] = {**out["budget"], "serialized_chars": context_views.serialized_chars(out)}
+        return out
     return result
 
 

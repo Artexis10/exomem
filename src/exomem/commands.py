@@ -1800,10 +1800,7 @@ def op_bootstrap(
                 "and reusable patterns as compiled notes; keep raw artifacts in "
                 "Sources and case-bound proof in Evidence."
             ),
-            "miss_rule": (
-                "Empty recall means not found in that query/scope. Try related terms or "
-                "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections."
-            ),
+            "next_action": "Follow `next_action` when present.",
         },
         "workflow_skills": workflow_skills_module.bootstrap_entries(),
         "authoring_contract": {
@@ -6549,7 +6546,7 @@ def op_ask_memory(
     """Search compiled knowledge and originals for an evidence gap.
 
     Reuse recall_context; read_memory opens selected refs. deep=true packs context.
-    Results are bounded; a miss covers only this query/scope. Evidence is not an answer.
+    A miss covers only this query/scope. Follow `next_action`. Evidence is not an answer.
     Help: bootstrap(profile="full").
 
     Args:
@@ -6628,7 +6625,26 @@ def op_ask_memory(
                 purpose=purpose,
             )
             result = _with_due_state(vault_root, result, purpose=purpose)
+    from . import read_next_action
+
+    if isinstance(result, list):
+        if not result:
+            result = {"hits": result}
+    if isinstance(result, dict):
+        read_next_action.attach(result, search=True)
     return recall_timing_module.completed(result, trace)
+
+
+def op_served_context(vault_root: Path, *, served_context_id: str | None = None) -> dict:
+    """Inspect retained composed response metadata with verified owner authority.
+
+    Omit served_context_id for retained-row counts and unknown usage.
+    Args:
+        served_context_id: Exact row id from a maps response; grants no authority.
+    """
+    from . import served_context
+
+    return served_context.read(vault_root, served_context_id=served_context_id)
 
 
 def _with_due_state(
@@ -6732,7 +6748,7 @@ def op_activate_context(
     Reuse held context; conversation supplies excerpts, not attachment reads.
     focus is agent-authored, not human intent; clarify ambiguity.
     Keep source identity/scope. Due/refresh grants no writes.
-    Pull map refs with read_memory.
+    Read map refs with read_memory; follow `next_action`.
     Optional epistemic_status has counts/completeness; read_memory gives
     items/reading provenance.
 
@@ -6792,6 +6808,9 @@ def op_activate_context(
     # packet exists — the session as a vault-keyed hash, the workspace not at
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
+    from . import read_next_action
+
+    requested_chars = working_set_module.clamp_budget(max_chars)
     started = time.perf_counter()
     bounded = None
     # The maintained collector also feeds host-local observations. Payloads remain opt-in.
@@ -6831,7 +6850,7 @@ def op_activate_context(
                         packet = _op_activate_context_body(
                             vault_root,
                             turn,
-                            max_chars,
+                            requested_chars,
                             purpose=purpose,
                             continuity=continuity,
                             anchor=anchor,
@@ -6880,6 +6899,11 @@ def op_activate_context(
                         block = active_budget.as_response_block() if active_budget is not None else None
                         if block is not None:
                             packet["request_budget"] = block
+                    if isinstance(packet.get("budget"), dict):
+                        packet["budget"]["limit_chars"] = requested_chars
+                    read_next_action.attach(packet)
+                    if "map" in packet and isinstance(packet.get("budget"), dict):
+                        packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
                     return packet
             finally:
                 egress_module.emit_boundary_receipt(collector)
@@ -7259,7 +7283,9 @@ def _op_activate_context_body(
     wrapper just bound). Kept separate so the wrapper's `try/finally` never
     has to wrap this function's many early returns."""
     timings = observation_timings or (find_types.FindTimings() if include_timings else None)
-    budget = working_set_module.clamp_budget(max_chars)
+    from . import read_next_action
+
+    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS
     turn = str(turn or "")
     anchor = str(anchor or "").strip() or None
 
@@ -7562,6 +7588,7 @@ def _op_activate_context_body(
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                     known_generation=(held_map or {}).get("map_generation"),
+                    packet_limit=working_set_module.clamp_budget(max_chars),
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
@@ -8343,6 +8370,8 @@ def op_observe_memory(
     relations: list[dict] | None = None,
     verdict: str | None = None,
     check_by: str | None = None,
+    as_of: str | None = None,
+    until: str | None = None,
     id: str | None = None,
     unit_ref: str | None = None,
     expected_fingerprint: str | None = None,
@@ -8356,32 +8385,31 @@ def op_observe_memory(
 ) -> dict:
     """Check or edit one semantic unit on a compiled note.
 
-    Default: compact observation; other governed kinds use rich form and typed
-    relations. Validate first when semantic review is required.
+    Defaults to compact; governed kinds use rich form and typed relations.
+    Validate when semantic review is required.
 
     Args:
-        path: Parent page path or memory reference.
-        operation: add, update, remove, or validate.
+        path: Parent path or memory ref.
+        operation: add/update/remove/validate.
         kind: Governed rich kind; omitted means compact observation.
         tags: Replaces on update.
         context: Replaces on update.
         relations: {kind, target} objects. Replaces on update.
-        verdict: Rich-only: abandoned, confirmed, inconclusive, qualified, or
-            refuted. Empty string clears it on update.
-        check_by: Rich-only ISO revisit date. Empty string clears it on update.
-        id: Unique anchor within the parent; derived on add if omitted.
-        unit_ref: Exact unit reference for update/remove or previewing an existing unit.
-            Without it, validate previews an addition.
-        expected_fingerprint: Current unit fingerprint; required for update/remove.
-            Echo it when previewing an existing unit.
-        expected_hash: Current parent-page content hash; required for update/remove.
+        verdict: Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears.
+        check_by: Rich ISO revisit date; '' clears.
+        as_of: Rich ISO start date; '' clears.
+        until: Rich ISO last valid date; '' clears.
+        id: Parent-unique anchor; derived on add if omitted.
+        unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
+        expected_fingerprint: Current fingerprint for update/remove and existing-unit preview.
+        expected_hash: Current parent hash for update/remove.
         transition_token: From validate.
         relation_disposition: Semantic review disposition (existing page).
         relation_review_hash: Transition hash the reviewed-none covers.
         relation_review_reason: Audit reason for reviewed-none.
-        reason: Optional rationale retained with the prior interpretation.
-        target_fingerprints: Exact corrective target refs and current fingerprints.
-            Omit for ordinary page or heading relations; episode unit leaves echo them.
+        reason: Rationale kept with the prior interpretation.
+        target_fingerprints: Exact corrective refs/current fingerprints.
+            Omit for page/heading links; echo for episode unit leaves.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -8431,6 +8459,8 @@ def op_observe_memory(
             relations=relations,
             verdict=verdict,
             check_by=check_by,
+            as_of=as_of,
+            until=until,
             id=id,
             unit_ref=unit_ref,
             expected_fingerprint=expected_fingerprint,
@@ -13763,6 +13793,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("served_context", op_served_context, 2, False, False, None, _RC),
     ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
@@ -13854,6 +13885,8 @@ def _build_commands() -> tuple[Command, ...]:
 
 # Preferred spellings are closed API tokens; execution names keep receipts and policies stable.
 _PRODUCT_SPEC: tuple[tuple, ...] = (
+    ("served_context", op_served_context, 2, False, False, None, _RC, ("served_context",),
+     {"public_title": "Inspect composed response metadata", "surface": "advanced", "actions": (), "first_run_safe": False}),
     (
         "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
         ("configure_memory",),

@@ -167,37 +167,23 @@ _WORKING_SET_HEADER = (
 )
 # One default with an environment override, no per-prominence table (design D9).
 _WORKING_SET_MAX_CHARS = 4000
-# The one thing a hook can ask of the agent, and the whole reason an abstention is
-# rendered at all: the agent is the only party allowed to choose a sense. Both
-# rendered abstentions end with this exact string; each gets its own lead, because
-# "two senses match" is false when none resolved and five candidates are listed.
-_WORKING_SET_ANCHOR_INSTRUCTION = (
-    "Call `recall_context` again with `anchor` set to the ref you mean."
-)
-_WORKING_SET_AMBIGUITY_LINE = (
-    "Two senses match this turn. " + _WORKING_SET_ANCHOR_INSTRUCTION
-)
-_WORKING_SET_UNRESOLVED_LINE = (
-    "None of these resolved on the turn's words alone. "
-    + _WORKING_SET_ANCHOR_INSTRUCTION
-)
-#: The same menu for pages the turn NAMED, which used to need a different
-#: remedy: `anchor=` used to select only a sense of an AMBIGUOUS turn from
-#: the activation index's own anchors, and a named page was not one of
-#: those. It now also accepts an ordinary compiled page
-#: (`working_set._eligible_agent_page` — not raw material, not navigation,
-#: not retired), which is exactly what a `retrieval_named` entry is, so the
-#: SAME instruction the other two menus give now works here too.
-_WORKING_SET_NAMED_LINE = (
-    "The turn named these pages, but none was carried. "
-    + _WORKING_SET_ANCHOR_INSTRUCTION
-)
-#: The lead for pages the service listed because the turn's words and the
-#: stored text agree on them, though the turn named none. They are listed, never
-#: loaded, so the agent reads one itself if it bears on the turn.
-_WORKING_SET_RELATED_LINE = (
-    "Related pages (not loaded). `read_memory` one if it bears on this turn."
-)
+# BEGIN GENERATED NEXT ACTION COMPATIBILITY
+_COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recall_context` again with the original turn '
+              'and `anchor` set to the ref you mean.',
+ 'related': 'Related pages (not loaded). Use `read_memory` to read a relevant ref before relying '
+            'on it.',
+ 'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '
+               'verify it before relying on it.',
+ 'search_miss': 'Empty recall means not found in that query/scope. Try related terms or '
+                "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections.",
+ 'slice_empty': 'Map and slice cover compiled material only. Use `search_memory` for captured '
+                'Sources; an empty slice is not proof of absence.'}
+# END GENERATED NEXT ACTION COMPATIBILITY
+_WORKING_SET_ANCHOR_INSTRUCTION = _COMPAT_NEXT_ACTION.get("ambiguous", "")
+_WORKING_SET_AMBIGUITY_LINE = _WORKING_SET_ANCHOR_INSTRUCTION
+_WORKING_SET_UNRESOLVED_LINE = _WORKING_SET_ANCHOR_INSTRUCTION
+_WORKING_SET_NAMED_LINE = _WORKING_SET_ANCHOR_INSTRUCTION
+_WORKING_SET_RELATED_LINE = _COMPAT_NEXT_ACTION.get("related", "")
 # Evidence kinds meaning the TURN'S OWN WORDS reached the anchor, as against
 # recall having surfaced it. This is the whole filter on an `unresolved` block: a
 # turn about a Planning item or a Records collection routinely ends `unresolved`
@@ -1478,6 +1464,10 @@ def _activation_map_path(session_id: str) -> Path:
     )
 
 
+def _activation_stance_path(session_id: str) -> Path:
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(_state_core().ACTIVATION_STANCE_GENERATION_SUFFIX)
+
+
 def _activation_map_overhead_path(session_id: str) -> Path:
     """Remember map framing independently of whether every item fit."""
     return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
@@ -1830,6 +1820,7 @@ def _menu_block(packet: dict, menu: list[str], instruction: str, max_chars: int)
     what is left is the recent block alone with the room the instruction no
     longer needs.
     """
+    instruction = str((packet.get("next_action") or {}).get("say") or instruction)
     reserve = len(instruction) + 1
     room = max_chars - reserve
     menu_kept = _bounded_lines(menu, room)
@@ -2085,11 +2076,45 @@ def _format_slice_block(block: object, max_chars: int) -> str:
     return "\n".join([leading, *kept, *tail])
 
 
-def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
-    """The map block, then the turn slice the packet carries beside it, and whether the map was complete."""
-    text, complete = _format_map_block(packet["map"], max_chars, last_generation)
-    turn = _format_slice_block(packet.get("turn_slice"), max_chars - len(text) - (1 if text else 0))
-    return ("\n".join([text, turn]) if text else turn) if turn else text, complete
+def _format_stance_block(block: object, max_chars: int, last_generation: str = "") -> tuple[str, bool]:
+    """Whole global lines under the data header; remember only a complete generation."""
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return "", True
+    if block.get("generation") and block["generation"] == last_generation:
+        pointer = "- stance: use the global lines already held for this generation."
+        return (pointer, True) if len(pointer) <= max_chars else ("", False)
+    lines = []
+    for item in block.get("items") or ():
+        text = str(item.get("text") or "")
+        if item.get("review_due"):
+            text += f" (review due {item['review_due']})"
+        lines.append(_packet_line("stance", text, str(item.get("ref") or "")))
+    tail = f"- stance: {block['omitted']} more not shown." if block.get("omitted") else ""
+    kept, used = [], len(tail) + (1 if tail else 0)
+    for line in lines:
+        if used + len(line) + (1 if kept else 0) > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + (1 if len(kept) > 1 else 0)
+    if len(kept) != len(lines):
+        return "", False
+    return "\n".join([*kept, *([tail] if tail else [])]), True
+
+
+def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool]:
+    """The map, stance and slice data, followed by one supplied move."""
+    action = str((packet.get("next_action") or {}).get("say") or "")
+    if not action and (packet.get("turn_slice") or {}).get("state") == "empty":
+        action = _COMPAT_NEXT_ACTION.get("slice_empty", "")
+    action = action if len(action) <= min(240, max_chars) else ""
+    room = max_chars - len(action) - (1 if action else 0)
+    stance_text, stance_complete = _format_stance_block(packet.get("stance"), room, last_stance)
+    text, complete = _format_map_block(packet["map"], room - len(stance_text) - (1 if stance_text else 0), last_generation)
+    parts = [part for part in (text, stance_text) if part]
+    used = len("\n".join(parts))
+    turn = _format_slice_block(packet.get("turn_slice"), room - used - (1 if parts else 0))
+    parts.extend(part for part in (turn, action) if part)
+    return "\n".join(parts), complete and stance_complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
@@ -2173,6 +2198,10 @@ def _format_working_set_block(packet: dict, max_chars: int, last_generation: str
         if reason == "unresolved":
             return _format_unresolved_block(packet, max_chars)
         return _bounded_block([*_recent_lines(packet), *_upkeep_lines(packet)], max_chars)
+    action = str((packet.get("next_action") or {}).get("say") or "")
+    if action and len(action) <= 240:
+        block = _bounded_resolved_block(packet, max_chars - len(action) - 1)
+        return "\n".join(part for part in (block, action) if part)
     return _bounded_resolved_block(packet, max_chars)
 
 
@@ -2603,7 +2632,7 @@ def _refresh_load(state, client: str, home: Path, session_id: str) -> dict:
         fd = safe._open_secure_file_at(state, REFRESH_STATE_NAME, os.O_RDONLY)
     except FileNotFoundError:
         if not safe.initialize_refresh_state_at(state, home, client, session_id):
-            raise ValueError("initialized refresh state is missing; prior totals are unavailable")
+            raise ValueError("initialized refresh state is missing; prior totals are unavailable") from None
         value = {
             "schema_version": 1,
             "client": client,
@@ -3278,10 +3307,13 @@ def main(argv: list[str] | None = None) -> int:
                 overhead_path = _activation_map_overhead_path(session_id)
                 max_chars = _read_map_request_max_chars(session_id)
                 last_generation = _read_activation_value(generation_path) if continuity else ""
+                stance_path = _activation_stance_path(session_id)
+                last_stance = _read_activation_value(stance_path) if continuity else ""
             except (AttributeError, OSError, ValueError):
                 # A mixed hook pair loses map state, never the working set.
                 generation_path = overhead_path = None
                 max_chars, last_generation = None, ""
+                stance_path, last_stance = None, ""
             request_budget = {"max_chars": max_chars} if max_chars is not None else {}
             packet, lane = _gather_packet_with_lane(
                 prompt,
@@ -3298,7 +3330,7 @@ def main(argv: list[str] | None = None) -> int:
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
             if isinstance(packet.get("map"), dict):
-                block, complete = _format_map_with_slice(packet, _working_set_max_chars(), last_generation)
+                block, complete = _format_map_with_slice(packet, _working_set_max_chars(), last_generation, last_stance)
                 if generation_path is not None and overhead_path is not None:
                     try:
                         overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
@@ -3312,6 +3344,8 @@ def main(argv: list[str] | None = None) -> int:
                             _write_activation_value(overhead_path, str(overhead))
                         if block and complete:
                             _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
+                            if stance_path is not None and (packet.get("stance") or {}).get("state") == "ready":
+                                _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
                         elif not complete:
                             _state_core().unlink_nudge_file(generation_path)
                     except (AttributeError, OSError, ValueError):

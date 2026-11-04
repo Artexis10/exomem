@@ -63,7 +63,7 @@ EPISTEMIC_OUTCOMES: tuple[str, ...] = (
 )
 
 #: Governed rich unit-metadata keys this module parses, validates, and projects.
-GOVERNED_UNIT_METADATA_KEYS: tuple[str, ...] = ("verdict", "check_by")
+GOVERNED_UNIT_METADATA_KEYS = semantic_blocks.GOVERNED_UNIT_METADATA_KEYS
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -156,6 +156,8 @@ class SemanticUnit:
     # `context` already are, so no downstream consumer re-parses a raw row.
     verdict: str | None = None
     check_by: str | None = None
+    as_of: str | None = None
+    until: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))
@@ -214,6 +216,8 @@ class SemanticUnit:
             # a hit omits what it has nothing to say about.
             "verdict": self.verdict,
             "check_by": self.check_by,
+            "as_of": self.as_of,
+            "until": self.until,
         }
 
 
@@ -499,6 +503,8 @@ class UnitStructure:
     start_offset: int = 0
     unit_ref: str | None = None
     fingerprint: str | None = None
+    as_of: str | None = None
+    until: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,6 +760,8 @@ def interpret_structural_summary(
             row.get("anchor") if form == "compact" else row["metadata"].get("id"),
             row["line"], row["end_line"], row["source_hash"], relations, row["key"],
             row["start_offset"], unit_ref, fingerprint,
+            as_of=calendar_date(row.get("metadata", {}).get("as_of")),
+            until=calendar_date(row.get("metadata", {}).get("until")),
         )
         for (row, form, kind, category, relations), (unit_ref, fingerprint, _) in zip(
             emitted, bindings, strict=True,
@@ -1106,9 +1114,15 @@ def _rich_unit(
     rich_tags, tags_error = _rich_tags(block, path=path, line_by_number=line_by_number)
     rich_context, context_error = _rich_context(block, path=path, line_by_number=line_by_number)
     rich_verdict, verdict_error = _rich_verdict(block, path=path, line_by_number=line_by_number)
-    rich_check_by, check_by_error = _rich_check_by(
-        block, path=path, line_by_number=line_by_number,
-    )
+    rich_check_by, check_by_error = _rich_date(block, key="check_by", path=path, line_by_number=line_by_number)
+    rich_as_of, as_of_error = _rich_date(block, key="as_of", path=path, line_by_number=line_by_number)
+    rich_until, until_error = _rich_date(block, key="until", path=path, line_by_number=line_by_number)
+    order_error = None
+    if rich_as_of and rich_until and dt.date.fromisoformat(rich_until) < dt.date.fromisoformat(rich_as_of):
+        order_error = replace(_invalid_rich_metadata(
+            block, key="until", path=path, line_by_number=line_by_number,
+            message="until precedes as_of", remediation="Set until on or after as_of.",
+        ), code="invalid_rich_date_order")
     unit = SemanticUnit(
         form="rich",
         kind=block.type,
@@ -1134,10 +1148,12 @@ def _rich_unit(
         body=block.body,
         verdict=rich_verdict,
         check_by=rich_check_by,
+        as_of=rich_as_of,
+        until=rich_until,
     )
     return unit, [
         error
-        for error in (category_error, tags_error, context_error, verdict_error, check_by_error)
+        for error in (category_error, tags_error, context_error, verdict_error, check_by_error, as_of_error, until_error, order_error)
         if error is not None
     ]
 
@@ -1698,44 +1714,34 @@ def _rich_verdict(
     return verdict, None
 
 
-def _rich_check_by(
-    block: semantic_blocks.SemanticBlock,
-    *,
-    path: str,
+def calendar_date(raw: object) -> str | None:
+    """A strict language date, shared with metadata-only selection."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    try:
+        if _ISO_DATE_RE.fullmatch(value) and dt.date.fromisoformat(value).isoformat() == value:
+            return value
+    except ValueError:
+        pass
+    return None
+
+
+def _rich_date(
+    block: semantic_blocks.SemanticBlock, *, key: str, path: str,
     line_by_number: dict[int, _SourceLine],
 ) -> tuple[str | None, SemanticUnitDiagnostic | None]:
-    """Validate the governed `check_by` row as a strict ISO calendar date."""
-    raw = block.metadata.get("check_by")
+    """Validate a language-declared date field with the same strict calendar parser."""
+    raw = block.metadata.get(key)
     if raw is None:
         return None, None
-    value = raw.strip()
-    if _ISO_DATE_RE.fullmatch(value) is None:
-        return None, _invalid_check_by(block, path, line_by_number)
-    try:
-        parsed = dt.date.fromisoformat(value)
-    except ValueError:
-        return None, _invalid_check_by(block, path, line_by_number)
-    if parsed.isoformat() != value:
-        return None, _invalid_check_by(block, path, line_by_number)
-    return value, None
-
-
-def _invalid_check_by(
-    block: semantic_blocks.SemanticBlock,
-    path: str,
-    line_by_number: dict[int, _SourceLine],
-) -> SemanticUnitDiagnostic:
-    return _invalid_rich_metadata(
-        block,
-        key="check_by",
-        path=path,
-        line_by_number=line_by_number,
-        message="invalid rich semantic-unit check_by date",
-        remediation=(
-            "Use one exact ISO calendar date spelled YYYY-MM-DD. A check-by "
-            "date names the day a claim should be revisited, so timestamps and "
-            "abbreviated dates are not accepted."
-        ),
+    value = calendar_date(raw)
+    if value is not None:
+        return value, None
+    return None, _invalid_rich_metadata(
+        block, key=key, path=path, line_by_number=line_by_number,
+        message=f"invalid rich semantic-unit {key} date",
+        remediation="Use one exact ISO calendar date spelled YYYY-MM-DD; timestamps and abbreviated dates are not accepted.",
     )
 
 

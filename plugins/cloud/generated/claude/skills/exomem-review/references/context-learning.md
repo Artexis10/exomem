@@ -36,6 +36,11 @@ If the source and supplied context are correct, investigate the engine or answer
 If an authored constraint is absent from the description, consider a supported summary correction with its source and target version.
 Resolve aliases, topics, and relations through their existing registries and ambiguity rules.
 
+When the response carries `served_context_id`, link that id as composed response metadata instead of copying its refs.
+Use the owner CLI or REST `served_context` readout; a tool or row id grants no owner authority.
+A retained row proves neither client receipt nor opening, citation or use. Refs do not preserve historical text.
+Record a missing row as absent unless independent retention evidence proves expiry. Without access, preserve the evidence gap.
+
 ## Apply one supported correction
 
 1. Read the current target and its provenance; the proposed change cites the source and current target version.

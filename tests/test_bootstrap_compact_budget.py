@@ -181,7 +181,7 @@ def test_compact_still_teaches_the_core_loop(payloads):
     compact = payloads["reference"]
     workflow = compact["workflow"]
     assert workflow["save_rule"]
-    assert workflow["miss_rule"]
+    assert workflow["next_action"]
     for section in ("server", "active_capabilities", "governance", "search_guidance"):
         assert section in compact, section
 

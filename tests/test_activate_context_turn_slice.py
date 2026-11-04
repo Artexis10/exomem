@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from conversation_vault import seed as seed_conversation_vault
-from test_activate_context_maps import _activate
+from test_activate_context_maps import _activate, _without_response_id
 from test_context_catalogue import INSIGHTS, _built, _seed, _write
 from test_context_views import OWNER, _cold, _second_vault
 from test_governance_egress import _external
@@ -80,7 +80,8 @@ def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path) ->
     for packet in (irrelevant, blank):
         assert packet["turn_slice"]["state"] == "empty"
         assert packet["turn_slice"]["items"] == []
-        assert "description" not in packet["turn_slice"]
+        assert packet["turn_slice"]["description"]
+        assert packet["next_action"]["state"] == "slice_empty"
         assert packet["map"] == resolving["map"]
         assert packet["continuity"] == resolving["continuity"]
         assert packet["generation"]["map_generation"] == resolving["generation"]["map_generation"]
@@ -102,7 +103,7 @@ def test_a_withheld_namesake_and_titled_page_change_no_byte_for_a_restricted_cal
         _cold()
         owners.append(_activate(root, OWNER, turn=NAMING_TURN))  # fills the owner caches before a restricted read
         guests.append(_activate(root, _external(), turn=NAMING_TURN))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     visible = [item["ref"] for item in guests[0]["turn_slice"]["items"]]
     assert visible == [CARGO_SLED]  # the control: the guest does reach the anchor that it may see
     assert owners[0]["turn_slice"] != owners[1]["turn_slice"]  # the control: the owner's slice does see the extra pages
@@ -147,7 +148,7 @@ def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(
     for root in (vault, twin):
         _cold()
         guests.append(_activate(root, _external(), turn=LONG_TURN))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     # The control: leads whose evidence the statistics decide.
     assert any("retrieval" in item["evidence"] for item in guests[0]["turn_slice"]["items"])
 
@@ -713,7 +714,7 @@ def test_a_conversation_naming_withheld_pages_changes_no_byte_for_a_restricted_c
         _cold()
         owners.append(_activate(root, OWNER, turn=turn, conversation=WITHHELD_THREAD))  # fills the owner caches first
         guests.append(_activate(root, _external(), turn=turn, conversation=WITHHELD_THREAD))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     assert guests[0]["turn_slice"]["items"]  # the control: the guest does reach what it may see through the thread
     assert owners[0]["turn_slice"] != owners[1]["turn_slice"]  # the control: the owner's slice does see the extra pages
     assert LEDGER in json.dumps(owners[0]["turn_slice"])

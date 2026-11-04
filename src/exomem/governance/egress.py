@@ -831,6 +831,8 @@ _UNIT_FIELDS: frozenset[str] = frozenset(
         "context",
         "verdict",
         "check_by",
+        "as_of",
+        "until",
         "relations",
         "source_anchor",
         "source_span",
@@ -3840,7 +3842,13 @@ def guard_working_set(
                         release_gate_active=release_gate_active, who=who, purpose=purpose,
                     )
                 guarded["turn_slice"] = slice_block
-            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block)
+            stance_chars = 0
+            if "stance" in guarded:
+                from .. import stance
+
+                guarded["stance"] = stance.guard_block(vault_root, caller, guarded["stance"])
+                stance_chars = stance.chars(guarded["stance"])
+            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block) + stance_chars + len((guarded.get("next_action") or {}).get("say", ""))
 
     ctx = _packet_release(
         vault_root,
@@ -5956,6 +5964,16 @@ def postfilter(
         and cleaned != evidence_projection
     ):
         cleaned.pop("evidence_version", None)
+    if command_name == "activate_context" and isinstance(cleaned, dict):
+        from .. import context_views, served_context
+
+        with call_spans.span("working_set.served_context"):
+            served_context.finalize(
+                vault_root, cleaned, session=(request_kwargs or {}).get("session"),
+                purpose=(request_kwargs or {}).get("purpose"),
+            )
+        if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
+            cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
             if metadata_evidence is not None else cleaned)
 
@@ -6216,6 +6234,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # what it emits is refs and short provenance-bearing excerpts naming vault
     # items, which is exactly what the structure backstop filters.
     "activate_context": "structure",
+    "served_context": "structure",
     # `inspect` names the caller's own recap by ref; `record` names the page
     # the caller just wrote. Both go through the dispatcher cross-check.
     "episode_memory": "structure",
@@ -6249,6 +6268,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "plan_memory": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
+    "served_context": "structure",
     "episode_memory": "structure",
 }
 

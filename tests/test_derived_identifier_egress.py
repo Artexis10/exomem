@@ -3145,7 +3145,7 @@ def _activated(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any
         answers[turn] = {
             key: value
             for key, value in packet.items()
-            if key not in {"timings", "continuity", "generation"}
+            if key not in {"timings", "continuity", "generation", "served_context_id"}
         }
         answers[turn]["generation"] = sorted((packet.get("generation") or {}).keys())
     return answers

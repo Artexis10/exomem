@@ -54,6 +54,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
+from datetime import date
 from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
@@ -304,6 +305,8 @@ def cache_key(
 
     """
     return (
+        # Currency and weak-state ages change at midnight without a vault write.
+        date.today().isoformat(),
         tuple(freshness_key) if isinstance(freshness_key, (list, tuple)) else str(freshness_key),
         int(index_generation),
         str(roles_hash),
@@ -2534,7 +2537,8 @@ def serve(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
-    limit = working_set.clamp_budget(max_chars)
+    # The public leaf clamps requests; internal budgets may already reserve carrier prose.
+    limit = working_set.clamp_budget(max_chars, minimum=0)
     registry = context_roles.load_roles(root)
     conventions_registry = activation_conventions.load_conventions(root)
     stamp = _key_text(freshness_key)

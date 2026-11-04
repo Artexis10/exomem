@@ -44,6 +44,7 @@ def optional_sibling_module(filename: str):
 
 # Shared filenames for the retrieve hook's per-client, per-session map state.
 ACTIVATION_MAP_GENERATION_SUFFIX = ".map-generation"
+ACTIVATION_STANCE_GENERATION_SUFFIX = ".stance-generation"
 ACTIVATION_MAP_OVERHEAD_SUFFIX = ".map-overhead"
 
 SCHEMA_VERSION = 1
@@ -474,6 +475,7 @@ def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
     for path in (
         token,
         token.with_suffix(ACTIVATION_MAP_GENERATION_SUFFIX),
+        token.with_suffix(ACTIVATION_STANCE_GENERATION_SUFFIX),
         token.with_suffix(ACTIVATION_MAP_OVERHEAD_SUFFIX),
     ):
         try:

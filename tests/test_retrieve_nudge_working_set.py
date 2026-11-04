@@ -638,7 +638,7 @@ def test_a_real_rare_term_candidate_from_the_leaf_is_rendered(tmp_path: Path) ->
         "- resource: Quibbleflux Zorbnax Panel [Knowledge Base/Products/panel.md]"
         in block
     )
-    assert hook._WORKING_SET_UNRESOLVED_LINE in block
+    assert (packet.get("next_action") or {}).get("say", hook._WORKING_SET_UNRESOLVED_LINE) in block
 
 
 def test_at_most_five_candidates_are_rendered() -> None:
@@ -690,24 +690,6 @@ def test_a_candidate_ref_kind_or_title_cannot_forge_a_line() -> None:
 
     assert len(block.splitlines()) == 3, block
     assert block.count("forged") == 3, "the text survives, but only inside its line"
-
-
-def test_the_anchor_instruction_is_the_same_one_in_both_abstentions() -> None:
-    """`ambiguous` says two senses compete; `unresolved` says none resolved. The
-    instruction they end with — the thing the agent has to DO — is one string."""
-    assert hook._WORKING_SET_AMBIGUITY_LINE.endswith(
-        hook._WORKING_SET_ANCHOR_INSTRUCTION
-    )
-    assert hook._WORKING_SET_UNRESOLVED_LINE.endswith(
-        hook._WORKING_SET_ANCHOR_INSTRUCTION
-    )
-    assert hook._WORKING_SET_AMBIGUITY_LINE != hook._WORKING_SET_UNRESOLVED_LINE
-    # The ambiguity line's bytes are a contract already asserted above; the
-    # refactor into a shared instruction must not have moved them.
-    assert hook._WORKING_SET_AMBIGUITY_LINE == (
-        "Two senses match this turn. Call `recall_context` again with `anchor` "
-        "set to the ref you mean."
-    )
 
 
 def test_the_reminder_follows_an_unresolved_block_and_not_the_others() -> None:

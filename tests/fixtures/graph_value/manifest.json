@@ -141,6 +141,7 @@
         "bootstrap": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "ask_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "activate_context": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "served_context": {"classification": "excluded", "reason": "owner-only response metadata readout is outside this graph workflow"},
         "read_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "viewer_map": {"classification": "excluded", "reason": "this CLI surface exposes the same bounded map projection; the MCP benchmark does not exercise that operation"},
         "browse_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},

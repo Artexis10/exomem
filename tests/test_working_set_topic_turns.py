@@ -221,7 +221,7 @@ def test_a_topic_turn_in_ordinary_words_lists_the_page_its_title_names(
         for anchor in packet["anchors"]
     ] == [(CLEANING, "retrieval_named", ["lexical_overlap", "retrieval"], ["cycling"])]
     assert packet["units"] == [] and packet["pointers"] == [] and packet["current_state"] == []
-    assert packet["budget"]["used_chars"] == 0
+    assert packet["budget"]["used_chars"] == len(packet["next_action"]["say"])
     assert CLEANING not in working_set_runtime.decode_continuity(packet["continuity"])["refs"]
 
     picked = _activate(workshop_vault, turn, anchor=CLEANING)
