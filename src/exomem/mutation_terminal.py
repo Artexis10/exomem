@@ -325,6 +325,12 @@ def _path_projection(result: Any) -> dict[str, Any]:
     raw_paths = result.get("paths")
     if isinstance(raw_paths, (list, tuple)) and all(isinstance(item, str) for item in raw_paths):
         return {"paths": list(raw_paths)}
+    apply_result = result.get("apply_result")
+    if isinstance(apply_result, Mapping):
+        # The import leaf records only this page's committed Sources and notes.
+        written = apply_result.get("written")
+        if isinstance(written, (list, tuple)) and all(isinstance(item, str) for item in written):
+            return {"paths": list(written)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
         return {"path": source["path"]}
