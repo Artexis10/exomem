@@ -72,15 +72,20 @@ class McpCell(Cell):
 
     def __init__(self, config: CloudImportClientConfig, oauth):
         self._client = Client(config.mcp_url, auth=oauth, timeout=120)
+        self._entered = False
 
     async def __aenter__(self) -> McpCell:
-        await self._client.__aenter__()
         return self
 
     async def __aexit__(self, *error) -> None:
-        await self._client.__aexit__(*error)
+        if self._entered:
+            self._entered = False
+            await self._client.__aexit__(*error)
 
     async def _call(self, arguments: dict) -> dict:
+        if not self._entered:
+            await self._client.__aenter__()
+            self._entered = True
         result = await self._client.call_tool("adoption_studio", arguments)
         if isinstance(result.structured_content, dict):
             return result.structured_content
@@ -555,6 +560,16 @@ class _Run:
 
     # -- the series
 
+    async def resume_active(self) -> None:
+        """Resume admitted windows before contacting the cell that their imports keep stopped."""
+        for window in list(self.series.windows):
+            if window.state != "open":
+                continue
+            row = await self._own_row(window.import_id)
+            # The Cloud import protocol fixes `done`; finished or ended rows still need receipt reconciliation.
+            if row is not None and row["observed_state"] != "done" and not _ended(row):
+                await self.send(window)
+
     async def drive(self) -> dict:
         reading = await self.read()
         await self.reconcile(reading)
@@ -607,6 +622,12 @@ class _Run:
         """Resume from the record: a landed window without a receipt is sent again; an open window resumes."""
         if not self.series.windows:
             return
+        if reading.windows_unknown:
+            # The early row read can precede an unknown listing; keep the terminal row's receipt and discard advice.
+            for window in list(self.series.windows):
+                if window.state == "open":
+                    await self.resume(window)
+            reading = await self.read()
         since = self.clock()
         while reading.windows_unknown:  # An unknown listing proves nothing: waiting, never sending a landed window again.
             await self.wait(since, f"the cell cannot list its window records: {reading.windows_unknown}")
@@ -800,12 +821,15 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
     response = await api.request("GET", base)
     response.raise_for_status()
     limits = response.json().get("limits")
-    first = Reading.of(await cell.status())
     options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
     settings = {"cell": cell, "api": api, "uploads": uploads, "limits": limits, "progress": progress,
                 "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock}
     if resend:
-        return await _resend(source, config, checkpoint, record, series, first, options, settings, held)
+        return await _resend(source, config, checkpoint, record, series, options, settings, held)
+    run = _Run(series, record, source, config, **settings) if series is not None else None
+    if run is not None:
+        await run.resume_active()
+    first = Reading.of(await cell.status())
     if first.older_cell:
         if series is not None:  # A series exists: sending the folder as one import would send every landed member again.
             raise stopped(series, "NO_WINDOW_BUDGET", "the cell reports no window budget now (its media store may be off or rolled back), "
@@ -815,7 +839,7 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
         series = await _begin(source, config, record, first, options, settings)
     if series not in held:
         held.append(series)
-    run = _Run(series, record, source, config, **settings)
+    run = run or _Run(series, record, source, config, **settings)
     return await run.drive()
 
 
@@ -878,13 +902,14 @@ async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:
             return found
 
 
-async def _resend(source, config, checkpoint, record, series, first, options, settings, held) -> dict:
+async def _resend(source, config, checkpoint, record, series, options, settings, held) -> dict:
     """Send the residual of a finished series as a new series that carries the first series' file unchanged."""
     progress = settings["progress"]
     original = Series.read(checkpoint / SERIES_RECORD)
     if original is None:
         raise CloudImportError(PREFLIGHT, "NO_SERIES", "this folder has no series to resend", resume=False)
     if series is None:
+        first = Reading.of(await settings["cell"].status())
         if first.bounds is None:
             raise CloudImportError(PREFLIGHT, "CELL_FIGURES_UNKNOWN", "the cell reports no classification inputs; try again later", resume=False)
         recorded = {member.path: member for member in original.members}
@@ -920,6 +945,7 @@ async def _resend(source, config, checkpoint, record, series, first, options, se
     if series not in held:
         held.append(series)
     run = _Run(series, record, source, config, on_landed=clear, **settings)
+    await run.resume_active()
     result = await run.drive()
     record.unlink(missing_ok=True)
     return result

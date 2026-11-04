@@ -286,8 +286,9 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
 ) -> None:
     """The twin of a withheld entity at another path, at the entity's own default path, and none."""
     seen: dict[str, dict] = {}
+    # Compare governance at the same graph readiness, including the twin with no entity write.
     for variant, entity_type in (("other-path", "organization"), ("same-path", "concept"), ("absent", None)):
-        vault, call = _served(tmp_path / variant, monkeypatch)
+        vault, call = _served_with_graph(tmp_path / variant, monkeypatch)
         _as(monkeypatch, "owner-session")
         if entity_type is not None:
             made = call("connect_memory", {
