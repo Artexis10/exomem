@@ -97,6 +97,142 @@ Keep = Callable[[str], bool] | None
 CALLER: Any = object()
 
 
+class AddedEdge(NamedTuple):
+    """One authored edge a write added, with the stable identity the operation log keys it by."""
+
+    fact: Any
+    source: str
+    target: str
+    identity: str
+
+
+class AddedEdges(NamedTuple):
+    edges: list[AddedEdge]
+    #: Facts whose endpoints no stable identity could prove, and every fact compared.
+    unavailable: int
+    compared: int
+
+
+def added_edges(
+    before: Any,
+    after: Any,
+    *,
+    prior_path: str | None,
+    current_path: str,
+    prior_facts: Any = None,
+    current_facts: Any = None,
+) -> AddedEdges:
+    """The authored edges a write added, from the corpora before and after it.
+
+    An edge counts as added when no edge of the page it replaces carries the same operand
+    or the same stable endpoints, so resolver or registry drift never adds one. `prior_path`
+    names the page the new one replaces: the page itself, or a predecessor. A caller that
+    reads the facts as a restricted writer sees them passes them as `prior_facts` and
+    `current_facts`; otherwise the corpora's own facts are read.
+    """
+
+    def authored(context: Any, path: str | None, facts: Any) -> list[Any]:
+        if context is None:
+            return []
+        facts = context.relation_facts if facts is None else facts
+        return [
+            fact
+            for fact in facts
+            if fact.authored_path == path and fact.authored and fact.origin in _AUTHORED_ORIGINS
+        ]
+
+    def operand(fact: Any) -> tuple[Any, ...]:
+        return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
+
+    def endpoint(context: Any, path: str, anchor: str | None = None) -> str:
+        page = context.pages.get(path)
+        identity = f"{page.identity_kind}:{page.identity}" if page is not None else path
+        return f"{identity}#{anchor}" if anchor else identity
+
+    def identity(context: Any, fact: Any, owner: str | None) -> tuple[Any, ...]:
+        # The author endpoint stays relative to its page across a successor write.
+        source = (
+            ("self", fact.authored_anchor, fact.source_kind)
+            if fact.logical_source_path == owner
+            else endpoint(context, fact.logical_source_path)
+        )
+        target = fact.logical_target_ref or endpoint(
+            context, fact.logical_target_path, fact.target_anchor
+        )
+        return (
+            source,
+            target,
+            fact.canonical_relation or fact.raw_relation,
+            fact.registry_instance,
+        )
+
+    prior = authored(before, prior_path, prior_facts)
+    current = authored(after, current_path, current_facts)
+
+    def stable_endpoints(context: Any, fact: Any) -> bool:
+        # "file" is the resolver's page-endpoint protocol token, not a vocabulary key.
+        if fact.source_kind != "file" and fact.authored_anchor is None:
+            return False
+        target_page = context.pages.get(fact.logical_target_path)
+        if target_page is not None and fact.logical_target_ref is not None:
+            target_unit = next(
+                (
+                    unit
+                    for unit in target_page.document.units
+                    if unit.unit_ref == fact.logical_target_ref
+                ),
+                None,
+            )
+            if target_unit is not None and target_unit.anchor is None:
+                return False
+        return True
+
+    uncertain = sum(not stable_endpoints(before, fact) for fact in prior) + sum(
+        not stable_endpoints(after, fact) for fact in current
+    )
+    compared = len(prior) + len(current)
+    prior = [fact for fact in prior if stable_endpoints(before, fact)]
+    current = [fact for fact in current if stable_endpoints(after, fact)]
+    # Unchanged operands cannot become additions through resolver or registry drift.
+    remaining = Counter(operand(fact) for fact in prior)
+    changed = []
+    for fact in current:
+        key = operand(fact)
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            changed.append(fact)
+    previous: Counter[Any] = Counter()
+    for fact in prior:
+        if remaining[operand(fact)]:
+            previous[identity(before, fact, prior_path)] += 1
+            remaining[operand(fact)] -= 1
+    additions: list[AddedEdge] = []
+    occurrences: Counter[Any] = Counter()
+    for fact in changed:
+        key = identity(after, fact, current_path)
+        if previous[key]:
+            previous[key] -= 1
+            continue
+        source_endpoint = fact.logical_source_ref or endpoint(
+            after, fact.logical_source_path, fact.authored_anchor
+        )
+        target_endpoint = fact.logical_target_ref or endpoint(
+            after, fact.logical_target_path, fact.target_anchor
+        )
+        occurrences[key] += 1
+        edge_identity = (source_endpoint, target_endpoint, *key[2:], occurrences[key])
+        additions.append(
+            AddedEdge(
+                fact,
+                source_endpoint,
+                target_endpoint,
+                hashlib.sha256(json.dumps(edge_identity, sort_keys=True).encode()).hexdigest(),
+            )
+        )
+    return AddedEdges(additions, uncertain, compared)
+
+
 def operation_provenance(
     preflight: Any,
     *,
@@ -125,90 +261,13 @@ def operation_provenance(
         after_hash = vault.content_hash(preflight.source)
         placement = preflight.placement
 
-    def authored(context: Any, path: str | None) -> list[Any]:
-        return (
-            [
-                fact
-                for fact in context.relation_facts
-                if fact.authored_path == path and fact.authored and fact.origin in _AUTHORED_ORIGINS
-            ]
-            if context is not None
-            else []
-        )
-
-    def operand(fact: Any) -> tuple[Any, ...]:
-        return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
-
-    def endpoint(context: Any, path: str, anchor: str | None = None) -> str:
-        page = context.pages.get(path)
-        identity = f"{page.identity_kind}:{page.identity}" if page is not None else path
-        return f"{identity}#{anchor}" if anchor else identity
-
-    def identity(context: Any, fact: Any, owner: str | None) -> tuple[Any, ...]:
-        # The author endpoint stays relative to its page across a successor write.
-        source = (
-            ("self", fact.authored_anchor, fact.source_kind)
-            if fact.logical_source_path == owner
-            else endpoint(context, fact.logical_source_path)
-        )
-        target = fact.logical_target_ref or endpoint(
-            context, fact.logical_target_path, fact.target_anchor
-        )
-        return (
-            source,
-            target,
-            fact.canonical_relation or fact.raw_relation,
-            fact.registry_instance,
-        )
-
-    prior = authored(before, prior_path)
-    current = authored(after, state.path)
-
-    def stable_endpoints(context: Any, fact: Any) -> bool:
-        # "file" is the resolver's page-endpoint protocol token, not a vocabulary key.
-        if fact.source_kind != "file" and fact.authored_anchor is None:
-            return False
-        target_page = context.pages.get(fact.logical_target_path)
-        if target_page is not None and fact.logical_target_ref is not None:
-            target_unit = next(
-                (
-                    unit
-                    for unit in target_page.document.units
-                    if unit.unit_ref == fact.logical_target_ref
-                ),
-                None,
-            )
-            if target_unit is not None and target_unit.anchor is None:
-                return False
-        return True
-
-    uncertain = sum(not stable_endpoints(before, fact) for fact in prior) + sum(
-        not stable_endpoints(after, fact) for fact in current
-    )
-    identity_denominator = len(prior) + len(current)
-    prior = [fact for fact in prior if stable_endpoints(before, fact)]
-    current = [fact for fact in current if stable_endpoints(after, fact)]
-    # Unchanged operands cannot become additions through resolver or registry drift.
-    remaining = Counter(operand(fact) for fact in prior)
-    changed = []
-    for fact in current:
-        key = operand(fact)
-        if remaining[key]:
-            remaining[key] -= 1
-        else:
-            changed.append(fact)
-    previous: Counter[Any] = Counter()
-    for fact in prior:
-        if remaining[operand(fact)]:
-            previous[identity(before, fact, prior_path)] += 1
-            remaining[operand(fact)] -= 1
+    added = added_edges(before, after, prior_path=prior_path, current_path=state.path)
+    # The reason a caller gave for each generic edge it kept, bound to that edge's identity.
+    cleared = getattr(preflight, "generic_cleared", None)
+    reasons = dict(cleared.edges) if cleared is not None else {}
     additions = []
-    occurrences: Counter[Any] = Counter()
-    for fact in changed:
-        key = identity(after, fact, state.path)
-        if previous[key]:
-            previous[key] -= 1
-            continue
+    for edge in added.edges:
+        fact = edge.fact
         source_page = after.pages.get(fact.logical_source_path)
         target_page = after.pages.get(fact.logical_target_path)
 
@@ -236,21 +295,11 @@ def operation_provenance(
             )
         )
         definition = after.registry_for(state.path).definition(fact.canonical_relation or "")
-        source_endpoint = fact.logical_source_ref or endpoint(
-            after, fact.logical_source_path, fact.authored_anchor
-        )
-        target_endpoint = fact.logical_target_ref or endpoint(
-            after, fact.logical_target_path, fact.target_anchor
-        )
-        occurrences[key] += 1
-        edge_identity = (source_endpoint, target_endpoint, *key[2:], occurrences[key])
         additions.append(
             {
-                "identity": hashlib.sha256(
-                    json.dumps(edge_identity, sort_keys=True).encode()
-                ).hexdigest(),
-                "source": source_endpoint,
-                "target": target_endpoint,
+                "identity": edge.identity,
+                "source": edge.source,
+                "target": edge.target,
                 "source_path": fact.logical_source_path,
                 "target_path": fact.logical_target_path,
                 "relation": fact.canonical_relation or fact.raw_relation,
@@ -258,8 +307,8 @@ def operation_provenance(
                 "origin": fact.origin,
                 "endpoint_class": endpoint_class,
                 "generic": definition.generic if definition is not None else None,
-                "reason": None,
-                "reason_recorded": False,
+                "reason": reasons.get(edge.identity),
+                "reason_recorded": edge.identity in reasons,
             }
         )
     # The v1 log schema fixes mutation kinds; note-type keys stay in their registry.
@@ -274,9 +323,9 @@ def operation_provenance(
         "predecessor_hash": predecessor_content_hash,
         "added_edges": additions if after is not None else None,
         "identity_coverage": {
-            "numerator": identity_denominator - uncertain,
-            "denominator": identity_denominator,
-            "unavailable_facts": uncertain,
+            "numerator": added.compared - added.unavailable,
+            "denominator": added.compared,
+            "unavailable_facts": added.unavailable,
             "limitation": "Anonymous unit fingerprints do not prove stable identity across authored changes.",
         },
         "placement": {"basis": placement["basis"]} if placement is not None else None,
@@ -428,7 +477,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "status": "partial" if reasoned else "unavailable",
         "numerator": len(reasoned),
         "denominator": len(generic) if events else None,
-        "limitation": "These writers do not yet record edge-bound generic review reasons.",
+        "limitation": "Only writes that answered the generic-relation barrier record an edge-bound reason.",
     }
     reasons = [
         unicodedata.normalize("NFKC", " ".join(edge["reason"].split())).casefold()

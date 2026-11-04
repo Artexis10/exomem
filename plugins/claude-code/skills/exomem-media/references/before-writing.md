@@ -25,7 +25,9 @@ the editor's own way of marking a thing that should exist; a passing name needs
 no link. When the note is about an identity that has no Entity, resolve it and
 create the Entity in the same turn, within your confirmation rules. When a write
 returns `entity_candidate`, resolve before you create, and hydrate an existing
-Entity before you make a second one.
+Entity before you make a second one. When it returns `undeclared_referents`, create
+the Entity from the returned route only for a durable referent (see
+[mutation-results](mutation-results.md)).
 
 ### Vocabulary consideration
 

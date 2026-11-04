@@ -292,7 +292,7 @@ A first-mention prompt and an agent's declaration need no origin count: the deci
 | --- | --- |
 | add-context-activation-benchmark 1.6 | Overlaps. Task 3.2 here is a capture-to-activation replay for referents only; it reuses 1.6's harness when 1.6 lands first. 1.6 keeps fan-out and interrupted resume. |
 | add-context-activation-benchmark 4.3 | Overlaps. Group 4 here is a referent instance of 4.3's rich-turn journey and uses its observation format. 4.3 stays open for multiple topics. |
-| f27 agent-track driver (`benchmarks/epistemic/journeys/f27_replay.py`) | Historical isolation reference; group 4 reuses the maintained Compiler runner. |
+| f27 agent-track driver (`benchmarks/epistemic/journeys/f27_replay.py`) | Isolation helpers that the maintained `switch_eval` runner still imports; group 4 reuses that runner, not the f27 driver. |
 | close-memory-loop 3.4 | Related. The core line that 3.4 owns stays; a declaration line joins it only if decision 1B ships. |
 | close-memory-loop 4.3, 4.3a-c | Not a dependency. |
 | close-memory-loop 4.5 | Related. `entity_candidate` stays the 1→2 step and still switches to origins after 4.3. |
@@ -323,7 +323,7 @@ The evaluator files a new amendment under the next free family in `benchmarks/ep
 The owner acknowledges the amendment before the final run.
 A separate measurement lane runs the arms and checks their captured inputs, outputs and digests before scoring.
 
-**Reuse.** Reuse the Compiler-owned session, state and transcript capture under `benchmarks/membench/utility/switch_eval/`.
+**Reuse.** Reuse the session, state and transcript capture under `benchmarks/membench/utility/switch_eval/`, owned by the Compiler programme (OpenSpec change `compile-context-maps-and-profiles`).
 The current switch protocol exposes four read tools; it does not prove the write-capable Organisation workflow.
 Coordinate the isolated writer binding with its owner before generation, including product, schemas, engagement, authority, terminal receipts and readback.
 The f33 driver remains a historical reference with known transport gaps; its cases stay sealed.
@@ -414,7 +414,7 @@ Note-to-note edges have no target, and no metric refuses a write.
 
 - The receipt block could become noise → at most 3 names, only newly linked unpaged names, fingerprint dismissal and family quiet, and the keep rule drops it unless it earns its place.
 - Measurement uses at most eighty development sessions and 160 final sessions, plus residual blind judging.
-  The manager allocates the serial laptop slot and subscription room; no runtime estimate establishes readiness.
+  The session manager allocates actor sessions and subscription room; no runtime estimate establishes readiness.
 - `referents` could be built and then dropped → it is built only when the shipped arm misses the pass line, and its budget raise is never taken without the gate.
 - A revert can strand dependants → the item context lists them, and the `revert_fingerprint` that the revert requires covers them.
 - Bootstrap bytes are nearly spent → task 1.1 pays for `promotion_classes` by trimming the confirm-first texts it replaces, on both the compact core ceiling and the compact reference bound, and raises neither (decision 2, item 9).
