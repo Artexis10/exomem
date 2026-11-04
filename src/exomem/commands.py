@@ -1579,11 +1579,18 @@ def op_bootstrap(
                 "the claim. A due date, not an expiry: nothing is removed, decayed, or "
                 "downranked when it passes; it becomes findable as overdue."
             ),
+            "as_of": (
+                "One exact ISO calendar date (YYYY-MM-DD) dating the unit's stated view."
+            ),
+            "until": (
+                "One exact ISO calendar date (YYYY-MM-DD), the last date of currency. "
+                "After it passes, activation marks the unit expired and omits it from stance."
+            ),
             "metadata_form": (
-                "verdict and check_by are `- key: value` rows under a rich `## Heading` "
-                "unit; a compact `- [category] ...` observation carries no metadata. "
-                "Both survive an edit to the unit's wording, so fixing a typo never "
-                "costs a verdict."
+                f"{', '.join(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS)} are "
+                "`- key: value` rows under a rich `## Heading` unit; a compact "
+                "`- [category] ...` observation carries no metadata. All governed metadata rows "
+                "survive an edit to the unit's wording, so fixing a typo never costs a verdict."
             ),
             "kinds": {
                 "open_question": "a question this store has not answered yet",

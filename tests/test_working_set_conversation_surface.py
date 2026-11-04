@@ -13,7 +13,7 @@ def test_the_instructions_still_ask_for_the_message_verbatim() -> None:
     text = server.SERVER_INSTRUCTIONS
     assert "verbatim" in text
     assert "a turn whose Exomem working set a hook already injected" in text
-    assert "`anchor`" in text and "`conversation.focus`" in text
+    assert "Follow `next_action` when present" in text
 
 
 def test_the_instructions_point_at_the_tool_and_stay_within_the_length_bound() -> None:

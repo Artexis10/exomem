@@ -275,6 +275,8 @@ def _withhold_from_external(vault: Path, glob: str) -> None:
 
 
 def _same_bytes_but_for_ids(value: object) -> str:
+    if isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key != "served_context_id"}
     return VOLATILE.sub("<id>", json.dumps(value, sort_keys=True))
 
 
@@ -307,6 +309,8 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
                 "activation": call("recall_context", {"turn": "What did the harbour review conclude about Kestrel?"}),
             }
 
+    identifiers = [row["activation"]["served_context_id"] for row in seen.values()]
+    assert len(set(identifiers)) == 3, "composition identifiers are fresh for every response"
     absent = seen.pop("absent")
     assert _listed(absent["write"]) == ["Kestrel", "Salt Ledger"], "the absent twin lists the name"
     for variant, observed in seen.items():

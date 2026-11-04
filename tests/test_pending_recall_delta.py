@@ -2409,6 +2409,7 @@ def test_activation_keeps_admitted_material_when_a_budget_pointer_origin_is_unce
     from exomem import (
         commands,
         epistemic_graph,
+        read_next_action,
         working_set,
         working_set_index,
         working_set_runtime,
@@ -2446,7 +2447,8 @@ def test_activation_keeps_admitted_material_when_a_budget_pointer_origin_is_unce
         working_set_runtime.reset_caches_for_tests()
         with request_scope(principal):
             return writer_lease.invoke_command(
-                command, tmp_path, turn=f"Remind me about {', '.join(titles)}.", max_chars=640,
+                command, tmp_path, turn=f"Remind me about {', '.join(titles)}.",
+                max_chars=640 + read_next_action.MAX_CHARS,
             )
 
     baseline = invoke(guest)
