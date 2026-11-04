@@ -449,6 +449,7 @@ class WriteCeiling:
     writable: frozenset[str]
     current: Snapshot | None
     compiled: policy.Policy
+    purpose: str | None
 
 
 def write_ceiling(root: Path, who: RequestPrincipal) -> WriteCeiling | None:
@@ -456,7 +457,7 @@ def write_ceiling(root: Path, who: RequestPrincipal) -> WriteCeiling | None:
 
     A restricted writer is a non-owner under a non-empty policy, or any caller,
     the owner included, whose connector entry denies a scope. Administrative ingress, an
-    unfenced client and every caller on a vault with an empty policy and no connector
+    unfenced owner client and every caller on a vault with an empty policy and no connector
     configuration are not. Writable scopes come only from the host configuration.
     """
     if who.administrative_ingress:
@@ -469,14 +470,22 @@ def write_ceiling(root: Path, who: RequestPrincipal) -> WriteCeiling | None:
     fenced = current is not None and bool(current.denied_scopes(who))
     if not fenced and (compiled.empty or not non_owner):
         return None
-    return WriteCeiling(who, current.writable_scopes(who) if current is not None else frozenset(), current, compiled)
+    from . import egress
+
+    try:
+        purpose = egress._declared_purpose(root, who, who.purpose)
+    except egress.AuthorizationSessionDecisionUnavailable as error:
+        raise BoundaryUnavailable() from error
+    return WriteCeiling(who, current.writable_scopes(who) if current is not None else frozenset(), current, compiled,
+                        purpose=purpose)
 
 
 def _writable(ceiling: WriteCeiling, scopes: frozenset[str]) -> bool:
     """A scope set that is non-empty, inside the writable scopes, and read in full by the writer."""
     who = ceiling.who
     return (bool(scopes) and scopes <= ceiling.writable and who.resolved and not ceiling.compiled.blocked
-            and decide(scopes, audience=who.audience_id, policy=ceiling.compiled).level >= policy.DISCLOSURE_MAX)
+            and decide(scopes, audience=who.audience_id, purpose=ceiling.purpose,
+                       policy=ceiling.compiled).level >= policy.DISCLOSURE_MAX)
 
 
 def _in_inbox(root: Path, path: str, ceiling: WriteCeiling, *, directory: bool = False) -> bool:

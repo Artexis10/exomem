@@ -217,6 +217,86 @@ def test_a_non_owner_is_read_only_with_any_policy_and_no_host_config(vault, reso
     assert not (vault / NEW_OUTSIDE_PAGE).exists()
 
 
+@pytest.mark.parametrize("purpose_source", ["explicit", "trusted-session"])
+@pytest.mark.parametrize("level", [0, 6])
+def test_a_confined_write_keeps_its_explicit_or_session_purpose(confined, vault, tmp_path, monkeypatch, purpose_source, level):
+    """A host write grant must not override the audience's full-read ceiling for its effective purpose."""
+    import time
+
+    from exomem.governance import authorization_custody, authorization_session_authority, authorization_session_lifecycle
+    from exomem.governance import store as authorization_store
+
+    _, authenticate = confined
+    writer = dataclasses.replace(authenticate("writer"), audience_id=NON_OWNER)
+    purpose = "limited-purpose"
+    rules = vault / "Knowledge Base/_Governance/rules"
+    rules.mkdir(exist_ok=True)
+    (rules / "purpose.yaml").write_text(
+        f"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC1\nscope_ids: [{INBOX}]\n"
+        f"audience: {NON_OWNER}\npurpose: {purpose}\nceiling: {level}\n", encoding="utf-8")
+    if purpose_source == "explicit":
+        writer = writer.with_purpose(purpose)
+    else:
+        from test_authorization_session_wire_reconnect import _configure_v4_authority
+
+        _configure_v4_authority(vault, tmp_path / "purpose-custody", monkeypatch)
+        now = int(time.time())
+        custody = authorization_custody.load_authorization_custody(vault, now=now)
+        connection = authorization_store.open_authorization_session_connection(vault)
+        try:
+            session = authorization_session_lifecycle.open_session(
+                connection, custody=custody, principal_id=NON_OWNER, issuer_family="mcp-oauth",
+                now=now, ttl_seconds=600)
+            authorization_session_authority.declare_purpose(
+                connection, context=session.context, audience=NON_OWNER, purpose=purpose,
+                now=now, expires_at=now + 300)
+        finally:
+            connection.close()
+        writer = writer.with_verified_authorization_session(session.context, issuer_family="mcp-oauth")
+        assert writer.purpose is None
+    with principal.request_scope(writer):
+        ceiling = connector_boundary.write_ceiling(vault, writer)
+        assert ceiling is not None and ceiling.purpose == purpose
+        if purpose_source == "trusted-session" and level == 6:
+            # This session fixture has an older projector namespace; prove its write admission without publishing content.
+            connector_boundary.require_create(vault, NEW_INBOX_PAGE)
+            assert not (vault / NEW_INBOX_PAGE).exists()
+            return
+
+    answer = _call(vault, writer, *_create(NEW_INBOX_PAGE)[:1], **_create(NEW_INBOX_PAGE)[1])
+
+    if level == 0:
+        assert _refused(answer), answer
+        assert not (vault / NEW_INBOX_PAGE).exists()
+    else:
+        assert "__error__" not in answer, answer
+        assert (vault / NEW_INBOX_PAGE).is_file()
+
+
+def test_an_unavailable_purpose_refuses_only_a_restricted_ceiling(confined, vault, monkeypatch):
+    """A failed trusted-purpose read cannot open a restricted target or burden an unfenced owner."""
+    _, authenticate = confined
+    writer = dataclasses.replace(authenticate("writer"), audience_id=NON_OWNER)
+
+    def unavailable(*args, **kwargs):
+        raise egress.AuthorizationSessionDecisionUnavailable()
+
+    monkeypatch.setattr(egress, "_declared_purpose", unavailable)
+    with principal.request_scope(writer), pytest.raises(ValueError, match=REFUSED):
+        connector_boundary.require_create(vault, NEW_INBOX_PAGE)
+    assert connector_boundary.write_ceiling(vault, authenticate("full")) is None
+    assert connector_boundary.write_ceiling(vault, principal.owner_principal(surface="library")) is None
+    assert not (vault / NEW_INBOX_PAGE).exists()
+
+
+def test_an_empty_policy_does_not_resolve_a_write_purpose(vault, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("an empty-policy write must not read purpose state")
+
+    monkeypatch.setattr(egress, "_declared_purpose", unexpected)
+    assert connector_boundary.write_ceiling(vault, principal.most_restrictive_principal(surface="mcp")) is None
+
+
 @pytest.mark.parametrize("path", [
     "Knowledge Base/_Governance/scopes/evil.yaml",
     "Knowledge Base/.exomem-activation.json",
