@@ -1,4 +1,4 @@
-# Advisory MCP read latency against the latest release, nightly and on demand.
+# MCP read latency against the latest release, nightly and on demand.
 # It does not gate a pull request or release evidence: the Full run in ci.yml
 # does not wait for it. Dispatch it on a branch to measure that branch.
 name: MCP read latency
@@ -19,8 +19,6 @@ concurrency:
 jobs:
   mcp-read-latency-plan:
     name: MCP read latency plan
-    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
-    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -52,8 +50,6 @@ jobs:
 
   mcp-read-latency-paired:
     name: MCP read latency paired (shard ${{ matrix.shard }})
-    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
-    continue-on-error: true
     needs: mcp-read-latency-plan
     # Keep this benchmark on the calibrated Ubuntu 24.04 runtime that the recall benchmark uses.
     runs-on: ubuntu-24.04
@@ -137,8 +133,6 @@ jobs:
 
   mcp-read-latency-aggregate:
     name: MCP read latency verdicts
-    # Advisory until a full run fits its step budget (measure-sandbox-mcp-reads 4.8): its own breakage must not turn the full run's evidence red.
-    continue-on-error: true
     needs: [mcp-read-latency-plan, mcp-read-latency-paired]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
