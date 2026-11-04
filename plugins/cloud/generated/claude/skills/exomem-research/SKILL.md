@@ -2,7 +2,7 @@
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: e0ace5a49c4f4a7408acfeff0152356ed97d5b2395c53c0c40c51b2cd84d445c
+  skill_contract: e9db682144973d627e63c5bc954f6c1e9a7ff0c4decc96d813c1e611ce83852a
   version: "0.1.0"
 ---
 
@@ -56,7 +56,9 @@ one `user_summary` names.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
+joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
+them), or choose no edge. Durable recurring
 meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 

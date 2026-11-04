@@ -234,14 +234,17 @@ def test_a_page_still_on_disk_but_no_longer_indexed_still_declines(
 ) -> None:
     """Leaving the admitted set is not a residue the drain is proven to remove."""
     root = handoff_vault
-    real = EpistemicGraphIndex._indexed_recall_membership
+    real = EpistemicGraphIndex._recall_memberships
 
     def without_removed(self, **kwargs):
-        membership = real(self, **kwargs)
-        return None if membership is None else membership - {REMOVED}
+        memberships = real(self, **kwargs)
+        if memberships is None:
+            return None
+        resolver, indexed = memberships
+        return resolver, indexed - {REMOVED}
 
     monkeypatch.setattr(
-        EpistemicGraphIndex, "_indexed_recall_membership", without_removed, raising=True
+        EpistemicGraphIndex, "_recall_memberships", without_removed, raising=True
     )
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
     assert adoption.adopted is False
@@ -267,7 +270,7 @@ def test_an_unexplained_non_kb_title_change_alongside_a_residue_declines(
     )
     index = EpistemicGraphIndex(root)
     assert outsider in (index._recall_membership() or ()), "the resolver must see it"
-    assert outsider not in (index._indexed_recall_membership() or ())
+    assert outsider not in (index._recall_memberships() or ((), ()))[1]
 
     (root / GENERATED / "residue-created.md").write_text(_note(700, []), encoding="utf-8")
     (root / outsider).write_text("---\ntitle: Renamed Outsider\n---\n\nbody\n", encoding="utf-8")
@@ -276,6 +279,62 @@ def test_an_unexplained_non_kb_title_change_alongside_a_residue_declines(
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
     assert adoption.adopted is False
     assert adoption.reason == "resolver_topology_mismatch"
+
+
+def test_one_walk_reads_each_membership_under_its_own_walks_rules(vault: Path) -> None:
+    """Catches a shared walk that prunes both memberships under one rule set.
+
+    The vault-wide walk skips every `.obsidian` folder, while the KB walk skips
+    only the KB's own reserved folders and so admits a page under
+    `Knowledge Base/.obsidian/`. A walk that applied either rule set to both
+    would change one membership, and the proof would decline a corpus that
+    nothing moved, or adopt one that differs from what a rebuild indexes.
+    """
+    pages = {
+        "Knowledge Base/.obsidian/kb-only.md": "body\n",
+        "Notes/vault-only.md": "body\n",
+        "Knowledge Base/Notes/shared.md": "body\n",
+    }
+    for rel, text in pages.items():
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(text, encoding="utf-8")
+    kb = vault / vault_module.kb_dirname()
+    from exomem import find_corpus, recall_policy
+
+    separate = (
+        recall_policy.admitted_relative_paths(vault, vault_module.walk_vault_md(vault)),
+        recall_policy.admitted_relative_paths(vault, find_corpus.walk_md(kb)),
+    )
+    resolver, indexed = separate
+    assert "Knowledge Base/.obsidian/kb-only.md" in indexed - resolver, (
+        "the fixture must hold a page that only the KB walk yields"
+    )
+    assert "Notes/vault-only.md" in resolver - indexed
+    assert "Knowledge Base/Notes/shared.md" in resolver & indexed
+
+    assert EpistemicGraphIndex(vault)._recall_memberships() == separate
+
+
+def test_one_walk_still_lists_a_kb_folder_that_the_vault_walk_skips(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a shared walk that lists the KB only through the vault walk: with the
+    # KB folder configured to a name the vault walk skips, the KB membership would
+    # come up empty while the KB walk alone still lists its pages.
+    from exomem import find_corpus
+
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "_archive")
+    kb = vault / vault_module.kb_dirname()
+    (kb / "Notes").mkdir(parents=True, exist_ok=True)
+    (kb / "Notes" / "page.md").write_text("body\n", encoding="utf-8")
+
+    walked = list(vault_module.walk_vault_md_with_subtree(vault, kb))
+
+    assert {path for path, _in_vault, in_kb in walked if in_kb} == set(find_corpus.walk_md(kb))
+    assert kb / "Notes" / "page.md" in {path for path, _v, in_kb in walked if in_kb}
+    assert {path for path, in_vault, _k in walked if in_vault} == set(
+        vault_module.walk_vault_md(vault)
+    )
 
 
 def _decline_on_an_oversized_residue(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -624,18 +683,19 @@ def test_the_edge_oracle_sees_a_drain_that_does_not_widen(
         _assert_matches_a_fresh_rebuild(root)
 
 
-def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
+def test_a_snapshot_published_during_the_proof_is_held_and_reproved_at_promotion(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """M1: the standby holds the snapshot its proof read, not one published after it.
 
-    The publication shows at promotion as `advanced`, so the promoted worker
-    runs the handoff in full instead of the standby discarding a sound proof.
-    The re-proof loop's next due poll leaves the proof held, for the same reason.
+    The re-proof loop's next due poll leaves the proof held. Promotion finds the
+    publication and re-proves it from the held proof's reads, so the promoted
+    worker inherits an adoption of S2 instead of running the handoff in full.
     """
     # Catches a standby that names S2 as proved, declines a sound proof of S1, or
     # withdraws S1 to re-prove after the publication and reports `graph_snapshot`
-    # waiting for the whole proof.
+    # waiting for the whole proof; and a promotion that carries the graph handoff
+    # only when S1 is still current.
     root = handoff_vault
     _commit_unpublished_page(root)
     _enter_standby(monkeypatch)
@@ -665,9 +725,30 @@ def test_a_snapshot_published_during_the_proof_is_held_and_promotes_as_advanced(
     assert service_standby.proved_checkpoint() == read[0], "the poll must keep S1 held"
     assert service_standby.cutover_components()["graph_snapshot"] == "ready"
 
+    # A page edited after the held proof and never published.
+    edited = f"{GENERATED}/generated-note-0007.md"
+    (root / edited).write_text(
+        (root / edited).read_text(encoding="utf-8") + "\n- unpublished\n", encoding="utf-8"
+    )
+    real_read = vault_module.read_bounded_guarded_bytes_with_generation
+    promotion_reads: list[str] = []
+
+    def counted_read(vault_root, target, **kwargs):
+        promotion_reads.append(target)
+        return real_read(vault_root, target, **kwargs)
+
+    monkeypatch.setattr(
+        vault_module, "read_bounded_guarded_bytes_with_generation", counted_read, raising=True
+    )
+
     record = service_standby.promote(root, migrated=False)
-    assert record["snapshot"] == "advanced"
-    assert "graph_handoff" not in record["carried_from_standby"]
+    assert record["snapshot"] == "current", record
+    assert record["reproved"] is True
+    assert "graph_handoff" in record["carried_from_standby"]
+    assert service_standby.proved_checkpoint() == service_standby.snapshot_token(root)
+    # It runs inside the supervisor's promotion request, so it reads only what moved.
+    assert promotion_reads == [edited], "the re-proof must start from the held proof's reads"
+    assert record["residue_applied"] == 1, "S2 plus the residue must equal the disk"
 
 
 def _replace_with_identical_bytes(path: Path) -> None:
@@ -697,13 +778,16 @@ def _governed_write(root: Path, writes: dict[Path, str]) -> None:
 
 
 def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
-    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
 ) -> None:
-    """The live upgrade: a governed write, a direct save and a deletion during the proof."""
-    # Catches a proof that declines while writers commit (`proof_raised` on a replaced
-    # page, `snapshot_published_during_proof`), or adopts a residue missing a moved page.
-    from exomem import warmup
+    """The live upgrade: a governed write, a direct save and a deletion during the proof.
 
+    The governed write publishes S2 after the proof read S1, so promotion
+    re-proves S2 and the promoted worker never runs the handoff again.
+    """
+    # Catches a proof that declines while writers commit (`proof_raised` on a replaced
+    # page, `snapshot_published_during_proof`), or adopts a residue missing a moved page;
+    # and a promotion re-proof whose adoption leaves the graph short of a fresh rebuild.
     root = handoff_vault
     _enter_standby(monkeypatch)
     freshness.rebaseline(root)
@@ -755,8 +839,55 @@ def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
     )
     monkeypatch.setattr(vault_module, "read_bounded_guarded_bytes", real_read, raising=True)
 
+    passes_before_promotion = len(whole_vault_passes)
     record = service_standby.promote(root, migrated=False)
-    assert record["snapshot"] == "advanced"
+    assert record["snapshot"] == "current", record
+    assert record["reproved"] is True
+    assert "graph_handoff" in record["carried_from_standby"]
+
+    # The promoted worker's watcher seeds its registry; its warm skips the
+    # carried handoff, and its drain repairs what the re-proof left as residue.
+    _seed_live_freshness(root)
+    _drain_to_empty(root)
+
+    assert whole_vault_passes[passes_before_promotion:] == [], (
+        "the promoted worker paid a whole-vault pass the re-proof should have removed"
+    )
+    assert EpistemicGraphIndex(root).available() is True
+    assert _file_row(root, created)
+    assert not _file_row(root, deleted)
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_promotion_reproof_that_runs_out_of_time_falls_back_to_the_full_handoff(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-proof is bounded inside the supervisor's promotion request.
+
+    One that runs out of time declines. Promotion then records `advanced` and
+    carries no graph handoff, and the promoted worker's warm runs the handoff
+    in full, which still converges to a fresh rebuild.
+    """
+    # Catches a promotion that carries the handoff after its re-proof declined,
+    # and a re-proof with no bound inside the promotion request.
+    from exomem import warmup
+
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    assert service_standby.prove_graph_snapshot(root) is True
+    s1 = service_standby.proved_checkpoint()
+    # The serving worker commits and publishes S2 after the held proof.
+    edited = root / GENERATED / "generated-note-0007.md"
+    _governed_write(root, {edited: edited.read_text(encoding="utf-8") + "\n- after the proof\n"})
+    assert graph_sync.drain_active_rebuilds(timeout=120.0)
+    index_sync.drain_graph_work(root, limit=64)
+    assert service_standby.snapshot_token(root) != s1, "the governed write must publish S2"
+    monkeypatch.setattr(service_standby, "PROMOTION_REPROOF_SHARE", 0.0, raising=True)
+
+    record = service_standby.promote(root, migrated=False)
+    assert record["snapshot"] == "advanced", record
+    assert record["reproof_declined"] == "proof_deadline_passed"
     assert "graph_handoff" not in record["carried_from_standby"]
 
     # The promoted worker seeds its registry, then its warm runs the handoff in full.
@@ -766,9 +897,146 @@ def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
     _drain_to_empty(root)
 
     assert EpistemicGraphIndex(root).available() is True
-    assert _file_row(root, created)
-    assert not _file_row(root, deleted)
     _assert_matches_a_fresh_rebuild(root)
+
+
+def _admission_slowed_per_page(monkeypatch: pytest.MonkeyPatch, seconds: float) -> threading.Event:
+    """Make every admitted page cost `seconds`; the event is set at the first one."""
+    from exomem import recall_policy
+
+    real = recall_policy.iter_admitted_relative
+    started = threading.Event()
+
+    def slowed(vault_root, paths):
+        for admitted in real(vault_root, paths):
+            started.set()
+            time.sleep(seconds)
+            yield admitted
+
+    monkeypatch.setattr(recall_policy, "iter_admitted_relative", slowed, raising=True)
+    return started
+
+
+def test_a_proof_stops_inside_a_round_once_its_deadline_passes(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a deadline checked only between rounds: one round on the production vault
+    # outlasts the whole bound, so the promotion request would time out and discard
+    # the standby before the proof looked at the clock again.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    # One membership walk now takes NOTE_COUNT * 0.05 s, about ten seconds.
+    _admission_slowed_per_page(monkeypatch, 0.05)
+
+    started = time.monotonic()
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(
+        apply_residue=False, deadline=started + 0.5
+    )
+    elapsed = time.monotonic() - started
+
+    assert adoption.reason == "proof_deadline_passed", adoption
+    assert elapsed < 5.0, (
+        f"the proof ran {elapsed:.1f}s past a 0.5 s deadline; it must stop at the "
+        "next walked page, not at the end of the round"
+    )
+
+
+def test_a_seeded_proof_stops_inside_its_seal_once_its_deadline_passes(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a seal recheck that never looks at the clock. The promotion re-proof is
+    # seeded, so it skips the initial walk, and the seal's walk is its long step.
+    root = handoff_vault
+    freshness.rebaseline(root)
+    held = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    assert held.proof_reads is not None, held
+    _admission_slowed_per_page(monkeypatch, 0.05)
+
+    started = time.monotonic()
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(
+        apply_residue=False, prior_reads=held.proof_reads, deadline=started + 0.5
+    )
+    elapsed = time.monotonic() - started
+
+    assert adoption.reason == "proof_deadline_passed", adoption
+    assert elapsed < 5.0, (
+        f"the seeded proof ran {elapsed:.1f}s past a 0.5 s deadline; its seal must "
+        "stop at the next walked page"
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_seconds", "budget"),
+    [
+        # A supervisor released before the field caps the request at ten seconds.
+        (None, 10.0),
+        (30.0, 30.0),
+    ],
+)
+def test_the_promotion_reproof_takes_its_share_of_the_request_budget(
+    handoff_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_seconds: float | None,
+    budget: float,
+) -> None:
+    # Catches a re-proof bound that ignores the supervisor's request budget. Above an
+    # old supervisor's ten-second cap the request times out and discards the standby;
+    # below a new supervisor's budget a large vault's re-proof declines for nothing.
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    assert service_standby.prove_graph_snapshot(root) is True
+    edited = root / GENERATED / "generated-note-0007.md"
+    _governed_write(root, {edited: edited.read_text(encoding="utf-8") + "\n- after the proof\n"})
+    assert graph_sync.drain_active_rebuilds(timeout=120.0)
+    index_sync.drain_graph_work(root, limit=64)
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+    deadlines: list[float] = []
+
+    def recorded(self, **kwargs):
+        deadlines.append(kwargs["deadline"])
+        return real_adopt(self, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", recorded, raising=True)
+
+    before = time.monotonic()
+    record = service_standby.promote(root, migrated=False, request_seconds=request_seconds)
+
+    assert record["reproved"] is True, record
+    share = service_standby.PROMOTION_REPROOF_SHARE
+    assert len(deadlines) == 1
+    assert before + share * budget <= deadlines[0] <= time.monotonic() + share * budget
+
+
+def test_promotion_stops_a_background_proof_that_is_still_walking(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Catches a background re-proof that runs on through promotion: its result is
+    # dropped, and meanwhile it competes with the promotion's own bounded re-proof.
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    freshness.rebaseline(root)
+    walking = _admission_slowed_per_page(monkeypatch, 0.05)
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+    outcomes: list[epistemic_graph.SnapshotAdoption] = []
+
+    def recorded(self, **kwargs):
+        outcomes.append(real_adopt(self, **kwargs))
+        return outcomes[-1]
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", recorded, raising=True)
+    background = threading.Thread(target=service_standby.prove_graph_snapshot, args=(root,))
+    background.start()
+    try:
+        assert walking.wait(30), "the background proof never reached its walk"
+        record = service_standby.promote(root, migrated=False)
+        background.join(5.0)
+        assert not background.is_alive(), "the background proof walked on after promotion"
+    finally:
+        background.join()
+
+    assert record["snapshot"] == "unproven", record
+    assert [outcome.reason for outcome in outcomes] == ["proof_cancelled"]
 
 
 def test_a_page_rewritten_after_every_read_declines_instead_of_folding_forever(

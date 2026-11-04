@@ -2,13 +2,32 @@
 
 Use this when the person wants existing files in the Knowledge Base: a folder, a ZIP or a notes export. Adoption never changes an original, and the person keeps their own copy in every route. Fields of each operation are in [operations](operations.md#collection-adoption).
 
+## Cloud prerequisites
+
+Call `observe_transfer(action="import_handoff")` before sending local files to Cloud. Read `open_import` and the returned routes.
+Use the CLI route's `argv_folder` or `argv_zip`, replacing its path placeholder with the real absolute path.
+The returned command includes the endpoints and can use `uvx` without a global Exomem installation.
+
+Check that the command's runner and `age` are on `PATH` before starting it.
+`uvx` comes with [uv](https://docs.astral.sh/uv/getting-started/installation/); [age](https://github.com/FiloSottile/age#installation) has separate installation instructions.
+Use their official instructions for the current platform when either is missing. Cloud imports need no local vault or Exomem service.
+
+An unversioned `uvx exomem` command can reuse a cached or installed CLI. Refreshing the connector or plugin does not update it.
+After a CLI fix ships, use `uvx exomem@latest` in place of that prefix when retrying the returned command.
+Keep its endpoints, other arguments and existing checkpoint. [uv's tool-version guidance](https://docs.astral.sh/uv/concepts/tools/#tool-versions) explains this refresh.
+
+The CLI opens its own browser sign-in, even when the MCP connector is already authenticated.
+Explain this before starting, and have the person authorize the same Cloud account.
+Keep the background command's output available while authorization and filing continue.
+If another import is open, inspect its progress through MCP and agree whether to resume it or cancel it before starting another.
+
 ## Flow
 1. Send the files to the server. Never retype or paste file contents.
    - Local server with a shell: run `exomem import <folder>`. It copies the folder into `_Imports/<id>/` and prints the path to start on.
-   - Exomem Cloud with a shell: start `exomem cloud import <folder>` in the background, never in the foreground. It can run for hours, and it waits for you: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID, and room appears only as you file. The folder or ZIP is encrypted before it leaves the machine.
+   - Exomem Cloud with a shell: start the returned CLI command in the background, never in the foreground. It can run for hours, and it waits for you: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID, and room appears only as you file. The folder or ZIP is encrypted before it leaves the machine.
      While it runs, file each window once it reaches `done` (steps 3 to 5), and discard it (step 8). Read its output for the window IDs.
      The command waits for room, and it stops with the members not yet sent if the cell cannot take them. Until it finishes, those members are only at the source.
-   - Exomem Cloud without a shell: give the person the exact `exomem cloud import <folder>` command to run themselves, or the Home link from `observe_transfer(action="import_handoff")` for a browser upload. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
+   - Exomem Cloud without a shell: give the person the returned CLI command or Home link. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
 2. Wait until the import, or the first window, is `done`. On Cloud, poll `observe_transfer`. `read_import` status lists each landed window's `import_id`, so later windows are found there.
 3. Call `import_memory(operation={"kind": "start", "path": "_Imports/<id>"})`. Add `collection` when the person names one.
 4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.

@@ -144,6 +144,10 @@ class _BatchAuthority:
     def before_publication(self) -> None:
         self.evidence.recheck(phase="before")
 
+    def effect_paths(self) -> frozenset[str]:
+        """The paths that this reservation's effects name, for the write gate's grant check."""
+        return frozenset(effect.path for effect in self.operation.effects)
+
     def _close_evidence(self) -> None:
         try:
             self.evidence.close()

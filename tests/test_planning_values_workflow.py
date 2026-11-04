@@ -284,7 +284,7 @@ def test_registry_parents_bind_only_the_writes_that_depend_on_them(
     assert _guards(call, "Epic") == guards
 
 
-def test_a_restricted_write_does_not_reopen_an_item_a_vault_status_settled(
+def test_a_restricted_reconcile_does_not_reopen_an_item_a_vault_status_settled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
@@ -303,10 +303,13 @@ def test_a_restricted_write_does_not_reopen_an_item_a_vault_status_settled(
     # A caller who cannot read the vault's definitions reports an outcome on it.
     _govern(vault, scope_path="_Schema/planning-values.yaml")
     _reset_governance()
+    # The owner reports the outcome: a restricted audience holds no write authority over records.
+    with request_scope(owner_principal(surface="mcp")):
+        report_event(vault, "Batch 1")
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
         served = commands.op_bootstrap(vault, profile="compact", section="vocabulary")
         assert served["vocabulary"]["planning-values"] == {"unavailable": "audience_restricted"}
-        report_event(vault, "Batch 1")
+        due_state_module.reconcile(vault)
 
     # The stored projection still holds the owner's classification: settled.
     with request_scope(owner_principal(surface="mcp")):

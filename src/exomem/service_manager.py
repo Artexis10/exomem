@@ -261,6 +261,16 @@ RESTART_WINDOW_SECONDS = 600.0
 #: How long a stopped worker's tree gets to show that every process exited,
 #: in a handoff and after a crash alike.
 STOP_ALLOWANCE_SECONDS = 10.0
+#: How long a promotion request without a migration may take. The supervisor
+#: sends this budget in the request, and the standby spends at most
+#: `service_standby.PROMOTION_REPROOF_SHARE` of it, 12 s, re-proving a snapshot
+#: that moved. On a synthetic 13,000-page vault on a host at load 8 that
+#: re-proof took 2.2 to 2.6 s, and the whole promotion 2.3 s. A host at load 20
+#: has made the same re-proof about 2.4 times slower, so the bound leaves room
+#: for that load and for vault growth. The 18 s after it keep the request clear
+#: of the timeout, which discards the standby. A larger cap only delays noticing
+#: a stuck standby, which ends in recovery either way.
+PROMOTE_REQUEST_SECONDS = 30.0
 
 
 def standby_warm_budget() -> float:
@@ -1900,14 +1910,18 @@ class WorkerRuntime:
         # call gets the cold-start budget this method is handed rather than a
         # fixed ten seconds. Capping it lower would time out the request while
         # the promotion it asked for was still running, and discard a standby
-        # that was about to succeed. Without a migration the POST only acquires
-        # ownership, so it keeps the tight cap that surfaces an unresponsive
-        # candidate quickly; the readiness wait below gets the whole budget
-        # either way.
-        promote_budget = deadline.remaining(timeout if migrated else 10)
+        # that was about to succeed. Without a migration the POST acquires
+        # ownership and, when the snapshot moved, runs a re-proof the standby
+        # bounds by a share of this cap, so it keeps a fixed cap that still
+        # surfaces an unresponsive candidate; the readiness wait below gets the
+        # whole budget either way.
+        promote_budget = deadline.remaining(timeout if migrated else PROMOTE_REQUEST_SECONDS)
         async with asyncio.timeout(promote_budget):
+            # The standby bounds its re-proof by a share of this budget, so it
+            # ends well before the request times out and discards the standby.
             response = await self.client.post(
-                "/control/promote", json={"migrated": bool(migrated)}
+                "/control/promote",
+                json={"migrated": bool(migrated), "request_seconds": promote_budget},
             )
         if response.status_code != 200:
             raise RuntimeError("standby refused promotion")

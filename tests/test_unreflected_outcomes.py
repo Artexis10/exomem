@@ -695,7 +695,6 @@ def test_a_projection_built_internally_serves_the_external_truth(tmp_path: Path)
     with request_scope(internal):
         internal_titles = _titles(_findings(tmp_path))
         due_state_module.reconcile(tmp_path)
-        report_event(tmp_path, "Batch 1", occurred_on="2026-08-05")
         assert len(_stored(tmp_path)) == 2, "the projection holds the writer's truth"
 
     with request_scope(external):

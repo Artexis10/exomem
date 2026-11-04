@@ -300,7 +300,7 @@ def _duplicate_from_sidecar(
     # `duplicate_of.path`. A page that points outside the destination it lives
     # in describes some other artifact, so it cannot stand for a duplicate here.
     resolved = os.path.realpath(vault_root / artifact_path)
-    if os.path.dirname(resolved) != os.path.realpath(folder) or not Path(resolved).is_file():
+    if os.path.dirname(resolved) != os.path.realpath(folder):
         return None
     # No resolvable ref, no duplicate. The contract says an `already_stored`
     # outcome names the existing path *and ref*, and a row that cannot is
@@ -309,7 +309,6 @@ def _duplicate_from_sidecar(
     if not isinstance(ref, str) or not ref:
         return None
     if raw_protection:
-        from . import reserved_paths
         from .governance.raw_protection import binding
 
         relative = sidecar.relative_to(vault_root).as_posix()
@@ -320,12 +319,15 @@ def _duplicate_from_sidecar(
         if (paired_companion != relative or block["original_ref"] != ref
                 or block["artifact_path"] != artifact_path or block["artifact_sha256"] != digest):
             return None
-        try:
-            original = reserved_paths.read_generic_bytes(vault_root, artifact_path).data
-        except (OSError, reserved_paths.ReservedPathLeafError):
-            return None
-        if hashlib.sha256(original).hexdigest() != digest:
-            return None
+    from . import reserved_paths
+
+    try:
+        with reserved_paths.open_generic_binary(vault_root, artifact_path) as original:
+            actual_digest = hashlib.file_digest(original.stream, "sha256").hexdigest()
+    except (OSError, reserved_paths.ReservedPathLeafError):
+        return None
+    if actual_digest != digest:
+        return None
     return DuplicateArtifact(
         hash=digest,
         path=artifact_path,
@@ -349,7 +351,7 @@ def destination_duplicate_index(
     directory once per *file* would make an eight-file batch eight full passes
     over a category that can hold hundreds of sidecars -- and the design's claim
     that this is cheaper than the staging download only holds for one pass.
-    Only wanted hashes, when supplied, reach protected-original byte verification.
+    Only wanted hashes, when supplied, reach artifact byte verification.
     """
     index: dict[str, DuplicateArtifact] = {}
     folder = evidence_folder(vault_root, scope, category)
@@ -855,8 +857,11 @@ def preserve(
                 desc_one_line = desc_one_line[:277] + "…"
             log_body += f" Description: {desc_one_line}"
 
+        from .governance import connector_boundary
+
+        effect_admitted = connector_boundary.effect_admission(vault_root)
         top_index = kb / "index.md"
-        if top_index.exists() and not raw_protection:
+        if top_index.exists() and not raw_protection and effect_admitted(top_index):
             current_top, _guard = read_guarded_text(vault_root, top_index)
             new_top, _trim_note = indexes._prepend_recent_activity(
                 with_newline(current_top, "\n"),
@@ -881,11 +886,11 @@ def preserve(
                 )
             )
             writes.extend(sub_writes)
-        elif not raw_protection:
+        elif not raw_protection and not top_index.exists():
             warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
-        if log_file.exists() and not raw_protection:
+        if log_file.exists() and not raw_protection and effect_admitted(log_file):
             current_log, _guard = read_guarded_text(vault_root, log_file)
             new_log = _prepend_log_entry(
                 current_log,
@@ -900,7 +905,7 @@ def preserve(
                     expected_hash=content_hash(current_log),
                 )
             )
-        elif not raw_protection:
+        elif not raw_protection and not log_file.exists():
             warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer

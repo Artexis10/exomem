@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: e0ace5a49c4f4a7408acfeff0152356ed97d5b2395c53c0c40c51b2cd84d445c
+  skill_contract: e9db682144973d627e63c5bc954f6c1e9a7ff0c4decc96d813c1e611ce83852a
   version: "0.1.0"
 ---
 
@@ -58,7 +58,7 @@ one `user_summary` names.
    For a whole folder or collection of existing files, use `import_memory` instead of
    capturing one by one. A folder outside the vault is staged first: run
    `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. (Exomem Cloud takes `exomem cloud import <folder>` instead.) Then set `operation.kind` to `start`
+   absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then set `operation.kind` to `start`
    with a `collection` name, `select` folders (with a `source_kind` and `domain` per folder rule where known),
    `plan`, `apply`, then `finish`. Repeat `plan` or `apply` with the returned `continuation`
    until none returns, and report the `coverage` from `finish`, including what was refused,
@@ -96,7 +96,9 @@ and the returned restore route. Use only exposed operations.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
+joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
+them), or choose no edge. Durable recurring
 meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 

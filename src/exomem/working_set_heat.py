@@ -884,13 +884,19 @@ def burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
     return frozenset(burst)
 
 
-def default_reason_for(paths: Iterable[str]) -> Callable[[str], str]:
+def default_reason_for(
+    paths: Iterable[str], *, vault_root: Path | None = None,
+) -> Callable[[str], str]:
     """The recent-context block's own rule for what is working context, with
-    the collection directories derived from `paths` (string work only)."""
-    from . import working_set
+    the collection directories derived from `paths` (string work only) and,
+    given `vault_root`, the inbox recap folders of its capture paths."""
+    from . import recap_folder, working_set
 
     collections = working_set._recent_collection_dirs(paths)
-    return lambda rel: working_set._recent_reason_for(rel, collections=collections)
+    inboxes = recap_folder.inbox_folders(vault_root)
+    return lambda rel: working_set._recent_reason_for(
+        rel, collections=collections, inboxes=inboxes,
+    )
 
 
 class FoldResult(NamedTuple):
@@ -1743,7 +1749,7 @@ def observe_commit(commit: Commit | None) -> ObservedCommit | None:
     try:
         import time
 
-        from . import due_state, freshness, working_set, writer_lease
+        from . import due_state, freshness, recap_folder, working_set, writer_lease
 
         trace = writer_lease.active_mutation_trace()
         batch = due_state.in_batch_scope()
@@ -1758,6 +1764,7 @@ def observe_commit(commit: Commit | None) -> ObservedCommit | None:
         primary = _PRIMARY.get()
         if trace is not None and not batch:
             collections = _collection_dirs_on_disk(commit.root, signatures)
+            inboxes = recap_folder.inbox_folders(commit.root)
             client = _observed_client()
             for rel in signatures:
                 if primary is not None and rel not in primary:
@@ -1766,7 +1773,9 @@ def observe_commit(commit: Commit | None) -> ObservedCommit | None:
                     rel,
                     traced=True,
                     in_batch=False,
-                    reason=working_set._recent_reason_for(rel, collections=collections),
+                    reason=working_set._recent_reason_for(
+                        rel, collections=collections, inboxes=inboxes,
+                    ),
                 )
                 if channel is not None:
                     events.append(HeatEvent(now, rel, channel, origin=trace[1], client=client))
@@ -1898,7 +1907,7 @@ def note_selection(
     try:
         import time
 
-        from . import working_set
+        from . import recap_folder, working_set
 
         wanted = [
             rel
@@ -1908,6 +1917,7 @@ def note_selection(
         if not wanted:
             return False
         collections = _collection_dirs_on_disk(vault_root, wanted)
+        inboxes = recap_folder.inbox_folders(vault_root)
         who = attribution or Attribution(client=_observed_client())
         now = int(ts_ns) if ts_ns else time.time_ns()
         events = [
@@ -1921,7 +1931,8 @@ def note_selection(
                 workspace=who.workspace,
             )
             for rel in wanted
-            if working_set._recent_reason_for(rel, collections=collections) in _SELECTABLE
+            if working_set._recent_reason_for(rel, collections=collections, inboxes=inboxes)
+            in _SELECTABLE
             and _released(vault_root, rel)
         ]
     except Exception:  # noqa: BLE001 - heat never fails the read it describes
@@ -1949,7 +1960,7 @@ def note_episode(
     try:
         import time
 
-        from . import episode_capture, working_set
+        from . import episode_capture, recap_folder, working_set
 
         who = attribution or Attribution(client=_observed_client())
         now = time.time_ns()
@@ -1958,12 +1969,14 @@ def note_episode(
             path for path in dict.fromkeys(str(item) for item in about_paths) if path
         ][: episode_capture.MAX_ABOUT]
         collections = _collection_dirs_on_disk(vault_root, wanted)
+        inboxes = recap_folder.inbox_folders(vault_root)
         stamped = [
             (path, "episode")
             for path in wanted
-            if working_set._recent_reason_for(path, collections=collections) == "edited"
+            if working_set._recent_reason_for(path, collections=collections, inboxes=inboxes)
+            == "edited"
         ]
-        if working_set._recent_reason_for(recap) == "episode":
+        if working_set._recent_reason_for(recap, inboxes=inboxes) == "episode":
             stamped.insert(0, (recap, "episode_page"))
         events = [
             HeatEvent(
@@ -2140,7 +2153,9 @@ def _seed(vault_root: Path, fold: _Fold) -> bool:
     now = time.time_ns()
     # Stored uncut: each profile applies the burst rule over its own view.
     events = seed_candidates(
-        {path: signature[0] for path, signature in live.items()}, limit=SEED_CANDIDATES_MAX
+        {path: signature[0] for path, signature in live.items()},
+        reason_for=default_reason_for(live, vault_root=vault_root),
+        limit=SEED_CANDIDATES_MAX,
     )
 
     def work(conn: sqlite3.Connection) -> None:
@@ -2172,6 +2187,7 @@ def _classify(
     now_ns: int,
 ) -> None:
     """Fold one batch of external changes into `fold`'s pending events."""
+    deleted = tuple(deleted)
     with _LOCK:
         carried = dict(fold.deferred)
     merged = {**carried, **changed}
@@ -2179,10 +2195,11 @@ def _classify(
         return
     folded = fold_external_events(
         merged,
-        deleted=tuple(deleted),
+        deleted=deleted,
         attributed=recent_attributed(vault_root, merged),
         in_flight=in_flight(vault_root),
         now_ns=now_ns,
+        reason_for=default_reason_for((*merged, *deleted), vault_root=vault_root),
     )
     with _LOCK:
         fold.deferred = {path: merged[path] for path in folded.deferred}

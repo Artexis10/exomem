@@ -14,6 +14,7 @@ import ipaddress
 import json
 import logging
 import re
+import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -1370,13 +1371,19 @@ def render_backup_job(
         # row shows cell-init's refusal.
         VAULT_CHECK_COMMAND,
         "restic snapshots || restic init",
-        f"restic backup --json {' '.join(BACKUP_PATHS)} > /tmp/backup.json || exit 1",
+        # Without --host restic records the Job pod's random hostname.
+        f"restic backup --json --host {shlex.quote(spec.cell_id)} {' '.join(BACKUP_PATHS)} "
+        "> /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "
             "| tail -n 1 | cut -d'\"' -f4)"
         ),
         '[ -n "$SNAPSHOT_ID" ] || exit 1',
-        *([f"restic forget {' '.join(retention)} --prune"] if retention is not None else []),
+        # One repository holds one cell, so retention applies across all its
+        # snapshots. restic's default grouping (host, paths) put each earlier
+        # snapshot, taken under a random pod hostname, in a group of its own,
+        # and the policy then never forgot any of them.
+        *([f"restic forget --group-by '' {' '.join(retention)} --prune"] if retention is not None else []),
         "printf '%s' \"$SNAPSHOT_ID\" > /dev/termination-log",
         # D10: "<id> <used bytes> <total bytes>". A failed measurement leaves
         # the id alone and the Job successful: the backup itself succeeded.

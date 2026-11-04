@@ -531,6 +531,9 @@ def test_entity_type_registry_load_is_bounded_at_scale(
         find_module.clear_cache()
         entity_types.clear_cache()
         _seed_freshness_live(vault)
+        # Settle fixture-created garbage first; collection triggered by the
+        # find's own allocations remains timed.
+        gc.collect()
         started = time.perf_counter()
         commands.op_find(
             vault,
@@ -554,6 +557,14 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             registry_path.unlink(missing_ok=True)
             measurement_order.append("without")
         return cold_find_ms()
+
+    # The first find with the registry pays one-time process work that later
+    # finds reuse (about a second on a CI runner). Warm both arms before the
+    # paired samples, so that one pass is not one of the median's three inputs.
+    registry_path.write_text(registry_text, encoding="utf-8")
+    cold_find_ms()
+    registry_path.unlink()
+    cold_find_ms()
 
     for index in range(_REPEAT):
         if index % 2 == 0:

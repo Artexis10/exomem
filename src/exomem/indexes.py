@@ -857,7 +857,11 @@ def compute_subindex_writes(
 
     Writes are only included for files that exist. Missing sub-indexes
     are silently skipped — not every machine maintains the full hierarchy.
+    A sub-index that a restricted writer may not write is skipped the same way.
     """
+    from .governance import connector_boundary
+
+    admitted = connector_boundary.effect_admission(vault_root)
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = []
     planned_bases = {
@@ -922,7 +926,7 @@ def compute_subindex_writes(
 
     # Sources/index.md refresh.
     sources_index = sources_index_path(vault_root)
-    if sources_index.exists():
+    if sources_index.exists() and admitted(sources_index):
         try:
             current, guard = read_guarded_text(vault_root, sources_index)
         except OSError:
@@ -953,7 +957,7 @@ def compute_subindex_writes(
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
-    if notes_index.exists():
+    if notes_index.exists() and admitted(notes_index):
         try:
             current, guard = read_guarded_text(vault_root, notes_index)
         except OSError:
@@ -980,7 +984,7 @@ def compute_subindex_writes(
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
-    if entities_index.exists():
+    if entities_index.exists() and admitted(entities_index):
         try:
             current, guard = read_guarded_text(vault_root, entities_index)
         except OSError:

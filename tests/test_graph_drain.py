@@ -156,7 +156,7 @@ def test_a_slow_availability_proof_does_not_block_a_canonical_write(
         conn.close()
 
 
-@pytest.mark.parametrize("phase", ["source_bytes", "resolver_membership", "indexed_membership"])
+@pytest.mark.parametrize("phase", ["source_bytes", "membership_walk"])
 def test_availability_sealing_steps_aside_for_a_waiting_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
@@ -197,18 +197,15 @@ def test_availability_sealing_steps_aside_for_a_waiting_writer(
 
         monkeypatch.setattr(vault_module.PathGuard, "recheck", slow_recheck)
     else:
-        owner, name = (
-            (vault_module, "walk_vault_md") if phase == "resolver_membership"
-            else (find_module, "_walk_md")
-        )
-        real_walk = getattr(owner, name)
+        # One walk of the vault yields both memberships the seal compares.
+        real_walk = vault_module.walk_vault_md_with_subtree
 
         def slow_walk(*args, **kwargs):
-            for path in real_walk(*args, **kwargs):
+            for entry in real_walk(*args, **kwargs):
                 slow_unit()
-                yield path
+                yield entry
 
-        monkeypatch.setattr(owner, name, slow_walk)
+        monkeypatch.setattr(vault_module, "walk_vault_md_with_subtree", slow_walk)
 
     path = root / "Knowledge Base/Notes/Insights/a.md"
     replacement = _page("A", "Changed while availability was being sealed.")

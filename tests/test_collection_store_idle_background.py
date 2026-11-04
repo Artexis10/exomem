@@ -184,7 +184,13 @@ def test_taking_the_lease_again_queues_no_history_page_but_a_changed_row_still_r
                      expected_container_hash=appended["after_container_hash"],
                      expected_item_version=appended["after_item_hash"])
     page = root / "Knowledge Base/Records/Work/_history.md"
-    _until(lambda: page.exists() and "first correction" in page.read_text())
+    def history_contains(text):
+        try:
+            return text in page.read_text()
+        except FileNotFoundError:
+            return False
+
+    _until(lambda: history_contains("first correction"))
     server = runtime._server(root)
     _until(lambda: server._history_policy is not None)
     queued, invalidate = [], CollectionWriter.invalidate_history_pages
@@ -205,7 +211,7 @@ def test_taking_the_lease_again_queues_no_history_page_but_a_changed_row_still_r
     assert queued == [] and rows(root, "SELECT count(*) FROM projection_state WHERE state='pending'") == [(0,)]
     call(root, "record_memory", **update, changes={"count": 3}, why="second correction",
          expected_container_hash=corrected["after_container_hash"], expected_item_version=corrected["after_item_hash"])
-    _until(lambda: "second correction" in page.read_text())
+    _until(lambda: history_contains("second correction"))
 
 
 def test_an_edit_whose_wake_could_not_take_the_lease_is_absorbed_by_a_later_sweep(idle_service, monkeypatch):

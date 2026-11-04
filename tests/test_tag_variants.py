@@ -962,20 +962,28 @@ def test_a_served_write_gives_the_tag_advice_once(tmp_path, monkeypatch, level):
 
 
 @pytest.mark.parametrize("level", ["maximal", "balanced"])
-def test_a_restricted_write_builds_its_tag_index_once(tmp_path, monkeypatch, level):
-    from test_governance_egress import _external
+def test_a_restricted_write_builds_its_tag_index_once(tmp_path, tmp_path_factory, monkeypatch, level):
+    from conftest import initialize_vault_state_offline
+    from granted_writer import grant_writer
+    from test_governance_egress import SCOPE_ID
 
     from exomem.governance.principal import request_scope
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    initialize_vault_state_offline(tmp_path, source="tag variants")  # arming needs ready state
     _served_vault(tmp_path)
     _govern(tmp_path, "Notes/Patterns/**")
+    # The restricted caller retags a page only as a client whose writable scope selects it.
+    writer = grant_writer(
+        tmp_path, tmp_path, monkeypatch, protected=[SCOPE_ID], writable_paths=["Notes/target.md"],
+        capture_paths=["Knowledge Base/Inbox"], config_dir=tmp_path_factory.mktemp("host-config"),
+    )
     builds = []
     real_rows = tag_variants._catalogue_rows
     monkeypatch.setattr(
         tag_variants, "_catalogue_rows", lambda root: builds.append(1) or real_rows(root)
     )
-    with request_scope(_external()):
+    with request_scope(writer("external")):
         result = _edit_tags(tmp_path, f"restricted-{level}", ["failure", "keep"])
     assert result["state"] == "committed"
     assert len(builds) == 1

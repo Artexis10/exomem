@@ -8,11 +8,15 @@ from pathlib import Path
 import pytest
 from test_connector_boundary import SCOPE
 from test_connector_boundary import configured_boundary as configured_boundary
+from test_connector_boundary import public_matter_writer as public_matter_writer
 from test_lifecycle_admission import IDENTITY, PAGE, SOURCE
 
 from exomem import relation_review, semantic_contract, semantic_writes, vocabulary_auxiliaries
 from exomem import vault as vault_module
 from exomem.governance import principal
+
+# A restricted client writes only its configured scopes, so each case grants `limited` the public matter.
+pytestmark = pytest.mark.usefixtures("public_matter_writer")
 
 
 def _write_primary(root: Path) -> tuple[str, vault_module.PathGuard]:

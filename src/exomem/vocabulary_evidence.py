@@ -173,6 +173,7 @@ def relation_evidence(
                     "target_kinds",
                     "projects",
                     "page_types",
+                    "endpoints",
                     "query",
                 ],
             },

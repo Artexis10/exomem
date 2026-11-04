@@ -31,6 +31,7 @@ from . import (
     freshness,
     memory_refs,
     query_log,
+    recap_folder,
     request_budget,
     source_taxonomy,
     working_set_heat,
@@ -46,7 +47,6 @@ from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
     content_hash,
-    kb_root,
     parse_frontmatter,
     read_guarded_text,
 )
@@ -115,7 +115,7 @@ class _Revision:
 
 
 def _folder(vault_root: Path) -> Path:
-    return kb_root(vault_root) / source_taxonomy.SOURCES_ROOT / source_taxonomy.EPISODE_PATH_LABEL
+    return Path(vault_root) / recap_folder.recap_folder(vault_root)
 
 
 def _revisions(

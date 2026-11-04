@@ -1598,25 +1598,29 @@ def test_a_migrated_promotion_gets_the_cutover_budget_not_a_ten_second_cap(
         granted.clear()
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
         runtime.standby = _FakeChild()
-        runtime.standby_client = _PromotingClient(delay=0.05)
-        client, record = await runtime.promote_standby(migrated=migrated, timeout=30)
+        standby_client = _PromotingClient(delay=0.05)
+        runtime.standby_client = standby_client
+        client, record = await runtime.promote_standby(migrated=migrated, timeout=120)
         assert record["snapshot"] == "current"
         # The promoted tree becomes the serving one.
         assert runtime.child is not None and runtime.standby is None
         assert client is not None
+        # The standby bounds its re-proof by a share of the budget it is sent,
+        # so that budget must be the one the request actually gets.
+        assert standby_client.posted[0][1]["request_seconds"] == granted[0]
         return granted[0]
 
     migrated_budget = asyncio.run(scenario(True))
-    assert migrated_budget > 10, (
+    assert migrated_budget > module.PROMOTE_REQUEST_SECONDS, (
         f"a migrated promotion was capped at {migrated_budget}s; the re-proof needs "
         "the whole budget the call is handed, which in production is the cold-start "
         "budget"
     )
 
     plain_budget = asyncio.run(scenario(False))
-    # Without a migration the call only acquires ownership, so it keeps the
-    # tight cap that surfaces an unresponsive candidate quickly.
-    assert plain_budget <= 10
+    # Without a migration the call acquires ownership and re-proves at most a
+    # bounded share, so it keeps the cap that surfaces a stuck candidate.
+    assert plain_budget <= module.PROMOTE_REQUEST_SECONDS
 
 
 class _NeverReadyClient(_PromotingClient):

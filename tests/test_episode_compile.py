@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from test_episode_coverage_citation import _cite
-from test_episode_memory_command import _audience, _record, _withhold_notes_from
+from test_episode_memory_command import _record, _withhold_notes_from
 
 from exomem import capture_sweep, semantic_contract
 from exomem import find as find_module
@@ -104,20 +104,32 @@ def test_a_cold_resolver_reports_the_open_count_unchecked_and_builds_no_resolver
 
 
 def test_with_a_cold_resolver_a_withheld_citing_page_and_none_give_the_same_block(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The block must not tell a caller that a page it cannot see cites the recap."""
-    with request_scope(_audience("client-a")):
+    from granted_writer import grant_writer
+
+    _withhold_notes_from(vault, "client-a")
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch,
+        writable_paths=["Sources/Episodes/**"],
+        capture_paths=["Knowledge Base/Sources/Episodes"],
+        protected=["01ARZ3NDEKTSV4RRFFQ69G5FAC"],
+        audience="client-a",
+    )("client-a")
+    with request_scope(writer):
         cited = _record(vault, episode="ep-" + "a1" * 16, decided=DECIDED)
         uncited = _record(vault, episode="ep-" + "b2" * 16, decided=DECIDED)
     _cite(vault, cited["source"]["path"], title="Withheld lamp pick")
-    _withhold_notes_from(vault, "client-a")
     monkeypatch.setattr(find_module, "_RESOLVER_CACHE", {})
     monkeypatch.setattr(semantic_contract, "current_writer_resolver_entries", lambda *a, **k: None)
 
-    with request_scope(_audience("client-a")):
-        withheld = _record(vault, episode=cited["episode"], decided=DECIDED, open=["Pick the paint"])["compile"]
-        none = _record(vault, episode=uncited["episode"], decided=DECIDED, open=["Pick the paint"])["compile"]
+    with request_scope(writer):
+        withheld_record = _record(vault, episode=cited["episode"], decided=DECIDED, open=["Pick the paint"])
+        uncited_record = _record(vault, episode=uncited["episode"], decided=DECIDED, open=["Pick the paint"])
+
+    assert withheld_record["revision"] == uncited_record["revision"] == 2
+    withheld, none = withheld_record["compile"], uncited_record["compile"]
 
     assert {**withheld, "cite": None} == {**none, "cite": None}
     assert withheld["open"] == "unchecked"

@@ -40,6 +40,7 @@ from . import (
     freshness,
     lifecycle_statuses,
     note_types,
+    recap_folder,
     sidecar_store,
     source_taxonomy,
     topic_carriers,
@@ -108,7 +109,7 @@ FOLD_DEFER = "defer"
 FOLD_BACKGROUND = "background"
 FOLD_MODES = (FOLD_INLINE, FOLD_DEFER, FOLD_BACKGROUND)
 
-#: `_graph_token` when another reader's proof of the graph sidecar is running.
+#: `_graph_token` when another reader's proof of the graph sidecar is running, or a managed request has handed it to the background.
 GRAPH_UNPROVEN = "unproven"
 
 
@@ -606,8 +607,8 @@ class ContextCatalogue:
         many pages and leaves the rest in `pending`. `fill_tags` runs one full fold when the
         entries' tags were never stored: only a background pass sets it, since a full fold ignores `limit`.
         `prove` is the graph's cold-proof mode: a request passes `SINGLE_FLIGHT`, so a graph
-        proof another reader is running leaves the stored edges as they are and the
-        catalogue reports them `warming`.
+        proof another reader is running, or one a managed request starts in the background,
+        leaves the stored edges as they are and the catalogue reports them `warming`.
         """
         return self._write(
             full=False,
@@ -773,7 +774,7 @@ class _Fold:
         self.page_anchors = {row.path: row for row in anchors if row.anchor_id == row.path and row.kind != "collection"}
         self.other_anchors = [row for row in anchors if row.anchor_id != row.path and row.kind != "collection"]
         self.collections = _collections(vault_root, self.activation_token)
-        self.thread_folder = f"{self.kb}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}"
+        self.thread_folders = recap_folder.recap_folders(vault_root)
         self.stored = {row.entry_id: row for row in _stored(conn)}
         self.stored_pending = {str(path) for (path,) in conn.execute("SELECT path FROM pending")}
         self.meta = {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM catalogue_meta")}
@@ -870,7 +871,7 @@ class _Fold:
     def _pull_edges(self) -> None:
         token = _graph_token(self.root, self.prove)
         if token == GRAPH_UNPROVEN:
-            # Another reader's proof of the graph sidecar is running: keep the stored edges and pull at the next fold.
+            # Another reader's proof, or the background proof a managed request started, is running: keep the stored edges and pull at the next fold.
             self.edge_state, self.graph_token = EDGES_WARMING, ""
             return
         new_source = any(entry_id == entry.path and entry_id not in self.stored for entry_id, entry in self.new.items())
@@ -965,7 +966,7 @@ class _Fold:
         if rel in self.collections:
             return KIND_COLLECTION, ""
         folder, _, name = rel.rpartition("/")
-        if folder == self.thread_folder:
+        if folder in self.thread_folders:
             return (KIND_THREAD, "") if episode_capture.filename_parts(name) is not None else None
         from . import recall_policy
 
@@ -1251,7 +1252,7 @@ def _collections(vault_root: Path, token: tuple[int, int, int]) -> dict[str, tup
 
 
 def _graph_token(vault_root: Path, prove: bool | str = True) -> str:
-    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader proves it, or "" when it has none to read."""
+    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader or the background proves it, or "" when it has none to read."""
     from . import epistemic_graph
 
     try:

@@ -216,7 +216,8 @@ def test_a_kept_origin_follows_the_live_row_disclosure(vault: Path, configured: 
         if configured
         else owner_principal(surface="mcp")
     )
-    with request_scope(reader):
+    # The owner writes: a restricted audience holds no write authority over the collection.
+    with request_scope(owner_principal(surface="mcp")):
         key = _append(vault)
         for revised, why in ((body, "Attach the reading's origin."), ("- [finding] Corrected. ^reading\n", "Drop it.")):
             records.update_record(
@@ -225,6 +226,7 @@ def test_a_kept_origin_follows_the_live_row_disclosure(vault: Path, configured: 
                 expected_item_version=hashlib.sha256(_entry(vault, key).read_bytes()).hexdigest(),
                 why=why,
             )
+    with request_scope(reader):
         assert "exomem-origin" in _history(vault, key)["revisions"][0]["prior"]["body"]
     if configured:
         _write_source_rule(vault, ceiling=0)

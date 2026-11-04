@@ -282,10 +282,7 @@ def _withhold_episodes_from(vault: Path, audience: str) -> None:
     policy._CACHE.clear()
 
 
-@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "visible"])
-def test_another_audience_never_retires_or_replays_the_owners_recap(
-    vault: Path, withheld: bool
-) -> None:
+def test_another_audience_never_retires_or_replays_the_owners_recap(vault: Path) -> None:
     """Revisions are grouped per audience, so another audience continuing the
     same key writes its own history: the owner's recap stays live, byte for
     byte, and stays the owner's newest revision in recent context."""
@@ -293,8 +290,6 @@ def test_another_audience_never_retires_or_replays_the_owners_recap(
         owned = _record(vault)
     owner_page = vault / owned["source"]["path"]
     before = owner_page.read_bytes()
-    if withheld:
-        _withhold_episodes_from(vault, "client-b")
 
     with request_scope(_audience("client-b")):
         other = _record(vault, summary="Audience B's own account of the same thread.")
@@ -325,6 +320,23 @@ def test_another_audience_never_retires_or_replays_the_owners_recap(
     # untouched by the owner's revision.
     assert _frontmatter(vault / other["source"]["path"])["status"] == "superseded"
     assert "status" not in _frontmatter(vault / replay["source"]["path"])
+
+
+def test_an_audience_with_no_client_entry_cannot_record_over_a_withheld_owner_recap(vault: Path) -> None:
+    """Under a governed vault a non-owner holds no write grant unless a client entry names one,
+    so another audience's record is refused and the owner's recap is left as it was."""
+    with request_scope(owner_principal(surface="mcp")):
+        owned = _record(vault)
+    owner_page = vault / owned["source"]["path"]
+    before = owner_page.read_bytes()
+    _withhold_episodes_from(vault, "client-b")
+
+    with request_scope(_audience("client-b")):
+        with pytest.raises(ValueError, match="WRITE_REFUSED: target is unavailable"):
+            _record(vault, summary="Audience B's own account of the same thread.")
+
+    assert owner_page.read_bytes() == before
+    assert _episodes(vault) == [owner_page]
 
 
 def test_a_clock_step_back_still_orders_the_new_revision_last(
@@ -1226,33 +1238,6 @@ def test_a_refused_recap_writes_nothing(vault: Path) -> None:
             _record(vault, worked_on=[], decided=[], open=[])
 
     assert _episodes(vault) == []
-
-
-def test_unknown_and_withheld_about_refs_are_indistinguishable(vault: Path) -> None:
-    visible = _write_note(vault, "visible-lamp-note", "11111111-1111-4111-8111-111111111111")
-    withheld = _write_note(vault, "withheld-lamp-note", "22222222-2222-4222-8222-222222222222")
-    unknown = memory_refs.memory_ref("33333333-3333-4333-8333-333333333333")
-    _withhold_notes_from(vault, "client-a")
-
-    with request_scope(_audience("client-a")):
-        kept = _record(vault, episode="ep-" + "b2" * 16, about=[visible])
-        hidden = _record(vault, episode="ep-" + "c3" * 16, about=[withheld])
-        missing = _record(vault, episode="ep-" + "d4" * 16, about=[unknown])
-
-    assert kept["about_skipped"] == 0
-    for result in (kept, hidden, missing):
-        assert "about" not in _frontmatter(vault / result["source"]["path"])
-    for result in (hidden, missing):
-        assert result["about_skipped"] == 1
-    with request_scope(_audience("client-a")):
-        ledger = episode_recovery.EpisodeInputOwner(vault)._store()
-        evidence = ledger.read(episode_model.episode_id("ep-" + "b2" * 16))["state"][
-            "input_revisions"
-        ][-1]["evidence"]
-    assert evidence["about"] == [visible]
-    assert {key: hidden[key] for key in ("about_skipped", "ledger", "idempotent")} == {
-        key: missing[key] for key in ("about_skipped", "ledger", "idempotent")
-    }
 
 
 def test_record_commits_without_about_when_pending_identity_is_unprovable(vault: Path) -> None:

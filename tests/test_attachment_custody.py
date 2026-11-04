@@ -8,6 +8,7 @@ original's page. All bytes, names and tokens here are synthetic.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -66,6 +67,15 @@ def _png(width: int = 2, height: int = 2) -> bytes:
     )
 
 
+def _jpeg() -> bytes:
+    """A valid, solid-color 2-by-2 JPEG, generated without camera metadata."""
+    return base64.b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRof"
+        "Hh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAACAAIBAREA/8QAFAAB"
+        "AAAAAAAAAAAAAAAAAAAAAf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AH//Z"
+    )
+
+
 def _command(name: str):
     return next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
 
@@ -101,7 +111,10 @@ def lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return writer_lease
 
 
-def _hold(vault: Path, payload: bytes, *, lane: str = "evidence", name: str = "card.png") -> dict:
+def _hold(
+    vault: Path, payload: bytes, *, lane: str = "evidence", name: str = "card.png",
+    content_type: str = "image/png",
+) -> dict:
     from exomem import held_uploads
 
     return held_uploads.hold(
@@ -109,7 +122,7 @@ def _hold(vault: Path, payload: bytes, *, lane: str = "evidence", name: str = "c
         io.BytesIO(payload),
         lane=lane,
         filename=name,
-        content_type="image/png",
+        content_type=content_type,
         max_bytes=1024 * 1024,
     )
 
@@ -209,12 +222,16 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
 # ---- Local clients: held uploads -------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("original", "filename", "content_type"),
+    [(_png(), "card.png", "image/png"), (_jpeg(), "card.jpg", "image/jpeg")],
+    ids=["png", "jpeg"],
+)
 def test_a_held_image_is_preserved_byte_for_byte_with_its_transcription(
-    vault: Path, lease
+    vault: Path, lease, original: bytes, filename: str, content_type: str,
 ) -> None:
-    original = _png()
     with _local_session("session-home"):
-        held = _hold(vault, original)
+        held = _hold(vault, original, name=filename, content_type=content_type)
         handle = held["file"]
         assert set(handle) == {"download_url", "file_id", "mime_type", "file_name"}
         assert handle["download_url"].startswith("exomem-held:")
@@ -241,7 +258,8 @@ def test_a_held_image_is_preserved_byte_for_byte_with_its_transcription(
     assert stored.read_bytes() == original
     assert row["hash"] == hashlib.sha256(original).hexdigest()
     assert row["size"] == len(original)
-    assert row["content_type"] == "image/png"
+    assert row["content_type"] == content_type
+    assert row["ref"]
 
     # The transcription is on the original's own page, marked derived, and bound
     # to the exact bytes it was made from.
@@ -254,7 +272,7 @@ def test_a_held_image_is_preserved_byte_for_byte_with_its_transcription(
         "origin": "client",
         "sha256": hashlib.sha256(original).hexdigest(),
         "size": len(original),
-        "content_type": "image/png",
+        "content_type": content_type,
     }
     assert frontmatter["binary_sha256"] == hashlib.sha256(original).hexdigest()
     assert TRANSCRIPTION in body.split("## Extracted text", 1)[1]
@@ -461,6 +479,55 @@ def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, leas
     assert not _vault_text_contains(vault, TRANSCRIPTION)
 
 
+@pytest.mark.parametrize("replacement", ["changed_bytes", "symlink"])
+def test_a_replaced_original_cannot_stand_for_a_duplicate(
+    vault: Path, lease, replacement: str,
+) -> None:
+    """A stale companion must not issue custody for different bytes or a symlink."""
+    original = _jpeg()
+    with _local_session("session-home"):
+        first = _preserve(
+            lease, vault,
+            [_hold(vault, original, name="card.jpg", content_type="image/jpeg")["file"]],
+            "replace-first",
+        )["files"][0]
+        stored = vault / first["stored_path"]
+        if replacement == "changed_bytes":
+            stored.write_bytes(b"externally changed artifact")
+        else:
+            target = stored.with_name("linked-card.jpg")
+            target.write_bytes(original)
+            stored.unlink()
+            try:
+                stored.symlink_to(target.name)
+            except (NotImplementedError, OSError):
+                pytest.skip("symlinks are unavailable")
+
+        fresh = _preserve(
+            lease, vault,
+            [_hold(vault, original, name="card-again.jpg", content_type="image/jpeg")["file"]],
+            "replace-second",
+        )["files"][0]
+        assert fresh["state"] == "stored", fresh
+        assert fresh["stored_path"] != first["stored_path"]
+        assert fresh["ref"] != first["ref"]
+        assert (vault / fresh["stored_path"]).read_bytes() == original
+        assert fresh["hash"] == hashlib.sha256(original).hexdigest()
+
+        duplicate = _preserve(
+            lease, vault,
+            [_hold(vault, original, name="card-retry.jpg", content_type="image/jpeg")["file"]],
+            "replace-third",
+        )["files"][0]
+
+    assert duplicate["state"] == "already_stored"
+    assert duplicate["stored_path"] == fresh["stored_path"]
+    assert duplicate["ref"] == fresh["ref"]
+    assert duplicate["hash"] == hashlib.sha256(
+        (vault / duplicate["stored_path"]).read_bytes()
+    ).hexdigest()
+
+
 def test_a_held_markdown_file_is_preserved_byte_for_byte(vault: Path, lease) -> None:
     from exomem import held_uploads
 
@@ -657,7 +724,7 @@ async def test_attach_hold_then_preserve_over_the_local_listener(
 ) -> None:
     from exomem import server_auth
 
-    original = _png(4, 4)
+    original = _jpeg()
     identity = SessionIdentity(github_user_id=OWNER_ID, github_login="example-owner")
     other, _ = await server_auth.build_local_session_authority().issue(
         client_id="laptop", scopes=list(local_ingress.LOCAL_SCOPES), identity=identity
@@ -668,13 +735,13 @@ async def test_attach_hold_then_preserve_over_the_local_listener(
         held = await doors.local.post(
             "/upload",
             headers=home,
-            files={"file": ("card.png", original, "image/png")},
+            files={"file": ("card.jpg", original, "image/jpeg")},
             data={"hold": "1"},
         )
         public_hold = await doors.public.post(
             "/upload",
             headers={"authorization": f"Bearer {UPLOAD_TOKEN}"},
-            files={"file": ("card.png", original, "image/png")},
+            files={"file": ("card.jpg", original, "image/jpeg")},
             data={"hold": "1"},
         )
         assert held.status_code == 201, held.text
@@ -704,6 +771,9 @@ async def test_attach_hold_then_preserve_over_the_local_listener(
     row = owned.json()["data"]["files"][0]
     assert row["state"] == "stored"
     assert (vault / row["stored_path"]).read_bytes() == original
+    assert row["hash"] == hashlib.sha256(original).hexdigest()
+    assert row["content_type"] == "image/jpeg"
+    assert row["ref"]
     assert row["transcription"]["state"] == "recorded"
     assert ISSUER not in json.dumps(held.json())
 

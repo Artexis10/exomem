@@ -5468,7 +5468,12 @@ def _batch_atomic_write_locked(
     # every destination replace so a live `_access.yaml` change cannot race a
     # long staging interval.
     if vault_root is not None:
-        _validate_batch_write_access(Path(vault_root), writes, auxiliary_manifest=_vocabulary_auxiliaries)
+        # A registry change waits for the vocabulary authority's decision (`begin_batch`),
+        # which needs the staged images; gate 2 then admits it or refuses it.
+        _validate_batch_write_access(
+            Path(vault_root), writes, auxiliary_manifest=_vocabulary_auxiliaries,
+            defer_registry=True,
+        )
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
@@ -5850,6 +5855,9 @@ def _batch_atomic_write_locked(
                 root = Path(vault_root)
                 _validate_batch_write_access(
                     root, writes[index:], proposed=writes, auxiliary_manifest=_vocabulary_auxiliaries,
+                    granted_paths=(
+                        additive_guard.effect_paths() if additive_guard is not None else frozenset()
+                    ),
                 )
                 recheck_path_guards(
                     root,
@@ -6181,8 +6189,17 @@ def _validate_batch_write_access(
     *,
     proposed: Iterable[PlannedWrite] | None = None,
     auxiliary_manifest: Any | None = None,
+    defer_registry: bool = False,
+    granted_paths: frozenset[str] = frozenset(),
 ) -> None:
-    """Fail closed when any planned target is outside or newly write-protected."""
+    """Fail closed when any planned target is outside or newly write-protected.
+
+    A vocabulary registry change is decided by the vocabulary authority, not by the
+    caller's writable scopes. `defer_registry` leaves that storage to the later check.
+    `granted_paths` are the paths that the authority's reservation for this exact batch
+    names; the registry storage whose sealed primary is among them skips the writable-scope
+    rule, and every other write keeps it.
+    """
     from . import access, vocabulary_auxiliaries, writer_lease
     from .governance import connector_boundary
 
@@ -6207,6 +6224,12 @@ def _validate_batch_write_access(
             proposed_source=primary.content, primary_guard=auxiliary_manifest.primary_guard,
             require_identity="lifecycle-review" in roles.values(),
         )
+    registry_primary = getattr(auxiliary_manifest, "primary_path", None)
+    registry_storage = (
+        {registry_primary, *(path for path, role in roles.items() if role == "registry-history")}
+        if registry_primary is not None and "registry-history" in roles.values()
+        else set()
+    )
     proposed_by_path = {}
     for write in full_plan:
         try:
@@ -6234,11 +6257,12 @@ def _validate_batch_write_access(
                 if rel in primary_bound_paths and primary_admission is not None:
                     if not primary_admission(rel):
                         raise ValueError("WRITE_REFUSED: target is unavailable")
-                else:
+                elif not (defer_registry and rel in registry_storage):
                     connector_boundary.require_write(
                         vault_root, rel,
                         content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
                         proposed=proposed_by_path,
+                        granted=rel in registry_storage and registry_primary in granted_paths,
                     )
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
@@ -6591,6 +6615,27 @@ def missing_path_reason(path: str) -> str:
     return f"path does not exist: {requested}"
 
 
+def admit_write_target(vault_root: Path, lexical: str, resolved: Path | None = None) -> None:
+    """Decide a restricted writer's target, in both spellings, before any existence check.
+
+    Raises `VaultPathError` with `WRITE_REFUSED`; for any other caller it does nothing.
+    """
+    from .governance import connector_boundary
+
+    forms = {lexical}
+    try:
+        if resolved is None:
+            resolved = (vault_root / lexical).resolve()
+        forms.add(_canonical_kb_segment(resolved.relative_to(vault_root.resolve()).as_posix()))
+    except (ValueError, OSError):
+        pass
+    try:
+        for form in forms:
+            connector_boundary.require_target(vault_root, form)
+    except ValueError:
+        raise VaultPathError(code="WRITE_REFUSED", reason="target is unavailable") from None
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -6615,9 +6660,11 @@ def resolve_under_vault(
     can't sneak a write to a vault-root sibling of KB). Governed content writers
     (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
 
-    `refuse_withheld` is for write doors: with `must_exist`, an existing file
-    the caller may not see (`egress.write_target_withheld`) raises exactly the
-    NOT_FOUND an absent path raises.
+    `refuse_withheld` is for write doors. A restricted writer's target is decided
+    first, from scope sets alone, so a withheld, an absent and a read-only target
+    raise the same `WRITE_REFUSED`. For any other caller, with `must_exist`, an
+    existing file it may not see (`egress.write_target_withheld`) raises exactly
+    the NOT_FOUND an absent path raises.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -6673,6 +6720,8 @@ def resolve_under_vault(
                 ),
             ) from None
 
+    if refuse_withheld:
+        admit_write_target(vault_root, rel, resolved)
     if must_exist and (
         not candidate.exists()
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
@@ -7111,6 +7160,50 @@ def walk_vault_md(vault_root: Path):
                 yield child
 
     yield from walk(vault_root)
+
+
+def walk_vault_md_with_subtree(vault_root: Path, subtree: Path):
+    """Yield `(path, in_vault, in_subtree)` for every page either of two walks yields.
+
+    `in_vault` says `walk_vault_md(vault_root)` yields the path, and `in_subtree`
+    says `find_corpus.walk_md(subtree)` does, where `subtree` lies under
+    `vault_root`. Each flag keeps its own walk's rules, so a folder that one
+    walk prunes is still entered for the other. A caller that needs both lists
+    each shared folder once instead of twice.
+    """
+    from . import foreground_priority, reserved_paths
+    from .find_corpus import _classify_walk_entry
+
+    anchor = Path(subtree)
+    subtree_entered = False
+
+    def walk(d: Path, in_vault: bool, in_subtree: bool):
+        nonlocal subtree_entered
+        foreground_priority.check_cancelled()
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            return
+        for child in children:
+            foreground_priority.check_cancelled()
+            vault_kind = _walk_vault_md_entry(vault_root, child) if in_vault else None
+            subtree_kind = (
+                _classify_walk_entry(anchor, child, reserved_paths)[0] if in_subtree else None
+            )
+            if vault_kind == "dir" and child == anchor:
+                # `walk_md(subtree)` lists the subtree's own children, whatever
+                # the vault walk's rules say about the folder itself.
+                subtree_entered = True
+                yield from walk(child, True, True)
+            elif vault_kind == "dir" or subtree_kind == "dir":
+                yield from walk(child, vault_kind == "dir", subtree_kind == "dir")
+            if vault_kind == "md" or subtree_kind == "md":
+                yield child, vault_kind == "md", subtree_kind == "md"
+
+    yield from walk(Path(vault_root), True, False)
+    if not subtree_entered and anchor.is_dir():
+        # The vault walk pruned the subtree folder or never reached it.
+        yield from walk(anchor, False, True)
 
 
 @dataclass
@@ -8860,14 +8953,23 @@ def plan_log_entries(
     *,
     operation_token: str,
     machine_generated: bool = False,
+    required: bool = False,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per item, oldest first.
 
     One read, one rewrite and one rotation decision for the whole batch, so a bulk write
     is a single log publication rather than one per entry. `operation_token` names the
-    whole batch for the deterministic rotation archive.
+    whole batch for the deterministic rotation archive. A `required` entry belongs to a
+    door whose contract needs it (a Records transition's audit), so it is planned whatever
+    the caller's ceiling and the write gate refuses a caller who may not write the log.
     """
     log_file = kb_root(vault_root) / "log.md"
+    from .governance import connector_boundary
+
+    if not required and not connector_boundary.effect_admission(vault_root)(log_file):
+        # A restricted writer's entry is skipped like every effect outside its ceiling, so the
+        # plan neither reads the log nor reports a rotation that would not happen.
+        return LogWritePlan(())
     if not log_file.is_file():
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
@@ -8910,6 +9012,7 @@ def plan_log_writes(
     operation_token: str,
     provenance: Mapping[str, Any] | None = None,
     machine_generated: bool = False,
+    required: bool = False,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
     return plan_log_entries(
@@ -8917,15 +9020,50 @@ def plan_log_writes(
         [LogEntry(date_iso, op, rel_path_no_ext, body, operation_token, provenance)],
         operation_token=operation_token,
         machine_generated=machine_generated,
+        required=required,
     )
+
+
+def _operation_log_paths(vault_root: Path) -> list[Path]:
+    """The live log, then the rotated archives oldest first."""
+    root = kb_root(vault_root)
+    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
+    return [root / "log.md", *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+
+
+def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]]:
+    """The activity sections of one log file, with the provenance fence each carries."""
+    tokens = parser.parse(text)
+    sections = [i for i, token in enumerate(tokens)
+                if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
+    entries: list[dict[str, Any]] = []
+    for index, at in enumerate(sections):
+        header = tokens[at + 1].content
+        stamp, separator, rest = header.removeprefix("[").partition("] ")
+        op, bar, title = rest.partition(" | ")
+        if not header.startswith("[") or not separator or not bar:
+            continue
+        stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
+        entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
+        for token in tokens[at:stop]:
+            if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
+                continue
+            try:
+                value = json.loads(token.content)
+            except (ValueError, TypeError):
+                entry["provenance_invalid"] = True
+                continue
+            if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+                entry["provenance"] = value
+            else:
+                entry["provenance_invalid"] = True
+        entries.append(entry)
+    return entries
 
 
 def read_operation_log(vault_root: Path) -> dict[str, Any]:
     """Read activity sections and structured provenance from live and rotated logs."""
-    root = kb_root(vault_root)
-    live = root / "log.md"
-    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
-    paths = [live, *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    paths = _operation_log_paths(vault_root)
     entries: list[dict[str, Any]] = []
     failed = 0
     read = 0
@@ -8937,36 +9075,42 @@ def read_operation_log(vault_root: Path) -> dict[str, Any]:
             failed += 1
             continue
         read += 1
-        tokens = parser.parse(text)
-        sections = [i for i, token in enumerate(tokens)
-                    if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
-        for index, at in enumerate(sections):
-            header = tokens[at + 1].content
-            stamp, separator, rest = header.removeprefix("[").partition("] ")
-            op, bar, title = rest.partition(" | ")
-            if not header.startswith("[") or not separator or not bar:
-                continue
-            stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
-            entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
-            for token in tokens[at:stop]:
-                if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
-                    continue
-                try:
-                    value = json.loads(token.content)
-                except (ValueError, TypeError):
-                    entry["provenance_invalid"] = True
-                    continue
-                if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
-                    entry["provenance"] = value
-                else:
-                    entry["provenance_invalid"] = True
-            entries.append(entry)
+        entries.extend(_operation_log_entries(text, parser))
     return {
         "entries": entries,
-        "live_log_present": live.is_file(),
+        "live_log_present": paths[0].is_file(),
         "files_read": read,
         "files_unreadable": failed,
     }
+
+
+def latest_operation_id(vault_root: Path, path: str) -> str | None:
+    """The `operation_id` of the newest logged write to `path`, or None when none carries one.
+
+    "Newest" is the largest server time among the provenance fences of the first log file
+    that holds one for `path`. Files are read newest first, the live log and then the
+    archives from the latest down, because rotation moves only the oldest entries out of the
+    live log. The scan stops at that file, so a recent write never reads the archives.
+    """
+    paths = _operation_log_paths(vault_root)
+    parser = MarkdownIt("commonmark")
+    for log_path in (paths[0], *reversed(paths[1:])):
+        try:
+            text, _guard = read_guarded_text(vault_root, log_path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+        newest: tuple[str, str] | None = None
+        for entry in _operation_log_entries(text, parser):
+            data = entry.get("provenance")
+            if not isinstance(data, dict) or data.get("path") != path:
+                continue
+            stamp, operation_id = data.get("server_at"), data.get("operation_id")
+            if isinstance(stamp, str) and isinstance(operation_id, str) and operation_id:
+                if newest is None or stamp > newest[0]:
+                    newest = (stamp, operation_id)
+        if newest is not None:
+            return newest[1]
+    return None
 
 
 def plan_log_writes_many(
@@ -8978,6 +9122,7 @@ def plan_log_writes_many(
     bodies: Iterable[str],
     operation_token: str,
     machine_generated: bool = False,
+    required: bool = False,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per body, oldest first."""
     return plan_log_entries(
@@ -8985,6 +9130,7 @@ def plan_log_writes_many(
         (LogEntry(date_iso, op, rel_path_no_ext, body) for body in bodies),
         operation_token=operation_token,
         machine_generated=machine_generated,
+        required=required,
     )
 
 

@@ -16,8 +16,8 @@ from .. import activation_manifest, find_corpus, reserved_paths, state_migration
 from .. import structured_collections as collections
 from ..kbdir import kb_dirname
 from . import companions, membership, policy
-from .decisions import Decision
-from .principal import ClientBinding, RequestPrincipal
+from .decisions import Decision, decide
+from .principal import OWNER_AUDIENCE, ClientBinding, RequestPrincipal
 
 CONFIG_ENV = "EXOMEM_CONNECTOR_BOUNDARY_CONFIG"
 COMPATIBILITY_ID = state_migration.CONNECTOR_BOUNDARY_COMPATIBILITY_ID
@@ -40,6 +40,7 @@ class Snapshot:
     clients: tuple[tuple[ClientBinding, frozenset[str]], ...]
     capture_paths: tuple[str, ...]
     vocabulary: dict | None = None
+    writable: tuple[tuple[ClientBinding, frozenset[str]], ...] = ()
 
     def denied_scopes(self, who: RequestPrincipal) -> frozenset[str]:
         if who.administrative_ingress:
@@ -49,6 +50,14 @@ class Snapshot:
                 if binding == who.client_binding:
                     return denied
         return self.default_denied_scope_ids
+
+    def writable_scopes(self, who: RequestPrincipal) -> frozenset[str]:
+        """The scopes the matched client entry lets `who` write; none without an entry."""
+        if who.resolved and who.client_binding is not None and who.origin_session is not None:
+            for binding, writable in self.writable:
+                if binding == who.client_binding:
+                    return writable
+        return frozenset()
 
 
 def _object(pairs):
@@ -210,6 +219,9 @@ def _read_snapshot(
                 raise BoundaryUnavailable()
         if not default or required is not None and not set(required["protected_scopes"]) <= default:
             raise BoundaryUnavailable()
+        residual = compiled.residual_scope_id
+        if residual is not None and residual not in default:
+            raise BoundaryUnavailable()
         if required is not None and not maintenance:
             active = policy.protective_scope_documents(compiled, frozenset(required["protected_scopes"]))
             if active != required["protected_scopes"]:
@@ -217,17 +229,34 @@ def _read_snapshot(
             if set(required["protected_scopes"]) != default or list(capture_paths) != required["capture_paths"]:
                 raise BoundaryUnavailable()
         clients = []
+        writable_by_client = []
         seen = set()
         for item in data["clients"]:
-            if not isinstance(item, dict) or set(item) != {"issuer", "client_id", "denied_scope_ids"}:
+            # nosemgrep: ep-word-set -- the closed field names of the host configuration schema; `writable_scope_ids` is optional.
+            if (not isinstance(item, dict) or not {"issuer", "client_id", "denied_scope_ids"} <= set(item)
+                    or set(item) - {"issuer", "client_id", "denied_scope_ids", "writable_scope_ids"}):
                 raise BoundaryUnavailable()
             binding = ClientBinding(item["issuer"], item["client_id"])
             denied = _scope_ids(item["denied_scope_ids"], compiled)
+            writable = _scope_ids(item.get("writable_scope_ids", []), compiled)
             if binding in seen or not denied <= default:
+                raise BoundaryUnavailable()
+            # A writable scope is exclusive to its client: it is outside the client's own denied set,
+            # on a fenced client, never the residual scope, and denied to the default context. A writer
+            # needs a default-closed vault: with no residual scope an unclassified page is open, and a
+            # workflow record that names the writer's inbox pages would land in it.
+            if writable and (residual is None or not denied or writable & denied or residual in writable
+                             or not writable <= default):
                 raise BoundaryUnavailable()
             seen.add(binding)
             clients.append((binding, denied))
-        return Snapshot(hashlib.sha256(raw + compiled.fingerprint.encode()).hexdigest(), default, tuple(clients), capture_paths, vocabulary)
+            writable_by_client.append((binding, writable))
+        for binding, writable in writable_by_client:
+            for other, other_denied in clients:
+                if other != binding and other_denied and not writable <= other_denied:
+                    raise BoundaryUnavailable()
+        return Snapshot(hashlib.sha256(raw + compiled.fingerprint.encode()).hexdigest(), default, tuple(clients),
+                        capture_paths, vocabulary, tuple(writable_by_client))
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise BoundaryUnavailable() from error
 
@@ -278,12 +307,20 @@ def require_global_observation(root: Path) -> None:
 def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: policy.Policy,
                    mutation: bool = False, path: str | None = None) -> Decision:
     try:
+        scope_ids = frozenset(scope_ids)
         current = snapshot(root, compiled)
         denied = current.denied_scopes(who) if current is not None else frozenset()
-        if current is not None and mutation and path is not None and _capture_destination(current, path):
-            denied = current.default_denied_scope_ids
+        if mutation:
+            # Canonical SQL subjects need the same write ceiling without relying on a projected file's existence.
+            ceiling = write_ceiling(root, who)
+            if ceiling is not None and not _writable(ceiling, scope_ids):
+                return Decision(policy.DISCLOSURE_MIN)
+        if (current is not None and mutation and path is not None and _capture_destination(current, path)
+                and scope_ids != membership.evaluate_path_selectors(Path(root), path, compiled)):
+            # A capture page keeps exactly the membership its path gives.
+            return Decision(policy.DISCLOSURE_MIN)
         return Decision(policy.DISCLOSURE_MIN if denied.intersection(scope_ids) else policy.DISCLOSURE_MAX)
-    except BoundaryUnavailable:
+    except (BoundaryUnavailable, membership.MembershipUnresolved, OSError):
         return Decision(policy.DISCLOSURE_MIN)
 
 
@@ -345,37 +382,54 @@ def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestP
     return _permits_membership(root, path, denied, compiled, content=content, who=who, artifact_copy=artifact_copy)
 
 
+def _membership_sets(root: Path, path: str, compiled: policy.Policy,
+                     *, content: bytes | None = None, who: RequestPrincipal | None = None,
+                     proposed_companion: companions.BoundCompanion | None = None,
+                     artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[frozenset[str], ...]:
+    """The scope set of each subject that `path` names; raises when membership cannot be decided."""
+    from ..collection_store.preview import bound_writer
+
+    writer = bound_writer(root)
+    if writer is not None and content is None and proposed_companion is None and artifact_copy is None:
+        with writer.read_snapshot():
+            operation = writer._operation
+            if who != operation.who:
+                raise BoundaryUnavailable()
+            targets = operation.projection_subjects(path)
+            if targets is not None:
+                return tuple(membership.evaluate_metadata(target.basis.subject, compiled) for target in targets)
+    if path.lower().endswith(".md") and artifact_copy is None:
+        if content is None and _unwritten_capture_slot(root, path, who):
+            # The capture invariant gives every page there the membership of its path, so a name no page holds yet has it too.
+            return (membership.evaluate_path_selectors(root, path, compiled),)
+        raw = content if content is not None else reserved_paths.read_generic_bytes(root, path).data
+        page = find_corpus.parse_page(root / path, 0, root, content=raw)
+        if page is None:
+            raise BoundaryUnavailable()
+        return (membership.evaluate_snapshot(page, compiled, content_hash=hashlib.sha256(raw).hexdigest()),)
+    return (membership.evaluate_path_only(root, path, compiled, proposed_companion=proposed_companion,
+                                          artifact_copy=artifact_copy).require_classified(),)
+
+
 def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled: policy.Policy,
                         *, content: bytes | None = None, who: RequestPrincipal | None = None,
                         proposed_companion: companions.BoundCompanion | None = None,
                         artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     try:
-        from ..collection_store.preview import bound_writer
-
-        writer = bound_writer(root)
-        if writer is not None and content is None and proposed_companion is None and artifact_copy is None:
-            with writer.read_snapshot():
-                operation = writer._operation
-                if who != operation.who:
-                    return False
-                targets = operation.projection_subjects(path)
-                if targets is not None:
-                    return bool(targets) and all(
-                        not denied.intersection(membership.evaluate_metadata(target.basis.subject, compiled))
-                        for target in targets
-                    )
-        if path.lower().endswith(".md") and artifact_copy is None:
-            raw = content if content is not None else reserved_paths.read_generic_bytes(root, path).data
-            page = find_corpus.parse_page(root / path, 0, root, content=raw)
-            if page is None:
-                return False
-            scopes = membership.evaluate_snapshot(page, compiled, content_hash=hashlib.sha256(raw).hexdigest())
-        else:
-            scopes = membership.evaluate_path_only(root, path, compiled, proposed_companion=proposed_companion, artifact_copy=artifact_copy).require_classified()
-        return not denied.intersection(scopes)
-    except (BoundaryUnavailable, membership.MembershipUnresolved, OSError,
-            reserved_paths.ReservedPathLeafError):
+        sets = _membership_sets(root, path, compiled, content=content, who=who,
+                                proposed_companion=proposed_companion, artifact_copy=artifact_copy)
+    except _ADMISSION_REFUSALS:
         return False
+    return bool(sets) and all(not denied.intersection(scopes) for scopes in sets)
+
+
+def _unwritten_capture_slot(root: Path, path: str, who: RequestPrincipal | None) -> bool:
+    """Whether `path` is a free slot in this restricted writer's own inbox."""
+    if who is None:
+        return False
+    ceiling = write_ceiling(root, who)
+    return (ceiling is not None and _in_inbox(root, path, ceiling)
+            and not os.path.lexists(Path(root) / path))
 
 
 def _capture_destination(current: Snapshot, path: str) -> str | None:
@@ -387,28 +441,185 @@ def _capture_destination(current: Snapshot, path: str) -> str | None:
     return None
 
 
-def require_create(root: Path, path: str, *, replace_existing: bool = False, directory: bool = False) -> None:
-    """Decide destination eligibility before revealing existence or allocating names."""
+@dataclass(frozen=True, slots=True)
+class WriteCeiling:
+    """What one restricted writer may write, with the host state that decides it."""
+
+    who: RequestPrincipal
+    writable: frozenset[str]
+    current: Snapshot | None
+    compiled: policy.Policy
+    purpose: str | None
+
+
+def write_ceiling(root: Path, who: RequestPrincipal) -> WriteCeiling | None:
+    """The one definition of a restricted writer: `None` when the boundary does not confine `who`.
+
+    A restricted writer is a non-owner under a non-empty policy, or any caller,
+    the owner included, whose connector entry denies a scope. Administrative ingress, an
+    unfenced owner client and every caller on a vault with an empty policy and no connector
+    configuration are not. Writable scopes come only from the host configuration.
+    """
+    if who.administrative_ingress:
+        return None
+    current = snapshot(root)
+    non_owner = who.audience_id != OWNER_AUDIENCE
+    if current is None and not non_owner:
+        return None
+    compiled = policy.load(root)
+    fenced = current is not None and bool(current.denied_scopes(who))
+    if not fenced and (compiled.empty or not non_owner):
+        return None
+    from . import egress
+
+    try:
+        purpose = egress._declared_purpose(root, who, who.purpose)
+    except egress.AuthorizationSessionDecisionUnavailable as error:
+        raise BoundaryUnavailable() from error
+    return WriteCeiling(who, current.writable_scopes(who) if current is not None else frozenset(), current, compiled,
+                        purpose=purpose)
+
+
+def _writable(ceiling: WriteCeiling, scopes: frozenset[str]) -> bool:
+    """A scope set that is non-empty, inside the writable scopes, and read in full by the writer."""
+    who = ceiling.who
+    return (bool(scopes) and scopes <= ceiling.writable and who.resolved and not ceiling.compiled.blocked
+            and decide(scopes, audience=who.audience_id, purpose=ceiling.purpose,
+                       policy=ceiling.compiled).level >= policy.DISCLOSURE_MAX)
+
+
+def _in_inbox(root: Path, path: str, ceiling: WriteCeiling, *, directory: bool = False) -> bool:
+    """Whether `path` lies in a capture path whose own membership the writer may write."""
+    current = ceiling.current
+    if current is None or read_requirement(root) is None:
+        return False
+    folder = _capture_destination(current, path)
+    if folder is None or not (path.startswith(f"{folder}/") or directory and path == folder):
+        return False
+    probe = f"{path}/x" if directory else path  # a directory is judged by a leaf it would hold
+    try:
+        return _writable(ceiling, membership.evaluate_path_selectors(Path(root), probe, ceiling.compiled))
+    except _ADMISSION_REFUSALS:
+        return False
+
+
+def _is_writable_page(root: Path, path: str, ceiling: WriteCeiling) -> bool:
+    """Whether `path` is an existing page that the writer reads in full inside its writable scopes."""
+    try:
+        if not (Path(root) / path).exists():
+            return False
+        sets = _membership_sets(Path(root), path, ceiling.compiled, who=ceiling.who)
+    except _ADMISSION_REFUSALS:
+        return False
+    return bool(sets) and all(_writable(ceiling, scopes) for scopes in sets)
+
+
+def _target_admitted(root: Path, path: str, ceiling: WriteCeiling, *, existing: bool, directory: bool = False) -> bool:
+    if Path(root) / path == activation_manifest.manifest_path(root) or policy.is_governance_path(path):
+        return False
+    return _in_inbox(root, path, ceiling, directory=directory) or (existing and _is_writable_page(root, path, ceiling))
+
+
+def _require_target(root: Path, path: str, *, existing: bool, directory: bool = False) -> None:
     from .principal import effective_principal
 
     try:
-        current = snapshot(root)
-        who = effective_principal()
-        if current is None or not current.denied_scopes(who):
-            return
-        if Path(root) / path == activation_manifest.manifest_path(root):
-            raise BoundaryUnavailable()
-        if replace_existing and permits(root, path, who):
-            return
-        folder = _capture_destination(current, path)
-        if read_requirement(root) is not None and folder is not None and (
-                path.startswith(f"{folder}/") or directory and path == folder):
+        ceiling = write_ceiling(root, effective_principal())
+        if ceiling is None or _target_admitted(root, path, ceiling, existing=existing, directory=directory):
             return
     except BoundaryUnavailable:
         pass
-    # Mixed namespaces cannot support private-independent collisions. The caller
-    # must select a configured capture destination; existing edits stay available.
+    # One answer for a withheld, an absent and a read-only target, decided from scope sets alone.
     raise ValueError("WRITE_REFUSED: target is unavailable")
+
+
+def require_create(root: Path, path: str, *, replace_existing: bool = False, directory: bool = False) -> None:
+    """Decide destination eligibility before revealing existence or allocating names."""
+    _require_target(root, path, existing=replace_existing, directory=directory)
+
+
+def effect_admission(root: Path) -> Callable[[str | Path], bool]:
+    """Decide where a door's side effects may land, once for one plan.
+
+    The returned test takes a page, vault-relative or absolute. A restricted writer's effect
+    lands only inside its write ceiling and is skipped, neither written nor refused,
+    anywhere else; an unavailable boundary skips every effect. Every other caller's effects
+    all land. A door that plans an effect on another page (an activity log or index entry, a
+    back-reference, a link rewrite) asks this one test and plans nothing when it says no.
+    """
+    from .principal import effective_principal
+
+    root = Path(root)
+
+    def relative(page: str | Path) -> str | None:
+        try:
+            return Path(page).relative_to(root).as_posix() if Path(page).is_absolute() else str(page)
+        except ValueError:
+            return None
+
+    try:
+        ceiling = write_ceiling(root, effective_principal())
+    except BoundaryUnavailable:
+        return lambda page: False
+    if ceiling is None:
+        return lambda page: True
+    return lambda page: (rel := relative(page)) is not None and _target_admitted(root, rel, ceiling, existing=True)
+
+
+def capture_folders(root: Path, *, tree: str | None = None) -> tuple[str, ...]:
+    """The configured capture paths, none when the boundary is absent or unavailable.
+
+    `tree` keeps the capture paths that lie under `<knowledge base>/<tree>/`.
+    """
+    try:
+        current = snapshot(root)
+    except BoundaryUnavailable:
+        return ()
+    if current is None:
+        return ()
+    if tree is None:
+        return current.capture_paths
+    return tuple(folder for folder in current.capture_paths if _in_tree(folder, tree))
+
+
+def _in_tree(path: str, tree: str) -> bool:
+    """Whether `path` lies under `<knowledge base>/<tree>/`, under any portable spelling."""
+    return collections._portable_path_key(path).startswith(collections._portable_path_key(f"{kb_dirname()}/{tree}/"))
+
+
+def inbox_destination(root: Path, folder: str, leaf: str) -> str | None:
+    """Where a restricted writer's page that a door places in `folder/leaf` goes: its inbox, as a vault folder.
+
+    `folder` is the shared destination `<knowledge base>/<tree>/<rest>`. It redirects to
+    `<capture path>/<rest>`: the first capture path, in sorted order, that lies under
+    `<knowledge base>/<tree>/` and where the writer may create. A destination already
+    inside a capture path stays. `None` when the boundary does not confine the caller;
+    with no capture path to use, the write is refused. Only a door that generates its
+    own destination calls this: an explicit destination is never redirected.
+    """
+    from .principal import effective_principal
+
+    try:
+        ceiling = write_ceiling(root, effective_principal())
+        if ceiling is None:
+            return None
+        if _in_inbox(root, f"{folder}/{leaf}", ceiling):
+            return folder
+        parts = folder.split("/")
+        if len(parts) > 1:
+            rest = "/".join(parts[2:])
+            for capture in ceiling.current.capture_paths if ceiling.current is not None else ():
+                target = f"{capture}/{rest}" if rest else capture
+                if _in_tree(capture, parts[1]) and _in_inbox(root, f"{target}/{leaf}", ceiling):
+                    return target
+    except BoundaryUnavailable:
+        pass
+    raise ValueError("WRITE_REFUSED: target is unavailable")
+
+
+def require_target(root: Path, path: str) -> None:
+    """Decide an existing target before a write door resolves or reads it."""
+    _require_target(root, path, existing=True)
 
 
 def capture_namespace(root: Path, path: str) -> bool:
@@ -417,8 +628,18 @@ def capture_namespace(root: Path, path: str) -> bool:
     return current is not None and _capture_destination(current, path) is not None
 
 
+def _keeps_path_membership(root: Path, path: str, compiled: policy.Policy, **evidence) -> bool:
+    """Whether the item at `path` has exactly the membership its path alone gives."""
+    try:
+        sets = _membership_sets(Path(root), path, compiled, **evidence)
+        return bool(sets) and all(
+            scopes == membership.evaluate_path_selectors(Path(root), path, compiled) for scopes in sets)
+    except _ADMISSION_REFUSALS:
+        return False
+
+
 def verify_capture_namespaces(root: Path, current: Snapshot) -> None:
-    """Establish the all-writer visibility invariant during stopped maintenance."""
+    """Establish the all-writer membership invariant of capture namespaces during stopped maintenance."""
     if not current.capture_paths:
         raise BoundaryUnavailable()
     if current.vocabulary is not None:
@@ -449,8 +670,7 @@ def verify_capture_namespaces(root: Path, current: Snapshot) -> None:
             for name in files:
                 item = Path(directory) / name
                 if (not stat.S_ISREG(item.lstat().st_mode)
-                        or not _permits_membership(root, item.relative_to(root).as_posix(),
-                                                  current.default_denied_scope_ids, compiled)):
+                        or not _keeps_path_membership(root, item.relative_to(root).as_posix(), compiled)):
                     raise BoundaryUnavailable()
 
 
@@ -470,39 +690,54 @@ def _proposed_companion(root: Path, artifact: str, proposed: dict) -> companions
                                                artifact_size=size, companion=page)
 
 
-def require_write(root: Path, path: str, *, content: bytes | None, proposed: dict | None = None) -> None:
+def require_write(
+    root: Path, path: str, *, content: bytes | None, proposed: dict | None = None,
+    granted: bool = False,
+) -> None:
     """Preserve both current and proposed membership at the publication owner.
 
-    A refused write cannot reveal or remove protective membership. The writer
-    loses that target change; unrelated allowed edits keep their existing flow.
+    A restricted writer keeps its target inside its writable scopes before and after the
+    write. Every writer keeps a capture page's membership equal to its path's. A refused
+    write cannot reveal or remove protective membership. A restricted writer's record of
+    workflow state is admitted here without a membership check: no audience is served it, a
+    door writes it, and a JSON record has no content or companion for a scope to select.
+    Registry storage that the vocabulary authority granted to this caller for this change
+    (`granted`) skips the writable-scope rule only; the caller passes it for that one path,
+    never for a whole write.
     """
     from .principal import effective_principal
 
     who = effective_principal()
-    current = snapshot(root)
-    if current is None:
+    ceiling = write_ceiling(root, who)
+    current = ceiling.current if ceiling is not None else snapshot(root)
+    folder = _capture_destination(current, path) if current is not None else None
+    if ceiling is None and folder is None:
         return
-    limited = current.denied_scopes(who)
-    # Even unrestricted writers must preserve capture namespace visibility.
-    folder = _capture_destination(current, path)
+    refused = ValueError("WRITE_REFUSED: target is unavailable")
     # Portable aliases could expose hidden collision state. All writers use
     # the configured folder spelling; choosing that spelling costs no content.
     if folder is not None and not path.startswith(f"{folder}/"):
-        raise ValueError("WRITE_REFUSED: target is unavailable")
-    denied = current.default_denied_scope_ids if folder is not None else limited
-    if not denied:
+        raise refused
+    if ceiling is not None and policy.is_workflow_state_path(path):
         return
-    if limited and (policy.is_governance_path(path) or root / path == activation_manifest.manifest_path(root)):
-        raise ValueError("WRITE_REFUSED: target is unavailable")
-    try:
-        exists = (root / path).exists()
-    except OSError:
-        raise ValueError("WRITE_REFUSED: target is unavailable") from None
-    if exists and limited and not permits(root, path, who):
-        raise ValueError("WRITE_REFUSED: target is unavailable")
-    if not exists and limited:
-        require_create(root, path)
-    compiled = policy.load(root)
+    if ceiling is not None and (policy.is_governance_path(path)
+                                or Path(root) / path == activation_manifest.manifest_path(root)):
+        raise refused
+    scope_exempt = ceiling is not None and granted
+    if ceiling is not None and not scope_exempt and not _target_admitted(root, path, ceiling, existing=True):
+        raise refused
+    compiled = ceiling.compiled if ceiling is not None else policy.load(root)
+
+    def admitted(target: str, **evidence) -> bool:
+        try:
+            sets = _membership_sets(Path(root), target, compiled, who=who, **evidence)
+        except _ADMISSION_REFUSALS:
+            return False
+        if folder is not None and not all(
+                scopes == membership.evaluate_path_selectors(Path(root), target, compiled) for scopes in sets):
+            return False
+        return bool(sets) and (ceiling is None or scope_exempt or all(_writable(ceiling, scopes) for scopes in sets))
+
     proposed = proposed or {}
     companion = None
     try:
@@ -521,12 +756,12 @@ def require_write(root: Path, path: str, *, content: bytes | None, proposed: dic
                 if not isinstance(artifact, str) or path != f"{artifact}.md":
                     raise companions.CompanionClassificationError("descriptor_invalid")
                 bound = _proposed_companion(root, artifact, proposed)
-                if not _permits_membership(root, artifact, denied, compiled, proposed_companion=bound):
+                if not admitted(artifact, proposed_companion=bound):
                     raise companions.CompanionClassificationError("descriptor_invalid")
     except (companions.CompanionClassificationError, reserved_paths.ReservedPathLeafError, OSError):
-        raise ValueError("WRITE_REFUSED: target is unavailable") from None
-    if not _permits_membership(root, path, denied, compiled, content=content, proposed_companion=companion, who=who):
-        raise ValueError("WRITE_REFUSED: target is unavailable")
+        raise refused from None
+    if not admitted(path, content=content, proposed_companion=companion):
+        raise refused
 
 
 def requirement_relative_path() -> str:

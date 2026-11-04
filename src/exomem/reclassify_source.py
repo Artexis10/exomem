@@ -43,6 +43,7 @@ from .vault import (
     PathGuard,
     PlannedWrite,
     VaultPathError,
+    admit_write_target,
     batch_atomic_write,
     find_inbound_wikilinks,
     parse_frontmatter,
@@ -173,6 +174,10 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
         rel = f"{kb_dirname()}/{rel}"
     if not rel.lower().endswith(".md"):
         rel = f"{rel}.md"
+    try:
+        admit_write_target(vault_root, rel)
+    except VaultPathError as refusal:
+        raise ReclassifyError(refusal.code, refusal.reason) from None
     prefix = f"{_sources_root()}/"
     if not rel.startswith(prefix):
         raise ReclassifyError(
@@ -621,9 +626,10 @@ def _referrer_outcome(
     caller's view, so every page named here is one the caller may see, and the
     report matches a vault without the pages withheld from it.
     """
-    from .governance import egress
+    from .governance import connector_boundary, egress
 
     relocating = destination != rel
+    writable_page = connector_boundary.effect_admission(vault_root)
     forms: dict[str, set[str]] = {}
     for hit in inbound:
         forms.setdefault(hit.path, set()).add(_link_form(hit.raw_target))
@@ -631,6 +637,8 @@ def _referrer_outcome(
     unchanged: dict[str, list[str]] = {}
     refusals: list[dict[str, str]] = []
     for item in move_file_module.plan_inbound_rewrites(vault_root, rel, destination, inbound):
+        if not writable_page(item.path):
+            continue  # the move leaves a page its mover may not write unchanged
         changes = item.changes if relocating else 0
         if changes and item.append_only:
             refusals.append({

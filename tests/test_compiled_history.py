@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from test_connector_boundary import PUBLIC
 from test_connector_boundary import configured_boundary as configured_boundary
+from test_connector_boundary import public_matter_writer as public_matter_writer
 from test_latency_gate import _seed_freshness_live
 from test_observe_memory import (
     PAGE,
@@ -601,12 +602,12 @@ def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
 
 
 def test_limited_legacy_path_ref_edit_keeps_public_prior_under_project_scope(
-    configured_boundary, vault: Path,
+    public_matter_writer, vault: Path,
 ) -> None:
     """Legacy history uses the producer's path identity without granting UUID authority."""
     from exomem import context_refs
 
-    _, authenticate = configured_boundary
+    _, authenticate = public_matter_writer
     source = "---\nproject: public-project\n---\nThe window is 30 minutes.\n"
     _write_page(vault, rel=UNTYPED_PAGE, source=source)
     with request_scope(authenticate("limited")):
@@ -735,12 +736,12 @@ def test_retained_bridge_cannot_borrow_the_current_bridge_approval(vault: Path) 
 
 @pytest.mark.parametrize("change", ["hash", "identity", "unrelated_ref"])
 def test_terminal_history_binding_cannot_outlive_its_exact_current_parent(
-    configured_boundary, vault: Path, change: str,
+    public_matter_writer, vault: Path, change: str,
 ) -> None:
     """Terminal shaping must not bind stale parent evidence or another memory URI."""
     from exomem.governance import egress
 
-    _, authenticate = configured_boundary
+    _, authenticate = public_matter_writer
     source = _untyped_page_source("An earlier interpretation.").replace(
         "status: active", "status: active\nproject: public-project",
     )

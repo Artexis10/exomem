@@ -14,6 +14,7 @@ on:
       - "uv.lock"
       - ".github/workflows/cloud-cellctl.yml"
       - ".github/actions/substrate-test-contract/**"
+      - ".github/actions/free-runner-disk/**"
   push:
     branches: [main]
     paths:
@@ -28,6 +29,7 @@ on:
       - "uv.lock"
       - ".github/workflows/cloud-cellctl.yml"
       - ".github/actions/substrate-test-contract/**"
+      - ".github/actions/free-runner-disk/**"
   # A manual run also replays the live K3s suite (live-k3s below).
   workflow_dispatch:
   workflow_call:
@@ -156,7 +158,7 @@ jobs:
           # is left out because release bumps touch it; chart tests pin the
           # invariants it carries. Git quotes a path with special or
           # non-ASCII characters, hence the optional leading quote.
-          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|infra/cellctl/tests/test_export_storage\.py$|infra/cellctl/src/cellctl/exports\.py$|src/exomem/cloud_(import[^/]*|export)\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$)'
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|infra/cellctl/tests/test_export_storage\.py$|infra/cellctl/src/cellctl/exports\.py$|src/exomem/cloud_(import[^/]*|export)\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$|\.github/actions/free-runner-disk/)'
         run: |
           case "$EVENT" in
             # Reusable workflows retain the full-CI caller's scheduled event.
@@ -225,6 +227,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+      # Docker loads the model image while BuildKit retains its build state.
+      - name: Free runner disk for the import image
+        if: matrix.suite == 'protected-import'
+        uses: ./.github/actions/free-runner-disk
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Install the pinned Helm release binary
         run: |

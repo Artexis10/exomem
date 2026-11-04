@@ -285,9 +285,14 @@ _SNAPSHOT_PROOFS_LOCK = threading.Lock()
 #: than each paying the O(corpus) proof: a blocking reader waits for its
 #: verdict, a `SINGLE_FLIGHT` reader serves without the graph instead.
 _PROOFS_IN_FLIGHT: dict[str, tuple[threading.Event, int]] = {}
-#: `prove` mode for a request path: prove inline when no proof is running for
-#: the sidecar, refuse as `unproven` when another reader's proof already is.
+#: `prove` mode for a request path: refuse as `unproven` when another reader's
+#: proof is running for the sidecar; otherwise prove inline in a one-shot
+#: process, or start the proof in the background in a managed service.
 SINGLE_FLIGHT = "single_flight"
+#: The background proof a managed request started, per sidecar, so concurrent
+#: requests start one proof thread rather than one each.
+_BACKGROUND_PROOFS: dict[str, threading.Thread] = {}
+_BACKGROUND_PROOF_THREAD_NAME = "exomem-graph-proof"
 
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
@@ -1461,6 +1466,53 @@ class _TrackedSidecarConnection(sqlite3.Connection):
                 _release_sidecar_reader(key, self)
 
 
+def _request_proves_in_background() -> bool:
+    """Whether a `SINGLE_FLIGHT` request hands its cold proof to a background thread.
+
+    A managed service has later requests to serve, and its first request after a
+    promotion paid the O(corpus) proof on its own thread while readiness said
+    ready. A one-shot caller has no later request, so it keeps the inline proof
+    and the graph lane. The same split as the vector lane's `defer_cold_load`.
+    """
+    from . import readiness
+
+    return readiness.runtime_managed()
+
+
+def _start_background_proof(vault_root: Path, registry_key: str) -> None:
+    """Start the one background proof of this sidecar unless it is already running."""
+    with _SNAPSHOT_PROOFS_LOCK:
+        running = _BACKGROUND_PROOFS.get(registry_key)
+        if running is not None and running.is_alive():
+            return
+        thread = threading.Thread(
+            target=_run_background_proof,
+            args=(Path(vault_root), registry_key),
+            name=_BACKGROUND_PROOF_THREAD_NAME,
+            daemon=True,
+        )
+        _BACKGROUND_PROOFS[registry_key] = thread
+        # Started under the lock, so a concurrent request sees it alive.
+        thread.start()
+
+
+def _run_background_proof(vault_root: Path, registry_key: str) -> None:
+    """Prove the sidecar as a bulk pass; the next request reads the remembered verdict.
+
+    A bulk pass yields to requests between pages. `available()` claims the
+    proof slot, or waits for and reuses a proof that another reader started.
+    """
+    try:
+        with foreground_priority.bulk():
+            EpistemicGraphIndex(vault_root).available()
+    except Exception:  # noqa: BLE001 - the next request starts another proof
+        log.info("graph background proof failed", exc_info=True)
+    finally:
+        with _SNAPSHOT_PROOFS_LOCK:
+            if _BACKGROUND_PROOFS.get(registry_key) is threading.current_thread():
+                _BACKGROUND_PROOFS.pop(registry_key, None)
+
+
 def _await_publication_hold(key: str) -> None:
     """Block a new reader for the bounded replacement window, then proceed.
 
@@ -1940,6 +1992,32 @@ class _ProofPage(NamedTuple):
     fold_guard: vault_module.PathGuard
 
 
+@dataclass(frozen=True)
+class _ProofReads:
+    """The admitted pages a converged cold proof ended on, for a later proof to start from.
+
+    A page read is a fact about disk bytes, not about the snapshot proved, so a
+    proof of a later snapshot may start from these pages and re-read only the
+    ones whose fold guard moved since. Admission and titles depend on the recall
+    policy, so the reads hold only under the identity they were made under.
+    The memberships are the ones that proof's last recheck walked, which its
+    pages cover exactly.
+    """
+
+    policy_identity: tuple[str, str]
+    resolver_membership: frozenset[str]
+    indexed_membership: frozenset[str]
+    pages: Mapping[str, _ProofPage]
+
+
+class _ProofDeadlinePassed(Exception):
+    """A deadline-bound cold proof ran out of time; it declines and proves nothing."""
+
+
+class _ProofCancelled(Exception):
+    """A cold proof's owner no longer wants its answer; it declines and proves nothing."""
+
+
 @dataclass
 class _SealMovement:
     """What a collecting seal recheck found moved, for the cold proof to fold."""
@@ -2173,8 +2251,9 @@ class EpistemicGraphIndex:
         """`prove_cold_snapshots` is the default `prove` mode of every public
         read on this index when no remembered verdict covers the sidecar: True
         proves (waiting for a proof already running), False refuses, and
-        `SINGLE_FLIGHT` proves unless another reader's proof is running, then
-        refuses -- for a request path that must not stack proofs (#1454)."""
+        `SINGLE_FLIGHT` refuses while another reader's proof is running, and
+        otherwise proves inline, or in the background in a managed service --
+        for a request path that must not stack or pay proofs (#1454)."""
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self._prove_cold_snapshots = prove_cold_snapshots
@@ -2602,9 +2681,10 @@ class EpistemicGraphIndex:
         is remembered per sidecar identity and recall projection identity
         (#1454), and one proof runs at a time per sidecar. ``prove`` defaults to
         the index's ``prove_cold_snapshots``: False refuses instead of proving
-        when nothing is remembered, ``SINGLE_FLIGHT`` refuses only while another
-        reader's proof is running, and True waits for that proof. A refusal
-        appends ``"unproven"`` to ``outcome_out``.
+        when nothing is remembered, ``SINGLE_FLIGHT`` refuses while another
+        reader's proof is running (and, in a managed service, starts the proof
+        in the background and refuses), and True waits for that proof. A
+        refusal appends ``"unproven"`` to ``outcome_out``.
 
         ``allow_cold_projection=False`` uses only a live event checkpoint for
         current projection checks, including checkpointless publications.
@@ -2815,16 +2895,20 @@ class EpistemicGraphIndex:
                 # back to the claim: the running proof may have raised or
                 # answered another identity, and then exactly one waiter
                 # claims the slot rather than all of them proving at once.
+                defer_to_background = prove == SINGLE_FLIGHT and _request_proves_in_background()
                 while True:
                     in_flight: threading.Event | None = None
                     mine: threading.Event | None = None
                     self_owned = False
+                    background = False
                     with _SNAPSHOT_PROOFS_LOCK:
                         remembered = _SNAPSHOT_PROOFS.get(registry_key)
                         covered = remembered is not None and remembered[0] == proof_identity
                         if not covered and prove:
                             claim = _PROOFS_IN_FLIGHT.get(registry_key)
-                            if claim is None:
+                            if claim is None and defer_to_background:
+                                background = True
+                            elif claim is None:
                                 mine = threading.Event()
                                 _PROOFS_IN_FLIGHT[registry_key] = (mine, threading.get_ident())
                             elif claim[1] == threading.get_ident():
@@ -2836,7 +2920,13 @@ class EpistemicGraphIndex:
                     if covered and remembered is not None:
                         current = remembered[1]
                         break
-                    if not prove or (in_flight is not None and prove == SINGLE_FLIGHT):
+                    if background:
+                        _start_background_proof(self.vault_root, registry_key)
+                    if (
+                        not prove
+                        or background
+                        or (in_flight is not None and prove == SINGLE_FLIGHT)
+                    ):
                         if outcome_out is not None:
                             outcome_out.append("unproven")
                         conn.close()
@@ -3155,7 +3245,14 @@ class EpistemicGraphIndex:
         with _REPUBLISH_BACKOFF_LOCK:
             _REPUBLISH_BACKOFF.pop(self._republish_backoff_key(), None)
 
-    def adopt_published_snapshot(self, *, apply_residue: bool = True) -> SnapshotAdoption:
+    def adopt_published_snapshot(
+        self,
+        *,
+        apply_residue: bool = True,
+        prior_reads: _ProofReads | None = None,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
 
         The entry point a standby calls before promotion, and the one a cold
@@ -3204,6 +3301,16 @@ class EpistemicGraphIndex:
         and calls :meth:`apply_adopted_residue` once it is promoted. Making the
         checkpoint the delta origin is process-local either way, so nothing the
         adoption establishes is lost by deferring them.
+
+        An adoption returns the page reads its proof ended on in `proof_reads`.
+        `prior_reads` starts the proof from an earlier adoption's reads, so it
+        re-reads only the pages that moved since, wherever a page's guard binds
+        its bytes; see `_snapshot_sources_match_disk`. `deadline`, a
+        `time.monotonic()` value, bounds the proof's walks, reads and rechecks:
+        one that passes it declines `proof_deadline_passed`. The topology check,
+        the origin adoption and the resolver fork after a converged proof still
+        run past it, about half a second on a 12,700-page vault. `cancelled`
+        declines `proof_cancelled` as soon as it answers True.
         """
         from . import graph_drain
 
@@ -3216,6 +3323,7 @@ class EpistemicGraphIndex:
             return SnapshotAdoption(False, reason=self._declined_snapshot_state())
         residue: set[str] = set()
         decline: list[str] = []
+        reads: list[_ProofReads] = []
         try:
             stored_checkpoint = self._stored_recall_checkpoint(conn)
             # Read in the transaction the proof compares rows against, so it
@@ -3231,6 +3339,10 @@ class EpistemicGraphIndex:
                 residue_out=residue,
                 reason_out=decline,
                 fold=True,
+                prior_reads=prior_reads,
+                reads_out=reads,
+                deadline=deadline,
+                cancelled=cancelled,
             )
         finally:
             conn.close()
@@ -3270,7 +3382,11 @@ class EpistemicGraphIndex:
         # of a whole-vault rebuild on the first write.
         find_module.recall_resolver_snapshot(self.vault_root)
         return SnapshotAdoption(
-            True, residue=tuple(sorted(residue)), reason="adopted", proved_token=proved_token
+            True,
+            residue=tuple(sorted(residue)),
+            reason="adopted",
+            proved_token=proved_token,
+            proof_reads=reads[0] if reads else None,
         )
 
     def _snapshot_sources_match_disk(
@@ -3282,6 +3398,10 @@ class EpistemicGraphIndex:
         reason_out: list[str] | None = None,
         seal_out: list[_SnapshotSourceSeal] | None = None,
         fold: bool = False,
+        prior_reads: _ProofReads | None = None,
+        reads_out: list[_ProofReads] | None = None,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
 
@@ -3327,6 +3447,22 @@ class EpistemicGraphIndex:
         ends the proof too. `seal_out` carries the content guards, so a caller's
         later strict seal still compares bytes.
 
+        `prior_reads` starts a folding proof from the pages and memberships an
+        earlier proof ended on, under the same policy identity, instead of a
+        first membership walk and an empty read set. Nothing about the
+        invariant changes: a seeded page is rechecked against its fold guard
+        like a page read in this proof, the recheck walks the vault again for
+        both memberships, and a page that moved or appeared is read, so a proof
+        of a snapshot published after the earlier one re-reads only what moved
+        in between. A page whose guard compares content, every page where the
+        stat generation is not trusted and any page in the racy window, is read
+        again whether it moved or not. `reads_out` receives the pages and memberships a True answer
+        ended on, for the next proof to start from. `deadline`, a
+        `time.monotonic()` value checked per page, per rechecked guard and per
+        walked path, declines `proof_deadline_passed` once passed; `cancelled`,
+        checked at the same points, declines `proof_cancelled` once it answers
+        True.
+
         The invariant a True answer establishes: the snapshot S that `conn`'s
         read transaction sees, plus the residue R, equals the admitted pages as
         the last recheck found them, under one recall policy identity. Every
@@ -3352,12 +3488,36 @@ class EpistemicGraphIndex:
                 reason_out.append(reason)
             return False
 
+        interrupt: Callable[[], None] | None = None
+        if deadline is not None or cancelled is not None:
+
+            def interrupt() -> None:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _ProofDeadlinePassed
+                if cancelled is not None and cancelled():
+                    raise _ProofCancelled
+
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
-            resolver_membership = self._recall_membership()
-            indexed_membership = self._indexed_recall_membership()
-            if resolver_membership is None or indexed_membership is None:
-                return declined("recall_membership_unreadable")
+            seed = (
+                prior_reads
+                if fold and prior_reads is not None
+                and prior_reads.policy_identity == policy_identity
+                else None
+            )
+            resolver_membership: frozenset[str] | None
+            indexed_membership: frozenset[str] | None
+            if seed is not None:
+                # The earlier proof converged on these memberships with every
+                # page read. The recheck below walks the vault before any page
+                # is accepted, so a walk here would only repeat it.
+                resolver_membership = seed.resolver_membership
+                indexed_membership = seed.indexed_membership
+            else:
+                memberships = self._recall_memberships(interrupt=interrupt)
+                if memberships is None:
+                    return declined("recall_membership_unreadable")
+                resolver_membership, indexed_membership = memberships
             stored_hashes = {
                 str(path): str(source_hash)
                 for path, source_hash in conn.execute(
@@ -3365,11 +3525,14 @@ class EpistemicGraphIndex:
                 ).fetchall()
             }
             carry = self._read_topology_carry(conn)
-            pages: dict[str, _ProofPage] = {}
-            to_read = sorted(resolver_membership | indexed_membership)
+            admitted = resolver_membership | indexed_membership
+            pages: dict[str, _ProofPage] = dict(seed.pages) if seed is not None else {}
+            to_read = sorted(admitted - pages.keys())
             rounds = 0
             while True:
                 for rel in to_read:
+                    if interrupt is not None:
+                        interrupt()
                     try:
                         page = self._read_proof_page(rel, fold=fold)
                     except (FileNotFoundError, vault_module.PathGuardError) as error:
@@ -3412,6 +3575,7 @@ class EpistemicGraphIndex:
                 movement = _SealMovement()
                 sealed = self._snapshot_source_seal_matches_disk(
                     replace(seal, guards=tuple(page.fold_guard for page in pages.values())),
+                    interrupt=interrupt,
                     movement_out=movement,
                 )
                 # A page whose read raced is not in `pages`, and its guard is
@@ -3505,7 +3669,17 @@ class EpistemicGraphIndex:
                 residue_out.update(residue)
             if seal_out is not None:
                 seal_out.append(seal)
+            if reads_out is not None:
+                reads_out.append(
+                    _ProofReads(
+                        policy_identity, resolver_membership, indexed_membership, dict(pages)
+                    )
+                )
             return True
+        except _ProofDeadlinePassed:
+            return declined("proof_deadline_passed")
+        except _ProofCancelled:
+            return declined("proof_cancelled")
         except Exception as error:  # noqa: BLE001 - an incomplete cold proof fails closed
             # The class at INFO, so a declined proof is diagnosable from the
             # service log; the traceback stays at DEBUG.
@@ -3594,8 +3768,10 @@ class EpistemicGraphIndex:
                 if movement_out is None:
                     raise
                 movement.failed.append((guard.target, error))
-        movement.resolver_membership = self._recall_membership(interrupt=interrupt)
-        movement.indexed_membership = self._indexed_recall_membership(interrupt=interrupt)
+        memberships = self._recall_memberships(interrupt=interrupt)
+        movement.resolver_membership, movement.indexed_membership = (
+            (None, None) if memberships is None else memberships
+        )
         movement.policy_moved = (
             recall_policy.recall_policy_identity(self.vault_root) != seal.policy_identity
         )
@@ -5750,29 +5926,50 @@ class EpistemicGraphIndex:
                     ), interrupt,
                 ),
             )
-        except _RepublicationDeferred:
+        except (_RepublicationDeferred, _ProofDeadlinePassed, _ProofCancelled):
             raise
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
 
-    def _indexed_recall_membership(
+    def _recall_memberships(
         self, *, interrupt: Callable[[], None] | None = None,
-    ) -> frozenset[str] | None:
-        """Capture the exact admitted KB paths represented by graph file rows."""
-        kb = self.vault_root / kb_dirname()
+    ) -> tuple[frozenset[str], frozenset[str]] | None:
+        """Both memberships the cold proof compares, from one walk and one admission pass.
+
+        The first is `_recall_membership`'s, the vault-wide resolver scope. The
+        second is the admitted KB paths that graph file rows represent, as
+        `find_module._walk_md` walks the KB. Each keeps its own walk's rules
+        (see `vault.walk_vault_md_with_subtree`), and a page in both is
+        admitted once. None when either cannot be read whole.
+        """
+        walked: dict[Path, tuple[bool, bool]] = {}
+
+        def candidates() -> Iterator[Path]:
+            for path, in_vault, in_kb in vault_module.walk_vault_md_with_subtree(
+                self.vault_root, self.vault_root / kb_dirname()
+            ):
+                walked[path] = (in_vault, in_kb)
+                yield path
+
+        resolver: set[str] = set()
+        indexed: set[str] = set()
         try:
-            return recall_policy.admitted_relative_paths(
+            for path, rel in recall_policy.iter_admitted_relative(
                 self.vault_root,
                 _interruptible_source_paths(
-                    foreground_priority.yielding_in_bulk(
-                        find_module._walk_md(kb) if kb.is_dir() else ()
-                    ), interrupt,
+                    foreground_priority.yielding_in_bulk(candidates()), interrupt
                 ),
-            )
-        except _RepublicationDeferred:
+            ):
+                in_vault, in_kb = walked[path]
+                if in_vault:
+                    resolver.add(rel)
+                if in_kb:
+                    indexed.add(rel)
+        except (_RepublicationDeferred, _ProofDeadlinePassed, _ProofCancelled):
             raise
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
+        return frozenset(resolver), frozenset(indexed)
 
     def _resolver_source_versions(
         self,
@@ -8738,6 +8935,7 @@ class EpistemicGraphIndex:
             # Selected meanings decide suppression and candidates before any
             # rank: SQL rows below are interpreted facts, never stored guesses.
             authored_pages, authored_raw = _authored_relations(conn, view, selected)
+            specific_pairs = _specific_pairs(conn, view, selected)
             generic = relation_registry.generic_relation_key()
             unit_relations = _unit_relation_rows(conn, view, sources=selected)
             selected_registries = {source: view.registry_for(source) for source in selected}
@@ -9094,7 +9292,7 @@ class EpistemicGraphIndex:
                 {
                     "from": source,
                     "to": target,
-                    "relation_type": "relates_to",
+                    "relation_type": generic,
                     "method": "shared_open_question",
                     "evidence": {
                         "shared_questions": len(matches),
@@ -9148,7 +9346,7 @@ class EpistemicGraphIndex:
                 {
                     "from": source,
                     "to": target,
-                    "relation_type": "relates_to",
+                    "relation_type": generic,
                     "method": "shared_resolution_target",
                     "evidence": {
                         "shared_targets": len(matches),
@@ -9194,7 +9392,7 @@ class EpistemicGraphIndex:
                 {
                     "from": str(source),
                     "to": target_rel,
-                    "relation_type": "relates_to",
+                    "relation_type": generic,
                     "method": "shared_sources",
                     "evidence": {
                         "shared_source": _page_rel(
@@ -9285,6 +9483,7 @@ class EpistemicGraphIndex:
             "frontmatter_sources",
             "shared_sources",
         )
+        fit = relation_queue.RelationFit(self.vault_root, basis=type_basis)
         for source in selected:
             if len(groups) >= page_cap:
                 break
@@ -9305,7 +9504,12 @@ class EpistemicGraphIndex:
             for candidate in ordered:
                 target = str(candidate["to"])
                 relation_type = str(candidate["relation_type"])
-                if bool(candidate.get("_authored")):
+                # A generic candidate is settled once a specific authored relation joins the
+                # two pages.
+                if bool(candidate.get("_authored")) or (
+                    selected_registries[source].is_generic(relation_type)
+                    and frozenset((source, target)) in specific_pairs
+                ):
                     filtered["authored_edge"] += 1
                     continue
                 if target in placeholder_targets:
@@ -9347,6 +9551,9 @@ class EpistemicGraphIndex:
                 if effective != "open":
                     filtered["decided"] += 1
                     continue
+                # Where a specific relation fits both pages, the item carries them and offers no
+                # bullet: the agent picks the relation, and accept refuses without one.
+                options = fit.options(candidate, registry=selected_registries[source])
                 item = {
                     "review_id": review_id,
                     "ref": relation_queue.relation_review_ref(review_id),
@@ -9359,12 +9566,14 @@ class EpistemicGraphIndex:
                     ),
                     "method": candidate["method"],
                     "evidence": candidate.get("evidence") or {},
-                    "bullet": relation_queue._bullet(candidate),
+                    "bullet": None if options else relation_queue._bullet(candidate),
                     "target_ref": from_ref,
                     "state": "open",
                     "signal_version": signal_version,
                     "source_path": source,
                 }
+                if options:
+                    item["options"] = options
                 if candidate.get("internal_evidence"):
                     item["internal_evidence"] = candidate["internal_evidence"]
                 visible.append(item)
@@ -10235,6 +10444,38 @@ def _plan_matches(
     )
 
 
+def _without_settled_generics(
+    vault_root: Path,
+    rel: str,
+    registry: relation_registry.RelationRegistry,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop a generic candidate whose two pages a specific authored relation already joins.
+
+    The same rule as the batch read in `relation_review_batch`. An unavailable snapshot keeps
+    every candidate, as the graph-backed generators return none then.
+    """
+    if not any(registry.is_generic(str(item.get("relation_type") or "")) for item in candidates):
+        return candidates
+    conn = EpistemicGraphIndex(vault_root)._open_read_snapshot()
+    if conn is None:
+        return candidates
+    try:
+        pairs = _specific_pairs(conn, GraphView(vault_root, conn), [rel])
+    except sqlite3.Error:
+        return candidates
+    finally:
+        conn.close()
+    return [
+        item
+        for item in candidates
+        if not (
+            registry.is_generic(str(item.get("relation_type") or ""))
+            and frozenset((rel, _page_rel(str(item.get("to") or "")))) in pairs
+        )
+    ]
+
+
 def suggest_relations(
     vault_root: Path,
     *,
@@ -10285,18 +10526,27 @@ def suggest_relations(
         candidates.extend(
             _draft_wikilink_candidates(vault_root, draft_body, draft_title=draft_title)
         )
+    if path and candidates:
+        candidates = _without_settled_generics(vault_root, _page_rel(path), registry, candidates)
     if include_model_suggestions:
         warnings.append("model-backed graph relation suggestions unavailable")
+    from . import relation_queue
+
+    # A generic proposal between pages that a specific relation fits carries those relations,
+    # so the agent chooses one instead of taking the generic as the answer.
+    fit = relation_queue.RelationFit(vault_root)
+    shown = []
+    for candidate in _dedupe_candidates(candidates)[: max(0, limit)]:
+        options = fit.options(candidate)
+        labelled = {
+            **candidate,
+            "relation_label": relation_registry.spelling_label(
+                registry, str(candidate.get("relation_type") or "")
+            ),
+        }
+        shown.append({**labelled, "options": options} if options else labelled)
     return {
-        "candidates": [
-            {
-                **candidate,
-                "relation_label": relation_registry.spelling_label(
-                    registry, str(candidate.get("relation_type") or "")
-                ),
-            }
-            for candidate in _dedupe_candidates(candidates)[: max(0, limit)]
-        ],
+        "candidates": shown,
         "warnings": warnings,
         "model_suggestions_available": False,
         "mutated": False,
@@ -10336,9 +10586,10 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     rebuild atomically replaces the SQLite file, preventing generation ABA.
 
     `prove` is the index's cold-proof mode (#1454). A request passes
-    `SINGLE_FLIGHT`: it proves inline unless another reader's proof is running,
-    and then an unproven sidecar answers `("unproven",)`, a key of its own,
-    since that request serves without the graph lane.
+    `SINGLE_FLIGHT`: it proves inline in a one-shot process, starts the proof in
+    the background in a managed service, and never waits on another reader's
+    proof. An unproven sidecar answers `("unproven",)`, a key of its own, since
+    that request serves without the graph lane.
     """
     idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
     outcome: list[str] = []
@@ -10400,6 +10651,9 @@ class SnapshotAdoption:
     residue: tuple[str, ...] = ()
     reason: str = ""
     proved_token: str | None = None
+    #: The page reads the proof ended on, set only on an adoption. A standby
+    #: passes them back as `prior_reads` when promotion finds the snapshot moved.
+    proof_reads: _ProofReads | None = dataclass_field(default=None, compare=False, repr=False)
 
     def __bool__(self) -> bool:
         return self.adopted
@@ -13745,7 +13999,7 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
             {
                 "from": rel_path,
                 "to": other_key.removeprefix("file:"),
-                "relation_type": "relates_to",
+                "relation_type": relation_registry.generic_relation_key(),
                 "method": "shared_sources",
                 "evidence": {"shared_source": shared_key.removeprefix("file:")},
             }
@@ -14005,7 +14259,7 @@ def _shared_open_question_candidates(
         {
             "from": rel_path,
             "to": target,
-            "relation_type": "relates_to",
+            "relation_type": relation_registry.generic_relation_key(),
             "method": "shared_open_question",
             "evidence": {
                 "shared_questions": len(matches),
@@ -14067,7 +14321,7 @@ def _shared_resolution_target_candidates(
         {
             "from": rel_path,
             "to": target,
-            "relation_type": "relates_to",
+            "relation_type": relation_registry.generic_relation_key(),
             "method": "shared_resolution_target",
             "evidence": {
                 "shared_targets": len(matches),
@@ -14121,6 +14375,42 @@ def _authored_relations(
                 (str(dst_page_key), str(edge["relation_type"]), str(edge["origin"]))
             )
     return authored, raw
+
+
+def _specific_pairs(
+    conn: sqlite3.Connection, view: GraphView, pages: list[str]
+) -> set[frozenset[str]]:
+    """Page pairs, either direction, that an authored note relation of a specific meaning joins.
+
+    Only pairs with a page in `pages` are read. A relation counts when its authoring page's
+    registry serves it as a registered relation that is not the generic one; an unregistered
+    label means nothing here. Both directions count because a typed edge between two pages
+    already says how they relate, so the generic one adds nothing.
+    """
+    if not pages:
+        return set()
+    keys = [_file_key(page) for page in pages]
+    found = conn.execute(
+        f"SELECT {EDGE_COLUMNS}, e.dst_page_key FROM graph_edges e "
+        "WHERE e.origin = 'markdown_relation' AND e.src_key = ('file:' || e.source_path) "
+        f"AND (e.source_path IN ({_marks(pages)}) OR e.dst_page_key IN ({_marks(keys)}))",
+        [*pages, *keys],
+    ).fetchall()
+    view.prefetch(
+        [
+            *(str(row[10]) for row in found),
+            *(str(row[-1] or "").removeprefix("file:") for row in found),
+        ]
+    )
+    pairs: set[frozenset[str]] = set()
+    for *edge_row, dst_page_key in found:
+        edge = view.edge(_edge_row_to_dict(edge_row))
+        if edge is None or edge.get("relation_type") is None:
+            continue
+        source = str(edge["source_path"])
+        if view.registry_for(source).is_specific(str(edge["relation_type"])):
+            pairs.add(frozenset((source, str(dst_page_key).removeprefix("file:"))))
+    return pairs
 
 
 def _unit_relation_rows(
@@ -14425,7 +14715,7 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
             {
                 "from": self_path,
                 "to": target_path,
-                "relation_type": "relates_to",
+                "relation_type": relation_registry.generic_relation_key(),
                 "method": "embedding_proximity",
                 "evidence": {"cosine": round(float(score), 4)},
             }

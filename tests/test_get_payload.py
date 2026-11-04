@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from granted_writer import grant_writer
 
 from exomem import commands, mutation_lock, writer_lease
 from exomem.governance import authorization_custody, egress, policy
@@ -24,6 +25,9 @@ def _page(vault: Path) -> str:
         encoding="utf-8",
     )
     return "Knowledge Base/Notes/get-payload-probe.md"
+
+
+NOTES_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 
 def _govern(vault: Path, *, ceiling: int, options: str = "") -> None:
@@ -384,15 +388,20 @@ def test_registry_proven_never_enrolled_secret_raw_is_blocked_and_edit_stays_sta
     ],
 )
 def test_include_raw_secret_is_content_free_and_hash_semantics_survive(
-    vault: Path, governed: bool, secret: str
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, governed: bool, secret: str
 ) -> None:
     rel = _page(vault)
     target = vault / rel
     target.write_text(target.read_text(encoding="utf-8") + f"\n{secret}\n", encoding="utf-8")
     if governed:
         _govern(vault, ceiling=egress.LEVEL_FULL)
+        # A restricted audience edits the page only through a client entry that lists its scope.
+        writer = grant_writer(
+            vault, tmp_path, monkeypatch, writable_paths=["Notes/**"], writable_scopes=[NOTES_SCOPE_ID],
+            capture_paths=["Knowledge Base/Inbox"],
+        )
 
-    scope = request_scope(_external()) if governed else request_scope(
+    scope = request_scope(writer("external")) if governed else request_scope(
         RequestPrincipal(audience_id="owner", surface="cli")
     )
     with scope:
