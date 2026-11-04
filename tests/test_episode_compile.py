@@ -7,7 +7,7 @@ tests pin is what an agent depends on: the open count falls once a live page cit
 the recap, an unchecked count is never 0, a recap request orders no page write
 that live policy forbids, and the record never walks the vault to count.
 
-The count reads the writers' resolver snapshot without the disk fallback, so a test
+The count borrows a current resident resolver without rebuilding it, so a test
 that expects a citation to be found warms the shared resolver just before its
 record (`find_module.shared_resolver`), as a running service keeps it warm.
 """
@@ -22,7 +22,7 @@ import pytest
 from test_episode_coverage_citation import _cite
 from test_episode_memory_command import _record, _withhold_notes_from
 
-from exomem import capture_sweep, semantic_contract
+from exomem import capture_sweep, episode_compile, semantic_contract
 from exomem import find as find_module
 from exomem import server as server_module
 from exomem import vault as vault_module
@@ -86,21 +86,22 @@ def test_a_cold_resolver_reports_the_open_count_unchecked_and_builds_no_resolver
     first = _record(vault, decided=DECIDED)
     _cite(vault, first["source"]["path"])
     monkeypatch.setattr(find_module, "_RESOLVER_CACHE", {})
-    monkeypatch.setattr(semantic_contract, "current_writer_resolver_entries", lambda *a, **k: None)
-    built: list[int] = []
-    construct = vault_module.WikilinkResolver.__init__
+    work: list[str] = []
+    walk = vault_module.walk_vault_md
 
-    def counting(self: object, *args: object, **kwargs: object) -> None:
-        built.append(1)
-        construct(self, *args, **kwargs)
+    def counting_walk(*args: object, **kwargs: object):
+        work.append("walk")
+        return walk(*args, **kwargs)
 
-    monkeypatch.setattr(vault_module.WikilinkResolver, "__init__", counting)
-    second = _record(vault, episode=first["episode"], decided=DECIDED, open=["Pick the paint"])
+    monkeypatch.setattr(vault_module, "walk_vault_md", counting_walk)
+    monkeypatch.setattr(find_module, "_schedule_query_resolver_rebuild", lambda *_: work.append("rebuild"))
+    block = episode_compile.block(
+        vault, ref=first["source"]["ref"], revisions=[first["source"]["path"]], decided=len(DECIDED),
+    )
 
-    assert built == []
-    assert second["ledger"] == "bound"
-    assert second["compile"]["open"] == "unchecked"
-    assert second["compile"]["outcome"] == "This recap has 2 decided items; whether a live page cites it was not checked."
+    assert work == []
+    assert block["open"] == "unchecked"
+    assert block["outcome"] == "This recap has 2 decided items; whether a live page cites it was not checked."
 
 
 def test_with_a_cold_resolver_a_withheld_citing_page_and_none_give_the_same_block(

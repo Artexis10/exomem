@@ -56,12 +56,12 @@ def _outcome(decided: int, open_: int | None) -> str:
 
 def _open(root: Path, revisions: Sequence[str], decided: int) -> int | None:
     """The Decided lines of the newest revision that no cited revision holds, or `None` when unchecked."""
-    # Not `find.writer_resolver_snapshot(root)`: a cold cache would cost a walk of the vault.
-    snapshot = find.writer_resolver_snapshot(root, allow_disk=False)
+    # Optional counts must not prove corpus membership or start a resolver rebuild.
+    keep = egress.visible_page_filter(root)
+    snapshot = find.borrow_query_resolver(root, visible=keep, schedule_rebuild=False)
     if snapshot is None:
         return None
     pages = [page for page in (find._CACHE.get(root / path, root) for path in revisions) if page is not None]  # noqa: SLF001
-    keep = egress.visible_page_filter(root)
 
     def lookup(path: str) -> Any:
         return None if keep is not None and not keep(path) else find._CACHE.get(root / path, root)  # noqa: SLF001

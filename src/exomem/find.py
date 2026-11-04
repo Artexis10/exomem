@@ -7671,7 +7671,10 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
 
 
 def borrow_query_resolver(
-    vault_root: Path, visible: Callable[[str], bool] | None = None
+    vault_root: Path,
+    visible: Callable[[str], bool] | None = None,
+    *,
+    schedule_rebuild: bool = True,
 ):
     """The broad resolver if one is resident and current, else None. Never builds.
 
@@ -7682,6 +7685,7 @@ def borrow_query_resolver(
     cache the watcher's patch has not yet advanced is a miss, never a stale hit.
     For a reader other than the owner (`visible` given), a cache that lags only
     by pages that reader may not see is current for it and is not a miss.
+    Set `schedule_rebuild=False` for an advisory read that must not start a rebuild.
     Writers and explicit operations keep `_get_query_resolver`.
     """
     root = Path(vault_root)
@@ -7698,7 +7702,8 @@ def borrow_query_resolver(
             and view_lag.consumer_lag_only_withheld(root, checkpoint, visible)
         ):
             return cached[1]
-    _schedule_query_resolver_rebuild(root)
+    if schedule_rebuild:
+        _schedule_query_resolver_rebuild(root)
     return None
 
 
@@ -7997,10 +8002,11 @@ def writer_resolver_snapshot(
     potentially stale event-registry state. When the corpus route declines,
     the span records why as one closed `declined_<reason>` field.
 
-    A caller that cannot afford a walk of the vault passes `allow_disk=False`:
-    when both cheap routes decline it gets None and the span records
-    `disk_declined`, instead of a resolver built from disk. Inside
-    `planned_pages`, the snapshot also holds the planned pages.
+    With `allow_disk=False`, a miss returns None instead of building from disk.
+    The resident-corpus route still walks Markdown paths to prove membership.
+    Advisory reads that forbid that work pass `schedule_rebuild=False` to
+    `borrow_query_resolver`. Inside `planned_pages`, the snapshot also holds the
+    planned pages.
     """
     resolver = _writer_resolver_snapshot(
         vault_root, freshness_key=freshness_key, allow_disk=allow_disk

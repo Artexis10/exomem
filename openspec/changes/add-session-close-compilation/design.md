@@ -113,9 +113,9 @@ with a message that names the range.
   allows it, so a recap request alone never orders a page write at `off`.
 
 The count reads the revisions that the record already holds and the cached pages
-that cite them, through the writers' resolver snapshot taken without the disk
-fallback. A cold snapshot would cost a walk of the whole vault, so the record
-declines it. The record probes the snapshot before it reads any revision. When the
+that cite them, through a resident resolver at the current event checkpoint.
+The advisory never proves global corpus membership or schedules a resolver rebuild.
+The record checks that resident view before it reads any revision. When the
 snapshot is cold, every recap with Decided items reports `open: "unchecked"`, whatever
 its `ingested_into` holds, and the outcome says that whether a live page cites the
 recap was not checked. The state then depends on the snapshot alone, so a cold
