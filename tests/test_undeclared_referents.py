@@ -16,6 +16,7 @@ from test_recent_promotions import _as, _log_entry
 from test_vocabulary_registries import _served
 
 from exomem import capture_sweep, due_state, envelope, episode_workflow, epistemic_graph, prominence
+from exomem import vault as vault_module
 from exomem.governance import egress, membership, policy
 from exomem.governance import principal as principal_module
 from exomem.governance.principal import RequestPrincipal
@@ -314,16 +315,12 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
         assert _same_bytes_but_for_ids(observed["activation"]) == _same_bytes_but_for_ids(absent["activation"]), variant
 
 
-OPERATION_FENCE = re.compile(r"```exomem-operation-v1\n(.*?)\n```", re.DOTALL)
-
-
 def _logged_operation_id(vault: Path, path: str) -> str:
-    """The `operation_id` that the page's own write left in the vault log, read from the raw fence."""
-    log = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
+    """Read the page's write identity through the maintained operation-log parser."""
     ids = [
-        entry["operation_id"]
-        for entry in map(json.loads, OPERATION_FENCE.findall(log))
-        if entry.get("path") == path
+        entry["provenance"]["operation_id"]
+        for entry in vault_module.read_operation_log(vault)["entries"]
+        if entry.get("provenance", {}).get("path") == path
     ]
     assert len(ids) == 1, ids
     return ids[0]
