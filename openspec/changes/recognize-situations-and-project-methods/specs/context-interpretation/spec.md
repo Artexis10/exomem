@@ -10,6 +10,11 @@ An enabled interpreter SHALL judge task fit only for the released candidates sup
 
 The output SHALL contain `items` with `ref`, `source_version` and `fit`. The protocol labels SHALL be `relevant`, `uncertain` and `unrelated`. Missing candidate results SHALL mean uncertain; an empty valid result SHALL preserve baseline order. Unknown identities, mismatched versions, duplicate identities or invalid labels SHALL reject the complete result. Valid judgments SHALL only reorder the supplied pool into relevant, uncertain and unrelated groups, preserving baseline order within each group. They SHALL NOT delete candidates, alter admission, change anchor resolution or reorder method invalidation. Existing packet budgets and overflow SHALL still apply. The packet SHALL distinguish disabled, ready and unavailable interpretation; judgments SHALL remain advisory.
 
+Provider input SHALL use the caller/provider intersection of canonical released FULL sources.
+It SHALL include only admitted identity, version and source prose, without arbitrary candidate display metadata.
+A private request-local binding MAY restore the validated order to unchanged caller candidates.
+Malformed transport envelopes and exhausted preparation or dispatch allowances SHALL preserve the complete baseline pool.
+
 #### Scenario: A model invents a reference
 - **WHEN** a model returns a reference absent from its admitted inputs
 - **THEN** validation rejects the output and the ordinary candidate path remains available

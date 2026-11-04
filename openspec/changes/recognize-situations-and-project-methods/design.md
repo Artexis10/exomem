@@ -50,6 +50,23 @@ The compiler must not index or enumerate arbitrary high-volume rows to improve g
 The cheaper baseline remains the existing map-assisted agent pulls.
 The new stage must improve the missing-candidate cases without requiring a model or forcing every context layer into every turn.
 
+Restricted callers build one complete request-local corpus from canonical released FULL sources before BM25 statistics, query-term selection, ranking or result caps.
+The existing semantic preparation reservation bounds each guarded read and parser allocation, with cooperative request-budget checks.
+The existing read policy snapshot covers candidate assembly only; optional inference and terminal guards run after that scope closes.
+The accumulated released corpus has a conservative byte charge against the existing preparation allowance, checked before accumulation and statistics.
+Exhaustion discards the complete partial prefix instead of ranking it; this charge is an engineering bound, not measured resident memory.
+Existing unit release decisions remove withheld unit spans before the existing BM25 scorer sees their source text.
+Visible units and uncovered prose remain discoverable on mixed pages; no raw top-k or title-only prefilter selects this corpus.
+Unrestricted callers retain the maintained retrieval fast path.
+A preparation deadline or capacity failure leaves the new task lane unavailable without reporting source absence; maps and ordinary pulls remain usable.
+
+Excerpt-only and lower-release sources consistently stay outside this new corpus and method continuation.
+Extra unit omissions have no exact mapping to the canonical fixed L5 excerpt, so this change does not refill or approximate that window.
+Discovery reports partial coverage and preserves existing canonical read, find and map pulls.
+This limitation does not depend on whether the source contains withheld units.
+Restricted task graph expansion reports an omitted lane: existing graph caps and page edges precede origin-unit release.
+Unrestricted graph expansion stays unchanged. Restricted collection claims require the existing FULL metadata admission; text recall remains independent.
+
 ### D2. Preserve candidate, current-state and intention distinctions
 
 Each selected candidate carries its canonical ref, source version, carrier, origin and an honest reason for discovery.
@@ -120,6 +137,11 @@ Task context and the turn slice share this reserve.
 Generic task pointers already present in the guarded lead pool are omitted.
 Useful slice lines can keep up to half of the reserve; task context uses the remaining allowance.
 This preserves existing contact and due-item routes that duplicate task pointers had crowded out in development.
+Compile stance before dividing the remaining material allowance. Reserve next-action prose before compiling material.
+When task context runs, stance can use only the space above mandatory map framing divided by one minus the fixed share.
+The earlier stance cap left only map framing; taking a share afterward crowded mandatory framing and invalidation out of their allowance.
+This minimum framing constraint depends on the cap and serving surface, never the turn, held methods or optional model.
+Keep existing stance selection and honest omission counts within that allowance; standalone stance behavior is unchanged.
 The reserve also applies when the slice is disabled.
 Unused task capacity remains available to the slice, without changing the turn-independent map.
 Do not increase the packet cap to hide poor selection.
@@ -129,7 +151,21 @@ It preserves the human turn and labels its own focus and refresh origin.
 Ordinary read replies alone do not trigger refresh loops.
 Unavailable discovery or interpretation leaves existing map and pull routes usable, with honest partial status.
 
+Restricted FULL source versions digest the complete canonical released body and metadata, including visible exclusions outside selected units.
+They do not digest a summary, unit-only projection, token list or private raw hash. Guard records retain the exact raw hash privately.
+Unrestricted FULL callers retain the existing whole-source version. No exact hash or invented title, carrier or attribution crosses below FULL.
+
+Current method identities reuse the existing unit release and currency chain once per admitted source/version.
+Apply unit admission before same-page supersession and typed expiry; review-due units remain current read routes.
+The selected semantic parent must match the same whole-source version that the packet carries.
+Revalidation shares this selection before discovery filters, so matching source bytes cannot certify a retired unit.
+
 ### D6. Fix the small wire contract before optional interpretation
+
+The shared prose counter charges map, stance, task context, slice and next-action prose once each.
+Task pinning binds the full public cap, including the space reserved for next action.
+The hook renders a fixed reset line before optional routes and retains the prior token if that reset cannot fit.
+Private served-context records retain task states, source identities, versions and read routes without source or prompt text.
 
 Add `task_context` beside `map` and `turn_slice`; do not redefine guarded anchor evidence as general relevance.
 Its closed protocol state is `ready`, `empty`, `partial`, `unavailable` or `skipped`.
@@ -181,6 +217,15 @@ Restricted views cannot consume owner-built rankings, counts or cached interpret
 
 The existing no-model conversation clauses receive only this explicit context-fit exception.
 Other conversation retention, anchor evidence, canonical authorship and mutation contracts remain in force.
+
+Provider input contains only admitted canonical identity, source version and released source prose.
+Existing reference redaction and provenance projection run under both caller and provider views before inference.
+Candidate display metadata stays in the client response and does not enter model input.
+An API call uses the caller/provider intersection projection and its admitted reference/version.
+A private request-local binding maps the validated order back to unchanged caller candidates.
+A judgment grants no admission, source currentness, authority or applicability for omitted method clauses.
+The existing Pydantic parser validates consumed HTTP envelopes; malformed or deeply nested success replies retain baseline order.
+Preparation checks the existing request budget between source stages, and dispatch recomputes the remaining HTTP allowance after preparation.
 
 ### D8. Prove the user workflow, then retain only useful machinery
 

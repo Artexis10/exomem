@@ -17,7 +17,7 @@
 
 ## 3. Deliver evolving methods across clients
 
-- [x] 3.1 Project existing governed methods with complete source versions and applicability read routes; verify an exclusion outside the selected unit invalidates the projection.
+- [ ] 3.1 Project existing governed methods with complete source versions and applicability read routes; verify an exclusion outside the selected unit invalidates the projection.
 - [x] 3.2 Extend existing continuation handling with bounded delivered-method versions; revalidate before applicability and verify reset, overflow and legacy-token behavior independently of map generation.
 - [ ] 3.3 Update the canonical skill scaffold and hook renderer through their producers; verify generic clients and native hooks share the same method semantics.
 - [ ] 3.4 Run a real-agent journey from a method edit in one client to use in another; verify the changed behavior, a local override and an unrelated negative case.

@@ -28,7 +28,7 @@ STATUS_CLASSIFICATION_RULE = (
 )
 
 OBSERVATION_UPDATE_GUIDANCE = (
-    "Updates rebuild the unit: omitted verdict/check_by/id persist; "
+    "Updates rebuild the unit: omitted governed metadata and id persist; "
     "tags/context/relations clear unless resent."
 )
 
@@ -299,6 +299,8 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "- relations: <relation-type>: [[Target]]",
             "- verdict: <epistemic outcome>",
             "- check_by: <ISO revisit date>",
+            "- as_of: <ISO start date>",
+            "- until: <ISO last valid date>",
         ],
         "accepted_metadata_order": "flexible while rows remain leading",
         "canonical_metadata_order": [
@@ -309,10 +311,12 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "relations",
             "verdict",
             "check_by",
+            "as_of",
+            "until",
         ],
         "metadata_rule": (
             "Metadata rows are optional and leading; the canonical writer emits category, "
-            "id, tags, context, relations, verdict and check_by; category defaults to the governed kind "
+            "id, tags, context, relations, verdict, check_by, as_of and until; category defaults to the governed kind "
             "when omitted."
         ),
         "correction_rule": (

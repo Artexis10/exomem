@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import zipfile
 
@@ -95,17 +96,20 @@ def test_protective_scope_restore_refuses_existing_selector_conflict(configured_
     assert scope.read_bytes() == before
 
 
-def test_actual_older_runtime_accepts_unarmed_root_and_refuses_after_enrollment(configured_boundary, vault):
+def test_actual_older_runtime_accepts_unarmed_root_and_refuses_after_enrollment(configured_boundary, vault, tmp_path):
     older = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
     assert older, "the real pre-capability runtime must be supplied"
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
     environment.pop(connector_boundary.CONFIG_ENV, None)
-    command = [older, "-c", "from exomem.state_migration import require_vault_state_ready; from pathlib import Path; import sys; require_vault_state_ready(Path(sys.argv[1]))", str(vault)]
+    # Let the old reader publish its own initial state; newer families must not preempt this boundary.
+    unarmed = tmp_path / "older-vault"
+    shutil.copytree(vault, unarmed)
+    command = [older, "-c", "from exomem.state_migration import require_vault_state_ready; from pathlib import Path; import sys; require_vault_state_ready(Path(sys.argv[1]))", str(unarmed)]
     before = subprocess.run(command, env=environment, capture_output=True, text=True)
     assert before.returncode == 0, before.stderr
     authority = state_migration.assert_offline_migration_authority(source="isolated downgrade stop window")
-    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    state_migration.arm_connector_boundary_offline(unarmed, authority=authority)
     after = subprocess.run(command, env=environment, capture_output=True, text=True)
     assert after.returncode != 0
     assert "StateMigrationManifestError" in after.stderr

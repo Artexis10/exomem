@@ -171,7 +171,7 @@ _CONFIG_KEY = "prominence"
 #: non-ASCII dash costs six JSON bytes) and inside 220.
 ACTIVATION_CARRIER_LINE = (
     "Before a substantive turn with no prior context, call `recall_context` "
-    "with the turn verbatim; on `ambiguous`, call again with `anchor`."
+    "with the turn verbatim. Follow `next_action` when present."
 )
 
 
@@ -182,7 +182,7 @@ ACTIVATION_CARRIER_LINE = (
 #: everywhere `recall_context` is not.
 ASK_MEMORY_CARRIER_LINE = (
     "Before a substantive turn with no prior context, call `search_memory` on the "
-    "turn's topic."
+    "turn's topic. Follow `next_action` when present."
 )
 
 #: The link instruction (`capture-identities-at-write-time` design D2, task
@@ -372,6 +372,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
         ),
         capture=(
             LINK_NAMED_IDENTITIES_LINE + " "
+            "Propose the sourced global line; confirm unless exactly requested. "
+            "Confirm every promoted unit; keep scoped rules local. "
             "Capture at a stepping stone: a durable conclusion, central or recurring "
             "entity with reusable facts, or method that was carried out with a reported "
             "result. Not "
@@ -405,6 +407,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
         ),
         capture=(
             LINK_NAMED_IDENTITIES_LINE + " "
+            "Propose the sourced global line; confirm unless exactly requested. "
+            "Confirm every promoted unit; keep scoped rules local. "
             "Capture at every stepping stone; treat the bar for 'durable' as low: "
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
             "a fact about a central or recurring entity, or a method you actually ran and "

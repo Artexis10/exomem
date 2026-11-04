@@ -24,6 +24,7 @@ Three properties are load-bearing and each is tested directly:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import posixpath
@@ -53,6 +54,7 @@ from . import (
     working_set_state,
 )
 from .governance import policy as governance_policy
+from .runtime_resources import SEMANTIC_PREPARATION_BYTES as TASK_CORPUS_MAX_BYTES
 
 if TYPE_CHECKING:
     from .find import UnitParentReads
@@ -372,7 +374,7 @@ class LaneResult(NamedTuple):
     task_truncated: bool = False
 
 
-def clamp_budget(value: object) -> int:
+def clamp_budget(value: object, *, minimum: int = MIN_BUDGET_CHARS) -> int:
     """Clamp a requested budget into the declared range; `None` takes the default."""
     if value is None:
         return DEFAULT_BUDGET_CHARS
@@ -380,7 +382,7 @@ def clamp_budget(value: object) -> int:
         requested = int(value)
     except (TypeError, ValueError):
         return DEFAULT_BUDGET_CHARS
-    return max(MIN_BUDGET_CHARS, min(MAX_BUDGET_CHARS, requested))
+    return max(minimum, min(MAX_BUDGET_CHARS, requested))
 
 
 def bounded_text(text: str) -> str:
@@ -586,7 +588,7 @@ def build_packet(
                 key: incoming[item.ref].provenance[key] for key in ("corrects", "relation", "family")
             }}) if item.ref in incoming else item for item in items
         ) + tuple(item for ref, item in incoming.items() if ref not in seeds)
-    limit = clamp_budget(max_chars)
+    limit = clamp_budget(max_chars, minimum=0)
     promoted_share = limit // PROMOTED_SHARE_DIVISOR
     promoted_used = 0
     order = _role_order(roles)
@@ -616,7 +618,7 @@ def build_packet(
             item.relevance_order,
             0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
-            _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
+            1 if working_set_currency.state(item, status_basis=status_basis)[0] else _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
             item.task_order,
             -_date_rank(item.updated),
             # Most units author no time of their own; their page's time orders
@@ -845,9 +847,11 @@ def build_packet(
             if used + cost > ceiling or not text:
                 _defer(item, "budget")
                 continue
-            ordering = status_basis.ordering(item.lifecycle, path=item.path or None)
-            if ordering is not None and ordering.historical:
+            history, review_due = working_set_currency.state(item, status_basis=status_basis)
+            if history:
                 unit["history"] = True
+            if review_due:
+                unit["review_due"] = review_due
             if promoted and promoted_used + cost > promoted_share:
                 _defer(item, "budget")
                 continue
@@ -985,7 +989,7 @@ def abstained_packet(
     thing a fresh session opening on "ok continue" has to be told.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(None)
-    limit = clamp_budget(max_chars)
+    limit = clamp_budget(max_chars, minimum=0)
     if conversation_inferred or generation.get("carried_by") == "conversation":
         return build_packet(
             items=(),
@@ -1334,15 +1338,23 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
     return result._replace(items=tuple(items))
 
 
+@governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
     snapshot: Any, limit: int,
-    index_token: tuple[int, int, int] | None = None,
+    index_token: tuple[int, int, int] | None = None, projections: dict | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Independent bounded recall over catalogue carriers, never anchor evidence."""
-    from . import bm25, collection_claims, context_views, epistemic_graph, lexstore
+    from . import (
+        bm25,
+        collection_claims,
+        context_views,
+        epistemic_graph,
+        lexstore,
+        record_governance,
+    )
 
-    entries = [entry for entry in catalogue.entries() if context_views._admits(entry, caller.visible)]
+    entries = [entry for entry in catalogue.entries() if entry.path and context_views._admits(entry, caller.visible)]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
@@ -1352,9 +1364,41 @@ def task_candidates(
     categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
     found: dict[str, dict[str, Any]] = {}
     missing: list[dict[str, str]] = []
+    restricted = caller.restricted
+    token_corpus = None
+    statistics = None
+    metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
+    if restricted:
+        from . import context_task
+
+        projections = projections if projections is not None else {}
+        token_corpus = {}
+        corpus_bytes = 0
+        for path in sorted(allowed):
+            context_task._deadline_check()
+            source = context_task.project_source(vault_root, path, caller, cache=projections)
+            if source is None:
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+                continue
+            text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
+            # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
+            charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
+            if charge > TASK_CORPUS_MAX_BYTES:
+                raise RuntimeError("released task corpus preparation allowance exceeded")
+            tokens = bm25.tokenize(text)
+            charge += 64 * len(tokens)
+            if charge > TASK_CORPUS_MAX_BYTES:
+                raise RuntimeError("released task corpus preparation allowance exceeded")
+            corpus_bytes = charge
+            token_corpus[path] = tokens
+        # The complete released corpus owns N/DF, term selection and result slots.
+        context_task._deadline_check()
+        statistics = bm25.CorpusStatistics.of(token_corpus)
+        context_task._deadline_check()
+        allowed = set(token_corpus)
 
     def add(path: str, origin: str) -> None:
-        if path not in by_path:
+        if path not in by_path or path not in allowed:
             return
         if path not in found:
             entry = by_path[path]
@@ -1369,11 +1413,26 @@ def task_candidates(
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
             targets = _routing_targets(
-                vault_root, index_token[1], index_token=index_token, visible=caller.visible,
+                vault_root, index_token[1], index_token=index_token,
+                visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
             )
             route = collection_claims.route(working_set_index.terms_of(query), targets)
             if route is not None:
                 add(str(route["collection"]), origin)
+        if restricted:
+            selected, _counted, _dropped = lexstore.select_query_units(
+                bm25.token_units(query_text, query=True), statistics.document_frequency,
+                statistics.pages, working_set_runtime.material_term_budget(),
+            )
+            tokens = list(dict.fromkeys(stem for unit in selected for stem in unit.stems))
+            context_task._deadline_check()
+            hits = statistics.score(token_corpus, tokens, limit + 1) if tokens else []
+            context_task._deadline_check()
+            if len(hits) > limit:
+                missing.append({"role": "task_context", "reason": "lane_truncated"})
+            for path, _score in hits[:limit]:
+                add(path, origin)
+            continue
         result = lexstore.search_bm25_result(
             vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
             allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
@@ -1401,7 +1460,10 @@ def task_candidates(
             else:
                 for hit in (methods.value or [])[:limit]:
                     add(hit.parent_path, origin)
-    if found:
+    if restricted:
+        # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
+        missing.append({"role": "task_context", "reason": "lane_failed"})
+    if found and not restricted:
         nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
         try:
             for path in list(found)[:MAX_ITEMS_PER_ROLE]:
@@ -1876,14 +1938,14 @@ def _unit_items(
                 # with none is served undated: the page changed when ANY unit
                 # on it did. The page's time orders it (`page_updated`,
                 # internal, never published).
-                updated=working_set_currency.own_time(getattr(hit, "context", None)),
+                updated=getattr(hit, "as_of", None) or working_set_currency.own_time(getattr(hit, "context", None)),
                 anchor=parent,
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
                     "kind": str(getattr(hit, "kind", "") or ""),
                     "source_hash": str(getattr(hit, "source_hash", "") or ""),
                     **({"verdict": hit.verdict} if getattr(hit, "verdict", None) else {}),
-                    **({"check_by": hit.check_by} if getattr(hit, "check_by", None) else {}),
+                    **({key: getattr(hit, key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS if getattr(hit, key, None)}),
                     "superseded_by": superseded_by,
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),
@@ -2440,7 +2502,8 @@ def signature_evidence(
 
 
 def _is_current_page(
-    vault_root: Path, rel_path: str, *, status_basis: lifecycle_statuses.Basis | None = None
+    vault_root: Path, rel_path: str, *, status_basis: lifecycle_statuses.Basis | None = None,
+    page: Any = None,
 ) -> bool:
     """Is `rel_path` a page the vault still stands behind?
 
@@ -2469,7 +2532,8 @@ def _is_current_page(
         from . import find_corpus
 
         root = Path(vault_root)
-        page = find_corpus.CACHE.get(root / text, root)
+        if page is None:
+            page = find_corpus.CACHE.get(root / text, root)
     except Exception:  # noqa: BLE001 - an unreadable page is simply not a candidate
         log.debug("activation carry lifecycle read failed for %s", text, exc_info=True)
         return False
@@ -4151,7 +4215,7 @@ def _compile_packet(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     task_refresh = trigger == "task_refresh"
     root = Path(vault_root)
-    limit = clamp_budget(max_chars)
+    limit = clamp_budget(max_chars, minimum=0)
     index = index or working_set_index.WorkingSetIndex(root)
     registry = context_roles.load_roles(root)
     # The WHOLE sidecar token, in place of the generation read this used to

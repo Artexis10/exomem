@@ -10,7 +10,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from exomem import semantic_authoring, workflow_skills  # noqa: E402
+from exomem import read_next_action, semantic_authoring, workflow_skills  # noqa: E402
 
 
 def main() -> None:
@@ -40,6 +40,16 @@ def main() -> None:
     before, block = text.split(start, 1)
     _, after = block.split(end, 1)
     changes[doc] = before + start + concise + end + after
+    import pprint
+
+    hook = REPO_ROOT / "src/exomem/_hooks/exomem_retrieve_nudge.py"
+    text = hook.read_text(encoding="utf-8")
+    start = "# BEGIN GENERATED NEXT ACTION COMPATIBILITY\n"
+    end = "# END GENERATED NEXT ACTION COMPATIBILITY"
+    before, rest = text.split(start, 1)
+    _, after = rest.split(end, 1)
+    moves = read_next_action.templates("`recall_context`", "`read_memory`", "`search_memory`")
+    changes[hook] = before + start + "_COMPAT_NEXT_ACTION = " + pprint.pformat(moves, width=100) + "\n" + end + after
     stale = [path for path, text in changes.items() if path.read_text(encoding="utf-8") != text]
     if args.check:
         if stale:

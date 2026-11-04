@@ -45,6 +45,7 @@ def _constructor_map():
         media_jobs,
         memory_refs,
         review_state,
+        served_context,
         voice_profiles,
     )
     from exomem.governance import (
@@ -92,6 +93,7 @@ def _constructor_map():
         "governance-store": (index_paths.governance_sidecar_path,),
         "due-state": (due_state.state_path,),
         "review-state": (review_state.state_path,),
+        "served-context": (served_context.sidecar_path,),
         "voice-profile-store": (voice_profiles.voice_profiles_path,),
         "authorization-projections": (
             lambda root: projection_store.variant_store_path(root, namespace),
@@ -146,6 +148,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "references-store",
     "refs-store",
     "review-state",
+    "served-context",
     "voice-profile-store",
 }
 

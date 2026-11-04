@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -50,6 +51,7 @@ from . import (
     lifecycle_statuses,
     project_keys,
     source_taxonomy,
+    stance,
     state_paths,
     topic_carriers,
     vocabulary_resolution,
@@ -1223,7 +1225,10 @@ def map_packet_chars(block: Mapping[str, Any]) -> int:
 
 def serialized_chars(packet: Mapping[str, Any]) -> int:
     """The length of the packet's compact JSON form, the form the MCP layer sends, without a `serialized_chars` field."""
-    return len(json.dumps(packet, separators=(",", ":"), ensure_ascii=False))
+    value = dict(packet)
+    if isinstance(value.get("budget"), Mapping):
+        value["budget"] = {key: item for key, item in value["budget"].items() if key != "serialized_chars"}
+    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
 def _map_description() -> str:
@@ -1239,6 +1244,7 @@ def activation_packet(
     vault_root: Path, max_chars: int, *, purpose: str | None = None,
     generation: Mapping[str, Any], timings: find_types.FindTimings | None = None,
     turn_leads: Callable[[CallerView], TurnLeads] | None = None, known_generation: str | None = None,
+    packet_limit: int | None = None,
     task_context: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
@@ -1253,14 +1259,21 @@ def activation_packet(
     """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-            return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation, task_context)
-    return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation, task_context)
+            return _activation_packet(
+                vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
+                packet_limit=packet_limit, task_context=task_context,
+            )
+    return _activation_packet(
+        vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
+        packet_limit=packet_limit, task_context=task_context,
+    )
 
 
 def _activation_packet(
     root: Path, max_chars: int, purpose: str | None, generation: Mapping[str, Any],
     timings: find_types.FindTimings | None, turn_leads: Callable[[CallerView], TurnLeads] | None = None,
     known_generation: str | None = None,
+    packet_limit: int | None = None,
     task_context: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
@@ -1288,10 +1301,21 @@ def _activation_packet(
         }
         view = _usable(prepared)
         description = _map_description()
-        # Task invalidation still needs the fixed share when no complete slice line fits.
-        reserve = (int(max_chars * TURN_SLICE_SHARE) if task_context is not None
-                   else (0 if turn_leads is None else _slice_reserve(max_chars)))
-        map_chars = max_chars - reserve - len(description) - 1
+        # Mandatory map framing must still fit after the fixed shared reserve is taken.
+        minimum_map = len(description) + 1
+        if task_context is not None:
+            minimum_map = math.ceil(minimum_map / (1 - TURN_SLICE_SHARE))
+        with find_types.timing_span(timings, "working_set.stance"):
+            try:
+                stance_block = stance.compile_block(root, caller, max(0, max_chars - minimum_map), catalogue=catalogue) if stance.enabled() else None
+            except Exception:  # noqa: BLE001 - optional stance must leave the map available
+                stance_block = stance._empty("unavailable") if stance.enabled() else None  # noqa: SLF001
+        stance_chars = stance.chars(stance_block) if stance_block is not None else 0
+        available_chars = max_chars - stance_chars
+        # Task invalidation keeps its fixed share even when no complete slice line fits.
+        reserve = (int(available_chars * TURN_SLICE_SHARE) if task_context is not None
+                   else (0 if turn_leads is None else _slice_reserve(available_chars)))
+        map_chars = available_chars - reserve - len(description) - 1
         compiled = None
         if view is None:
             compiled, built_from = _served_map(
@@ -1305,7 +1329,8 @@ def _activation_packet(
                 )
             view = compiled.view
         metadata["map_generation"] = view.generation
-        packet = working_set.abstained_packet(reason=view.state, max_chars=max_chars, generation=metadata)
+        # Bind terminal restoration to the public limit; material space already excludes reserved prose.
+        packet = working_set.abstained_packet(reason=view.state, max_chars=max_chars if packet_limit is None else packet_limit, generation=metadata)
         if view.state != READY:
             return packet
         assert compiled is not None
@@ -1326,7 +1351,9 @@ def _activation_packet(
             root, view, rows, prepared.caller, block=block, limit=packet["budget"]["limit_chars"]
         )
         packet["map"] = block
-        packet["budget"]["used_chars"] = map_packet_chars(block)
+        if stance_block is not None:
+            packet["stance"] = stance_block
+        packet["budget"]["used_chars"] = map_packet_chars(block) + stance_chars
         cached_leads = None
 
         def leads_once(caller):
@@ -1351,7 +1378,7 @@ def _activation_packet(
             from . import context_task
 
             task_block = task_context(prepared.caller, catalogue, reserve, prepare_slice if turn_leads is not None else None)
-            packet["task_context"] = context_task.pin(root, prepared.caller, task_block, limit=max_chars)
+            packet["task_context"] = context_task.pin(root, prepared.caller, task_block, limit=packet["budget"]["limit_chars"])
             task_chars = context_task.packet_chars(task_block)
             packet["budget"]["used_chars"] += task_chars
             reserve = max(0, reserve - task_chars)
@@ -1479,7 +1506,7 @@ def _slice_overflow(count: int) -> str:
 
 def slice_packet_chars(block: Mapping[str, Any]) -> int:
     """The prose budget charged for a slice, rendered as `slice_item_line` selects it. A slice with no lines costs none."""
-    if block.get("state") != READY or not block.get("description"):
+    if not block.get("description"):
         return 0
     lines = [str(block["description"])]
     lines.extend(slice_item_line(item) for item in block.get("items", ()))
@@ -1492,12 +1519,15 @@ def slice_packet_chars(block: Mapping[str, Any]) -> int:
 def packet_chars(
     map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | None,
     task_block: Mapping[str, Any] | None = None,
+    stance_block: Mapping[str, Any] | None = None, next_action: Mapping[str, Any] | None = None,
 ) -> int:
     """Charge all admitted maps-packet prose through the same accounting path."""
-    from . import context_task
+    from . import context_task, stance
 
     return (map_packet_chars(map_block) + (0 if slice_block is None else slice_packet_chars(slice_block))
-            + (0 if task_block is None else context_task.packet_chars(task_block)))
+            + (0 if task_block is None else context_task.packet_chars(task_block))
+            + (0 if stance_block is None else stance.chars(stance_block))
+            + len((next_action or {}).get("say", "")))
 
 
 def _slice_reserve(max_chars: int) -> int:
@@ -1542,6 +1572,14 @@ def _turn_slice(
         block["description"] = SLICE_DESCRIPTION
         if overflow:
             block["overflow"] = overflow
+    if state == SLICE_EMPTY:
+        block["description"] = (
+            "Map and slice cover compiled material only. "
+            f"{capabilities.active_call_text('search_memory', {})} reaches captured Sources; an empty slice is not proof of absence."
+        )
+        if len(block["description"]) + 1 > reserve:
+            block.pop("description")
+            block["state"] = state = SLICE_SKIPPED
     # The compile's evidence states, so a slice that a warming lane left empty is not a silent `empty`.
     block.update(evidence)
     # The record's key: the content this slice serves, so the same content is the same generation.

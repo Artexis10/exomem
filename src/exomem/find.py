@@ -2984,6 +2984,14 @@ class _UnitCandidate:
         return self.unit_view.get("verdict")
 
     @property
+    def as_of(self) -> str | None:
+        return self.selected_unit.as_of
+
+    @property
+    def until(self) -> str | None:
+        return self.selected_unit.until
+
+    @property
     def check_by(self) -> str | None:
         value = self.unit_view.get("check_by")
         return value.isoformat() if value is not None else None
@@ -3480,6 +3488,8 @@ def _semantic_unit_hit(
         context=unit.context,
         verdict=getattr(unit, "verdict", None),
         check_by=getattr(unit, "check_by", None),
+        as_of=getattr(unit, "as_of", None),
+        until=getattr(unit, "until", None),
         relations=[relation.to_dict() for relation in unit.relations],
         source_anchor=unit.anchor,
         source_span=_unit_span(unit),

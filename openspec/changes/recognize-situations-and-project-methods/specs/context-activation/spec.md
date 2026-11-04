@@ -2,18 +2,24 @@
 
 ### Requirement: Task context uses one portable packet section
 
-Maps packets SHALL carry a bounded `task_context` section beside the map and turn slice. Its protocol state SHALL distinguish ready, empty, partial, unavailable and skipped results. It SHALL contain candidates, methods and existing section-level missing reasons. Candidate entries SHALL carry canonical identity, source reference, source version, registry-defined carrier, discovery origins, an honest discovery reason and a read reference. Method entries SHALL carry identity, source reference, whole-source version, attribution, applicability completeness and a read reference. Optional method content SHALL reuse governed units or procedures. Incomplete applicability SHALL require reading the source before use.
+Maps packets SHALL carry a bounded `task_context` section beside the map and turn slice. Its protocol state SHALL distinguish ready, empty, partial, unavailable and skipped results. It SHALL contain candidates, methods and existing section-level missing reasons. Candidate entries SHALL carry canonical identity, source reference, source version, registry-defined carrier, discovery origins, an honest discovery reason and a read reference. Method entries SHALL carry identity, source reference, complete admitted FULL-source version, admitted attribution, applicability completeness and a read reference. Optional method content SHALL reuse governed units or procedures. Incomplete applicability SHALL require reading the source before use. Current method identity SHALL follow existing unit admission, same-page supersession and typed expiry before category selection. Review-due units SHALL remain current read routes. The selected semantic parent SHALL match the carried whole-source version. The existing next-action producer SHALL add closed states `method_reset` and `task_read`. Method reset SHALL precede stance review advice; admitted task read routes SHALL follow stance review advice and precede empty-slice advice. These states SHALL preserve existing authority and capability checks.
 
 #### Scenario: An ordinary client receives usable method context
 - **WHEN** a method is selected through any public activation door
 - **THEN** the same identity, version and applicability contract reaches the client
 - **AND** a partial projection requires a source read rather than implying that absent exclusions do not exist
 
+#### Scenario: Task context remains auditable without retaining its prose
+
+- **WHEN** final egress releases task candidates or methods in a maps response
+- **THEN** the existing private served-context record retains their state, source identity, version and read route without source or prompt text
+- **AND** earlier records without task metadata remain readable with an explicit unrecorded task state
+
 ### Requirement: Method continuation cannot certify stale behavior
 
 The existing activation token MAY carry optional `method_versions` entries with `ref`, `source_ref` and `source_version`. Combined anchor references and method entries SHALL fit the existing 32-entry ceiling and the token SHALL fit its existing 8,192-character ceiling. Entries SHALL be untrusted read hints, rechecked against the caller's current view, and SHALL NOT establish anchor evidence or authority. Existing thread binding and lifetime rules SHALL remain unchanged. Legacy tokens SHALL mean no carried methods; malformed method entries SHALL NOT invalidate independently valid map continuity.
 
-Before task applicability selection, the system SHALL revalidate every carried method. `task_context.methods.reset` SHALL invalidate held projections when a source changed, retired, disappeared, became withheld or could not be checked. Missing and withheld sources SHALL produce the same generic reset without a reference or revealing reason. Current relevant replacements MAY follow. If packet or token bounds prevent complete dependency retention, the system SHALL reset the held set and carry only complete new projections that fit. A client without method continuity SHALL freshly read a method before reusing it.
+Before task applicability selection, the system SHALL revalidate every carried method. `task_context.methods.reset` SHALL invalidate held projections when a source changed, retired, disappeared, became withheld or could not be checked. Missing and withheld sources SHALL produce the same generic reset without a reference or revealing reason. Current relevant replacements MAY follow. Restricted FULL versions SHALL cover the complete canonical released body and metadata, including operative exclusions outside selected units. Internal raw-byte guards SHALL remain private. Excerpt-only and lower-release sources SHALL supply no new task or method projection; they SHALL retain ordinary pull surfaces with honest partial coverage. If packet or token bounds prevent complete dependency retention, the system SHALL reset the held set and carry only complete new projections that fit. A client without method continuity SHALL freshly read a method before reusing it.
 
 #### Scenario: Changed exclusions remove a method from discovery
 - **WHEN** a carried method's new exclusion makes it irrelevant to the current task
@@ -28,6 +34,12 @@ Before task applicability selection, the system SHALL revalidate every carried m
 #### Scenario: An older token carries no method fields
 - **WHEN** an activation receives a valid legacy token
 - **THEN** map continuity retains its existing behavior and no method is assumed to be held
+
+#### Scenario: Small hook budgets preserve method invalidation
+
+- **WHEN** a method reset, admitted stance lines and next action fit but optional routes do not
+- **THEN** the hook renders the reset before method content and preserves stance and next action
+- **AND** an undelivered reset does not advance method continuity
 
 ### Requirement: Maps activation discovers across knowledge carriers
 
@@ -45,6 +57,29 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 #### Scenario: A large structured collection is relevant
 - **WHEN** a collection description identifies a source of exact facts
 - **THEN** activation supplies its bounded query route without indexing or enumerating all collection rows
+
+#### Scenario: Unit release precedes ranking and caps
+
+- **WHEN** a restricted caller can read a page with both visible and withheld units
+- **THEN** only admitted units and uncovered released prose contribute corpus statistics, query-term selection, scores and candidate slots
+- **AND** visible material remains discoverable without a raw top-k or title-only prefilter
+
+#### Scenario: Incomplete preparation preserves ordinary context
+
+- **WHEN** the complete restricted source corpus cannot finish within the existing preparation, aggregate corpus or request budget
+- **THEN** task discovery reports partial or unavailable coverage, preserves maps and ordinary pulls, and makes no absence claim
+
+#### Scenario: Excerpt-only sources keep their existing pull surfaces
+
+- **WHEN** a source has only L5 excerpt permission or a lower release level
+- **THEN** this new task corpus consistently omits it and reports partial discovery without exposing a raw source hash or unadmitted metadata
+- **AND** existing canonical read, find and map pulls remain available under their current contracts
+
+#### Scenario: Restricted routes report their limits
+
+- **WHEN** a restricted caller activates task context
+- **THEN** task graph expansion reports an omitted lane until origin-unit release can precede its caps
+- **AND** collection claims routing requires existing FULL metadata admission, while independent released text remains eligible
 
 ### Requirement: Candidate context does not manufacture ongoing intent
 
@@ -84,7 +119,7 @@ Every activation carrying delivered method versions SHALL revalidate them before
 
 ### Requirement: Context layers share bounded selective delivery
 
-Maps, profiles, stance, candidate context and methods SHALL reuse the existing packet budget and continuation contracts. Overflow SHALL provide bounded read routes or honest partial status. A failed optional stage SHALL preserve available context. Refresh SHALL follow a material task or evidence change rather than every memory reply.
+Maps, profiles, stance, candidate context and methods SHALL reuse the existing packet budget and continuation contracts. Next-action prose SHALL be reserved first. Stance SHALL compile before the fixed shared task/slice reserve is computed from remaining material space. The common prose counter SHALL charge each section and next action once. Task pinning SHALL bind the full public cap. Overflow SHALL provide bounded read routes or honest partial status. A failed optional stage SHALL preserve available context. Refresh SHALL follow a material task or evidence change rather than every memory reply.
 
 #### Scenario: A crowded packet needs depth
 - **WHEN** useful candidate evidence exceeds the packet budget
@@ -159,7 +194,7 @@ within that interval.
 - **AND** a content-private packet's row carries no anchor identifiers
 
 ### Requirement: The maps packet
-In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT call a model other than retrieval scorers or the explicitly enabled interpreter governed by context-interpretation, or write to the vault. It SHALL NOT resolve anchors, except for the turn slice, which the setting `EXOMEM_ACTIVATION_TURN_SLICE` turns off and which "The turn slice" governs. The map, any attached profile, the turn slice and task context SHALL share the request's `max_chars` cap. The cap SHALL charge the packet's prose: the map's description line, one rendered line for each map, slice, candidate and method item, all operative method content and invalidation advice, and the overflow line. It SHALL NOT charge structure fields: refs given as fields, paths, profile routes, topics, dates, the generation blocks, the continuity token and timings. The budget report SHALL carry `serialized_chars`, the length of the packet's compact JSON form without that field. A map item SHALL omit `topics` when it is empty and `lifecycle_class` and `state` when they have no value. The map's description SHALL name the read call for a map ref. When the owner's map inputs changed after an earlier map for the same owner was built, activation MAY serve that earlier map marked `stale: true`, with `generation.index_stale: true` and the index generation it was built from, and SHALL then rebuild the map off the request thread. A restricted caller's map SHALL NOT be served from an earlier build. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. It MAY carry the bounded method-version hints defined by method continuation; those hints SHALL NOT become anchor continuity evidence. When a request carries a `continuity` token from a `maps` packet whose map generation equals the generation of the map that activation would serve to that caller, the map block SHALL carry its ref, generation, stale flag, `unchanged: true` and a one-line description, and no items. `conversation`, `focus` and `trigger` SHALL NOT change the map, and neither SHALL the turn: the turn, its conversation, its focus and its trigger MAY change the turn slice and task context, while leaving the map independent of those inputs. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
+In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT call a model other than retrieval scorers or the explicitly enabled interpreter governed by context-interpretation, or write to the vault. It SHALL NOT resolve anchors, except for the turn slice, which the setting `EXOMEM_ACTIVATION_TURN_SLICE` turns off and which "The turn slice" governs. The map, any attached profile, stance, the turn slice, task context and next-action prose SHALL share the request's `max_chars` cap. Stance allowance SHALL preserve mandatory map framing after the fixed shared reserve. This allowance SHALL remain independent of the turn and held methods. The cap SHALL charge the packet's prose: the map's description line, one rendered line for each map, slice, candidate and method item, all operative method content and invalidation advice, and the overflow line. It SHALL NOT charge structure fields: refs given as fields, paths, profile routes, topics, dates, the generation blocks, the continuity token and timings. The budget report SHALL carry `serialized_chars`, the length of the packet's compact JSON form without that field. A map item SHALL omit `topics` when it is empty and `lifecycle_class` and `state` when they have no value. The map's description SHALL name the read call for a map ref. When the owner's map inputs changed after an earlier map for the same owner was built, activation MAY serve that earlier map marked `stale: true`, with `generation.index_stale: true` and the index generation it was built from, and SHALL then rebuild the map off the request thread. A restricted caller's map SHALL NOT be served from an earlier build. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. It MAY carry the bounded method-version hints defined by method continuation; those hints SHALL NOT become anchor continuity evidence. When a request carries a `continuity` token from a `maps` packet whose map generation equals the generation of the map that activation would serve to that caller, the map block SHALL carry its ref, generation, stale flag, `unchanged: true` and a one-line description, and no items. `conversation`, `focus` and `trigger` SHALL NOT change the map, and neither SHALL the turn: the turn, its conversation, its focus and its trigger MAY change the turn slice and task context, while leaving the map independent of those inputs. A `maps` packet SHALL carry the `episode_due` advisory under the same conditions as an `anchors` packet. The call ledger SHALL record the released-item count of a `maps` packet as unknown, not zero, because a map response carries no per-page basis to count.
 
 #### Scenario: An empty vault returns an empty map
 - **WHEN** no context-catalogue entry is visible to the caller

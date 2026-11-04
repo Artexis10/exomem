@@ -468,6 +468,48 @@ def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfi
     return seen[0]
 
 
+def test_a_folder_resume_connects_mcp_only_when_it_calls_a_cell_tool(tmp_path, monkeypatch):
+    """Catches eager MCP entry that prevents REST from releasing an import's hold on the cell."""
+    from types import SimpleNamespace
+
+    resumed, entered, exited = [], [], []
+    oauth = object()
+
+    class HeldClient:
+        def __init__(self, url, *, auth, timeout):
+            assert auth is oauth
+
+        async def __aenter__(self):
+            assert resumed, "the import's REST resume must release the cell before MCP connects"
+            entered.append(True)
+            return self
+
+        async def __aexit__(self, *error):
+            exited.append(True)
+
+        async def call_tool(self, name, arguments):
+            assert entered and name == "adoption_studio"
+            return SimpleNamespace(structured_content={"resumed": True})
+
+    def api_client(config, auth):
+        assert auth is oauth
+        return httpx2.AsyncClient(transport=httpx2.MockTransport(lambda request: httpx2.Response(200)))
+
+    async def resume(source, config, checkpoint, *, cell, **kwargs):
+        resumed.append(True)
+        assert await cell.status() == {"resumed": True}
+        assert await cell.status() == {"resumed": True}
+        return {"import_id": "example-import", "windows": 1}
+
+    monkeypatch.setattr(cloud_import_windows, "Client", HeldClient)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", resume)
+    monkeypatch.setattr(cloud_import_client, "cloud_oauth", lambda config: oauth)
+    monkeypatch.setattr(cloud_import_client, "authorized_api_client", api_client)
+
+    assert cloud_import_client.main(["import", str(tmp_path)]) == 0
+    assert entered == [True] and exited == [True]
+
+
 def test_cloud_import_needs_no_endpoint_setup(tmp_path, monkeypatch):
     monkeypatch.delenv("EXOMEM_CLOUD_MCP_URL", raising=False)
     monkeypatch.delenv("EXOMEM_CLOUD_API_BASE_URL", raising=False)

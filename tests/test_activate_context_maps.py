@@ -32,6 +32,7 @@ from exomem import (
     freshness,
     lexstore,
     project_keys,
+    read_next_action,
     working_set_runtime,
 )
 from exomem.governance import egress, principal
@@ -42,6 +43,11 @@ def _activate(root: Path, caller=OWNER, **kwargs):
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
     with principal.request_scope(caller):
         return invoke_command(command, root, **kwargs)
+
+
+def _without_response_id(packet: dict) -> dict:
+    """Compare all served content while fresh row IDs identify separate responses."""
+    return {key: value for key, value in packet.items() if key != "served_context_id"}
 
 
 def test_the_default_mode_is_maps_and_anchors_is_the_rollback(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
@@ -61,8 +67,8 @@ def test_the_default_mode_is_maps_and_anchors_is_the_rollback(vault: Path, monke
     monkeypatch.setattr(working_set_runtime, "_PACKET_WARNING_EMITTED", False)
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "invalid")
     invalid = _activate(vault, **options)
-    assert absent == explicit == invalid
-    assert _activate(vault, **options) == invalid
+    assert _without_response_id(absent) == _without_response_id(explicit) == _without_response_id(invalid)
+    assert _without_response_id(_activate(vault, **options)) == _without_response_id(invalid)
     assert sum("invalid EXOMEM_ACTIVATION_PACKET" in record.message for record in caplog.records) == 1
     assert absent["map"]["items"] and absent["anchors"] == []
     # The rollback: the one setting restores the anchors packet.
@@ -137,9 +143,12 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         assert packet["abstained"] is False, packet.get("abstention")
         block = packet["map"]
         rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"]), block["overflow"]]
+        if description := packet.get("turn_slice", {}).get("description"):
+            rendered.append(description)
+        used = len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", ""))
         # `used_chars` charges the prose; `serialized_chars` is the wire size of the packet without that field.
-        sent = json.dumps({**packet, "budget": {"limit_chars": budget, "used_chars": len("\n".join(rendered))}}, separators=(",", ":"), ensure_ascii=False)
-        assert packet["budget"] == {"limit_chars": budget, "used_chars": len("\n".join(rendered)), "serialized_chars": len(sent)}
+        sent = json.dumps({**packet, "budget": {"limit_chars": budget, "used_chars": used}}, separators=(",", ":"), ensure_ascii=False)
+        assert packet["budget"] == {"limit_chars": budget, "used_chars": used, "serialized_chars": len(sent)}
         assert packet["budget"]["used_chars"] <= budget
         # A field with nothing to say is absent, not empty or null.
         assert all(item.get(field, "present") not in ([], None) for item in block["items"] for field in ("topics", "lifecycle_class", "state"))
@@ -279,7 +288,7 @@ def test_a_maps_packet_reports_the_conversation_its_slice_read(vault: Path, monk
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
     off = _activate(vault, turn=turn, conversation=earlier)
     assert off["generation"]["conversation"] == "absent" and "turn_slice" not in off
-    assert off == _activate(vault, turn=turn)  # the map alone: the conversation changes no byte
+    assert _without_response_id(off) == _without_response_id(_activate(vault, turn=turn))  # the map alone: the conversation changes no byte
 
 
 @pytest.mark.parametrize("restricted", [False, True])
@@ -332,7 +341,7 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
         _cold()
         owners.append(_activate(root, max_chars=1000))  # fill the owner cache before a restricted read
         guests.append(_activate(root, _external(), max_chars=1000))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     assert guests[0]["generation"] == guests[1]["generation"]
     assert working_set_runtime.decode_continuity(guests[0]["continuity"]) == working_set_runtime.decode_continuity(guests[1]["continuity"])
     assert owners[0]["map"] != owners[1]["map"]
@@ -368,7 +377,7 @@ def test_a_restricted_caller_is_not_served_the_owner_map_a_write_left_stale(
     alone = _activate(vault, _external(), max_chars=1000)
     for packet in (guest, alone):
         del packet["continuity"]  # the token carries a thread minted per call
-    assert json.dumps(guest, sort_keys=True) == json.dumps(alone, sort_keys=True)
+    assert json.dumps(_without_response_id(guest), sort_keys=True) == json.dumps(_without_response_id(alone), sort_keys=True)
     assert guest["map"]["stale"] is False and "index_stale" not in guest["generation"]
     assert "Quayside" in _topic_titles(guest) and "Harbour" not in _topic_titles(guest)  # fresh, not the owner's stale labels
     assert THREAD_W not in json.dumps(guest)
@@ -507,7 +516,7 @@ def test_equal_rendered_lines_do_not_select_an_extra_entry(vault: Path, monkeypa
     _, overflow = context_views.map_within(view, 100_000)
     description = _activate(vault, max_chars=500)["map"]["description"]
     required = len(description) + len(lines[0]) + len(overflow) + 2
-    budget = math.ceil(required / (1 - context_views.TURN_SLICE_SHARE))
+    budget = math.ceil(required / (1 - context_views.TURN_SLICE_SHARE)) + read_next_action.MAX_CHARS
     assert budget >= 500
     packet = _activate(vault, max_chars=budget)
     assert len(packet["map"]["items"]) == 1
@@ -560,7 +569,7 @@ def test_a_withheld_project_registry_edited_after_readiness_leaves_a_restricted_
         return prepared
 
     monkeypatch.setattr(context_views, "_prepare", prepare_then_edit)
-    assert _activate(vault, _external(), max_chars=1000) == before
+    assert _without_response_id(_activate(vault, _external(), max_chars=1000)) == _without_response_id(before)
 
 
 def test_each_activation_in_a_library_scope_keeps_its_record_only_while_it_runs(

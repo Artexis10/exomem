@@ -4,7 +4,7 @@
 
 ### Requirement: Served units carry their own authored time
 Every unit in the packet SHALL carry, as `updated`, the ISO date its author wrote in
-the unit's context slot (the compact `(context)` or the rich `context:` row). A date
+the unit's typed `as_of`, falling back to its context slot (the compact `(context)` or rich `context:` row). A date
 the context introduces as a deadline (due, by, before, until, deadline, expiry) SHALL
 NOT count, and a date mentioned only in the unit's prose SHALL NOT count. A unit that
 authors no time SHALL be served with an empty `updated`. Within a role, units SHALL
@@ -19,13 +19,11 @@ be published.
 - **WHEN** a unit reads "renew the certificate before it expires on 2027-01-15", or its context reads `due 2027-01-15`
 - **THEN** its `updated` is empty
 
-### Requirement: History comes only from an authored supersession
-A unit SHALL carry `history: true` only when its lifecycle is `superseded` or
+### Requirement: History follows authored supersession and typed expiry
+A unit SHALL carry `history: true` when its typed `until` is earlier than today, without changing its stored lifecycle, or when its lifecycle is `superseded` or
 `archived`: its page is superseded or archived, or a unit on the SAME page carries a
 `supersedes` relation naming it (by `#anchor`, `page#anchor` or a full-path link),
-which gives it lifecycle `superseded`. No date, category or shared-word comparison
-SHALL mark a unit history, and draft, planned or dropped material SHALL NOT be
-history. Within a role, history SHALL rank after current material; role order is
+which gives it lifecycle `superseded`. No untyped date, category or shared-word comparison SHALL mark a unit history. Draft, planned or dropped material SHALL NOT be history without typed expiry. Supersession and archive take priority, then typed expiry, then a passed `check_by` adds `review_due` while keeping the unit current. Within a role, history SHALL rank after current material; role order is
 unchanged. A relation on another page SHALL mark nothing, so a released unit never
 reports that a page its reader may not see replaced it.
 

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from test_activate_context_maps import _activate
+from test_activate_context_maps import _activate, _without_response_id
 from test_context_catalogue import _built, _page, _source_schema, _write
 from test_context_views import _second_vault
 from test_governance_egress import _external
@@ -140,7 +140,7 @@ def test_a_withheld_method_and_a_missing_method_reset_identically(vault: Path, t
     )
     with_hidden = _activate(vault, _external(), turn="Seed germination", continuity=token, max_chars=8000)
     absent = _activate(twin, _external(), turn="Seed germination", continuity=token, max_chars=8000)
-    assert with_hidden == absent
+    assert _without_response_id(with_hidden) == _without_response_id(absent)
     assert with_hidden["task_context"]["methods"]["reset"] is True
     assert hidden not in str(with_hidden)
 
@@ -224,3 +224,245 @@ def test_collection_discovery_returns_the_manifest_without_querying_rows(vault: 
     assert manifest in str(packet)
     assert "raw-row" not in str(packet)
 
+
+
+def test_current_methods_follow_admitted_unit_currency_before_reuse(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live page must not offer replaced or expired methods, even with matching carried source bytes."""
+    from exomem import semantic_index
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    path = _page(vault, "alignment-methods", body=(
+        "## Procedure\n- id: before\n\nInspect optical alignment with the earlier target.\n"
+        "## Procedure\n- id: current\n- relations: supersedes: [[#before]]\n\nInspect optical alignment with the current target.\n"
+        "## Procedure\n- id: expired\n- until: 2020-01-01\n\nInspect optical alignment with the expired target.\n"
+        "## Procedure\n- id: review\n- check_by: 2020-01-01\n\nInspect optical alignment and check the source first.\n"
+    ))
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    first = _activate(vault, turn="Inspect optical alignment", max_chars=8000)
+    methods = [item for item in first["task_context"]["methods"]["items"] if item["source_ref"] == path]
+    assert {item["ref"].rpartition("#")[2] for item in methods} == {"current", "review"}
+    assert all(item["read_ref"] == path and item["applicability"] == "read_required" for item in methods)
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        document = semantic_index.selected_parent_index_state(vault, path).document
+    expired = next(unit.unit_ref for unit in document.units if unit.anchor == "expired")
+    token = working_set_runtime.encode_continuity(
+        identity="old", roles_hash="r", conventions_hash="c", generation=0, refs=[], roles=[], map_generation="old",
+        method_versions=[{"ref": expired, "source_ref": path, "source_version": methods[0]["source_version"]}],
+    )
+    unrelated = _activate(vault, turn="", continuity=token, max_chars=8000)
+    assert unrelated["task_context"]["methods"]["reset"] is True
+    assert unrelated["task_context"]["methods"]["items"] == []
+
+
+def test_withheld_unit_cannot_retire_an_admitted_method(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller must receive method currency computed after its unit release decisions."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "private-reference", body="Restricted inspection reference.\n")
+    path = _page(vault, "alignment-methods", body=(
+        "## Procedure\n- id: before\n\nInspect optical alignment with the earlier target.\n"
+        "## Procedure\n- id: replacement\n- relations: supersedes: [[#before]]\n\n"
+        f"Inspect optical alignment with [[{hidden}]].\n"
+    ))
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    owner = _activate(vault, turn="Inspect optical alignment", max_chars=8000)
+    guest = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    def identities(packet):
+        return {item["ref"].rpartition("#")[2] for item in packet["task_context"]["methods"]["items"] if item["source_ref"] == path}
+    assert identities(owner) == {"replacement"}
+    assert identities(guest) == {"before"}
+    assert hidden not in str(guest["task_context"])
+
+
+def test_unavailable_method_currency_preserves_admitted_read_routes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed method stage must leave discovered source routes usable with an honest partial state."""
+    from exomem import working_set_currency
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    path = _page(vault, "alignment-methods", body="- [technique] Inspect optical alignment with the reference target ^target\n")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    def unavailable(*args, **kwargs):
+        raise working_set_currency.CurrencyUnavailable("fixture current-unit evidence unavailable")
+    monkeypatch.setattr(working_set_currency, "annotate", unavailable)
+    packet = _activate(vault, turn="Inspect optical alignment", max_chars=8000)
+    task = packet["task_context"]
+    assert packet["abstained"] is False and "map" in packet
+    assert path in {item["read_ref"] for item in task["candidates"]}
+    assert task["state"] == "partial" and task["methods"]["items"] == []
+    assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
+
+
+def test_withheld_units_cannot_create_restricted_task_routes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mixed page stays discoverable for its visible unit without matching its withheld unit."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
+    visible = "- [technique] Inspect optical alignment against a reference target ^visible\n"
+    withheld = f"- [technique] Evaluate germination using [[{hidden}]] ^hidden\n"
+    path = _page(vault, "measurement-reference", body=visible + "\n" + withheld)
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    before = _activate(vault, _external(), turn="Evaluate germination", max_chars=8000)
+    allowed = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    assert path in str(allowed["task_context"])
+    (vault / path).write_text((vault / path).read_text().replace("\n" + withheld, ""))
+    freshness.on_files_changed(vault, [vault / path])
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    after = _activate(vault, _external(), turn="Evaluate germination", max_chars=8000)
+    assert {item["source_ref"] for item in before["task_context"]["candidates"]} == {
+        item["source_ref"] for item in after["task_context"]["candidates"]
+    }
+
+
+def test_restricted_task_admission_precedes_candidate_limits(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Withheld matches must not consume a raw top-k window ahead of a permitted source."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
+    for index in range(13):
+        _page(vault, f"measurement-reference-{index}", body=(
+            "- [technique] Inspect optical alignment ^visible\n\n"
+            f"- [technique] Evaluate germination germination germination using [[{hidden}]] ^hidden\n"
+        ))
+    permitted = _page(vault, "public-observation", body="Evaluate germination in the current observation record.\n")
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, _external(), turn="Evaluate germination", max_chars=8000)
+    refs = {item["source_ref"] for item in packet["task_context"]["candidates"]}
+    assert permitted in refs
+    assert not any("measurement-reference-" in ref for ref in refs)
+
+
+def test_excerpt_only_sources_do_not_expose_task_hashes_or_metadata(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An excerpt permission keeps canonical pull routes without exposing whole-source versions or metadata."""
+    import hashlib
+    import json
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    path = _page(vault, "measurement-reference", "title: Restricted metadata label\n",
+                 body="- [technique] Inspect optical alignment ^visible\n\n" + "Neutral observation. " * 60)
+    _withhold(vault, path, ceiling=5)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    raw_hash = hashlib.sha256((vault / path).read_bytes()).hexdigest()
+    reader = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
+    with principal.request_scope(_external()):
+        canonical = invoke_command(reader, vault, path=path)
+    assert canonical["release_level"] == 5 and canonical["body"]
+    assert "content_hash" not in canonical and raw_hash not in json.dumps(canonical)
+    packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    assert packet["abstained"] is False and "map" in packet
+    assert packet["task_context"]["state"] in ("partial", "unavailable")
+    assert path not in {item["source_ref"] for item in packet["task_context"]["candidates"]}
+    assert packet["task_context"]["methods"]["items"] == []
+    assert raw_hash not in json.dumps(packet)
+    assert "Restricted metadata label" not in json.dumps(packet["task_context"])
+
+
+def test_restricted_method_version_covers_visible_exclusions_outside_the_unit(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A released-source version must retain operative prose outside the selected method unit."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
+    path = _page(vault, "alignment-method", body="- [technique] Inspect optical alignment ^visible\n\nExclude handheld field checks.\n")
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    first = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    before = next(item for item in first["task_context"]["methods"]["items"] if item["source_ref"] == path)
+    (vault / path).write_text((vault / path).read_text().replace("Exclude handheld field checks.", "Exclude workshop and handheld checks."))
+    freshness.on_files_changed(vault, [vault / path])
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    unrelated = _activate(vault, _external(), turn="Evaluate seed germination", continuity=first["continuity"], max_chars=8000)
+    fresh = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    after = next(item for item in fresh["task_context"]["methods"]["items"] if item["source_ref"] == path)
+    assert unrelated["task_context"]["methods"]["reset"] is True
+    assert before["ref"] == after["ref"] and before["source_version"] != after["source_version"]
+
+
+def test_restricted_graph_omission_keeps_visible_recall_without_origin_leaks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A withheld unit's graph edge cannot admit a source that the released text did not match."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
+    neighbour = _page(vault, "secondary-reference", body="A separate measurement note.\n")
+    path = _page(vault, "alignment-method", body=(
+        "- [technique] Inspect optical alignment ^visible\n\n"
+        f"- [technique] Evaluate germination using [[{hidden}]] and [[{neighbour}]] ^hidden\n"
+    ))
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    task = packet["task_context"]
+    assert path in str(task)
+    assert neighbour not in {item["source_ref"] for item in task["candidates"]}
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
+
+
+def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A preparation deadline must preserve the map without ranking a biased source prefix."""
+    import contextlib
+    import time
+
+    from exomem import request_budget, runtime_resources
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
+    _page(vault, "a-matching-reference", body="Inspect optical alignment with the target.\n")
+    _page(vault, "z-matching-reference", body="Inspect optical alignment with the alternate target.\n")
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    budget = request_budget.RequestBudget(seconds=60)
+    original = runtime_resources.semantic_preparation
+    prepared = []
+    @contextlib.contextmanager
+    def expires(root, path, **kwargs):
+        with original(root, path, **kwargs) as source:
+            prepared.append(path)
+            if path.name == "z-matching-reference.md":
+                budget.deadline = time.monotonic()
+            yield source
+    monkeypatch.setattr(runtime_resources, "semantic_preparation", expires)
+    token = request_budget.set_current(budget)
+    try:
+        packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+    assert {path.name for path in prepared} >= {"a-matching-reference.md", "z-matching-reference.md"}
+    assert packet["abstained"] is False and "map" in packet
+    assert packet["task_context"]["state"] in ("partial", "unavailable")
+    assert packet["task_context"]["candidates"] == []
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
+def test_restricted_corpus_capacity_cannot_rank_a_prepared_prefix(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aggregate capacity exhaustion must not turn the first prepared matching source into an answer."""
+    from exomem import context_task, working_set
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
+    first = _page(vault, "a-budget-reference", body="Inspect optical alignment with the target.\n")
+    last = _page(vault, "z-budget-reference", body="Calibration observation. " * 5000 + "\nInspect optical alignment.\n")
+    _withhold(vault, hidden, ceiling=0)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    monkeypatch.setattr(working_set, "TASK_CORPUS_MAX_BYTES", 1024 * 1024)
+    original = context_task.project_source
+    prepared = []
+    def record(root, path, caller, **kwargs):
+        source = original(root, path, caller, **kwargs)
+        if source is not None:
+            prepared.append(path)
+        return source
+    monkeypatch.setattr(context_task, "project_source", record)
+    packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    assert first in prepared and last in prepared
+    assert packet["abstained"] is False and "map" in packet
+    assert packet["task_context"]["state"] in ("partial", "unavailable")
+    assert packet["task_context"]["candidates"] == []
