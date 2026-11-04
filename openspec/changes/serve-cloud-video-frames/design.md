@@ -47,6 +47,11 @@ it does not copy the video into the serving process.
 
 ### Keep authority in the parent with one preparation handshake
 
+The child acknowledges path-independent admission before it touches the original.
+Until the first authorization succeeds, original-specific failures return the same refusal as a missing path.
+This hides storage failures and preparation interruptions for withheld originals.
+The affected request loses detailed preparation diagnostics; admission and lock refusals keep their existing outcomes.
+
 The child pins the original through `open_original` and retains it through
 `hold_generic_file`. It reports the canonical path, complete file version,
 digest and size, then waits before decoding.

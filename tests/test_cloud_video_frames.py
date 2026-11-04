@@ -129,6 +129,89 @@ def test_withheld_prepared_original_never_reaches_decoder(vault, cloud_frames, m
     assert children[0].poll() is not None
 
 
+@pytest.mark.frame_codecs
+def test_withheld_unavailable_stored_original_matches_missing_path(vault, cloud_frames, selected_store):
+    import io
+
+    from test_governance_egress import write_rule, write_scope
+    from test_media_store import _offload
+
+    from exomem import command_surface, media_store, preserve
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    captured = preserve.preserve(
+        vault, scope="Test", category="video", filename="sample.mp4",
+        content_stream=io.BytesIO(b"retained video original"), text="A recorded sample.",
+    )
+    path = vault / captured.path
+    reference = _offload(vault, path)
+    assert media_store.evict(vault, path)
+    (Path(selected_store[0]["root"]) / reference.object / reference.version).unlink()
+    write_scope(vault, paths="Sources/**")
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    command = next(item for item in commands.COMMANDS if item.name == "get_video_frames")
+    read = command_surface.bind_vault(command.leaf, vault, command=command)
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        retained = read(path=captured.path)
+        missing = read(path="Knowledge Base/Sources/missing.mp4")
+
+    assert retained == missing
+    assert retained["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.parametrize("interruption", ["deadline", "pressure"])
+def test_withheld_original_preparation_interruption_matches_missing_path(
+    vault, cloud_frames, monkeypatch, interruption,
+):
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem import command_surface, media_brakes, request_budget
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    path = "Knowledge Base/Sources/video.mp4"
+    (vault / path).write_bytes(b"retained video original")
+    write_scope(vault, paths="Sources/**")
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    children = _injected_child(monkeypatch, '''
+from contextlib import contextmanager
+from exomem import media_store
+original = media_store.open_original
+
+@contextmanager
+def stalled(vault, target, **kwargs):
+    if target.exists():
+        (vault / "preparing").write_text("yes")
+        time.sleep(30)
+    with original(vault, target, **kwargs) as value:
+        yield value
+media_store.open_original = stalled
+''')
+    if interruption == "pressure":
+        monkeypatch.setattr(media_brakes, "read_cell", lambda: media_brakes.CellMemory(
+            0, 3 << 30, None, 99.0) if (vault / "preparing").exists() else cloud_frames)
+    command = next(item for item in commands.COMMANDS if item.name == "get_video_frames")
+    read = command_surface.bind_vault(command.leaf, vault, command=command)
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with reserved_paths.hold_generic_file(vault, path, recorded_sha256=lambda version: None) as held:
+            assert not egress.release_allows_frames(vault, path, artifact_copy=held)
+        token = request_budget.set_current(request_budget.RequestBudget(
+            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 3))
+        try:
+            retained = read(path=path)
+        finally:
+            request_budget.reset_current(token)
+        (vault / "preparing").unlink()
+        missing = read(path="Knowledge Base/Sources/missing.mp4")
+
+    assert retained == missing
+    assert retained["error"]["code"] == "NOT_FOUND"
+    assert all(child.poll() is not None for child in children)
+
+
 def test_replaced_prepared_original_is_refused_before_decode(vault, cloud_frames, monkeypatch):
     path = "Knowledge Base/Sources/video.mp4"
     (vault / path).write_bytes(b"video bytes")

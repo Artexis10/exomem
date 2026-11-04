@@ -514,7 +514,8 @@ jobs:
     name: product E2E (installed wheel, stdio + HTTP)
     if: *not-release-pr
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # Keep the existing eight-minute journey, bounded apt setup and native proof inside the job.
+    timeout-minutes: 20
     # The job installs and runs earlier published releases; it needs no write access.
     permissions:
       contents: read
@@ -565,6 +566,8 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true'
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 330 --request-timeout 20
       - name: Install retained-original encryption tools
+        # Cover the helper's update retries, download, installation and kill grace.
+        timeout-minutes: 9
         if: steps.scope.outputs.docs_only != 'true'
         run: scripts/ci-apt-install.sh age
       - name: Cloud frame reads with native codecs

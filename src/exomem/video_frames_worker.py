@@ -39,6 +39,10 @@ class _Request(_Message):
     deadline: float
 
 
+class _Admitted(_Message):
+    kind: Literal["admitted"]
+
+
 class _Prepared(_Message):
     kind: Literal["prepared"] = "prepared"
     path: str = Field(min_length=1, max_length=4096)
@@ -223,7 +227,7 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
     from .extract import media_type_for
     from .governance import egress, policy
     from .vault import VaultPathError, resolve_under_vault
-    from .video_frames import Frame, FramesResult, _tool_frames_cap
+    from .video_frames import Frame, FramesResult, VideoFramesError, _tool_frames_cap
 
     if media_engines.FRAMES not in media_engines.enabled_engines():
         _fail("VIDEO_UNAVAILABLE", "the frame engine is disabled on this cell")
@@ -262,20 +266,8 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
         check()
         child = _launch_child(Path(vault_root))
         _write_message(child.stdin, request, check)
-        prepared = _read_message(child.stdout, _Prepared, check)
-        if prepared.path != relative or prepared.size != prepared.version.size:
-            _fail("VIDEO_PROTOCOL", "the frame worker prepared a different original")
-
-        def recorded(version):
-            if version != prepared.version:
-                _fail("NOT_FOUND", "video does not exist")
-            return prepared.sha256
-
-        held = custody.enter_context(reserved_paths.hold_generic_file(
-            vault_root, relative, recorded_sha256=recorded, deadline=deadline
-        ))
-
-        def authorize():
+        _read_message(child.stdout, _Admitted, check)
+        def authorize(held):
             check()
             reserved_paths.require_current_generic_copy(held)
             # Preparation can outlive the request's cached authority; both decisions use live floors.
@@ -285,7 +277,25 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
                 ):
                     _fail("NOT_FOUND", "video does not exist")
 
-        authorize()
+        try:
+            prepared = _read_message(child.stdout, _Prepared, check)
+            if prepared.path != relative or prepared.size != prepared.version.size:
+                _fail("VIDEO_PROTOCOL", "the frame worker prepared a different original")
+
+            def recorded(version):
+                if version != prepared.version:
+                    _fail("NOT_FOUND", "video does not exist")
+                return prepared.sha256
+
+            held = custody.enter_context(reserved_paths.hold_generic_file(
+                vault_root, relative, recorded_sha256=recorded, deadline=deadline
+            ))
+
+            authorize(held)
+        except VideoFramesError:
+            # Before disclosure, original-dependent failures must look like a missing path.
+            # This costs one generic refusal rather than revealing a withheld original.
+            _fail("NOT_FOUND", "video does not exist")
         if media_type_for(target) != "video":
             _fail("NOT_A_VIDEO", "the requested file is not a video")
         _write_message(child.stdin, _Permission(), check)
@@ -311,7 +321,7 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
             time.sleep(_POLL_SECONDS)
         if exited.si_code != os.CLD_EXITED or exited.si_status != 0:
             _fail("VIDEO_PROTOCOL", "the frame worker did not complete its read")
-        authorize()
+        authorize(held)
         return FramesResult(relative, result.duration_sec, frames, result.candidates,
                             result.dedup_dropped, effective)
     except (reserved_paths.ReservedPathLeafError, OSError):
@@ -347,6 +357,9 @@ def _child(vault: Path) -> int:
             media_brakes.apply_hard_limit(config.budget_for(media_engines.FRAMES), config)
         from .video_frames import VideoFramesError, sample_stream
 
+        # Admission depends on the cell and lock, before any original-specific work.
+        sys.stdout.buffer.write(_wire(_Admitted(kind="admitted")))
+        sys.stdout.buffer.flush()
         target, relative = resolve_under_vault(vault, request.path)
         if access.refuse_if_excluded(vault, relative):
             _fail("NOT_FOUND", "video does not exist")

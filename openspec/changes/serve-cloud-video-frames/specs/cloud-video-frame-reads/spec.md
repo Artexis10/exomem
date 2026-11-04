@@ -32,7 +32,13 @@ An admitted frame request SHALL retain the existing path, window and frame-limit
 
 ### Requirement: Authorization is bound to the original decoded
 
-The serving process SHALL authorize frames against the exact original identity, version and digest retained for decoding. It SHALL refuse withheld or changed originals before decoding, and check current authority and original version again before releasing frames. A refusal SHALL not reveal an excluded original's existence. Original hydration MAY update verified cache state, but the request SHALL not write knowledge content or durable processing jobs.
+The serving process SHALL authorize frames against the exact original identity, version and digest retained for decoding. It SHALL refuse withheld or changed originals before decoding, and check current authority and original version again before releasing frames. A refusal SHALL not reveal a withheld or excluded original's existence. Original hydration MAY update verified cache state, but the request SHALL not write knowledge content or durable processing jobs.
+
+#### Scenario: A withheld original cannot complete preparation
+
+- **WHEN** a withheld original's storage fails or its preparation reaches the deadline or pressure limit
+- **THEN** its outward refusal matches a missing path
+- **AND** path-independent admission and competing media ownership retain their retryable outcomes
 
 #### Scenario: An original changes during preparation
 
