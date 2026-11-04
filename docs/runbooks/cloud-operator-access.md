@@ -282,6 +282,9 @@ Do not delete retained evidence, roll back the schema destructively or erase the
 Disabling a log view does not erase its received evidence or make the collection window complete.
 Applying `access_record_enabled: false` stops the installed shipper and removes its writer environment and optional observation hooks.
 It preserves the local buffer; record the resulting collection gap.
+The enabled role also enables journald's audit socket for sudo metadata.
+If that socket is inactive, the role restarts journald once so that systemd opens the socket first.
+Disabling the role preserves this shared host audit facility because other consumers can depend on it.
 
 ### Prepare admin credential custody
 

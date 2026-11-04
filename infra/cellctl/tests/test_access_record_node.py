@@ -10,6 +10,7 @@ import platform
 import socket
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,15 @@ def free_port():
         return listener.getsockname()[1]
 
 
+def audit_source_state():
+    # These are the two systemd units that own the journal audit transport.
+    return {
+        unit: run(["systemctl", "show", unit, "--property=ActiveState,SubState,UnitFileState"],
+                  check=False).stdout.splitlines()
+        for unit in ("systemd-journald-audit.socket", "systemd-journald.service")
+    }
+
+
 @pytest.mark.skipif(not RUN_NODE, reason="requires an explicitly disposable Ubuntu node")
 def test_real_ssh_session_boundaries_and_sudo_discard_content(tmp_path):
     assert os.geteuid() == 0, "Run only on an owned disposable Ubuntu node"
@@ -42,6 +52,19 @@ def test_real_ssh_session_boundaries_and_sudo_discard_content(tmp_path):
     ).stdout
     print("Node package versions:\n" + versions)
     assert run(["ssh", "-V"], check=False).stderr.startswith("OpenSSH_9.6")
+    import yaml
+
+    print("Audit producer before setup:", audit_source_state())
+    audit_setup = tmp_path / "audit-source.yml"
+    audit_setup.write_text(yaml.safe_dump([{
+        "hosts": "localhost", "gather_facts": False,
+        "tasks": [{"ansible.builtin.import_tasks": str(ROLE / "tasks/audit-source.yml")}],
+    }]))
+    try:
+        run([os.environ.get("ANSIBLE_PLAYBOOK_BIN", "ansible-playbook"),
+             "-c", "local", "-i", "localhost,", str(audit_setup)])
+    finally:
+        print("Audit producer after setup:", audit_source_state())
     pam = Path("/etc/pam.d/sshd")
     original = pam.read_bytes()
     adapter = ROLE / "files/exomem-pam-session.py"
@@ -89,6 +112,7 @@ LogLevel ERROR
         f"UserKnownHostsFile={tmp_path}/known_hosts",
     ]
     ssh = ["ssh", *common, "-p", str(port)]
+    events = []
     try:
         pam.write_bytes(original + f"\nsession optional pam_exec.so quiet {adapter}\n".encode())
         for _ in range(100):
@@ -151,8 +175,6 @@ LogLevel ERROR
         assert all(event.get("EXOMEM_FINGERPRINT") == expected for event in opens)
         assert all(event.get("EXOMEM_FINGERPRINT_KIND") == "public_key_blob" for event in opens)
         # Use the role's actual projection in Vector's native test engine against journal records.
-        import yaml
-
         values = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
         values.update(
             k3s_node_role="server",
@@ -221,6 +243,11 @@ LogLevel ERROR
             and event.get("AUDIT_FIELD_EXE") == "/usr/bin/sudo"
             for event in events
         ), "sudo denial audit producer unavailable"
+        assert any(
+            event.get("AUDIT_FIELD_RES") == "success"
+            and event.get("AUDIT_FIELD_EXE") == "/usr/bin/sudo"
+            for event in events
+        ), "sudo success audit producer unavailable"
         tests = tmp_path / "journal-tests.yaml"
         tests.write_text(yaml.safe_dump({"tests": projected}))
         env = {
@@ -241,6 +268,23 @@ LogLevel ERROR
         print(
             f"Observed {len(opens)} SSH connections and {len(projected)} projected journal events; all discarded-field checks passed."
         )
+    except Exception:
+        print("Audit producer at failure:", audit_source_state())
+        print("Journal transport counts:", dict(Counter(event.get("_TRANSPORT") for event in events)))
+        print("Audit type counts:", dict(Counter(event.get("_AUDIT_TYPE_NAME") for event in events)))
+        # Only presence and closed audit results leave the VM, never command-bearing fields.
+        print("Audit key presence:", {key: sum(key in event for event in events) for key in (
+            "AUDIT_FIELD_EXE", "AUDIT_FIELD_RES", "AUDIT_FIELD_ACCT", "_AUDIT_ID",
+            "_SOURCE_REALTIME_TIMESTAMP", "_AUDIT_LOGINUID", "_AUDIT_SESSION",
+        )})
+        print("Sanitized sudo results:", [
+            {"result": event.get("AUDIT_FIELD_RES")
+             if event.get("AUDIT_FIELD_RES") in ("success", "failed") else "unknown",
+             "executable_is_sudo": event.get("AUDIT_FIELD_EXE") == "/usr/bin/sudo"}
+            for event in events
+            if event.get("AUDIT_FIELD_EXE") == "/usr/bin/sudo" or event.get("SYSLOG_IDENTIFIER") == "sudo"
+        ][:20])
+        raise
     finally:
         for process in active:
             if process.poll() is None:

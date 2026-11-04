@@ -17,6 +17,9 @@
         quiet: true
       no_log: true
 
+    - name: Prepare the journal audit producer
+      ansible.builtin.import_tasks: audit-source.yml
+
     - name: Create the Vector installation and protected state directories
       ansible.builtin.file:
         path: "{{ item }}"
@@ -28,13 +31,15 @@
 
     - name: Download the pinned Vector archive
       ansible.builtin.get_url:
-        url: "https://github.com/vectordotdev/vector/releases/download/v{{ access_record_vector_version }}/vector-{{ access_record_vector_version }}-{{ access_record_vector_archives[ansible_facts['architecture']].target }}.tar.gz"
+        url: >-
+          {{ 'https://github.com/vectordotdev/vector/releases/download/v'
+             ~ access_record_vector_version ~ '/vector-' ~ access_record_vector_version
+             ~ '-' ~ access_record_vector_archives[ansible_facts['architecture']].target ~ '.tar.gz' }}
         dest: /opt/exomem-vector/archive.tar.gz
         checksum: "sha256:{{ access_record_vector_archives[ansible_facts['architecture']].sha256 }}"
         owner: root
         group: root
         mode: "0600"
-      register: access_record_archive
 
     - name: Install the pinned Vector executable
       ansible.builtin.unarchive:
@@ -42,7 +47,6 @@
         dest: /opt/exomem-vector
         remote_src: true
         extra_opts: [--strip-components=2]
-      when: access_record_archive.changed
       notify: Restart access record
 
     - name: Install the content-free projection and write credential

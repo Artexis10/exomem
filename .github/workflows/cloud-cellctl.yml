@@ -5,6 +5,7 @@ on:
     paths:
       - "infra/cellctl/**"
       - "infra/helm/platform/**"
+      - "infra/scripts/helm_dependencies.py"
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - "src/exomem/cloud_import*.py"
@@ -20,6 +21,7 @@ on:
     paths:
       - "infra/cellctl/**"
       - "infra/helm/platform/**"
+      - "infra/scripts/helm_dependencies.py"
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - "src/exomem/cloud_import*.py"
@@ -94,11 +96,7 @@ jobs:
         run: uvx --from "ruff==${RUFF_VERSION}" ruff check src tests
       - name: Platform chart dependency build, lint and template
         run: |
-          helm repo add hcloud https://charts.hetzner.cloud
-          helm repo add traefik https://traefik.github.io/charts
-          helm repo add jetstack https://charts.jetstack.io
-          helm repo add topolvm https://topolvm.github.io/topolvm
-          helm dependency build infra/helm/platform
+          uv run --project infra/cellctl --locked python infra/scripts/helm_dependencies.py infra/helm/platform
           helm lint infra/helm/platform --strict \
             --namespace exomem-platform \
             --values infra/helm/platform/values.validation.yaml
@@ -251,11 +249,7 @@ jobs:
           echo "CELLCTL_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
       - name: Build the platform chart dependencies the suite renders
         run: |
-          helm repo add hcloud https://charts.hetzner.cloud
-          helm repo add traefik https://traefik.github.io/charts
-          helm repo add jetstack https://charts.jetstack.io
-          helm repo add topolvm https://topolvm.github.io/topolvm
-          helm dependency build infra/helm/platform
+          uv run --project infra/cellctl --locked python infra/scripts/helm_dependencies.py infra/helm/platform
       - name: Read the source image build metadata
         if: matrix.suite == 'protected-import'
         id: import-meta

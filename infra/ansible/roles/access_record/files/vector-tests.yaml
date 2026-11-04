@@ -4,7 +4,13 @@ tests:
       - insert_at: audit_metadata
         type: log
         log_fields:
-          message: '{"auditID":"event-a","stage":"ResponseComplete","stageTimestamp":"2026-10-26T12:00:00Z","requestURI":"/api/v1/namespaces/test/secrets/key?canary=DISCARDED_CONTENT","verb":"get","user":{"username":"operator","extra":{"private":"DISCARDED_CONTENT"}},"objectRef":{"namespace":"test","resource":"secrets"},"requestObject":{"canary":"DISCARDED_CONTENT"},"responseObject":{"canary":"DISCARDED_CONTENT"},"annotations":{"private":"DISCARDED_CONTENT"},"userAgent":"DISCARDED_CONTENT","responseStatus":{"message":"DISCARDED_CONTENT"}}'
+          message: >-
+            {"auditID":"event-a","stage":"ResponseComplete","stageTimestamp":"2026-10-26T12:00:00Z",
+            "requestURI":"/api/v1/namespaces/test/secrets/key?canary=DISCARDED_CONTENT","verb":"get",
+            "user":{"username":"operator","extra":{"private":"DISCARDED_CONTENT"}},
+            "objectRef":{"namespace":"test","resource":"secrets"},"requestObject":{"canary":"DISCARDED_CONTENT"},
+            "responseObject":{"canary":"DISCARDED_CONTENT"},"annotations":{"private":"DISCARDED_CONTENT"},
+            "userAgent":"DISCARDED_CONTENT","responseStatus":{"message":"DISCARDED_CONTENT"}}
     outputs:
       - extract_from: audit_metadata
         conditions:

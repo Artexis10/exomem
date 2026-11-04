@@ -258,7 +258,7 @@ jobs:
           printf '%s  %s\n' "$HELM_LINUX_AMD64_SHA256" "$RUNNER_TEMP/helm.tar.gz" | sha256sum --check
           tar --extract --gzip --file "$RUNNER_TEMP/helm.tar.gz" --directory "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/linux-amd64" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/linux-amd64/helm" dependency build infra/helm/platform
+          uv run --frozen python infra/scripts/helm_dependencies.py infra/helm/platform --helm "$RUNNER_TEMP/linux-amd64/helm"
       - name: Prove scoped startup, negative permissions and CA rotation
         env:
           RUN_K3S_ADMISSION_TEST: "1"

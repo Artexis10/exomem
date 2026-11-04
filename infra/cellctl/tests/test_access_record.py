@@ -166,6 +166,35 @@ async def test_exact_version_retries_and_observed_placement_keep_tenants_separat
         assert await connection.fetchval(
             "SELECT error_code FROM exomem_cloud_access_receipts WHERE version_id='invalid-gzip'"
         ) == "ACCESS_RECORD_INVALID"
+        # JSON strings that PostgreSQL cannot store must back off instead of rolling
+        # back retry state and blocking the healthy immutable version behind them.
+        for version in ("invalid-nul", "invalid-surrogate", "healthy-text"):
+            await connection.execute(
+                "INSERT INTO exomem_cloud_access_receipts(bucket_id,object_key,version_id,provider_at) VALUES('bucket',$1,$2,$3)",
+                f"access/node-a/{version}", version, now,
+            )
+
+        class TextMetadata(Reader):
+            def records(self, key, version):
+                return [parse_record(dict(
+                    schema_version=1, kind="heartbeat", source_at=now.isoformat(),
+                    node="node-a", boot_id="boot-a", event_id=version, action="heartbeat",
+                    identity="\x00" if version == "invalid-nul" else "operator",
+                    target="\ud800" if version == "invalid-surrogate" else "valid-\U0001f512",
+                ), {})]
+
+        assert await derive_receipts(connection, TextMetadata()) == 0
+        assert await derive_receipts(connection, TextMetadata()) == 1
+        failed_text = await connection.fetch(
+            "SELECT attempts,error_code,processed_at,next_attempt_at>now() AS backed_off "
+            "FROM exomem_cloud_access_receipts WHERE version_id IN ('invalid-nul','invalid-surrogate')"
+        )
+        assert len(failed_text) == 2
+        assert all(row["attempts"] == 1 and row["error_code"] == "ACCESS_RECORD_INVALID"
+                   and row["processed_at"] is None and row["backed_off"] for row in failed_text)
+        assert await connection.fetchval(
+            "SELECT target FROM exomem_cloud_access_records WHERE event_id='healthy-text'"
+        ) == "valid-\U0001f512"
     finally:
         await connection.close()
 

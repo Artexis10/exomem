@@ -77,21 +77,10 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
 # The vendored snapshot CRDs are byte copies of external-snapshotter v8.6.0
 # (infra/helm/platform/LOCAL_STORAGE_PROVENANCE.md); a bump updates both.
 (cd "${infra_dir}/helm/platform/files/external-snapshotter" && sha256sum --check --quiet SHA256SUMS.txt)
-"${helm_bin}" repo add hcloud https://charts.hetzner.cloud \
-  --repository-config "${helm_repository_config}" \
-  --repository-cache "${helm_repository_cache}"
-"${helm_bin}" repo add traefik https://traefik.github.io/charts \
-  --repository-config "${helm_repository_config}" \
-  --repository-cache "${helm_repository_cache}"
-"${helm_bin}" repo add jetstack https://charts.jetstack.io \
-  --repository-config "${helm_repository_config}" \
-  --repository-cache "${helm_repository_cache}"
-"${helm_bin}" repo add topolvm https://topolvm.github.io/topolvm \
-  --repository-config "${helm_repository_config}" \
-  --repository-cache "${helm_repository_cache}"
-"${helm_bin}" dependency build "${infra_dir}/helm/platform" \
-  --repository-config "${helm_repository_config}" \
-  --repository-cache "${helm_repository_cache}"
+HELM_REPOSITORY_CONFIG="${helm_repository_config}" \
+HELM_REPOSITORY_CACHE="${helm_repository_cache}" \
+  uv run --project "${repo_root}" --frozen python "${script_dir}/helm_dependencies.py" \
+    "${infra_dir}/helm/platform" --helm "${helm_bin}"
 "${helm_bin}" lint "${infra_dir}/helm/platform" --strict \
   --namespace exomem-platform \
   --values "${infra_dir}/helm/platform/values.validation.yaml"

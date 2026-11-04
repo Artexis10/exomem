@@ -106,8 +106,11 @@ def parse_record(
         raise ValueError("invalid access record schema")
     result = {key: value.get(key) for key in FIELDS}
     for key, item in result.items():
-        if item is not None and (not isinstance(item, str) or len(item) > 2048):
-            raise ValueError("invalid access metadata field")
+        if item is not None:
+            if not isinstance(item, str) or len(item) > 2048 or "\x00" in item:
+                raise ValueError("invalid access metadata field")
+            # PostgreSQL text requires UTF-8 without NUL; JSON can carry lone surrogates.
+            item.encode("utf-8")
         if key in ("kind", "source_at", "node", "boot_id", "event_id", "action") and not item:
             raise ValueError("missing access metadata field")
     timestamp = datetime.fromisoformat(result["source_at"].replace("Z", "+00:00"))

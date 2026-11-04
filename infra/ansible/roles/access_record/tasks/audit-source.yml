@@ -1,0 +1,18 @@
+---
+- name: Read the journal audit socket state
+  ansible.builtin.command:
+    argv: [systemctl, show, systemd-journald-audit.socket, --property=ActiveState, --value]
+  register: access_record_audit_socket
+  changed_when: false
+
+- name: Enable the journal audit producer
+  ansible.builtin.systemd_service:
+    name: systemd-journald-audit.socket
+    enabled: true
+
+# Journald must order socket startup; starting the socket alone while journald runs fails.
+- name: Start audit capture through the journal service dependency
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+  when: access_record_audit_socket.stdout != 'active'
