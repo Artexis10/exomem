@@ -76,7 +76,7 @@ download stream with an idle bound (default 60 seconds) and a total cap (default
 
 ## Check a selected cell
 
-1. Call `tools/list` through the gateway; expect `transfer_artifact` and no `read_media`.
+1. Call `tools/list` through the gateway; expect `transfer_artifact` and `read_media` with status, with video decoding excluded.
 2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256=<digest>)`.
 3. Run `exomem attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
 4. Call `capture_source` with the returned file and the same digest; expect a stored receipt with that hash.
