@@ -1109,66 +1109,14 @@
                 "pressure_wait_observations": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "monotonic_s",
-                      "avg60",
-                      "error"
-                    ],
-                    "properties": {
-                      "monotonic_s": {
-                        "type": "number",
-                        "minimum": 0
-                      },
-                      "avg60": {
-                        "type": [
-                          "number",
-                          "null"
-                        ],
-                        "minimum": 0,
-                        "maximum": 100
-                      },
-                      "error": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    }
+                    "$ref": "#/$defs/pressure_observation"
                   }
                 },
                 "pressure_observations": {
                   "type": "array",
                   "minItems": 2,
                   "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "monotonic_s",
-                      "avg60",
-                      "error"
-                    ],
-                    "properties": {
-                      "monotonic_s": {
-                        "type": "number",
-                        "minimum": 0
-                      },
-                      "avg60": {
-                        "type": [
-                          "number",
-                          "null"
-                        ],
-                        "minimum": 0,
-                        "maximum": 100
-                      },
-                      "error": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    }
+                    "$ref": "#/$defs/pressure_observation"
                   }
                 },
                 "pressure_cadence_seconds": {
@@ -1348,6 +1296,35 @@
           }
         }
       ]
+    },
+    "pressure_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "monotonic_s",
+        "avg60",
+        "error"
+      ],
+      "properties": {
+        "monotonic_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "avg60": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   }
 }
