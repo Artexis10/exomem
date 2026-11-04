@@ -14,6 +14,7 @@ import ipaddress
 import json
 import logging
 import re
+import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
