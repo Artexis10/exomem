@@ -896,6 +896,11 @@ embeddings-onnx = [
     { name = "sqlite-vec" },
     { name = "tokenizers" },
 ]
+frame-codecs = [
+    { name = "av" },
+    { name = "pillow" },
+    { name = "pillow-heif" },
+]
 image-codecs = [
     { name = "pillow" },
     { name = "pillow-heif" },
@@ -965,12 +970,12 @@ tui-dev = [
 requires-dist = [
     { name = "aiofile", specifier = ">=3.12.3,<4" },
     { name = "alembic", specifier = ">=1.20,<2" },
-    { name = "av", marker = "extra == 'media'", specifier = ">=11,<19" },
-    { name = "av", marker = "extra == 'media-cpu'", specifier = ">=11,<19" },
+    { name = "av", marker = "extra == 'frame-codecs'", specifier = ">=11,<19" },
     { name = "charset-normalizer", specifier = ">=3.4,<4" },
     { name = "ctranslate2", marker = "extra == 'media'", specifier = ">=4.6.3,<5" },
+    { name = "exomem", extras = ["frame-codecs"], marker = "extra == 'media-cpu'" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'embeddings'" },
-    { name = "exomem", extras = ["image-codecs"], marker = "extra == 'media-cpu'" },
+    { name = "exomem", extras = ["image-codecs"], marker = "extra == 'frame-codecs'" },
     { name = "exomem", extras = ["media-cpu"], marker = "extra == 'media'" },
     { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.1" },
     { name = "fastmcp", specifier = "==4.0.3" },
@@ -1024,7 +1029,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.47" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
-provides-extras = ["image-codecs", "embeddings", "embeddings-onnx", "reranker-onnx", "nli", "media-cpu", "media", "media-mlx", "diarization", "vision", "tui"]
+provides-extras = ["image-codecs", "frame-codecs", "embeddings", "embeddings-onnx", "reranker-onnx", "nli", "media-cpu", "media", "media-mlx", "diarization", "vision", "tui"]
 
 [package.metadata.requires-dev]
 dev = [

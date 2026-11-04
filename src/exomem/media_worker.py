@@ -70,6 +70,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
+from .media_worker_child import _reap_group
 from .ocr_facts import OcrFacts
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -2588,23 +2589,6 @@ def _engines_loaded(job: _Job) -> list[str | None]:
 def _budget_for(job: _Job, config: media_brakes.Settings) -> media_brakes.Budget:
     """The budget of everything the job's child loads, or the default."""
     return config.budget_for_loaded(_engines_loaded(job))
-
-
-def _reap_group(pgid: int, timeout: float = 2.0) -> None:
-    """Reap the killed media child's tools that were reparented to this process.
-
-    In a Cloud cell the server is PID 1, so a tool orphaned by a pressure stop becomes
-    its child and stays a zombie unless reaped. `waitpid(-pgid)` waits only on children
-    in the media child's own session, so no other subprocess loses its exit status.
-    """
-    deadline = _clock() + timeout
-    while _clock() < deadline:
-        try:
-            pid, _status = os.waitpid(-pgid, os.WNOHANG)
-        except ChildProcessError:
-            return  # no child of this process is left in the group
-        if pid == 0:
-            time.sleep(0.05)  # a member is still exiting
 
 
 def _join_with_timeout(q: queue.Queue, timeout: float) -> None:

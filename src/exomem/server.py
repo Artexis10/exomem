@@ -967,6 +967,10 @@ def build_server(
                 command=cmd,
                 surface_descriptor=surface_descriptor,
             )
+            if cloud and cmd.leaf is commands_module.op_read_media:
+                from .video_frames_worker import async_owner
+
+                bound = async_owner(bound)
             grouped = bound if exposed_name == cmd.name else grouped
             mcp.tool(bound, **tool_kwargs)
         if tool_shape != "grouped":
