@@ -37,7 +37,7 @@ from jsonschema import Draft202012Validator
 
 from . import checks, judge, runner
 from .report import read_rows
-from .session_close import Case, load_cases
+from .session_close import DEFAULT_CLIENT_MODE, Case, client_mode_error, load_cases
 from .store_report import paired_interval
 
 KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages"}
@@ -329,6 +329,9 @@ def recall_evidence(row: dict, key: dict | None = None) -> tuple[str, list[dict]
     from exomem.kbdir import kb_prefix
 
     fresh = row.get("fresh")
+    mode = row.get("client_mode", DEFAULT_CLIENT_MODE)
+    if mode == "tool-only" and (client_mode_error(mode, row) or not fresh or fresh.get("client_mode", DEFAULT_CLIENT_MODE) != mode or client_mode_error(mode, fresh)):
+        return checks.UNKNOWN, []
     if not fresh or fresh.get("error") or (fresh.get("server_connected") or {}).get(checks.SERVER) != "connected":
         return checks.UNKNOWN, []
     if not fresh.get("answer") or not fresh.get("session_id"):
@@ -393,7 +396,7 @@ def score_recall(key: dict, row: dict, *, judge_model: str, executable: Path | N
 def score_row(case: Case, key: dict, row: dict, *, judge_model: str, executable: Path | None, scratch: Path, answers: dict | None = None, automatic_judge: bool = False) -> dict:
     answers = answers or {}
     recall = score_recall(key, row, judge_model=judge_model, executable=executable, scratch=scratch, answer=answers.get("recall"), automatic_judge=automatic_judge)
-    if row["error"] is not None:
+    if client_mode_error(row.get("client_mode", DEFAULT_CLIENT_MODE), row) is not None:
         return {"deterministic": [], "judged": [], "verdict": checks.UNKNOWN, "recall": recall}
     deterministic = check_row(key, row)
     judged = judge_row(case, key, row, model=judge_model, executable=executable, scratch=scratch, answer=answers.get("capture"), automatic_judge=automatic_judge)
@@ -408,7 +411,7 @@ def score_row(case: Case, key: dict, row: dict, *, judge_model: str, executable:
 def native_views(case: Case, key: dict, row: dict) -> dict[str, tuple[str, tuple[dict, ...]]]:
     """Only stages that need semantic judgments; transport failures retain their deterministic unknown state."""
     views = {}
-    if row["error"] is None and material_changes(row["observed"]):
+    if client_mode_error(row.get("client_mode", DEFAULT_CLIENT_MODE), row) is None and material_changes(row["observed"]):
         views["capture"] = (judge_prompt(judge_view(case, key, row)), CRITERIA)
     status, pages = recall_evidence(row, key)
     if row.get("recall_enabled") and status == checks.PASS:
@@ -416,10 +419,15 @@ def native_views(case: Case, key: dict, row: dict) -> dict[str, tuple[str, tuple
     return views
 
 
+def run_identity(row: dict) -> tuple:
+    """Historical session-close records belong to plugin mode; mode is part of run identity."""
+    return (*(row[name] for name in ("scenario", "repeat", "model", "arm")), row.get("client_mode", DEFAULT_CLIENT_MODE))
+
+
 def prepare_native(runs: Sequence[Path], *, out: Path, case_dir: Path | None = None) -> int:
     """Export blind prompts separately from the run mapping; start no model."""
     cases = {c.id: c for c in load_cases("all", case_dir=case_dir)}
-    rows, _replaced = read_rows(runs)
+    rows, _replaced = read_rows(runs, identity=run_identity)
     keys = refuse_unkeyed([cases[sid] for sid in dict.fromkeys(r["scenario"] for r in rows)])
     items, mapping = [], {}
     for row in rows:
@@ -427,7 +435,7 @@ def prepare_native(runs: Sequence[Path], *, out: Path, case_dir: Path | None = N
             item_id = uuid.uuid4().hex
             items.append({"id": item_id, "prompt": prompt, "answer_schema": judge.answer_schema(criteria)})
             mapping[item_id] = {
-                "run": [row[name] for name in ("scenario", "repeat", "model", "arm")],
+                "run": list(run_identity(row)),
                 "stage": stage,
                 "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
             }
@@ -463,11 +471,13 @@ def read_native(path: Path, mapping_path: Path) -> tuple[dict, dict]:
 
 def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: dict) -> dict:
     answers = {}
-    identity = [row[name] for name in ("scenario", "repeat", "model", "arm")]
+    identity = list(run_identity(row))
+    # Four-field native maps predate client modes and describe plugin runs only.
+    compatible = (identity, identity[:-1]) if identity[-1] == DEFAULT_CLIENT_MODE else (identity,)
     for stage, (prompt, criteria) in native_views(case, key, row).items():
         # Bind an answer to the exact evidence and rubric; stale imports become unknown instead of scoring another run.
         matches = [item_id for item_id, item in mapping.items() if isinstance(item, dict)
-                   and item.get("run") == identity and item.get("stage") == stage
+                   and item.get("run") in compatible and item.get("stage") == stage
                    and item.get("prompt_sha256") == hashlib.sha256(prompt.encode()).hexdigest()]
         item = judgments.get(matches[0]) if len(matches) == 1 else None
         answer = judge.parse_answer(json.dumps(item), criteria)
@@ -477,7 +487,7 @@ def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: d
 
 def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", judgments: Path | None = None, automatic_judge: bool = False, case_dir: Path | None = None) -> list[dict]:
     cases = {c.id: c for c in load_cases("all", case_dir=case_dir)}
-    rows, _replaced = read_rows(runs)
+    rows, _replaced = read_rows(runs, identity=run_identity)
     keys = refuse_unkeyed([cases[sid] for sid in dict.fromkeys(r["scenario"] for r in rows)])
     out.mkdir(parents=True, exist_ok=True)
     scratch = out / "judge-cwd"
@@ -489,6 +499,11 @@ def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", jud
         for row in rows:
             case = cases[row["scenario"]]
             key = keys[case.id]
+            mode = row.get("client_mode", DEFAULT_CLIENT_MODE)
+            capture_error = client_mode_error(mode, row)
+            recall_error = (row.get("fresh") or {}).get("error")
+            if mode == "tool-only" and row.get("recall_enabled"):
+                recall_error = capture_error or client_mode_error(mode, row.get("fresh") or {})
             answers = native_answers(case, key, row, mapping, imported) if not automatic_judge else None
             result = score_row(case, key, row, judge_model=judge_model, executable=executable, scratch=scratch, answers=answers, automatic_judge=automatic_judge)
             entry = {
@@ -496,12 +511,18 @@ def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", jud
                 for k in ("scenario", "repeat", "model", "arm", "error", "cost_usd", "warming_replies")
                 if k in row
             } | {
+                "client_mode": mode,
+                "error": capture_error,
+                "hook_invocations": row.get("hook_invocations"),
+                "hook_starts": row.get("hook_starts"),
+                "fresh_hook_invocations": (row.get("fresh") or {}).get("hook_invocations"),
+                "fresh_hook_starts": (row.get("fresh") or {}).get("hook_starts"),
                 "order": (row.get("observed") or {}).get("order"),
                 "restraint_case": not key["must_change"],
                 "recap_rule": key["recap"],
-                "recap_produced": bool((row.get("observed") or {}).get("recaps")) if row["error"] is None else None,
+                "recap_produced": bool((row.get("observed") or {}).get("recaps")) if capture_error is None else None,
                 "recall_enabled": row.get("recall_enabled", False),
-                "recall_error": (row.get("fresh") or {}).get("error"),
+                "recall_error": recall_error,
                 "recall_cost_usd": (row.get("fresh") or {}).get("cost_usd"),
             } | result
             sink.write(json.dumps(entry) + "\n")
@@ -541,15 +562,15 @@ def build_report(scored: list[dict], *, baseline: str, candidate: str) -> str:
     selected = [row for row in scored if row["arm"] in arms]
     cells: dict[tuple, list[dict]] = defaultdict(list)
     for row in selected:
-        cells[(row["model"], row["scenario"], row["arm"])].append(row)
+        cells[(row.get("client_mode", DEFAULT_CLIENT_MODE), row["model"], row["scenario"], row["arm"])].append(row)
     lines = [
-        "| model | case | arm | runs | pass | fail | unknown |",
-        "|---|---|---|---|---|---|---|",
+        "| client mode | model | case | arm | runs | pass | fail | unknown |",
+        "|---|---|---|---|---|---|---|---|",
     ]
-    for (model, case, arm), rows in sorted(cells.items()):
+    for (mode, model, case, arm), rows in sorted(cells.items()):
         verdicts = [row["verdict"] for row in rows]
         lines.append(
-            f"| {model} | {case} | {arm} | {len(rows)} | {verdicts.count(checks.PASS)} | "
+            f"| {mode} | {model} | {case} | {arm} | {len(rows)} | {verdicts.count(checks.PASS)} | "
             f"{verdicts.count(checks.FAIL)} | {verdicts.count(checks.UNKNOWN)} |"
         )
     lines += [
@@ -559,51 +580,56 @@ def build_report(scored: list[dict], *, baseline: str, candidate: str) -> str:
         "For recap production, pass means a recap exists; production on a forbidden case is unwanted.",
         "Fresh recall includes every input-enabled probe, regardless of capture success.",
         "",
-        "| measure | arm | pass/known | unknown | not applicable |",
-        "|---|---|---|---|---|",
+        "| client mode | measure | arm | pass/known | unknown | not applicable |",
+        "|---|---|---|---|---|---|",
     ]
     measured = [(row, measures(row)) for row in selected]
     names = list(measures(selected[0])) if selected else []
-    for name in names:
-        for arm in arms:
-            verdicts = [values[name] for row, values in measured if row["arm"] == arm]
-            passed = verdicts.count(checks.PASS)
-            known = passed + verdicts.count(checks.FAIL)
-            lines.append(
-                f"| {name} | {arm} | {passed}/{known} | {verdicts.count(checks.UNKNOWN)} | "
-                f"{verdicts.count(checks.NOT_APPLICABLE)} |"
-            )
+    modes = sorted({row.get("client_mode", DEFAULT_CLIENT_MODE) for row in selected})
+    for mode in modes:
+        for name in names:
+            for arm in arms:
+                verdicts = [values[name] for row, values in measured if row["arm"] == arm and row.get("client_mode", DEFAULT_CLIENT_MODE) == mode]
+                passed = verdicts.count(checks.PASS)
+                known = passed + verdicts.count(checks.FAIL)
+                lines.append(
+                    f"| {mode} | {name} | {arm} | {passed}/{known} | {verdicts.count(checks.UNKNOWN)} | "
+                    f"{verdicts.count(checks.NOT_APPLICABLE)} |"
+                )
     lines += [
         "",
         "Differences are candidate minus baseline. Repeats and models are averaged within each case; the 95% bootstrap resamples cases.",
         "Intervals that include zero mean no change. Unknown pairs are excluded and counted.",
     ]
-    for name in names:
-        clusters: dict[tuple, dict] = defaultdict(dict)
-        for row, values in measured:
-            clusters[(row["scenario"], row["model"], row["repeat"])][row["arm"]] = values[name]
-        by_case: dict[str, list[tuple[float, float]]] = defaultdict(list)
-        unknown = 0
-        for (case, _model, _repeat), values in clusters.items():
-            pair = (values.get(baseline), values.get(candidate))
-            if pair == (checks.NOT_APPLICABLE, checks.NOT_APPLICABLE):
+    for mode in modes:
+        for name in names:
+            clusters: dict[tuple, dict] = defaultdict(dict)
+            for row, values in measured:
+                if row.get("client_mode", DEFAULT_CLIENT_MODE) != mode:
+                    continue
+                clusters[(row["scenario"], row["model"], row["repeat"])][row["arm"]] = values[name]
+            by_case: dict[str, list[tuple[float, float]]] = defaultdict(list)
+            unknown = 0
+            for (case, _model, _repeat), values in clusters.items():
+                pair = (values.get(baseline), values.get(candidate))
+                if pair == (checks.NOT_APPLICABLE, checks.NOT_APPLICABLE):
+                    continue
+                if any(value not in (checks.PASS, checks.FAIL) for value in pair):
+                    unknown += 1
+                else:
+                    by_case[case].append((float(pair[0] == checks.PASS), float(pair[1] == checks.PASS)))
+            pairs = [
+                (sum(pair[0] for pair in values) / len(values), sum(pair[1] for pair in values) / len(values))
+                for values in by_case.values()
+            ]
+            if not pairs:
+                lines.append(f"\n{mode} {name}: no complete paired case; {unknown} pair(s) unknown.")
                 continue
-            if any(value not in (checks.PASS, checks.FAIL) for value in pair):
-                unknown += 1
-            else:
-                by_case[case].append((float(pair[0] == checks.PASS), float(pair[1] == checks.PASS)))
-        pairs = [
-            (sum(pair[0] for pair in values) / len(values), sum(pair[1] for pair in values) / len(values))
-            for values in by_case.values()
-        ]
-        if not pairs:
-            lines.append(f"\n{name}: no complete paired case; {unknown} pair(s) unknown.")
-            continue
-        low, high = paired_interval(pairs)
-        mean = sum(c - b for b, c in pairs) / len(pairs)
-        conclusion = "no change" if low <= 0 <= high else "difference excludes zero"
-        lines.append(
-            f"\n{name}: {len(pairs)} paired case(s), difference {mean:+.2f} "
-            f"(95% interval {low:+.2f} to {high:+.2f}; {conclusion}); {unknown} pair(s) unknown."
-        )
+            low, high = paired_interval(pairs)
+            mean = sum(c - b for b, c in pairs) / len(pairs)
+            conclusion = "no change" if low <= 0 <= high else "difference excludes zero"
+            lines.append(
+                f"\n{mode} {name}: {len(pairs)} paired case(s), difference {mean:+.2f} "
+                f"(95% interval {low:+.2f} to {high:+.2f}; {conclusion}); {unknown} pair(s) unknown."
+            )
     return "\n".join(lines) + "\n"

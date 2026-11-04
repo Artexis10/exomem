@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
     )
     run.add_argument("--case-dir", type=Path, help="session-close case inputs; seed identifiers still use shipped seeds")
+    run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill")
     run.add_argument(
         "--suite",
         default=DEFAULT_SUITE,
@@ -115,8 +116,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     arms = [parse_arm(text) for text in args.product_root]
+    if args.client_mode is not None and args.suite != session_close.SUITE:
+        raise SystemExit("--client-mode applies to the session-close suite only")
+    args.client_mode = args.client_mode or session_close.DEFAULT_CLIENT_MODE
     if args.case_dir is not None and args.suite != session_close.SUITE:
         raise SystemExit("--case-dir applies to the session-close suite only")
+    if args.hook_turn and args.client_mode == "tool-only":
+        raise SystemExit("--hook-turn requires --client-mode plugin")
     if args.hook_turn and args.suite != session_close.SUITE:
         raise SystemExit("--hook-turn applies to the session-close suite only")
     if args.suite == session_close.SUITE:
@@ -169,7 +175,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         with tempfile.TemporaryDirectory(prefix="ig-dry-") as scratch:
             for case in cases:
                 for arm in arms:
-                    problems = session_close.dry_run(case, arm, Path(scratch), hooked=args.hook_turn)
+                    problems = session_close.dry_run(case, arm, Path(scratch), hooked=args.hook_turn, client_mode=args.client_mode)
                     print(f"{arm.label}: {case.id}: {'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}")
                     failed += bool(problems)
         return 1 if failed else 0
@@ -181,8 +187,9 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         arms=arms,
         repeat_offset=args.repeat_offset,
         hooked=args.hook_turn,
+        client_mode=args.client_mode,
     )
-    return 1 if any(row["error"] for row in rows) else 0
+    return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 
 
 if __name__ == "__main__":

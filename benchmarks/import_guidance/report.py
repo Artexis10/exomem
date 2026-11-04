@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import random
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from . import checks
@@ -22,9 +22,9 @@ BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 20261102
 
 
-def read_rows(paths: Sequence[Path]) -> tuple[list[dict], list[dict]]:
-    """The rows, and the rows that a later run of the same arm, model, case and repeat replaced.
-    A run that ended in a provider or harness error is run again; its row is kept in the second list, not dropped."""
+def read_rows(paths: Sequence[Path], *, identity: Callable[[dict], tuple] | None = None) -> tuple[list[dict], list[dict]]:
+    """Latest rows and the earlier rows they replaced. A suite can supply a wider run identity.
+    The default key remains arm, model, case and repeat; original rows stay in their input files."""
     latest: dict[tuple, dict] = {}
     replaced: list[dict] = []
     for path in paths:
@@ -32,7 +32,7 @@ def read_rows(paths: Sequence[Path]) -> tuple[list[dict], list[dict]]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            key = (row.get("arm"), row["model"], row["scenario"], row["repeat"])
+            key = identity(row) if identity is not None else (row.get("arm"), row["model"], row["scenario"], row["repeat"])
             if key in latest:
                 replaced.append(latest[key])
             latest[key] = row

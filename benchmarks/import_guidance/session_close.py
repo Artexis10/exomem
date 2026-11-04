@@ -37,6 +37,7 @@ from epistemic.journeys.f27_replay import (
     fault_reason,
     refuse_unsafe_out_dir,
 )
+from epistemic.journeys.f33_referent_replay import _lines as stream_events
 from epistemic.journeys.f33_referent_replay import tool_calls
 from membench.trackc.witness_join import parse_stream_json_transcript
 
@@ -47,6 +48,9 @@ from .recording import Arm, checkout_sha, worker_env
 from .scripted_replies import SCENARIO_DIR
 
 SUITE = "session-close"
+# Client modes are a closed harness protocol, not vault vocabulary.
+CLIENT_MODES = ("plugin", "tool-only")
+DEFAULT_CLIENT_MODE = CLIENT_MODES[0]
 SEED_WORKER = Path(__file__).resolve().parent / "session_seed.py"
 #: The engagement levels, read from the product so the list lives in one place; a typo would
 #: silently read as balanced.
@@ -273,46 +277,23 @@ def write_order(changed: dict, recaps: dict, after: dict[str, dict]) -> str:
 # --------------------------------------------------------------------------
 
 
-def stage_agent_files(arm: Arm, work: Path, env: dict[str, str]) -> dict[str, Path]:
-    """The arm's skill text, its stdio server and its own Stop and UserPromptSubmit hooks, as `--mcp-config`,
-    `--settings` and `--append-system-prompt-file` files."""
-    schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
-    skill = work / "skill.md"
-    skill.write_text(
-        "\n\n".join((schema / name).read_text(encoding="utf-8") for name in SKILL_FILES),
-        encoding="utf-8",
-    )
+def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict[str, Path]:
+    """Stage the same real MCP server, with plugin guidance or an explicit request to disable hooks."""
     mcp = work / "mcp.json"
-    mcp.write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    checks.SERVER: {
-                        "command": sys.executable,
-                        "args": ["-m", "exomem", "--transport", "stdio"],
-                        "env": env,
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    plugin = arm.root / "plugins" / "claude-code"
-    declared = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-    settings = work / "settings.json"
-    settings.write_text(
-        json.dumps(
-            {
-                "hooks": json.loads(
-                    json.dumps({e: declared[e] for e in HOOK_EVENTS}).replace(
-                        "${CLAUDE_PLUGIN_ROOT}", str(plugin)
-                    )
-                )
-            }
-        ),
-        encoding="utf-8",
-    )
-    return {"skill": skill, "mcp": mcp, "settings": settings}
+    mcp.write_text(json.dumps({"mcpServers": {checks.SERVER: {
+        "command": sys.executable, "args": ["-m", "exomem", "--transport", "stdio"], "env": env,
+    }}}), encoding="utf-8")
+    files = {"mcp": mcp, "settings": work / "settings.json"}
+    settings = {"disableAllHooks": True}
+    if client_mode == DEFAULT_CLIENT_MODE:
+        schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
+        files["skill"] = work / "skill.md"
+        files["skill"].write_text("\n\n".join((schema / name).read_text(encoding="utf-8") for name in SKILL_FILES), encoding="utf-8")
+        plugin = arm.root / "plugins" / "claude-code"
+        declared = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+        settings = {"hooks": json.loads(json.dumps({e: declared[e] for e in HOOK_EVENTS}).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)))}
+    files["settings"].write_text(json.dumps(settings), encoding="utf-8")
+    return files
 
 
 def agent_argv(executable: Path, files: dict[str, Path], model: str) -> list[str]:
@@ -341,9 +322,7 @@ def agent_argv(executable: Path, files: dict[str, Path], model: str) -> list[str
         "--model",
         model,
         "--no-session-persistence",
-        "--append-system-prompt-file",
-        str(files["skill"]),
-    ]
+    ] + (["--append-system-prompt-file", str(files["skill"])] if "skill" in files else [])
 
 
 def agent_env(work: Path, case: Case) -> dict[str, str]:
@@ -397,12 +376,12 @@ def drive_session(
     stderr: list[str] = []
     threading.Thread(target=read_stdout, daemon=True).start()
     threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True).start()
-    stream, finished = [], 0
+    stream, finished, eof_seen = [], 0, False
     time.sleep(WARM_HOLD_SECONDS)
 
     def exchange(number: int, turn: str, sink: TextIO) -> str | None:
         """One user turn and the agent's answer to it; the reason the session stopped, or None."""
-        nonlocal finished
+        nonlocal finished, eof_seen
         try:
             proc.stdin.write(user_message(turn) + "\n")
             proc.stdin.flush()
@@ -415,6 +394,7 @@ def drive_session(
             except queue.Empty:
                 return f"turn {number} timed out after {TURN_TIMEOUT_SECONDS:.0f} s"
             if raw is None:
+                eof_seen = True
                 return f"the agent exited during turn {number}"
             stream.append(raw)
             sink.write(raw)
@@ -436,13 +416,27 @@ def drive_session(
         if not stopped and hook_turn is not None:
             hook_text = hook_turn(str(init_field("".join(stream), "session_id")))
             stopped = exchange(len(turns) + 1, hook_text, sink)
-    try:
-        proc.stdin.close()
-    except OSError:
-        pass
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        exit_deadline = time.monotonic() + EXIT_GRACE_SECONDS
+        # SessionEnd hooks can run after stdin closes; a result event is not stdout EOF.
+        while not eof_seen and time.monotonic() < exit_deadline:
+            try:
+                raw = lines.get(timeout=max(0, exit_deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if raw is None:
+                eof_seen = True
+            else:
+                stream.append(raw)
+                sink.write(raw)
+                sink.flush()
+        if not eof_seen:
+            stopped = stopped or "agent stdout observation is incomplete: EOF was not observed before the exit deadline"
     if os.name == "posix":
-        def wait_without_reaping() -> None:
-            deadline = time.monotonic() + EXIT_GRACE_SECONDS
+        def wait_without_reaping(deadline: float) -> None:
             while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -451,10 +445,10 @@ def drive_session(
 
         try:
             try:
-                wait_without_reaping()
+                wait_without_reaping(exit_deadline)
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGTERM)
-                wait_without_reaping()
+                wait_without_reaping(time.monotonic() + EXIT_GRACE_SECONDS)
         finally:
             # The unreaped leader reserves our group ID until the remaining stdio server is killed.
             try:
@@ -464,7 +458,7 @@ def drive_session(
             proc.wait(timeout=EXIT_GRACE_SECONDS)
     else:
         try:
-            proc.wait(timeout=EXIT_GRACE_SECONDS)
+            proc.wait(timeout=max(0, exit_deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             proc.terminate()
             proc.wait(timeout=EXIT_GRACE_SECONDS)
@@ -472,6 +466,7 @@ def drive_session(
         stdout="".join(stream),
         stderr="".join(stderr),
         returncode=proc.returncode,
+        stdout_eof=eof_seen,
         stopped=stopped,
         finished=finished,
         hook_turn=hook_text,
@@ -539,7 +534,21 @@ def replies_by_turn(stdout: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def session_result(done: SimpleNamespace, expected_turns: int) -> dict:
+def client_mode_error(client_mode: str, result: dict) -> str | None:
+    """A no-hook measurement needs a complete connected trace; contamination preserves evidence as unknown."""
+    error = result.get("error")
+    if error is not None or client_mode != "tool-only":
+        return error
+    count = result.get("hook_invocations")
+    starts = result.get("hook_starts")
+    if type(count) is not int or count < 0 or type(starts) is not int or starts < 0 or (result.get("server_connected") or {}).get(checks.SERVER) != "connected":
+        return "tool-only hook observations are unavailable; no-hook acceptance is unknown"
+    if count or starts:
+        return f"tool-only observed {count} completed hook invocation(s) and {starts} hook start(s); no-hook acceptance is unknown"
+    return None
+
+
+def session_result(done: SimpleNamespace, expected_turns: int, client_mode: str = DEFAULT_CLIENT_MODE) -> dict:
     """Raw evidence from a finished process, without scoring its answer or its tool choices."""
     transcript = parse_stream_json_transcript(done.stdout.splitlines())
     trail = tool_trail(done.stdout)
@@ -550,8 +559,15 @@ def session_result(done: SimpleNamespace, expected_turns: int) -> dict:
         or (None if done.finished == expected_turns else "a turn returned no result")
         or (None if connected.get(checks.SERVER) == "connected" else "the MCP server did not connect")
     )
-    return {
+    invocations, firings = count_hook_activity(done.stdout) if done.stdout_eof else (None, None)
+    result = {
+        "client_mode": client_mode,
         "error": error,
+        "stdout_eof": done.stdout_eof,
+        "hook_invocations": invocations,
+        # These are closed Claude wire subtypes; an unfinished hook_started still proves execution.
+        "hook_starts": sum(event.get("type") == "system" and event.get("subtype") == "hook_started" for event in stream_events(done.stdout)) if done.stdout_eof else None,
+        "capture_nudges": firings,
         "session_id": init_field(done.stdout, "session_id"),
         "replies": replies_by_turn(done.stdout),
         "calls": trail["calls"],
@@ -564,14 +580,21 @@ def session_result(done: SimpleNamespace, expected_turns: int) -> dict:
         "stderr": done.stderr,
         "returncode": done.returncode,
     }
+    result["error"] = client_mode_error(client_mode, result)
+    return result
 
 
-def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str]) -> dict:
+def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict:
     """A new actor and server on capture's state, with only the independently supplied question."""
     fresh = work / "fresh"
     stream = fresh / "stream.jsonl"
     row = {
         "question": case.recall_turn,
+        "client_mode": client_mode,
+        "hook_invocations": None,
+        "hook_starts": None,
+        "argv": None,
+        "settings": None,
         "stream": str(stream),
         "error": None,
         "session_id": None,
@@ -585,15 +608,16 @@ def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Pa
         for name in ("cwd", "hook-home"):
             (fresh / name).mkdir(parents=True)
         row["before"] = snapshot(work / "vault")
-        files = stage_agent_files(arm, fresh, env)
+        files = stage_agent_files(arm, fresh, env, client_mode)
+        row.update(argv=agent_argv(executable, files, model), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
         done = drive_session(
-            agent_argv(executable, files, model),
+            row["argv"],
             fresh / "cwd",
             agent_env(fresh, case) | {"EXOMEM_CONFIG_PATH": env["EXOMEM_CONFIG_PATH"]},
             (case.recall_turn,),
             stream,
         )
-        row.update(session_result(done, 1))
+        row.update(session_result(done, 1, client_mode))
         row["answer"] = row["replies"][-1] if row["replies"] else None
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         row["error"] = f"{type(error).__name__}: {error}"
@@ -616,20 +640,29 @@ def run_session(
     executable: Path,
     stamp: dict[str, str],
     hooked: bool = False,
+    client_mode: str = DEFAULT_CLIENT_MODE,
 ) -> dict:
-    work = out / "work" / model / arm.label / f"{case.id}-{repeat}"
+    if hooked and client_mode == "tool-only":
+        raise ValueError("--hook-turn requires --client-mode plugin")
+    work = out / "work" / client_mode / model / arm.label / f"{case.id}-{repeat}"
     shutil.rmtree(work, ignore_errors=True)
     for name in ("cwd", "hook-home", "logs", "scratch"):
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case)
-    files = stage_agent_files(arm, work, env)
+    files = stage_agent_files(arm, work, env, client_mode)
+    argv = agent_argv(executable, files, model)
     row: dict = {
         "scenario": case.id,
         "repeat": repeat,
         "model": model,
         "arm": arm.label,
+        "client_mode": client_mode,
+        "argv": argv,
+        "settings": json.loads(files["settings"].read_text(encoding="utf-8")),
+        "hook_invocations": None,
+        "hook_starts": None,
         "product_sha": stamp["product_shas"][arm.label],
-        "skill_sha256": hashlib.sha256(files["skill"].read_bytes()).hexdigest(),
+        "skill_sha256": hashlib.sha256(files["skill"].read_bytes()).hexdigest() if "skill" in files else None,
         "engagement": case.engagement,
         "turns": list(case.turns),
         "hooked": hooked,
@@ -643,7 +676,7 @@ def run_session(
         seed_vault(case, arm, work, env)
         before = snapshot(work / "vault")
         done = drive_session(
-            agent_argv(executable, files, model),
+            argv,
             work / "cwd",
             agent_env(work, case),
             case.turns,
@@ -651,18 +684,15 @@ def run_session(
             hook_turn=(lambda session_id: hook_ask(arm, session_id)) if hooked else None,
         )
         after = snapshot(work / "vault")
-        row.update(session_result(done, len(case.turns) + hooked))
-        invocations, firings = count_hook_activity(done.stdout)
+        row.update(session_result(done, len(case.turns) + hooked, client_mode))
         row.update(
             hook_turn=done.hook_turn,
             capture_before=before,
             capture_after=after,
             observed=diff_vault(before, after),
-            hook_invocations=invocations,
-            capture_nudges=firings,
         )
         if case.recall_turn is not None:
-            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env)
+            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env, client_mode=client_mode)
             if row["fresh"].get("session_id") == row.get("session_id") and row.get("session_id"):
                 row["fresh"]["error"] = "the fresh actor reused the capture session identity"
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -695,8 +725,11 @@ def run_all(
     arms: list[Arm],
     repeat_offset: int = 0,
     hooked: bool = False,
+    client_mode: str = DEFAULT_CLIENT_MODE,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
+    if hooked and client_mode == "tool-only":
+        raise ValueError("--hook-turn requires --client-mode plugin")
     out = refuse_unsafe_out_dir(out)
     out.mkdir(parents=True, exist_ok=True)
     envelope = discover_agent_envelope()
@@ -719,13 +752,14 @@ def run_all(
                         executable=envelope.executable,
                         stamp=stamp,
                         hooked=hooked,
+                        client_mode=client_mode,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
                     rows.append(row)
                     observed = row.get("observed") or {}
                     print(
-                        f"{model} {arm.label} {case.id}#{repeat}: "
+                        f"{client_mode} {model} {arm.label} {case.id}#{repeat}: "
                         f"{'error: ' + row['error'] if row['error'] else 'ran'}; "
                         f"changed={sorted(observed.get('changed', {}))} recaps={sorted(observed.get('recaps', {}))}",
                         file=sys.stderr,
@@ -734,19 +768,21 @@ def run_all(
     return rows
 
 
-def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False) -> list[str]:
+def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False, client_mode: str = DEFAULT_CLIENT_MODE) -> list[str]:
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
     problems found."""
+    if hooked and client_mode == "tool-only":
+        raise ValueError("--hook-turn requires --client-mode plugin")
     problems: list[str] = []
-    work = scratch / f"{arm.label}-{case.id}"
+    work = scratch / client_mode / f"{arm.label}-{case.id}"
     shutil.rmtree(work, ignore_errors=True)
     for name in ("hook-home", "logs", "scratch"):
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case)
     try:
         seed_vault(case, arm, work, env)
-        stage_agent_files(arm, work, env)
+        stage_agent_files(arm, work, env, client_mode)
         if hooked:
             hook_ask(arm, "dry-run")
     except (OSError, RuntimeError, KeyError, AttributeError, subprocess.TimeoutExpired) as error:

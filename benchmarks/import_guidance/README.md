@@ -46,6 +46,12 @@ Layout:
 - `scenarios/session-close/answer-keys/<case-id>.json` contains the independent scorer-only object. A missing, null or malformed key refuses scoring.
 - Each key has `reference`, `must_change`, `must_not_change`, `recap` and `new_pages`. The scorer rejects page paths outside the seed. `new_pages: none` still permits the recap Source.
 
+`--client-mode plugin` is the default. It appends the arm's skill and installs its Stop and UserPromptSubmit hooks. Omitting `--hook-turn` keeps those hooks; that flag adds a separate synthetic close ask. `--client-mode tool-only` keeps the same strict real MCP server, stages no plugin hooks, and appends no skill. It requests `disableAllHooks: true` in the supplied settings file. Combining tool-only with `--hook-turn` is rejected before launch.
+
+The [official hook setting](https://code.claude.com/docs/en/settings-reference#disableallhooks) does not override managed hooks or force-enabled managed plugin hooks. Settings record the requested configuration. A complete connected tool-only trace must report zero observed hook starts and completed invocations. Observed hooks or unavailable observations leave no-hook acceptance unknown; capture and fresh counts remain separate. Raw evidence stays available, and the harness does not retry automatically. Real-model evidence must establish the observed client behavior.
+
+Capture and fresh rows retain `client_mode`, the actual argv, supplied settings, hook starts and completed invocation counts. Work directories include the mode. Native identity, scored rows, denominators and paired intervals keep modes separate; historical rows without a mode mean plugin. Blind judge views expose neither mode nor actor identity.
+
 The key writer supplies the references and recall questions independently. Generation's `Case` object contains no key. The actor receives neither reference text nor scorer files. Cases c01, c02, c03, c07, c08, c09, c10 and c11 have fixed input recall probes. Case c11 combines a compiled-note update and an entity update in one session.
 
 For external cases, pass the same `--case-dir` to `run --suite session-close` and each `session-score` invocation. Cases keep the existing format and resolve seed identifiers against the shipped seeds. Scoring reads `<case-dir>/answer-keys/<id>.json`; actor staging receives neither the case directory nor its keys. Omit the option to use shipped cases.
@@ -63,7 +69,7 @@ The default preparation, also selected by `--prepare-judge`, starts no model. Ea
 
 Only run actors or judging under an agreed evaluation protocol and budget. The no-model checks establish harness behavior; they do not establish a model improvement.
 
-Each capture actor uses strict MCP configuration, no shell tools and no session persistence. The server imports the arm's source and keeps its vault, state, logs and caches in the run directory. The hooks use that actor's isolated hook home. The initial capture actor retains its context across the scripted turns.
+Each capture actor uses strict MCP configuration, no shell tools and no session persistence. Both client modes keep the empty isolated working directory and the project-only setting-source floor. The server imports the arm's source and keeps its vault, state, logs and caches in the run directory. The hooks use that actor's isolated hook home. The initial capture actor retains its context across the scripted turns.
 
 After capture exits, the harness retains its before/after snapshots, page diff, replies, session identity and paired tool requests and replies. It also retains raw stream, connectivity, errors, usage, cost, hook counts and compile diagnostics. Capture's `observed` field always comes from these capture snapshots.
 

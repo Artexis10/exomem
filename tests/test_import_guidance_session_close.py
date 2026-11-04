@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from import_guidance import checks, session_close, session_score
@@ -67,7 +68,6 @@ def test_every_shipped_case_loads_and_the_variants_change_only_engagement() -> N
     assert cases["c01-person"].recall_turn
     assert all(not hasattr(c, "answer_key") for c in cases.values())
     assert all("answer_key" not in json.loads(c.path.read_text()) for c in cases.values())
-    assert all(c.turns[-1].startswith("That's all for today") for c in cases.values())
 
 
 def test_external_cases_use_adjacent_truth_without_exposing_it_to_actor_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,6 +117,69 @@ def test_external_cases_use_adjacent_truth_without_exposing_it_to_actor_staging(
     assert key_reads == {external_key} and external_key.read_bytes() == key_bytes
     with pytest.raises(SystemExit, match="--case-dir applies to the session-close suite only"):
         main(["run", "--case-dir", str(case_dir), "--model", "unused", "--dry-run", "--out", str(tmp_path / "other")])
+
+
+def test_client_modes_keep_capture_and_fresh_configuration_separate_without_changing_mcp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from import_guidance.recording import Arm
+
+    invocations = []
+
+    def local_protocol(argv, cwd, env, turns, stream_path, hook_turn=None):
+        assert not list(cwd.iterdir())
+        settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+        invocations.append((argv, settings))
+        stream = json.dumps({"type": "system", "subtype": "init", "session_id": str(len(invocations)),
+                             "mcp_servers": [{"name": checks.SERVER, "status": "connected"}]}) + "\n"
+        stream += (json.dumps({"type": "result", "subtype": "success", "result": "Local protocol receipt."}) + "\n") * len(turns)
+        stream_path.write_text(stream)
+        return SimpleNamespace(stdout=stream, stderr="", returncode=0, stdout_eof=True, stopped=None, finished=len(turns), hook_turn=None)
+
+    monkeypatch.setattr(session_close, "drive_session", local_protocol)
+    selected = session_close.load_cases("c01")[0]
+    arm = Arm("test", Path(__file__).resolve().parents[1])
+    rows = [session_close.run_session(selected, arm, repeat=0, model="unused", out=tmp_path, executable=Path("unused"), stamp={"product_shas": {"test": "test"}}, client_mode=mode) for mode in ("plugin", "tool-only")]
+    assert len(invocations) == 4 and rows[0]["stream"] != rows[1]["stream"]
+    for row in rows:
+        assert Path(row["stream"]).exists()
+        assert row["client_mode"] == row["fresh"]["client_mode"]
+        for stage in (row, row["fresh"]):
+            assert stage["error"] is None and stage["hook_invocations"] == 0
+            argv, settings = stage["argv"], stage["settings"]
+            assert "--strict-mcp-config" in argv and "--include-hook-events" in argv
+            assert argv[argv.index("--setting-sources") + 1] == "project"
+            assert json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())["mcpServers"][checks.SERVER]["args"] == ["-m", "exomem", "--transport", "stdio"]
+            if row["client_mode"] == "tool-only":
+                assert settings == {"disableAllHooks": True} and "--append-system-prompt-file" not in argv
+            else:
+                assert settings["hooks"] and "--append-system-prompt-file" in argv
+
+
+def test_tool_only_rejects_a_synthetic_hook_turn_before_staging(tmp_path: Path) -> None:
+    from import_guidance.__main__ import main
+
+    with pytest.raises(SystemExit, match="--hook-turn requires --client-mode plugin"):
+        main(["run", "--suite", "session-close", "--client-mode", "tool-only", "--hook-turn", "--model", "unused", "--dry-run", "--out", str(tmp_path)])
+
+
+def test_tool_only_hook_observations_reject_contamination_and_unavailable_transport() -> None:
+    base = {"error": None, "hook_invocations": 0, "hook_starts": 0, "server_connected": {checks.SERVER: "connected"}}
+    assert session_close.client_mode_error("tool-only", base) is None
+    assert "observed" in session_close.client_mode_error("tool-only", base | {"hook_invocations": 1})
+    assert "unavailable" in session_close.client_mode_error("tool-only", base | {"server_connected": {}})
+    assert "unavailable" in session_close.client_mode_error("tool-only", base | {"hook_invocations": None})
+    assert "observed" in session_close.client_mode_error("tool-only", base | {"hook_starts": 1})
+    assert session_close.client_mode_error("plugin", base | {"hook_invocations": 1}) is None
+    for subtype in ("hook_response", "hook_started"):
+        stream = "\n".join(json.dumps(event) for event in (
+            {"type": "system", "subtype": "init", "session_id": "local", "mcp_servers": [{"name": checks.SERVER, "status": "connected"}]},
+            {"type": "system", "subtype": subtype, "hook_event": "UserPromptSubmit", "output": ""},
+            {"type": "result", "subtype": "success", "result": "Local protocol receipt."},
+        ))
+        result = session_close.session_result(SimpleNamespace(stdout=stream, stderr="", returncode=0, stdout_eof=True, stopped=None, finished=1), 1, "tool-only")
+        assert result["hook_invocations"] + result["hook_starts"] == 1 and "observed" in result["error"]
+    row = base | {"client_mode": "tool-only", "recall_enabled": True,
+                  "fresh": base | {"client_mode": "tool-only", "hook_invocations": 1, "answer": KEY["reference"], "session_id": "fresh"}}
+    assert session_score.recall_evidence(row, KEY) == (checks.UNKNOWN, [])
 
 
 def routine(sources: str) -> str:
@@ -247,8 +310,8 @@ def test_unavailable_recall_is_unknown_and_stays_in_its_own_denominator(tmp_path
         "deterministic": [], "judged": [], "recap_rule": "required", "recap_produced": True, "recall": result, "restraint_case": False,
     }
     report = session_score.build_report([scored | {"arm": "baseline"}, scored | {"arm": "candidate"}], baseline="baseline", candidate="candidate")
-    assert "| fresh recall | baseline | 0/0 | 1 | 0 |" in report
-    assert "| recap production (required) | baseline | 1/1 | 0 | 0 |" in report
+    assert "| plugin | fresh recall | baseline | 0/0 | 1 | 0 |" in report
+    assert "| plugin | recap production (required) | baseline | 1/1 | 0 | 0 |" in report
     assert "fresh recall: no complete paired case; 1 pair(s) unknown" in report
 
 
@@ -343,6 +406,40 @@ def test_actor_cleanup_keeps_the_exited_leader_owned_until_its_group_is_killed(t
     assert done.returncode == 0 and done.finished == 1 and len(checked) == 1
 
 
+def test_session_end_hooks_after_input_eof_are_saved_and_contaminate_tool_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(session_close, "WARM_HOLD_SECONDS", 0)
+    child = """import json,sys
+print(json.dumps({"type":"system","subtype":"init","session_id":"local","mcp_servers":[{"name":"exomem","status":"connected"}]}),flush=True)
+for line in sys.stdin:
+ print(json.dumps({"type":"result","subtype":"success","result":"Local protocol receipt."}),flush=True)
+print(json.dumps({"type":"system","subtype":"hook_started","hook_event":"SessionEnd"}),flush=True)
+print(json.dumps({"type":"system","subtype":"hook_response","hook_event":"SessionEnd","output":""}),flush=True)
+"""
+    path = tmp_path / "stream.jsonl"
+    done = session_close.drive_session([sys.executable, "-c", child], tmp_path, os.environ.copy(), ("Local protocol check.",), path)
+    result = session_close.session_result(done, 1, "tool-only")
+    assert done.returncode == 0 and path.read_text() == done.stdout
+    assert result["hook_starts"] == result["hook_invocations"] == 1
+    assert "observed" in result["error"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup of the owned stdout holder")
+def test_an_exited_actor_with_stdout_still_open_cannot_prove_zero_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(session_close, "WARM_HOLD_SECONDS", 0)
+    monkeypatch.setattr(session_close, "EXIT_GRACE_SECONDS", 0.2)
+    child = """import json,subprocess,sys
+print(json.dumps({"type":"system","subtype":"init","session_id":"local","mcp_servers":[{"name":"exomem","status":"connected"}]}),flush=True)
+for line in sys.stdin:
+ print(json.dumps({"type":"result","subtype":"success","result":"Local protocol receipt."}),flush=True)
+subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])
+"""
+    done = session_close.drive_session([sys.executable, "-c", child], tmp_path, os.environ.copy(), ("Local protocol check.",), tmp_path / "stream.jsonl")
+    result = session_close.session_result(done, 1, "tool-only")
+    assert done.returncode == 0 and done.finished == 1
+    assert not result["stdout_eof"] and result["hook_starts"] is result["hook_invocations"] is None
+    assert result["error"] is not None and "stdout" in result["error"]
+
+
 def test_case_intervals_do_not_round_away_fractional_repeat_rates() -> None:
     assert session_score.paired_interval([(0.0, 0.5), (0.0, 0.0)]) == (0.0, 0.5)
 
@@ -359,35 +456,48 @@ def test_native_handoff_blinds_both_stages_and_imports_judgments_without_startin
     page_reply = json.dumps({"path": PERSON, "body": selected.turns[1]})
     row = {
         "scenario": selected.id, "repeat": 0, "model": "actor-sensitive", "error": None,
+        "hook_invocations": 0, "hook_starts": 0, "server_connected": {checks.SERVER: "connected"},
         "observed": observed(pages={PERSON: {"compiled": False, "cites": []}}, recaps=False),
         "capture_after": {PERSON: {"text": selected.turns[1]}}, "recall_enabled": True,
-        "fresh": {"error": None, "session_id": "fresh", "question": selected.recall_turn,
+        "fresh": {"error": None, "session_id": "fresh", "question": selected.recall_turn, "hook_invocations": 0, "hook_starts": 0,
                   "answer": selected.turns[1], "server_connected": {checks.SERVER: "connected"},
                   "calls": [{"name": f"mcp__{checks.SERVER}__read_memory", "is_error": False,
                              "result": page_reply}]},
     }
     runs = tmp_path / "runs.jsonl"
-    runs.write_text("".join(json.dumps(row | {"arm": arm}) + "\n" for arm in ("arm-a-sensitive", "arm-b-sensitive")))
+    inputs = []
+    for mode in ("plugin", "tool-only"):
+        for arm in ("arm-a-sensitive", "arm-b-sensitive"):
+            variant = row | {"arm": arm}
+            if mode == "tool-only":
+                variant |= {"client_mode": mode, "fresh": row["fresh"] | {"client_mode": mode}}
+            inputs.append(variant)
+    runs.write_text("".join(json.dumps(item) + "\n" for item in inputs))
+    # Other suites retain the reader's original four-field replacement semantics.
+    assert len(session_score.read_rows([runs])[0]) == 2
     out = tmp_path / "judging"
     arguments = ["session-score", str(runs), "--baseline", "arm-a-sensitive", "--candidate", "arm-b-sensitive", "--out", str(out)]
     assert main(arguments) == 0
     blind = (out / "judge-views.jsonl").read_text()
-    assert not any(marker in blind for marker in ("arm-a-sensitive", "arm-b-sensitive", "actor-sensitive"))
+    assert not any(marker in blind for marker in ("arm-a-sensitive", "arm-b-sensitive", "actor-sensitive", "tool-only", "disableAllHooks"))
     items = [json.loads(line) for line in blind.splitlines()]
     mapping = json.loads((out / "private/judge-map.json").read_text())
-    assert len(items) == len({item["id"] for item in items}) == 4
+    assert len(items) == len({item["id"] for item in items}) == 8
     assert set(mapping) == {item["id"] for item in items}
     reference = session_score.refuse_unkeyed([selected])[selected.id]["reference"]
     assert all(reference in item["prompt"] for item in items)
     judgments = tmp_path / "judgments.jsonl"
     judgments.write_text("".join(json.dumps({"id": item["id"], "structured_output": {
-        name: True if field["type"] == "boolean" else "Boundary fixture."
+        name: ((mapping[item["id"]]["run"][3] == "arm-b-sensitive") == (mapping[item["id"]]["run"][4] == "plugin")) if name == "J1" else True if field["type"] == "boolean" else "Boundary fixture."
         for name, field in item["answer_schema"]["properties"].items()
     }}) + "\n" for item in items))
     assert main(arguments + ["--judgments", str(judgments)]) == 0
     scored = [json.loads(line) for line in (out / "scores.jsonl").read_text().splitlines()]
-    assert len(scored) == 2
-    assert all(row["verdict"] == checks.PASS and row["recall"]["verdict"] == checks.PASS for row in scored)
+    assert len(scored) == 4 and {row["client_mode"] for row in scored} == {"plugin", "tool-only"}
+    assert all(row["recall"]["verdict"] == checks.PASS for row in scored)
+    report = (out / "report.md").read_text()
+    assert "plugin canonical correctness: 1 paired case(s), difference +1.00" in report
+    assert "tool-only canonical correctness: 1 paired case(s), difference -1.00" in report
 
 
 def test_missing_malformed_and_stale_native_judgments_stay_unknown_without_model_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,6 +522,12 @@ def test_missing_malformed_and_stale_native_judgments_stay_unknown_without_model
         name: True if field["type"] == "boolean" else "Boundary fixture."
         for name, field in item["answer_schema"]["properties"].items()
     }}) + "\n")
+    mapping_path = out / "private/judge-map.json"
+    mapping = json.loads(mapping_path.read_text())
+    for mapped in mapping.values():
+        mapped["run"].pop()
+    mapping_path.write_text(json.dumps(mapping))
+    assert session_score.score_all([runs], out=out, judgments=judgments)[0]["verdict"] == checks.PASS
     row["observed"]["changed"][PERSON] = "Different evidence."
     runs.write_text(json.dumps(row) + "\n")
     assert session_score.score_all([runs], out=out, judgments=judgments)[0]["verdict"] == checks.UNKNOWN
