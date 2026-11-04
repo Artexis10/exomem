@@ -48,6 +48,9 @@ it does not copy the video into the serving process.
 ### Keep authority in the parent with one preparation handshake
 
 The child acknowledges path-independent admission before it touches the original.
+It then waits for a distinct preparation acknowledgement from the parent.
+The parent enters the refusal-normalization boundary before sending that acknowledgement.
+Original-specific work cannot race the parent's admission read; decode permission still follows exact-proof authorization.
 Until the first authorization succeeds, original-specific failures return the same refusal as a missing path.
 This hides storage failures and preparation interruptions for withheld originals.
 The affected request loses detailed preparation diagnostics; admission and lock refusals keep their existing outcomes.

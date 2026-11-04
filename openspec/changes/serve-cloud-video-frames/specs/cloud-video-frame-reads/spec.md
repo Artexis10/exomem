@@ -38,6 +38,7 @@ The serving process SHALL authorize frames against the exact original identity, 
 
 - **WHEN** a withheld original's storage fails or its preparation reaches the deadline or pressure limit
 - **THEN** its outward refusal matches a missing path
+- **AND** original-specific preparation waits until the serving process enters that refusal boundary
 - **AND** path-independent admission and competing media ownership retain their retryable outcomes
 
 #### Scenario: An original changes during preparation

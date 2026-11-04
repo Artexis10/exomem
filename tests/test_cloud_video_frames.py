@@ -165,9 +165,11 @@ def test_withheld_unavailable_stored_original_matches_missing_path(vault, cloud_
 def test_withheld_original_preparation_interruption_matches_missing_path(
     vault, cloud_frames, monkeypatch, interruption,
 ):
+    import time
+
     from test_governance_egress import write_rule, write_scope
 
-    from exomem import command_surface, media_brakes, request_budget
+    from exomem import command_surface, media_brakes, request_budget, video_frames_worker
     from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal, request_scope
 
@@ -188,10 +190,34 @@ def stalled(vault, target, **kwargs):
     with original(vault, target, **kwargs) as value:
         yield value
 media_store.open_original = stalled
+
+read_message = w._read_message
+prepare = getattr(w, "_Prepare", None)
+
+def waiting(stream, model, check):
+    if model is prepare:
+        (Path(sys.argv[1]) / "awaiting-prepare").write_text("yes")
+    return read_message(stream, model, check)
+w._read_message = waiting
 ''')
     if interruption == "pressure":
         monkeypatch.setattr(media_brakes, "read_cell", lambda: media_brakes.CellMemory(
             0, 3 << 30, None, 99.0) if (vault / "preparing").exists() else cloud_frames)
+        read_message = video_frames_worker._read_message
+        delayed = False
+
+        def parent_yields(stream, model, check):
+            nonlocal delayed
+            if model is video_frames_worker._Admitted and not delayed:
+                delayed = True
+                until = time.monotonic() + 10
+                # Let the child reach preparation or its control wait before the parent reads admission.
+                while not any((vault / name).exists() for name in ("preparing", "awaiting-prepare")):
+                    assert time.monotonic() < until, "the child did not reach its preparation boundary"
+                    time.sleep(0.01)
+            return read_message(stream, model, check)
+
+        monkeypatch.setattr(video_frames_worker, "_read_message", parent_yields)
     command = next(item for item in commands.COMMANDS if item.name == "get_video_frames")
     read = command_surface.bind_vault(command.leaf, vault, command=command)
 
@@ -199,7 +225,7 @@ media_store.open_original = stalled
         with reserved_paths.hold_generic_file(vault, path, recorded_sha256=lambda version: None) as held:
             assert not egress.release_allows_frames(vault, path, artifact_copy=held)
         token = request_budget.set_current(request_budget.RequestBudget(
-            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 3))
+            seconds=request_budget.DELIVERY_RESERVE_SECONDS + (10 if interruption == "pressure" else 3)))
         try:
             retained = read(path=path)
         finally:

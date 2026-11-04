@@ -43,6 +43,10 @@ class _Admitted(_Message):
     kind: Literal["admitted"]
 
 
+class _Prepare(_Message):
+    kind: Literal["prepare"]
+
+
 class _Prepared(_Message):
     kind: Literal["prepared"] = "prepared"
     path: str = Field(min_length=1, max_length=4096)
@@ -279,6 +283,7 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
                     _fail("NOT_FOUND", "video does not exist")
 
         try:
+            _write_message(child.stdin, _Prepare(kind="prepare"), check)
             prepared = _read_message(child.stdout, _Prepared, check)
             if prepared.path != relative or prepared.size != prepared.version.size:
                 _fail("VIDEO_PROTOCOL", "the frame worker prepared a different original")
@@ -361,6 +366,8 @@ def _child(vault: Path) -> int:
         # Admission depends on the cell and lock, before any original-specific work.
         sys.stdout.buffer.write(_wire(_Admitted(kind="admitted")))
         sys.stdout.buffer.flush()
+        # Preparation must not outrun the parent's disclosure boundary.
+        _read_message(sys.stdin.buffer, _Prepare, lambda: None)
         target, relative = resolve_under_vault(vault, request.path)
         if access.refuse_if_excluded(vault, relative):
             _fail("NOT_FOUND", "video does not exist")
