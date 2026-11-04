@@ -9,7 +9,7 @@
 
 - [x] 2.1 Accept the optional client key `writable_scope_ids` in `connector_boundary._read_snapshot`, with the exclusivity checks and the residual-in-default-denied check.
 - [x] 2.2 Add `write_ceiling(root, who)` and the inbox resolver; define the restricted writer in one place.
-- [x] 2.3 Rewrite `require_create` and `require_write` around the write ceiling; decide before any existence check; one `WRITE_REFUSED: target is unavailable` text.
+- [x] 2.3 Rewrite `require_create` and `require_write` around the write ceiling; decide before any existence check; one `WRITE_REFUSED: target is unavailable` text for path confinement; apply the same ceiling to current and proposed canonical subjects of structured store mutations.
 - [x] 2.4 Replace the capture visibility invariant with "a capture page's membership equals its path's membership" in `require_write` and `verify_capture_namespaces`.
 - [x] 2.5 Wire the move source and destination (`move_file.py`) and the delete source (`delete_file.py`) through the gate; confirm the batch path and every existing `require_create` caller reach it.
 

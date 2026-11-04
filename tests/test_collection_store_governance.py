@@ -11,9 +11,9 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
 from exomem.collection_store.preview import preview_store
-from exomem.governance import authorization_custody, policy, schema_v4, tool
+from exomem.governance import authorization_custody, connector_boundary, policy, schema_v4, tool
 from exomem.governance import store as authority_store
-from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal, owner_principal, request_scope
 from exomem.record_memory import record_memory
 
 
@@ -193,6 +193,63 @@ def test_withheld_append_refuses_without_changing_stored_data(store):
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")
     assert tuple(store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("authority", ["none", "other-scope", "collection-scope"])
+@pytest.mark.parametrize("operation", ["append", "update"])
+def test_readable_sql_collection_mutations_require_host_write_authority(store, tmp_path, monkeypatch, authority, operation):
+    """Read access must not let a caller append or update canonical rows outside its writable scopes."""
+    from test_governance_egress import SCOPE_ID
+
+    create(store)
+    first = store.append_record(CID, item={"title": "Existing"}, item_key=KEY, why="capture")
+    write_scope(store.root, paths="Records/**")
+    write_rule(store.root, ceiling=6)
+    who = _external()
+    if authority != "none":
+        writable_id = "01ARZ3NDEKTSV4RRFFQ69G5FW1"
+        residual_id = "01ARZ3NDEKTSV4RRFFQ69G5FW2"
+        scopes = store.root / "Knowledge Base/_Governance/scopes"
+        (scopes / "inbox.yaml").write_text(
+            f'governance_version: 1\nid: {writable_id}\npaths: ["Inbox/**"]\n', encoding="utf-8")
+        (scopes / "residual.yaml").write_text(
+            f"governance_version: 1\nid: {residual_id}\nresidual: true\n", encoding="utf-8")
+        issuer = "https://memory.example.test"
+        config = tmp_path / "collection-host-boundary.json"
+        config.write_text(json.dumps({
+            "version": 1, "default_denied_scope_ids": [SCOPE_ID, writable_id, residual_id],
+            "capture_paths": ["Knowledge Base/Inbox"],
+            "clients": [{"issuer": issuer, "client_id": "writer", "denied_scope_ids": [residual_id],
+                         "writable_scope_ids": [SCOPE_ID if authority == "collection-scope" else writable_id]}],
+        }), encoding="utf-8")
+        monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(config))
+        who = replace(who, client_binding=ClientBinding(issuer, "writer"),
+                      origin_session=OriginSessionBinding("session", "generation", who.audience_id))
+    compiled = policy.load(store.root)
+    assert not compiled.empty and not compiled.blocked
+    before = tuple(store.connection.iterdump())
+
+    def mutate():
+        if operation == "append":
+            return store.append_record(CID, item={"title": "Changed"}, item_key=OTHER, why="capture")
+        return store.update_record(
+            CID, item_key=KEY, changes={"title": "Changed"},
+            expected_container_hash=first["after_container_hash"],
+            expected_item_version=first["after_item_hash"], why="correct")
+
+    with request_scope(who):
+        assert store.inspect_collection(CID)["coverage"]["committed"] == 1
+        if authority == "collection-scope":
+            result = mutate()
+            assert result["outcome"] == "committed"
+        else:
+            with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                mutate()
+    if authority == "collection-scope":
+        versions = store.connection.execute("SELECT row_version FROM items ORDER BY item_key").fetchall()
+        assert versions == ([(1,), (1,)] if operation == "append" else [(2,)])
+    else:
+        assert tuple(store.connection.iterdump()) == before
 
 
 def test_withheld_request_replay_does_not_return_a_stored_receipt(store):

@@ -307,10 +307,16 @@ def require_global_observation(root: Path) -> None:
 def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: policy.Policy,
                    mutation: bool = False, path: str | None = None) -> Decision:
     try:
+        scope_ids = frozenset(scope_ids)
         current = snapshot(root, compiled)
         denied = current.denied_scopes(who) if current is not None else frozenset()
+        if mutation:
+            # Canonical SQL subjects need the same write ceiling without relying on a projected file's existence.
+            ceiling = write_ceiling(root, who)
+            if ceiling is not None and not _writable(ceiling, scope_ids):
+                return Decision(policy.DISCLOSURE_MIN)
         if (current is not None and mutation and path is not None and _capture_destination(current, path)
-                and frozenset(scope_ids) != membership.evaluate_path_selectors(Path(root), path, compiled)):
+                and scope_ids != membership.evaluate_path_selectors(Path(root), path, compiled)):
             # A capture page keeps exactly the membership its path gives.
             return Decision(policy.DISCLOSURE_MIN)
         return Decision(policy.DISCLOSURE_MIN if denied.intersection(scope_ids) else policy.DISCLOSURE_MAX)

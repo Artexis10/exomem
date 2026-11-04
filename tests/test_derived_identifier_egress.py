@@ -44,6 +44,7 @@ NOTES = f"{KB}/Notes"
 WITHHELD_DIR = f"{NOTES}/Withheld"
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 GRANT_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+RESIDUAL_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
 ISSUER = "https://memory.example.test"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 FIXED_MTIME = 1_780_000_000
@@ -90,6 +91,9 @@ def _govern(vault: Path, audience: str, scope: str = "Notes/Withheld/**") -> Non
         # The granted writer's writable scope selects the whole knowledge base, its capture path.
         (governance / "scopes" / "granted.yaml").write_text(
             f'governance_version: 1\nid: {GRANT_ID}\nname: Granted\npaths: ["**"]\n', encoding="utf-8",
+        )
+        (governance / "scopes" / "residual.yaml").write_text(
+            f"governance_version: 1\nid: {RESIDUAL_ID}\nresidual: true\n", encoding="utf-8",
         )
 
 
@@ -158,7 +162,7 @@ def granted_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     config = tmp_path / "host-boundary.json"
     config.write_text(json.dumps({
-        "version": 1, "default_denied_scope_ids": [SCOPE_ID, GRANT_ID], "capture_paths": [KB],
+        "version": 1, "default_denied_scope_ids": [SCOPE_ID, GRANT_ID, RESIDUAL_ID], "capture_paths": [KB],
         "clients": [{"issuer": ISSUER, "client_id": "writer", "denied_scope_ids": [SCOPE_ID],
                      "writable_scope_ids": [GRANT_ID]}],
     }), encoding="utf-8")
@@ -850,14 +854,21 @@ def _drafted_fixture() -> tuple[dict[str, str], dict[str, str]]:
 @pytest.mark.parametrize("caller", ["unbound-non-owner", "granted-writer"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_previews_answer_alike_with_and_without_a_withheld_page(
-    tmp_path: Path, request: pytest.FixtureRequest, audience: str, caller: str
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, audience: str, caller: str
 ) -> None:
     """A draft and a reclassification proposal neither judge nor name a page withheld from the caller.
 
     A non-owner with no client entry holds no write authority, so its previews are refused before
-    any page is read. A granted writer's previews name a path that does not exist yet, which the
-    release plane withholds. Either answer is the same with and without the withheld page.
+    any page is read. A granted writer receives an intact draft for its own capture destination.
+    Either answer is the same with and without the withheld page.
     """
+    import datetime as dt
+
+    from exomem import memory_refs, temporal
+
+    # Fix generated identity and authoring time so full drafts, including their tokens, compare across twins.
+    monkeypatch.setattr(memory_refs, "new_id", lambda: "9c0b955e-b682-4b87-9809-d82541664080")
+    monkeypatch.setattr(temporal, "now", lambda: dt.datetime(2026, 8, 26, tzinfo=dt.UTC))
     if caller == "granted-writer":
         request.getfixturevalue("granted_writer")
     source = f"{KB}/Sources/Web/target-source.md"

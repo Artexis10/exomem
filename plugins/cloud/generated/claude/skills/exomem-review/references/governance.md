@@ -42,9 +42,11 @@ configuration whose default denied set omits a declared residual scope.
 
 A restricted writer is an audience other than the owner under a non-empty policy,
 or the owner reached through a connector whose denied set is not empty. It may
-write only in two places, and every refusal reads
-`WRITE_REFUSED: target is unavailable`, whether the target is hidden, absent or
-read-only.
+write only in two places. File paths refused by confinement receive
+`WRITE_REFUSED: target is unavailable`, whether their targets are hidden, absent
+or read-only. Identifier resolution and structured Records or Planning operations
+keep their existing opaque unavailable errors. Withheld and absent targets answer alike.
+The same write ceiling applies to current and proposed canonical store subjects.
 
 - Its writable scopes: `writable_scope_ids` on its client entry in the host
   connector configuration. It may change an existing page it reads in full when
