@@ -420,15 +420,23 @@ class RetainedRegularFile:
                 self.directory.close()
 
 
-def retain_regular_file(path: Path) -> RetainedRegularFile:
-    """Pin one regular child without following aliases or replacement races."""
+def retain_regular_file(path: Path, *, identity_only: bool = False) -> RetainedRegularFile:
+    """Pin one regular child without following aliases or replacement races.
+
+    With `identity_only` the descriptor only observes identity and cannot be
+    read. On Linux it is an O_PATH descriptor: closing an ordinary descriptor
+    drops every POSIX lock that this process holds on the file, such as the
+    locks of its own SQLite connections. Elsewhere O_PATH is 0 and the open
+    stays read-only; a Windows LockFileEx lock belongs to its own handle.
+    """
     target = Path(path)
     if target.name != target.as_posix().split("/")[-1]:
         raise OSError("retained file target must be one child basename")
     directory = _acquire_secure_directory(target.parent, create=False)
     try:
+        flags = getattr(os, "O_PATH", 0) if identity_only else os.O_RDONLY
         fd = _open_secure_file_at(
-            directory, target.name, os.O_RDONLY, delete_access=True
+            directory, target.name, flags, delete_access=True
         )
         try:
             info = os.fstat(fd)

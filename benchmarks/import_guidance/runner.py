@@ -372,7 +372,9 @@ def run_once(
         answer_view = scenario.judge_view == "answer"
         rendered = (
             judge.render_answer_view(
-                scenario.prompt, fill_reference(scenario.reference, shapes), transcript.result_text
+                scenario.prompt,
+                judged_reference(scenario, shapes, evidence.calls),
+                transcript.result_text,
             )
             if answer_view
             else judge.render_transcript(scenario.prompt, proc.stdout.splitlines())
@@ -410,6 +412,17 @@ def run_once(
         said = judge.assistant_texts(proc.stdout.splitlines())
         row["said"] = said
     return row
+
+
+def judged_reference(scenario: Scenario, shapes: Mapping[str, object] | None, calls: tuple[dict, ...]) -> str:
+    """The scenario's reference, plus the one fact that only the call log holds: whether the agent's write landed.
+    The line comes from the log in the same words for every arm, so the judge learns the outcome, not the arm."""
+    reference = fill_reference(scenario.reference, shapes)
+    facts = scenario.outcome_facts
+    if facts:
+        landed = bool(checks.committed_writes(calls, facts["tool"]))
+        reference += " " + facts["saved" if landed else "not_saved"]
+    return reference
 
 
 def fill_reference(reference: str, shapes: Mapping[str, object] | None) -> str:

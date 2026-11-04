@@ -1248,3 +1248,81 @@ def test_a_residual_flag_that_is_not_a_boolean_blocks_the_policy(vault: Path, va
     _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: {value}\n")
 
     assert policy.load(vault).blocked
+
+
+_VIDEO = "Knowledge Base/Evidence/Video/clip.mp4.md"
+_VIDEO_FRAME = "Knowledge Base/Evidence/Video/clip.mp4.frames/scene-001.jpg.md"
+
+
+def _video_with_a_frame(vault: Path) -> None:
+    """A video page and one scene-frame page, tagged as frames are, in the video's frames folder."""
+    _write_page(vault, _VIDEO, "type: source\nexomem_id: 4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607")
+    _write_page(
+        vault, _VIDEO_FRAME,
+        "type: source\ntags: [scene-frame]\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\nframe_ts: 12.0",
+        body="Whiteboard text from the frame.",
+    )
+
+
+def test_a_scene_frame_keeps_its_own_scopes_and_takes_its_videos(vault: Path) -> None:
+    _video_with_a_frame(vault)
+    _write_scope(
+        vault, "client",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\nrefs: ["exomem://memory/4f1c2a3b-5d6e-4f70-8a91-b2c3d4e5f607"]\n',
+    )
+    _write_scope(vault, "frames", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB4\ntags: ["scene-frame"]\n')
+    frame = _parse(vault, _VIDEO_FRAME)
+    loaded = policy.load(vault)
+    content_hash = hashlib.sha256((vault / _VIDEO_FRAME).read_bytes()).hexdigest()
+
+    live = membership.evaluate(frame, loaded)
+    snapshot = membership.evaluate_snapshot(frame, loaded, content_hash=content_hash)
+
+    assert live == snapshot == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB2", "01ARZ3NDEKTSV4RRFFQ69G5FB4"})
+
+
+def test_a_page_that_claims_a_video_parent_keeps_its_own_scopes(vault: Path) -> None:
+    _write_page(vault, "Knowledge Base/Notes/public.md", "type: insight")
+    _write_page(
+        vault, "Knowledge Base/Notes/public.frames/salary-review.md",
+        "type: insight\ntags: [secret]\nparent_media: Knowledge Base/Notes/public",
+    )
+    _write_scope(vault, "secret", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB3\ntags: ["secret"]\n')
+
+    scopes = membership.evaluate(
+        _parse(vault, "Knowledge Base/Notes/public.frames/salary-review.md"), policy.load(vault)
+    )
+
+    assert scopes == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB3"})
+
+
+def test_a_scene_frame_whose_video_page_is_gone_is_unresolved(vault: Path) -> None:
+    _video_with_a_frame(vault)
+    _write_scope(vault, "frames", 'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB4\ntags: ["scene-frame"]\n')
+    frame = _parse(vault, _VIDEO_FRAME)
+    (vault / _VIDEO).unlink()
+
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate(frame, policy.load(vault))
+
+
+def test_a_video_parent_cannot_remove_a_frames_residual_scope(vault: Path) -> None:
+    """A parent claim must not open an unclassified frame, including after a warm read."""
+    _video_with_a_frame(vault)
+    _write_scope(vault, "residual", f"governance_version: 1\nid: {_RESIDUAL}\nresidual: true\n")
+    _write_scope(vault, "video", f'governance_version: 1\nid: {_MATTER}\nprojects: [matter]\n')
+    _write_page(vault, _VIDEO, "type: source\nproject: matter")
+    frame = _parse(vault, _VIDEO_FRAME)
+    compiled = policy.load(vault)
+    content_hash = hashlib.sha256((vault / _VIDEO_FRAME).read_bytes()).hexdigest()
+
+    for _ in range(2):
+        assert membership.evaluate(frame, compiled) == frozenset({_RESIDUAL, _MATTER})
+        assert membership.evaluate_snapshot(frame, compiled, content_hash=content_hash) == frozenset({_RESIDUAL, _MATTER})
+
+    _write_page(vault, _VIDEO, "type: source")
+    assert membership.evaluate(frame, compiled) == frozenset({_RESIDUAL})
+    assert membership.evaluate_snapshot(frame, compiled, content_hash=content_hash) == frozenset({_RESIDUAL})
+    (vault / _VIDEO).unlink()
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate_snapshot(frame, compiled, content_hash=content_hash)

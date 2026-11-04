@@ -32,6 +32,8 @@ from exomem import (
     graph_sync,
     index_sync,
     lexstore,
+    readiness,
+    warmup,
     writer_lease,
 )
 from exomem import find as find_module
@@ -450,3 +452,50 @@ def test_waiters_on_a_raised_proof_claim_one_new_proof(
     assert peak == 1, f"{peak} proofs ran at once after a raised proof"
     assert len(calls) == 2, f"waiters re-proved {len(calls) - 1} times: {calls}"
 
+
+
+def test_a_managed_request_hands_the_cold_proof_to_the_background(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a managed promotion, the first search ran this proof on its own thread.
+
+    Readiness said ready, and the search took 114.7 s while it hashed the whole
+    corpus. A managed request starts the proof in the background, answers
+    without the graph lane, and names that lane as degraded.
+    """
+    root = inherited_vault
+    lexstore.ensure_fresh(root)
+    # Admit retrieval the way managed activation does before readiness says ready.
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        warmup.warm_retrieval_catalog(root)
+    finally:
+        readiness.finish_warm()
+    assert readiness.retrieval_admission(root)["admitted"]
+    proofs = _count_proofs(monkeypatch)
+    try:
+        degraded: list[str] = []
+        hits = find_module.find(
+            root, query="generated note", mode="hybrid", graph=True, degraded_out=degraded
+        )
+        assert hits, "recall must still answer without the graph lane"
+        assert "graph" in degraded, "the skipped graph lane must be reported as degraded"
+        assert threading.current_thread().name not in proofs, (
+            f"the request ran the O(corpus) proof on its own thread: {proofs}"
+        )
+
+        for thread in threading.enumerate():
+            if thread.name == "exomem-graph-proof":
+                thread.join(30.0)
+        assert proofs == ["exomem-graph-proof"], f"one background proof expected: {proofs}"
+
+        # The next request reads the remembered verdict and keeps the graph lane.
+        degraded.clear()
+        find_module.find(
+            root, query="generated note", mode="hybrid", graph=True, degraded_out=degraded
+        )
+        assert "graph" not in degraded
+        assert proofs == ["exomem-graph-proof"]
+    finally:
+        readiness.reset()

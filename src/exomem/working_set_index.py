@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import find_corpus, foreground_priority, freshness, sidecar_store
+from . import find_corpus, foreground_priority, freshness, sidecar_store, vault
 from .collection_store.preview import (
     QUERY_RECEIPT_BOUNDARY,
     bound_writer,
@@ -1110,7 +1110,7 @@ class _PageEntry:
 #: than reused: file times move in coarse ticks (two seconds on FAT), so a
 #: same-size rewrite inside the tick that was read keeps its whole stat
 #: (git's racy-clean rule).
-_RACY_WINDOW_NS = 2_000_000_000
+_RACY_WINDOW_NS = vault.GENERATION_RACY_WINDOW_NS
 
 _PAGE_MEMO_LOCK = threading.Lock()
 #: vault -> (walk context, rel -> (page key, entry)): the last walk's entries,

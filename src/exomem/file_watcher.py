@@ -45,7 +45,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import freshness, index_sync, media_processing, mode, semantic_writes, state_paths
+from . import (
+    freshness,
+    index_sync,
+    media_processing,
+    mode,
+    semantic_contract,
+    semantic_writes,
+    state_paths,
+)
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -2061,8 +2069,9 @@ class FileWatcher:
     ) -> int:
         """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
         inbound publish -> resolver publish -> KB-filtered index_sync
-        upsert/delete. Each step keeps its own exception guard — a bad batch
-        must never kill the watcher or the reconcile loop.
+        upsert/delete -> cold corpus warm -> semantic posthoc report. Each step
+        keeps its own exception guard — a bad batch must never kill the watcher
+        or the reconcile loop.
 
         `cap`: when True (reconcile only), the KB re-embed list fed to
         `index_sync.upsert_after_write` is bounded by
@@ -2079,11 +2088,16 @@ class FileWatcher:
         # failure makes every checkpoint consumer cold before fan-out.
         publication_current = True
         if publish_corpus_change:
+            # A cold corpus is warmed after the apply below, not here: from this
+            # publication until the lexical apply, the catalogue is behind the
+            # registry and readiness refuses, and a cold build takes a minute
+            # on a live vault.
             publication_current = index_sync.publish_corpus_delta(
                 self._vault_root,
                 changed=ups,
                 deleted=[self._vault_root / rel for rel in del_rels],
                 attempts=2,
+                populate_on_miss=False,
             )
 
         kb_ups = [p for p in ups if self._is_kb(p)]
@@ -2104,21 +2118,6 @@ class FileWatcher:
                 ]
             except Exception:  # noqa: BLE001 — fail closed for expensive work
                 log.exception("file watcher: semantic admission evaluation failed")
-        if semantic_kb_ups:
-            try:
-                posthoc = semantic_writes.evaluate_posthoc_batch(
-                    self._vault_root,
-                    paths=semantic_kb_ups,
-                    operation="watcher",
-                )
-                summary = posthoc.as_dict()
-                logger = log.warning if summary["semantic_contract_findings"] else log.info
-                logger(
-                    "file watcher: semantic posthoc batch %s",
-                    json.dumps(summary, ensure_ascii=True, sort_keys=True),
-                )
-            except Exception:  # noqa: BLE001 — posthoc reporting never blocks fan-out
-                log.exception("file watcher: semantic posthoc evaluation failed")
 
         # Inbound + resolver: the whole vault (both index sibling folders). The
         # resolver patch also restamps its freshness triple, so the next graph
@@ -2355,6 +2354,29 @@ class FileWatcher:
                             _graph_incompleteness_fields(self._vault_root),
                             "paths" if scope is not None else "full",
                         )
+        # After every consumer has applied the batch. Both steps may build the
+        # whole corpus, and neither changes what the consumers apply: posthoc
+        # reads the Markdown and the vault's own definitions, not any index.
+        if publish_corpus_change and publication_current:
+            try:
+                semantic_contract.populate_cold_corpus_context(self._vault_root)
+            except Exception:  # noqa: BLE001 - a cold corpus is built by its next reader
+                log.exception("file watcher: corpus warm after the batch failed")
+        if semantic_kb_ups:
+            try:
+                posthoc = semantic_writes.evaluate_posthoc_batch(
+                    self._vault_root,
+                    paths=semantic_kb_ups,
+                    operation="watcher",
+                )
+                summary = posthoc.as_dict()
+                logger = log.warning if summary["semantic_contract_findings"] else log.info
+                logger(
+                    "file watcher: semantic posthoc batch %s",
+                    json.dumps(summary, ensure_ascii=True, sort_keys=True),
+                )
+            except Exception:  # noqa: BLE001 — posthoc reporting never blocks fan-out
+                log.exception("file watcher: semantic posthoc evaluation failed")
         return admitted_semantic
 
     def _run_reconcile(self) -> None:

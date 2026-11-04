@@ -22,6 +22,65 @@ Declare a purpose only when the applicable policy or reserved notice calls for
 one. A grant or purpose declaration never authorizes more than Exomem's current
 policy allows.
 
+## Closing unclassified material
+
+A page that no scope selects is open to every audience. To close it, the owner
+adds one residual scope: a scope document with `residual: true`, no selector and
+no `exclude`, usually with `default_deny: true`. A policy holds at most one.
+Membership gives the residual scope to every page and file that no other scope
+selects, so a new, unclassified page is closed until a scope selects it. Public
+vocabulary overlays and their history stay classified with no scope, and a folder
+is still listed when it holds a page the reader may see.
+
+A connector the host fences meets the residual scope through its denied set. The
+host lists the residual scope in `default_denied_scope_ids`, and in the
+`denied_scope_ids` of each client that must not see unclassified material. The
+owner's own client omits it and keeps reading everything. The host refuses a
+configuration whose default denied set omits a declared residual scope.
+
+## Where a fenced writer may write
+
+A restricted writer is an audience other than the owner under a non-empty policy,
+or the owner reached through a connector whose denied set is not empty. It may
+write only in two places, and every refusal reads
+`WRITE_REFUSED: target is unavailable`, whether the target is hidden, absent or
+read-only.
+
+- Its writable scopes: `writable_scope_ids` on its client entry in the host
+  connector configuration. It may change an existing page it reads in full when
+  the page sits inside those scopes before and after the change.
+- Its inbox: configured capture paths. Give each client one capture path for
+  each tree it writes to, for example one under the sources tree and one under
+  the notes tree. Add a scope that selects those capture paths by `paths`, name
+  the scope in that client's `writable_scope_ids`, and deny it to the default
+  context and to every other fenced client. The inbox scope selects every one of
+  the client's capture paths. The inbox is private to its writer and the owner.
+
+A non-owner without writable scopes is read-only under any non-empty policy,
+even without a residual scope or connector configuration, including when identity
+does not resolve.
+
+Vault content never confers write authority: a policy document cannot grant
+`writable_scope_ids`. The host refuses a client whose writable scopes are not
+policy scopes, meet its own denied set, belong to a client with an empty denied
+set, or are readable by the default context or another fenced client. Writable
+scopes also require a declared residual scope. A configuration that breaks these rules makes the connector boundary unavailable,
+and every restricted write is refused until the host repairs it.
+
+Source capture, episode recap and note doors place a restricted writer's page
+under the capture path in the same tree, keeping the folders below it. An explicit destination is never
+redirected. Entity creation generates its destination from the entity type's
+folder and keeps it; a destination outside the writer's inbox is refused. The
+owner's recaps stay in the shared episodes folder and take the residual scope. A fenced connector uses kinds the owner has registered, and a
+vocabulary change needs the owner's grant through the vocabulary authority.
+
+A door skips its side effects on pages outside the writer's writable scopes and
+inbox, without a refusal. The effects are activity log and index entries, a cited
+Source's `ingested_into` back-reference, and link rewrites in linking pages. A
+fenced episode still prepares, records and resumes: the door keeps its workflow
+state under the governance tree. A skipped back-reference shows as one warning
+without a path.
+
 ## Authorization sessions
 
 An authorization session is an opaque, policy-bound capability for one verified

@@ -218,6 +218,40 @@ def test_a_boundary_held_past_the_wait_at_file_two_fails_that_file_and_keeps_fil
     assert "new call" in second["reason"] and "failed files" in second["reason"]
 
 
+def test_a_file_lost_to_a_busy_boundary_is_not_reported_as_saved(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0.3")
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_each(tmp_path))
+    writer, holder = _managers(vault.parent / "state")
+    contention = _Contention(monkeypatch, holder, vault, refusals=1)
+    real_guard = writer.absorbing_mutation_guard
+    entered: list[int] = []
+
+    def guard_met_by_a_holder_that_stays(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        entered.append(1)
+        if len(entered) == 2:
+            contention.__enter__()
+        return real_guard(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "absorbing_mutation_guard", guard_met_by_a_holder_that_stays)
+    try:
+        result = _capture_command(writer, vault, ("file-a", "file-b"))
+    finally:
+        if len(entered) >= 2:
+            contention.__exit__()
+
+    first, second = result["files"]
+    assert (first["outcome"], second["outcome"], second["code"]) == (
+        "stored",
+        "failed",
+        "MUTATION_BUSY",
+    )
+    assert result["user_summary"] == (
+        f"Saved 1 of 2 files -> {first['stored_path']}; 1 file could not be saved (personal Exomem)"
+    )
+
+
 def test_a_busy_raised_after_a_files_commit_is_not_reported_as_a_failed_item(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

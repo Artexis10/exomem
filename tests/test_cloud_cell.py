@@ -14,8 +14,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from exomem import cloud_cell, privacy_log, server
 from exomem import commands as commands_module
-from exomem import privacy_log, server
 from exomem.access_log import AccessLogMiddleware
 from exomem.governance import principal as principal_module
 from exomem.governance.tool import GovernanceError, _require_owner
@@ -126,6 +126,27 @@ def _teardown_activation(mcp) -> None:
     activation = mcp._exomem_local_runtime_activation
     assert activation._shutdown.is_set() or True
     activation._shutdown.set()
+
+
+# ---------------------------------------------------------------------------
+# Store identity: which Exomem a process serves
+# ---------------------------------------------------------------------------
+
+
+def test_store_identity_tells_the_three_deployment_modes_apart() -> None:
+    """Two connectors can present one display name; this is what names the store behind each."""
+    assert cloud_cell.store_identity({}) == {"kind": "personal", "name": "personal Exomem"}
+    assert cloud_cell.store_identity({"EXOMEM_HOSTED_CELL": "true"}) == {
+        "kind": "hosted",
+        "name": "Exomem Hosted",
+    }
+    assert cloud_cell.store_identity({"EXOMEM_CLOUD_CELL": "1"}) == {
+        "kind": "cloud",
+        "name": "Exomem Cloud",
+    }
+    # A cloud cell is the more specific deployment when both flags are set.
+    both = {"EXOMEM_CLOUD_CELL": "1", "EXOMEM_HOSTED_CELL": "1"}
+    assert cloud_cell.store_identity(both)["kind"] == "cloud"
 
 
 # ---------------------------------------------------------------------------

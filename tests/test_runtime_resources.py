@@ -1061,3 +1061,43 @@ def test_service_bulk_waiter_gets_an_aging_turn_and_cancel_releases_admission(mo
     assert not worker.is_alive()
     assert turns.index("bulk") <= 8
     assert gate.admitted_count() == 0
+
+
+def test_available_memory_reads_memavailable_or_else_the_free_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:       16384000 kB\nMemFree:         1024000 kB\nMemAvailable:    7340032 kB\n", encoding="ascii"
+    )
+    monkeypatch.setattr(runtime_resources, "_MEMINFO", meminfo)
+    assert runtime_resources.available_memory() == 7 << 30
+
+    monkeypatch.setattr(runtime_resources, "_MEMINFO", tmp_path / "absent")
+    pages = {"SC_AVPHYS_PAGES": 1000, "SC_PAGE_SIZE": 4096}
+    monkeypatch.setattr(runtime_resources.os, "sysconf", lambda name: pages[name], raising=False)
+    assert runtime_resources.available_memory() == 4096 * 1000
+
+    def unknown(name: str) -> int:
+        raise ValueError(name)
+
+    monkeypatch.setattr(runtime_resources.os, "sysconf", unknown, raising=False)
+    assert runtime_resources.available_memory() is None
+
+
+def test_peak_rss_reads_vmhwm_or_else_ru_maxrss_in_the_platforms_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import resource
+
+    status = tmp_path / "status"
+    status.write_text("Name:\tpython\nVmHWM:\t 1394688 kB\nVmRSS:\t  900000 kB\n", encoding="ascii")
+    monkeypatch.setattr(runtime_resources, "_PROC_STATUS", status)
+    assert runtime_resources.peak_rss_bytes() == 1394688 * 1024
+
+    monkeypatch.setattr(runtime_resources, "_PROC_STATUS", tmp_path / "absent")
+    monkeypatch.setattr(resource, "getrusage", lambda _who: types.SimpleNamespace(ru_maxrss=2048))
+    monkeypatch.setattr(runtime_resources, "sys", types.SimpleNamespace(platform="linux"))
+    assert runtime_resources.peak_rss_bytes() == 2048 * 1024, "kilobytes on Linux"
+    monkeypatch.setattr(runtime_resources, "sys", types.SimpleNamespace(platform="darwin"))
+    assert runtime_resources.peak_rss_bytes() == 2048, "bytes on macOS"

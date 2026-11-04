@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import bisect
 import contextvars
 import hashlib
 import json
 import logging
+import operator
 import os
 import re
 import stat
@@ -221,6 +223,13 @@ def _mapping_of_tuples(
     values: Mapping[str, Iterable[Any]],
 ) -> Mapping[str, tuple[Any, ...]]:
     return MappingProxyType({key: tuple(values[key]) for key in sorted(values)})
+
+
+def _frozen_buckets(
+    values: Mapping[str, Iterable[Any]],
+) -> Mapping[str, tuple[Any, ...]]:
+    """A read-only copy that keeps the given key order; resolver lookups only call `get`, so keys need no sort."""
+    return MappingProxyType({key: tuple(bucket) for key, bucket in values.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1153,7 +1162,7 @@ class SemanticCorpusContext:
     resolver_kb_stripped: frozenset[str]
     resolver_stems: Mapping[str, tuple[str, ...]]
     resolver_titles: Mapping[str, tuple[str, ...]]
-    resolver_candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]] = field(init=False)
+    resolver_candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
     raw_target_dependencies: Mapping[str, tuple[str, ...]]
     relation_facts: tuple[RelationFact, ...]
     eligible_governed_paths: frozenset[str]
@@ -1173,23 +1182,15 @@ class SemanticCorpusContext:
             MappingProxyType({key: self.pages[key] for key in sorted(self.pages)}),
         )
         object.__setattr__(self, "resolver_entries", tuple(self.resolver_entries))
-        resolver = vault.WikilinkResolver.from_entries(self.vault_root, self.resolver_entries)
+        # The constructor's resolver already holds these; a second build from the entries cost a full pass per commit.
         object.__setattr__(
             self, "resolver_candidates_by_key",
-            _mapping_of_tuples(resolver.candidates_by_key),
+            _frozen_buckets(self.resolver_candidates_by_key),
         )
         object.__setattr__(self, "resolver_full_paths", frozenset(self.resolver_full_paths))
         object.__setattr__(self, "resolver_kb_stripped", frozenset(self.resolver_kb_stripped))
-        object.__setattr__(
-            self,
-            "resolver_stems",
-            _mapping_of_tuples(self.resolver_stems),
-        )
-        object.__setattr__(
-            self,
-            "resolver_titles",
-            _mapping_of_tuples(self.resolver_titles),
-        )
+        object.__setattr__(self, "resolver_stems", _frozen_buckets(self.resolver_stems))
+        object.__setattr__(self, "resolver_titles", _frozen_buckets(self.resolver_titles))
         object.__setattr__(
             self,
             "raw_target_dependencies",
@@ -2877,6 +2878,7 @@ def publish_corpus_files_changed_classified(
     *,
     changed: Iterable[Path] = (),
     deleted: Iterable[Path | str] = (),
+    populate_on_miss: bool = True,
 ) -> CorpusPublicationFailure | None:
     """:func:`publish_corpus_files_changed`, reporting WHICH half failed.
 
@@ -2885,6 +2887,10 @@ def publish_corpus_files_changed_classified(
     only wants to propagate can re-raise it unchanged. Interpreter-level
     exits (anything that is not an ``Exception``) are never turned into a
     result; they propagate as before.
+
+    ``populate_on_miss=False`` leaves a cold cache cold. The watcher passes it
+    because its consumers' apply follows this publication, and calls
+    :func:`populate_cold_corpus_context` once that apply has landed.
     """
     root = Path(vault_root)
     changed_values = tuple(Path(value) for value in changed)
@@ -2926,9 +2932,19 @@ def publish_corpus_files_changed_classified(
             return CorpusPublicationFailure(CORPUS_PUBLICATION_PROJECTION_PATCH, error)
     # Outside the update lock on purpose: the populate walks and parses the
     # whole vault, and the publisher advances freshness under that same lock.
-    if disposition == _CORPUS_PATCH_MISS:
+    if disposition == _CORPUS_PATCH_MISS and populate_on_miss:
         _populate_corpus_context_after_miss(root)
     return None
+
+
+def populate_cold_corpus_context(vault_root: Path) -> None:
+    """Build the corpus context when none is cached; a warm cache is a no-op.
+
+    The populate a publication skipped with ``populate_on_miss=False``, under
+    the same admission rules. It also fills a cache that the publication
+    evicted for config drift, which a reader would otherwise build.
+    """
+    _populate_corpus_context_after_miss(Path(vault_root))
 
 
 def _patch_corpus_files_changed_locked(
@@ -2944,8 +2960,10 @@ def _patch_corpus_files_changed_locked(
     cold cache has nothing to patch, and populating it means a full walk that
     must NOT happen inside this lock (see
     :func:`_populate_corpus_context_after_miss`). ``"evicted"`` is the
-    config-census drift pop and stays eviction-only — a drifted config makes
-    the stored context unusable, not merely absent.
+    config-census drift pop: a drifted config makes the stored context
+    unusable, not merely absent. The patch only evicts. Publishers populate only
+    on a miss, so only the watcher's deferred populate, which checks for an empty
+    slot, refills an evicted entry.
     """
     root = Path(vault_root)
     cache_key = _corpus_cache_key(root)
@@ -3270,9 +3288,19 @@ def corpus_registry_overrides(
 
 
 def warm_corpus_context(vault_root: Path) -> None:
-    """Fill the shared structural corpus cache without classifying for any caller."""
-    _context, census = _build_corpus_context_with_census(Path(vault_root), warm=True)
+    """Fill the shared structural corpus cache without classifying for any caller.
+
+    A build that writes kept outrunning still counts: it is cached for the next
+    reader to confirm with a census walk, which spares that reader the build.
+    """
+    root = Path(vault_root)
+    held_before = cached_corpus_census(root)
+    _context, census = _build_corpus_context_with_census(root, warm=True)
     if corpus_context_cache_enabled() and census is None:
+        held_after = cached_corpus_census(root)
+        # A new entry is this build's, or a publication's patch of it.
+        if held_after is not None and held_after is not held_before:
+            return
         raise OpError(
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
@@ -3475,7 +3503,8 @@ def _build_corpus_context_with_census(
     one. The census is ``None`` whenever no single walk unambiguously matches
     the returned context: candidate-bearing builds, a disabled cache, a
     registry that does not match disk, a cold build whose post-publish
-    reconciliation never stabilized, or an in-flight-dedup waiter (it only
+    reconciliation never stabilized (it is still cached, uncaptioned, for the
+    next reader's census walk to confirm), or an in-flight-dedup waiter (it only
     confirmed its own pre-wait walk matched the flight it is chasing, not
     whatever the owning build's stabilization loop settles on or gives up on
     afterward). A caller that gets ``None`` here has no cheaper option than
@@ -3715,6 +3744,7 @@ def _build_corpus_context_with_census(
             {"caller": current_call_context(), "outcome": "rebuild"},
         )
         stored = False
+        kept_unconfirmed = False
         if census is not None and cache_key is not None:
             # Entered outside the update lock, so its queued samples are
             # emitted only after that lock releases.
@@ -3756,11 +3786,28 @@ def _build_corpus_context_with_census(
                         _caption_corpus_context_locked(cache_key, current_checkpoint)
                         _trim_corpus_cache_locked(cache_key)
                     stored = True
+                elif stable_census is not None:
+                    # Writes outran every confirmation. The context matches its
+                    # last census for each page that census still describes, and
+                    # a page changed since differs from it, so the next reader's
+                    # census walk reparses only that page. Uncaptioned: no single
+                    # checkpoint describes this context, so no event serves it
+                    # without a walk. Dropping it made that reader, or a promoted
+                    # standby, pay the whole cold build again.
+                    with _CORPUS_CONTEXT_CACHE_LOCK:
+                        _CORPUS_CONTEXT_CACHE[cache_key] = (stable_census, context)
+                        _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                            f"{language.schema_version}:{language.content_hash}"
+                        )
+                        _drop_corpus_caption_locked(cache_key)
+                        _trim_corpus_cache_locked(cache_key)
+                    log.info("semantic corpus context kept unconfirmed: writes outran the census")
+                    kept_unconfirmed = True
         log.info(
             "semantic corpus context built pages=%d build_ms=%.1f cached=%s event_miss=%s",
             len(context.pages),
             build_ms,
-            stored,
+            "unconfirmed" if kept_unconfirmed else stored,
             miss_reason,
         )
     except BaseException as error:
@@ -3988,22 +4035,6 @@ def build_stable_identity_census(vault_root: Path) -> StableIdentityCensus:
     return census
 
 
-def _resolver_snapshot(
-    resolver: vault.WikilinkResolver,
-) -> tuple[
-    frozenset[str],
-    frozenset[str],
-    Mapping[str, tuple[str, ...]],
-    Mapping[str, tuple[str, ...]],
-]:
-    return (
-        frozenset(resolver.full_paths),
-        frozenset(resolver.kb_stripped),
-        _mapping_of_tuples({key: tuple(values) for key, values in resolver.stems.items()}),
-        _mapping_of_tuples({key: tuple(values) for key, values in resolver.titles.items()}),
-    )
-
-
 def _context_from_state_map(
     root: Path,
     states: Mapping[str, SemanticPageState],
@@ -4096,6 +4127,26 @@ def _resolver_dependency_keys(root: Path, path: str, title: str) -> set[str]:
     }
 
 
+def _patched_resolver_entries(
+    entries: tuple[tuple[str, str], ...],
+    updated: Mapping[str, str],
+    removed: Iterable[str],
+) -> tuple[tuple[str, str], ...]:
+    """The path-sorted resolver entries with `updated` set and `removed` dropped, without a re-sort."""
+    patched = list(entries)
+    for path in sorted({*updated, *removed}):
+        index = bisect.bisect_left(patched, path, key=operator.itemgetter(0))
+        present = index < len(patched) and patched[index][0] == path
+        if path in updated:
+            if present:
+                patched[index] = (path, updated[path])
+            else:
+                patched.insert(index, (path, updated[path]))
+        elif present:
+            del patched[index]
+    return tuple(patched)
+
+
 def _context_with_page_delta(
     base: SemanticCorpusContext,
     pages: Mapping[str, SemanticPageState],
@@ -4146,14 +4197,19 @@ def _context_with_page_delta(
         path not in old or path not in pages or old[path].title != pages[path].title
         for path in delta
     ):
-        by_path = dict(base.resolver_entries)
-        for path in delta:
-            if path in pages:
-                by_path[path] = pages[path].title
-            else:
-                by_path.pop(path, None)
-        entries = tuple(sorted(by_path.items()))
-        resolver = vault.WikilinkResolver.from_entries(base.vault_root, entries)
+        # Patch the base resolver by the changed pages; a rebuild re-adds every page each commit.
+        updated = {path: pages[path].title for path in delta if path in pages}
+        removed = tuple(path for path in delta if path not in pages)
+        entries = _patched_resolver_entries(base.resolver_entries, updated, removed)
+        resolver = vault.WikilinkResolver.from_maps(
+            base.vault_root,
+            full_paths=base.resolver_full_paths,
+            kb_stripped=base.resolver_kb_stripped,
+            stems=base.resolver_stems,
+            titles=base.resolver_titles,
+            candidates_by_key=base.resolver_candidates_by_key,
+        )
+        resolver.on_entries_changed(updated.items(), removed)
     else:
         entries = base.resolver_entries
         resolver = _WikilinkResolverView(
@@ -4189,30 +4245,19 @@ def _context_with_page_delta(
     affected |= {path for path in stale_authors if path in pages}
     # Fact identities count occurrences per authored id across the corpus, so
     # every holder of an id that one re-derived page carries is re-derived with
-    # it, in sorted order, as a full build would.
-    holders: dict[str, list[str]] = {}
-    for page in pages.values():
-        if page.identity_kind == "exomem_id":
-            holders.setdefault(page.identity, []).append(page.path)
-    seen_ids: set[str] = set()
-    pending = [
+    # it, in sorted order, as a full build would. A holder carries that same id,
+    # so the set of ids to follow is known before the scan.
+    shared_ids = {
         page.identity
         for path in (*delta, *affected)
         for page in (old.get(path), pages.get(path))
         if page is not None and page.identity_kind == "exomem_id"
-    ]
-    while pending:
-        identity = pending.pop()
-        if identity in seen_ids:
-            continue
-        seen_ids.add(identity)
-        for path in holders.get(identity, ()):
-            if path not in affected:
-                affected.add(path)
-                stale_authors.add(path)
-            state = pages[path]
-            if state.identity_kind == "exomem_id":
-                pending.append(state.identity)
+    }
+    if shared_ids:
+        for page in pages.values():
+            if page.identity_kind == "exomem_id" and page.identity in shared_ids:
+                affected.add(page.path)
+                stale_authors.add(page.path)
     if len(affected) > max(_PAGE_DELTA_LIMIT, len(pages) // 2):
         return None
     candidate_facts = _derive_relation_facts(
@@ -4271,7 +4316,6 @@ def _context_from_resolved_state(
             outbound.setdefault(fact.logical_source_path, []).append(fact)
         if fact.logical_target_path in ordered_pages:
             inbound.setdefault(fact.logical_target_path, []).append(fact)
-    full_paths, kb_stripped, stems, titles = _resolver_snapshot(resolver)
     # The census is structural and records raw labels unclassified, so it is the
     # same for every caller and may live in the shared cache.
     census = validated_census
@@ -4285,10 +4329,11 @@ def _context_from_resolved_state(
         vault_root=root,
         pages=MappingProxyType(ordered_pages),
         resolver_entries=entries,
-        resolver_full_paths=full_paths,
-        resolver_kb_stripped=kb_stripped,
-        resolver_stems=stems,
-        resolver_titles=titles,
+        resolver_full_paths=resolver.full_paths,
+        resolver_kb_stripped=resolver.kb_stripped,
+        resolver_stems=resolver.stems,
+        resolver_titles=resolver.titles,
+        resolver_candidates_by_key=resolver.candidates_by_key,
         raw_target_dependencies=_mapping_of_tuples(
             {key: tuple(sorted(values)) for key, values in dependencies.items()}
         ),

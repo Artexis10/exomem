@@ -57,6 +57,7 @@ from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
+from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
 from . import context_roles as context_roles_module
@@ -1629,6 +1630,8 @@ def op_bootstrap(
             },
             "compute_policy": compute_policy,
         },
+        # Which Exomem this connector reaches: two connectors can share a display name.
+        "store": cloud_cell_module.store_identity(),
         "active_capabilities": active_descriptor.as_metadata(),
         # How much Exomem should participate, as a behavioural contract the client can
         # follow directly. Deliberately tool-agnostic: `_filter_bootstrap_payload`
@@ -9323,7 +9326,7 @@ def _process_media(
                 continue
             row: dict[str, object] = {
                 "path": relative,
-                "outcome": _MEDIA_OUTCOMES[operation],
+                "outcome": mutation_terminal_module.MEDIA_OUTCOMES[operation],
                 "state": state,
                 "media_type": result.media_type,
                 "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
@@ -9409,14 +9412,11 @@ def _process_media(
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
-    if operation in {"retry", "reprocess"}:
+    if operation in mutation_terminal_module.MEDIA_REQUEUE_OPERATIONS:
         payload["requeued"] = result.requeued
     payload["index_refreshed"] = 0
     payload["index_refresh_remaining"] = _index_refresh_remaining()
     return payload
-
-
-_MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
 
 
 def _run_media_operation(

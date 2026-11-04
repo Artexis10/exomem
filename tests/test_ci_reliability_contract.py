@@ -954,7 +954,13 @@ def test_the_cross_platform_split_count_matches_its_shard_matrix() -> None:
 
 
 @pytest.mark.parametrize(
-    "pin", ["EXOMEM_TEST_OLDER_READER_VERSION", "EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION"]
+    "pin",
+    [
+        "EXOMEM_TEST_OLDER_READER_VERSION",
+        "EXOMEM_TEST_OLDER_READER_SHA256",
+        "EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION",
+        "EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256",
+    ],
 )
 def test_cross_platform_installs_the_same_older_readers_as_ci(pin: str) -> None:
     """A pin bump that edits only ci.yml leaves the nightly lane testing another release."""

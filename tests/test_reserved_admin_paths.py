@@ -3882,7 +3882,7 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
                 assert retained == database
 
     assert parent_accesses == [(database.parent.name, "read")]
-    assert accesses == ["read", "read"]
+    assert accesses == ["identity", "identity"]
 
 
 def test_external_sqlite_owner_publication_never_acquires_a_vault_catalogue(

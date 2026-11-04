@@ -44,7 +44,7 @@ A restricted writer is an audience other than the owner under a non-empty policy
 or the owner reached through a connector whose denied set is not empty. It may
 write only in two places, and every refusal reads
 `WRITE_REFUSED: target is unavailable`, whether the target is hidden, absent or
-only read-only.
+read-only.
 
 - Its writable scopes: `writable_scope_ids` on its client entry in the host
   connector configuration. It may change an existing page it reads in full when
@@ -56,18 +56,22 @@ only read-only.
   context and to every other fenced client. The inbox scope selects every one of
   the client's capture paths. The inbox is private to its writer and the owner.
 
+A non-owner without writable scopes is read-only under any non-empty policy,
+even without a residual scope or connector configuration, including when identity
+does not resolve.
+
 Vault content never confers write authority: a policy document cannot grant
 `writable_scope_ids`. The host refuses a client whose writable scopes are not
 policy scopes, meet its own denied set, belong to a client with an empty denied
-set, or are readable by the default context or another fenced client. A
-configuration that breaks these rules makes the connector boundary unavailable,
+set, or are readable by the default context or another fenced client. Writable
+scopes also require a declared residual scope. A configuration that breaks these rules makes the connector boundary unavailable,
 and every restricted write is refused until the host repairs it.
 
-A door that generates its own destination, such as a Source capture, an episode
-recap or a note, places a restricted writer's page under the capture path in the
-same tree, keeping the folders below it. An explicit destination is never
-redirected. The owner's recaps stay in the shared episodes folder and take the
-residual scope. A fenced connector uses kinds the owner has registered, and a
+Source capture, episode recap and note doors place a restricted writer's page
+under the capture path in the same tree, keeping the folders below it. An explicit destination is never
+redirected. Entity creation generates its destination from the entity type's
+folder and keeps it; a destination outside the writer's inbox is refused. The
+owner's recaps stay in the shared episodes folder and take the residual scope. A fenced connector uses kinds the owner has registered, and a
 vocabulary change needs the owner's grant through the vocabulary authority.
 
 A door skips its side effects on pages outside the writer's writable scopes and

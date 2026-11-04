@@ -10,10 +10,12 @@ default) after that attempt ended, and SHALL look for that change without openin
 sidecar while neither file has moved. A proof SHALL be held only for the snapshot it
 read: when the published snapshot changed between the proof's start and its end, the
 attempt proves nothing. A newer proof that succeeds SHALL replace the held one; a newer
-proof that declines SHALL NOT. A re-proof SHALL write nothing the serving worker owns,
-SHALL reseed only this process's recall registry before proving, and SHALL NOT replace
-the adoption once promotion or discard has begun; a promotion that raises SHALL leave
-the standby proving.
+proof that declines SHALL NOT. A re-proof SHALL write nothing the serving worker owns
+and SHALL NOT replace the adoption once promotion or discard has begun; a promotion that
+raises SHALL leave the standby proving. A re-proof that holds no proof SHALL reseed only
+this process's recall registry before proving. A re-proof of a held proof SHALL NOT
+reseed the registry or withdraw the held proof, because a reseed retires the delta
+origin that proof adopted; promotion during that re-proof SHALL rely on the held proof.
 
 #### Scenario: The serving worker republishes after a declined proof
 
@@ -28,6 +30,15 @@ the standby proving.
 - **WHEN** the serving worker publishes a new snapshot while the standby's proof runs
 - **THEN** the standby does not name the new snapshot as proved, the component stays
   waiting, and the next re-proof proves the new snapshot itself
+
+#### Scenario: Promotion lands while the standby re-proves its held proof
+
+- **WHEN** a standby holds a proof, a batch the serving worker has not published moves
+  the durable checkpoint generation, and promotion arrives while the re-proof runs
+- **THEN** promotion relies on the held proof and records `current` or `advanced`, never
+  `unproven`
+- **AND** the promoted worker drains the batch and serves its writes without a
+  whole-vault rebuild
 
 #### Scenario: Nothing changed since the last attempt
 
