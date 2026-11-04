@@ -6,16 +6,16 @@
   - A lock can be extended but not shortened. Confirmed.
   - The lock time is anchored at creation. Confirmed: the lock ended 24.0 hours after upload under a 1-day default.
   - A key minted from the parent cannot carry `writeBuckets` or a bypass capability. Refuted: see design D3 and `contain-cloud-controller-compromise` D9.
-- [ ] 1.2 Measure the cost on a real cell's repository. Evidence: the bytes, the call counts and the monthly cost at the provider's published prices.
-  - 30 days of hidden-version storage from its churn.
-  - Lock extensions at fleet scale, for versions within 24 days of expiry.
-  - A per-cell storage-growth alert, because a key that writes the locked bucket adds objects that no one can remove for 30 days.
-  - The age distribution of its packs.
+- [x] 1.2 Measure the cost on a real cell's repository. Evidence: the bytes, the call counts and the monthly cost at the provider's published prices, measured on 2026-11-02 with list calls only (design Risks).
+  - 30 days of hidden-version storage from its churn: at most about 5.6 GB per cell of the largest real size, $0.04 a month.
+  - Lock extensions at fleet scale: about 3.7 million calls a month for 1,000 such cells, all in a call class the provider does not charge for.
+  - The age distribution of its packs: a third of the bytes came from the first backup 34 days earlier, and the rest from daily uploads since.
+  - Restic retention had never removed a snapshot: each backup carried its Job pod's random hostname, so each snapshot sat in a retention group of its own. The backup now records the cell ID as its host, and `forget` groups across the whole repository.
 
 ## 2. Bucket and keys
 
 - [ ] 2.1 Add the locked backup bucket and its noncurrent-only lifecycle rule in Terraform, in the cell-data member account (`contain-cloud-controller-compromise` task 1.1).
-- [ ] 2.2 Scope new per-cell keys to the locked bucket, and point new cells' repositories at it.
+- [ ] 2.2 Scope new per-cell keys to the locked bucket, and point new cells' repositories at it. Alert on each cell's storage growth, because a key that writes the locked bucket adds objects that no one can remove for 30 days.
 - [ ] 2.3 Add the lock-extension CronJob in its own namespace, with its own extend-only key and service account, the 31-day guard checked against the provider's time, and an alert on a missed run.
 
 ## 3. Migration and recovery
