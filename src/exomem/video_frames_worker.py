@@ -205,6 +205,7 @@ def _group_running(group: int) -> bool:
             continue
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            # nosemgrep: ep-lexical-intent -- Linux defines these closed process-state tokens.
             if int(fields[2]) == group and fields[0] not in {"Z", "X"}:
                 return True
         except (FileNotFoundError, ProcessLookupError):
