@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -249,6 +248,65 @@ def test_the_child_reports_its_peak_memory_where_the_host_gives_one(
     assert "peak_rss_bytes" not in json.loads(spend_path.read_text())
 
 
+def test_question_admission_refusal_keeps_the_recorded_model_peak(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from exomem import sensing_nli
+
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: 1 << 40)
+    sup, launcher = _supervisor(vault, [1000.0])
+    _step(sup)
+    _record_peak(vault, launcher, sup)
+    _step(sup)
+    child = launcher.children[-1]
+
+    def missing_weights():
+        raise sensing_nli.Refused("weights-missing", "the artifact is unavailable")
+
+    with monkeypatch.context() as child_host:
+        child_host.setattr(sensor_worker.os, "getpid", lambda: child.pid)
+        child_host.setattr(runtime_resources, "peak_rss_bytes", lambda: 80 << 20)
+        code = sensor_worker.run_child(
+            vault, parent_pid=0, cpu_allotment=10, judgement_allotment=10,
+            idle_seconds=0, admit=missing_weights,
+        )
+    assert code == sensor_worker.EXIT_IDLE, "question refusal does not stop other questions"
+    child.exit(code)
+    sup._harvest()
+    assert sup.peak_rss_bytes() == PEAK
+    assert sup.status()["refused"] is None, "the supervisor has no global admission refusal"
+
+
+def test_question_refusal_backoff_survives_parent_child_setting_difference(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from exomem import sensing, sensing_nli
+
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+
+    def missing_weights():
+        raise sensing_nli.Refused("weights-missing", "the artifact is unavailable")
+
+    # The sanitized child does not inherit the supervisor's setting override.
+    with monkeypatch.context() as child_environment:
+        child_environment.setenv("EXOMEM_SENSING", "off")
+        assert sensor_worker.run_child(
+            vault, parent_pid=0, cpu_allotment=10, judgement_allotment=10,
+            idle_seconds=0, admit=missing_weights,
+        ) == sensor_worker.EXIT_IDLE
+    assert sensing.enabled()
+    assert sensor_worker.question_refused(vault, sensing.PAIR_RELATION)
+    sup, launcher = _supervisor(vault, [1000.0])
+    monkeypatch.setattr(sensor_worker, "supervisor", lambda _vault: sup)
+    assert sensor_worker.supervise(vault, gate_run=True, gate_reason="ready") == "idle"
+    assert launcher.children == [], "known refused work must not relaunch a child"
+
+
 def test_a_cloud_cell_never_launches_the_child(tmp_path: Path, monkeypatch) -> None:
     """Until the Cloud placement exists, cells write no readings."""
     sf.enable(monkeypatch)
@@ -398,25 +456,21 @@ def test_an_orphaned_child_exits(tmp_path: Path, monkeypatch) -> None:
     assert stub.calls == []
 
 
-def test_a_real_child_without_weights_refuses_and_is_not_relaunched(
+def test_a_real_child_with_no_jobs_exits_without_admitting_or_creating_a_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The real spawn path: a child process that cannot admit its instrument."""
+    """Lazy admission must not touch missing weights when the queue is empty."""
     sf.enable(monkeypatch)
     vault = tmp_path / "vault"
     vault.mkdir()
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hub"))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    sup = sensor_worker.Supervisor(vault)
-    assert _step(sup) == "launched"
-    deadline = time.monotonic() + 60
-    while sup.alive() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert not sup.alive()
-    assert _step(sup) == "refused"
-    assert sup.status()["refused"] in {"dependency-missing", "weights-missing"}
-    assert sup.launches == 1
-    assert not sensing_ledger.ledger_path(vault).exists(), "a refused child appends nothing"
+    monkeypatch.setattr(sensor_worker, "IDLE_EXIT_SECONDS", 0.0)
+    child = sensor_worker._launch_child(vault, 10.0, 5)
+    assert child.wait(timeout=30) == sensor_worker.EXIT_IDLE
+    assert not sensing_ledger.ledger_path(vault).exists()
+    status = sensing_ledger.ledger_path(vault).with_name(sensor_worker.STATUS_FILE)
+    assert not status.exists(), "no instrument was admitted or refused"
 
 
 def test_stored_unit_vectors_never_create_the_embeddings_sidecar(tmp_path: Path) -> None:
@@ -508,3 +562,133 @@ def test_the_child_gets_an_allowlisted_environment(tmp_path: Path, monkeypatch) 
     assert env["LC_ALL"] == "C.UTF-8"
     assert env["EXOMEM_STATE_ROOT"] == os.environ["EXOMEM_STATE_ROOT"]
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_completed_and_refused_prefix_cannot_starve_another_question(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dataclasses import replace
+
+    from exomem import sensing
+
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    store = sensed_model.ProjectionStore(vault)
+    conn = store.connect()
+    with store.write(conn):
+        sensed_model._set_meta(conn, "seeding", None)
+    conn.close()
+    future = replace(
+        sensing.question(sensing.PAIR_RELATION),
+        question_type="test.future",
+        vector_names=("answer",),
+    )
+    monkeypatch.setitem(sensing.QUESTIONS, future.question_type, future)
+    base_active = sensed_model.active_instruments
+    monkeypatch.setattr(
+        sensed_model,
+        "active_instruments",
+        lambda q=sensing.PAIR_RELATION: (
+            base_active() if q == sensing.PAIR_RELATION else {sf.STUB.instrument_id: sf.STUB}
+        ),
+    )
+    texts = tuple(sorted(("A completed unit.", "Another completed unit."), key=sensing.text_sha256))
+    units = tuple(
+        sensing.InputUnit(str(i), f"{i}.md", sensing.text_sha256(text))
+        for i, text in enumerate(texts)
+    )
+    complete = sensing.SenseRequest(sensing.PAIR_RELATION, 1, units, texts)
+    ledger = sensing_ledger.Ledger(vault)
+    lconn = ledger.connect()
+    reading = sensing.make_request_reading(
+        complete,
+        sf.STUB,
+        vectors={"ab": sf.NEUTRAL, "ba": sf.NEUTRAL},
+        abstain_reason=None,
+        sensed_at="2026-01-01T00:00:00Z",
+    )
+    ledger.append(lconn, [reading])
+    lconn.close()
+    future_inputs = tuple(
+        sensing.InputSlot(str(i), f"{i}.md", slot, "page-claim-v1", sensing.text_sha256(text))
+        for i, (slot, text) in enumerate(zip(("a", "b"), texts, strict=True))
+    )
+    pending_future = sensing.SenseRequest(future.question_type, 2, future_inputs, texts)
+    pending = sensing.SenseRequest(sensing.PAIR_RELATION, 2, future_inputs, (texts))
+    jobs = [
+        sensed_model.OwnedRequest(f"complete-{i:04d}", complete, order_key=f"a-{i:04d}")
+        for i in range(300)
+    ]
+    jobs += [
+        sensed_model.OwnedRequest(f"refused-{i:04d}", pending_future, order_key=f"b-{i:04d}")
+        for i in range(300)
+    ]
+    jobs += [sensed_model.OwnedRequest("runnable", pending, order_key="z")]
+    token = sensed_model.capture_scope(vault, "audit", "scope")
+    sensed_model.submit_scope(vault, token, jobs)
+    admitted = []
+    stub = sf.StubInstrument()
+
+    def admit(q):
+        admitted.append(q)
+        if q == future.question_type:
+
+            class Refused(Exception):
+                reason = "weights-missing"
+                detail = "test artifact unavailable"
+
+            raise Refused()
+        return stub
+
+    assert (
+        sensor_worker.run_child(
+            vault,
+            parent_pid=0,
+            cpu_allotment=100,
+            judgement_allotment=10,
+            idle_seconds=0,
+            admit_selected=admit,
+            sleep=lambda _: None,
+        )
+        == sensor_worker.EXIT_IDLE
+    )
+    assert len(stub.calls) == 1
+    assert admitted.count(future.question_type) == 1
+    assert sensor_worker.question_refused(vault, future.question_type)
+    assert (
+        list(
+            sensed_model.runnable_jobs(
+                vault, refused=lambda q: sensor_worker.question_refused(vault, q)
+            )
+        )
+        == []
+    )
+
+
+def test_restored_artifacts_clear_only_the_refused_question(tmp_path: Path, monkeypatch) -> None:
+    from exomem import claims, model_cache, sensing
+
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    pin = claims._active_pin()
+    assert pin is not None
+    before = sensor_worker._question_refusal_key(vault, sensing.PAIR_RELATION)
+    sensor_worker._write_json(
+        sensor_worker._state_file(vault, sensor_worker.STATUS_FILE),
+        {
+            "refusals": {sensing.PAIR_RELATION: {"key": before, "reason": "weights-missing"}},
+        },
+    )
+    assert sensor_worker.question_refused(vault, sensing.PAIR_RELATION)
+    snapshot = (
+        model_cache.hub_dir()
+        / model_cache.snapshot_dirname(pin.model_name)
+        / "snapshots"
+        / pin.model_revision
+    )
+    for relative in pin.artifact_files:
+        artifact = snapshot / relative
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"invented admission evidence; never loaded")
+    assert not sensor_worker.question_refused(vault, sensing.PAIR_RELATION)

@@ -47,6 +47,7 @@ complete, partial or missing. These diagnostics cover completed calls and do not
 | `paired --shard N` | Time one shard of the generated fixture on both arms. Write a fragment. |
 | `aggregate FRAGMENT...` | Join the fragments of every shard into per-group verdicts. |
 | `private` | Time a private prepared vault on both arms. See Private mode. |
+| `private-absolute` | Time one prepared arm with its worker continuously runnable. |
 | `validate-summary FILE` | Validate a stored plan, fragment or summary against the schema. |
 
 Run it with `uv run --frozen --group recall-benchmark python scripts/mcp_read_latency_gate.py ...`.
@@ -111,6 +112,44 @@ It marks absolute acceptance `unverified` with reason `paused-worker-comparison`
 Those pauses change lease and maintenance timing, even on a quiet host.
 Absolute acceptance needs a continuously runnable worker and CPU pressure observations throughout the measured interval.
 The paired summary records `/proc/pressure/cpu` avg60 at the start and at the end.
+
+## Private absolute mode
+
+`private-absolute --arm-root DIR --cases FILE --output FILE` consumes one fixed, already prepared arm.
+The root must contain `prepared.json`, its vault, and its existing state. This mode never copies, adopts, or rebuilds a corpus.
+It uses the invoking interpreter and records that interpreter's imported module origin and installed package version.
+`source_commit` identifies the runner checkout; it does not attest the worker's served bytes under isolated Python.
+`--embeddings` selects the existing encoder configuration, as in paired private mode.
+
+The case loader, arguments, expectations, and source group labels stay unchanged.
+An optional `--group-bindings FILE` supplies a JSON object from source labels to configured contract groups.
+Without that file, labels resolve by identity. Every used label must resolve to a declared group.
+Distinct source groups cannot merge, and every configured target group must have a case.
+The runner checks these conditions before starting the worker. It retains the case digest and the external binding file's digest.
+
+The worker starts quiet and passes the existing state and derived-readiness checks.
+Every case completes one retained warm-up before any timed round begins.
+The runner waits up to `--pressure-wait-seconds` (default 300) for CPU PSI `some avg60` below 10%.
+This threshold is the closed quiet-host measurement rule, not a service performance target.
+A zero wait still observes pressure and measures the calls; contention leaves numeric targets unverified.
+Timed rounds visit every case before starting the next round. The runner never pauses the worker during measurement.
+
+The report retains timestamped monotonic PSI observations at opening, approximately every second, and at closing.
+It reports the requested cadence and largest observed gap without inventing a maximum-gap acceptance threshold.
+Unreadable, invalid, or failed observations stay unknown. A busy middle observation invalidates quiet eligibility despite quiet endpoints.
+Every attempted warm-up and timed call stays in the report, including failures.
+The shared observer owns the parsed-terminal timer and runs assertions after timing ends.
+
+The absolute reducer uses descriptive nearest-rank percentiles without paired differences or the CI case floor.
+A complete successful series under observed quiet pressure reports `below-target` or `at-or-above-target` for each configured target.
+Other series report `unverified`; missing, duplicate, unexpected, or failed attempts mark the instrument failed.
+Extra declared groups without targets remain descriptive. A single list case can report a percentile.
+
+The watcher is requested by omitting `EXOMEM_DISABLE_FILE_WATCHER`; this does not prove that startup activated it.
+Overall `acceptance` stays `unverified` pending independent corpus, active-watcher, runtime, and sandbox-isolation proof.
+A numeric target comparison alone never establishes programme acceptance.
+Exit 0 means a complete measurement with observed quiet pressure, including an above-target comparison.
+Exit 1 means a broken or refused instrument. Exit 2 means pressure left the measurement unverified.
 
 ## Fixture
 
