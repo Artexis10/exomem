@@ -380,10 +380,12 @@ def test_a_denied_caller_cannot_tell_a_private_type_from_an_unknown_one(
                 (hit["path"], hit.get("score"))
                 for hit in commands.op_find(vault, query="quillwort", mode="hybrid", graph=False)
             ]
-            # The writer judges the page against the shipped pack: no type, no obligation.
-            codes = _gate_codes(vault)
+            # A restricted writer's draft is refused before the contract judges it, so the
+            # registry never answers it, whether the type is private or unknown.
+            with pytest.raises(ValueError, match="WRITE_REFUSED: target is unavailable"):
+                _gate_codes(vault)
             debt = _debt(vault)
-        observed.append((ranked, codes, debt))
+        observed.append((ranked, debt))
         assert "quillwort crew" in read["body"]
         assert [path for path, _score in ranked][:2] == [
             "Knowledge Base/Inbox/quillwort-twin.md",
@@ -391,8 +393,7 @@ def test_a_denied_caller_cannot_tell_a_private_type_from_an_unknown_one(
         ]
 
     assert observed[0] == observed[1]
-    assert "missing_semantic_unit" not in observed[0][1]
-    assert observed[0][2] == set()
+    assert observed[0][1] == set()
 
 
 def test_note_type_usage_is_unavailable_without_a_graph(vault: Path) -> None:

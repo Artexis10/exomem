@@ -26,13 +26,19 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from granted_writer import grant_writer
 
 from exomem import commands, curation, episode_workflow, provenance, record_formats, records
 from exomem import episode_model as model
 from exomem import schema as schema_module
 from exomem import structured_collections as collections
 from exomem.governance import egress
-from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.governance.principal import (
+    OWNER_AUDIENCE,
+    RequestPrincipal,
+    owner_principal,
+    request_scope,
+)
 
 KEY = "ep-" + "4d" * 16
 COLLECTION = "Knowledge Base/Records/Vat Readings/_collection.md"
@@ -603,8 +609,8 @@ def test_record_origin_retry_replays_the_original_body_without_recertifying_inpu
 
     _collection(vault)
     body = _origin_reading_body(vault)
-    _write_source_rule(vault, ceiling=6)
-    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+    _write_source_rule(vault, ceiling=6, audience=OWNER_AUDIENCE)
+    with request_scope(owner_principal(surface="mcp")):
         first = records.append_record(
             vault, COLLECTION, item=READING, body=body,
             expected_container_hash=_container(vault), why="Preserve the observed reading.",
@@ -612,7 +618,7 @@ def test_record_origin_retry_replays_the_original_body_without_recertifying_inpu
         (entry,) = _entries(vault)
         committed = entry.read_bytes()
         assert provenance.parse_origin(entry.read_text(encoding="utf-8"), managed=True).status == "valid"
-        _write_source_rule(vault, ceiling=0)
+        _write_source_rule(vault, ceiling=0, audience=OWNER_AUDIENCE)
         for retry_body in (body, parse_frontmatter(committed.decode("utf-8"))[1]):
             replay = records.append_record(
                 vault, COLLECTION, item=READING, body=retry_body,
@@ -722,8 +728,8 @@ def test_original_record_origin_proposal_preserves_committed_leaf_when_adding_an
     from test_episode_recovery import _write_source_rule
 
     _collection(vault)
-    _write_source_rule(vault, ceiling=6)
-    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+    _write_source_rule(vault, ceiling=6, audience=OWNER_AUDIENCE)
+    with request_scope(owner_principal(surface="mcp")):
         _record(vault)
         original = _leaf(vault, body=_origin_reading_body(vault, unit=True))
         reviewed = _prepared(vault, original)
@@ -742,7 +748,7 @@ def test_original_record_origin_proposal_preserves_committed_leaf_when_adding_an
         stored = entry.read_bytes()
         receipt = curation.CurationStore(vault).reconstruct(bound["run_id"])["receipts"]
         assert len(receipt) == 1
-        _write_source_rule(vault, ceiling=0)
+        _write_source_rule(vault, ceiling=0, audience=OWNER_AUDIENCE)
         before = _episode(vault, action="candidates")
         repeated = _episode(
             vault, action="prepare", candidate="reading",
@@ -810,17 +816,17 @@ def test_record_origin_refuses_current_source_narrowing_without_an_append(
 
     _collection(vault)
     body = _origin_reading_body(vault)
-    _write_source_rule(vault, ceiling=6)
+    _write_source_rule(vault, ceiling=6, audience=OWNER_AUDIENCE)
     before_manifest = (vault / COLLECTION).read_bytes()
     before_log = (vault / "Knowledge Base/log.md").read_bytes()
     if checkpoint == "preparation":
-        _write_source_rule(vault, ceiling=0)
+        _write_source_rule(vault, ceiling=0, audience=OWNER_AUDIENCE)
     elif checkpoint == "before-publication":
         authorize = record_governance.precommit_authorize_mutation
 
         def narrow_after_authorization(*args, **kwargs):
             authorize(*args, **kwargs)
-            _write_source_rule(vault, ceiling=0)
+            _write_source_rule(vault, ceiling=0, audience=OWNER_AUDIENCE)
 
         monkeypatch.setattr(record_governance, "precommit_authorize_mutation", narrow_after_authorization)
     else:
@@ -829,10 +835,10 @@ def test_record_origin_refuses_current_source_narrowing_without_an_append(
         def narrow_after_publication(path: Path) -> None:
             published(path)
             if path.parent.name == "Entries":
-                _write_source_rule(vault, ceiling=0)
+                _write_source_rule(vault, ceiling=0, audience=OWNER_AUDIENCE)
 
         monkeypatch.setattr(vault_module, "_after_batch_destination_published", narrow_after_publication)
-    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+    with request_scope(owner_principal(surface="mcp")):
         with pytest.raises(collections.CollectionError, match="ORIGIN_INPUT_UNAVAILABLE"):
             if checkpoint == "preparation":
                 records.prepare_append(
@@ -1030,13 +1036,21 @@ def _withhold_records_from(vault: Path, audience: str) -> None:
     policy._CACHE.clear()  # noqa: SLF001
 
 
-def test_an_invisible_collection_is_refused_exactly_like_a_missing_one(vault: Path) -> None:
+def test_an_invisible_collection_is_refused_exactly_like_a_missing_one(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     withheld = _collection(vault, "Knowledge Base/Records/Withheld Readings/_collection.md")
     with request_scope(owner_principal(surface="mcp")):
         container = _container(vault, withheld)
     _withhold_records_from(vault, "client-a")
+    # The client records its own recap in its inbox, then prepares: it cannot write a Record itself.
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch, writable_paths=["Sources/Inbox/client-a/**"],
+        capture_paths=["Knowledge Base/Sources/Inbox/client-a"],
+        protected=["01ARZ3NDEKTSV4RRFFQ69G5FAE"], audience="client-a",
+    )("client-a")
     errors = []
-    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+    with request_scope(writer):
         _record(vault)
         for collection in (withheld, "Knowledge Base/Records/Missing Readings/_collection.md"):
             leaf = {

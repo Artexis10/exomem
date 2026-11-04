@@ -185,10 +185,11 @@ from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
 from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
-from .kbdir import kb_dirname
+from .kbdir import kb_dirname, kb_page_target
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
+    admit_write_target,
     latest_operation_id,
     resolve_under_vault,
 )
@@ -5031,6 +5032,11 @@ def op_replace(
 
 def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
     unavailable = f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
+    try:
+        # A restricted writer's predecessor is decided before it is read.
+        admit_write_target(vault_root, kb_page_target(vault_root, old_path)[1])
+    except VaultPathError as refusal:
+        raise ValueError(f"{refusal.code}: {refusal.reason}") from None
     # A predecessor the caller may not see is unavailable exactly as a missing
     # one is, and is never read.
     if egress_module.write_target_withheld(vault_root, old_path):
@@ -6159,8 +6165,13 @@ def op_delete(
     path = _resolve_memory_identifier(vault_root, path)
     try:
         abs_path, rel = resolve_under_vault(vault_root, path)
+        # A restricted writer's path is decided before it is probed, so a folder it may not
+        # write answers as an absent path does.
+        admit_write_target(vault_root, rel)
         is_dir = abs_path.is_dir()
-    except VaultPathError:
+    except VaultPathError as refusal:
+        if refusal.code == "WRITE_REFUSED":
+            raise ValueError(f"{refusal.code}: {refusal.reason}") from None
         is_dir = False  # let the file backend raise the precise path error
     if restricted and is_dir:
         from . import list_directory as list_directory_module

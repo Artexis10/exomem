@@ -31,7 +31,9 @@ Mixed-authority acceptance remains outside this diagnostic; these numbers cannot
 retire the store's phase-acceptance gate.
 ``--phase-probes`` adds a synthetic 10% ref-withheld audience split and one
 bulk-500 call in store mode. It reports refusal and successful append timings
-separately, without claiming the remaining platform or fsync evidence.
+separately, without claiming the remaining platform or fsync evidence. These fenced
+clients chain guards from committed acknowledgements; their inspection timings
+are not comparable with historical owner-mode guard-refresh measurements.
 """
 
 from __future__ import annotations
@@ -385,7 +387,8 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     complete_principal = partial_principal = None
     fixture = None
     if args.phase_probes:
-        from exomem.governance import policy
+        from exomem.activation_manifest import ensure_manifest
+        from exomem.governance import connector_boundary, policy
 
         keys = handle.connection.execute("SELECT collection_id, item_key FROM items ORDER BY row_id").fetchall()
         selected = keys[:size // 10]
@@ -400,9 +403,19 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             + "refs: " + json.dumps([f"exomem://record/{cid}/{key}" for cid, key in selected]) + "\n",
             encoding="utf-8",
         )
-        for audience, ceiling, rule_id in (
-            ("partial", 0, "01ARZ3NDEKTSV4RRFFQ69G5FB0"),
-            ("complete", 6, "01ARZ3NDEKTSV4RRFFQ69G5FB1"),
+        # These scope ids and audiences name the synthetic measurement fixture.
+        writable_id = "01ARZ3NDEKTSV4RRFFQ69G5FW1"
+        residual_id = "01ARZ3NDEKTSV4RRFFQ69G5FW2"
+        (governance_dir / "scopes/writable.yaml").write_text(
+            f'governance_version: 1\nid: {writable_id}\npaths: ["Records/**", "Evidence/latency-seed.md", "Capture/**"]\n',
+            encoding="utf-8",
+        )
+        (governance_dir / "scopes/residual.yaml").write_text(
+            f"governance_version: 1\nid: {residual_id}\nresidual: true\n", encoding="utf-8",
+        )
+        for audience, ceiling, rule_id, writable_rule_id in (
+            ("partial", 0, "01ARZ3NDEKTSV4RRFFQ69G5FB0", "01ARZ3NDEKTSV4RRFFQ69G5FW3"),
+            ("complete", 6, "01ARZ3NDEKTSV4RRFFQ69G5FB1", "01ARZ3NDEKTSV4RRFFQ69G5FW4"),
         ):
             rule = governance_dir / f"rules/{audience}.yaml"
             rule.parent.mkdir(exist_ok=True)
@@ -410,11 +423,30 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
                 f"governance_version: 1\nid: {rule_id}\nscope_ids: [{scope_id}]\n"
                 f"audience: {audience}\nceiling: {ceiling}\n", encoding="utf-8",
             )
+            (governance_dir / f"rules/{audience}-writable.yaml").write_text(
+                f"governance_version: 1\nid: {writable_rule_id}\nscope_ids: [{writable_id}]\n"
+                f"audience: {audience}\nceiling: 6\n", encoding="utf-8",
+            )
+        with principal.library_scope():
+            ensure_manifest(vault)
+        issuer, client_id = "https://latency.example.test", "measurement"
+        config = tmp / "host-boundary.json"
+        config.write_text(json.dumps({
+            "version": 1, "default_denied_scope_ids": [scope_id, writable_id, residual_id],
+            "capture_paths": ["Knowledge Base/Capture"],
+            "clients": [{"issuer": issuer, "client_id": client_id,
+                         "denied_scope_ids": [residual_id], "writable_scope_ids": [scope_id, writable_id]}],
+        }), encoding="utf-8")
+        os.environ[connector_boundary.CONFIG_ENV] = str(config)
+        state_migration.arm_connector_boundary_offline(vault, authority=authority)
         compiled = policy.load(vault)
         if compiled.empty or compiled.blocked:
             raise RuntimeError("synthetic ref-withheld policy did not compile")
-        complete_principal = principal.RequestPrincipal("complete", surface="mcp")
-        partial_principal = principal.RequestPrincipal("partial", surface="mcp")
+        client = principal.ClientBinding(issuer, client_id)
+        complete_principal = principal.RequestPrincipal("complete", surface="mcp", client_binding=client,
+            origin_session=principal.OriginSessionBinding("measurement", "generation", "complete"))
+        partial_principal = principal.RequestPrincipal("partial", surface="mcp", client_binding=client,
+            origin_session=principal.OriginSessionBinding("measurement", "generation", "partial"))
         fixture = {"seeded_rows": len(keys), "selected_refs": len(selected)}
 
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "record_memory")
@@ -508,7 +540,12 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
 
     index_sync.upsert_after_write = spying_upsert
 
+    phase_guard = None
+
     def invoke(*, audience=None, **kwargs: object) -> tuple[float, float, object, list[dict[str, object]]]:
+        nonlocal phase_guard
+        if fixture is not None:
+            kwargs.setdefault("response_detail", "full")
         token = f"harness-{uuid.uuid4().hex}"
         context_token = call_spans.MCP_CALL_TOKEN.set(token)
         stages.reset()
@@ -536,6 +573,19 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             spans = call_spans.pop_call_spans(token)
             call_spans.MCP_CALL_TOKEN.reset(context_token)
             stages.last_sample = stages.sample(wall, cpu, spans, error_code)
+        # The public mutation protocol supplies guards only after a committed write.
+        if fixture is not None and isinstance(result, dict) and (
+            result.get("outcome") == "committed" or result.get("state") == "committed"
+        ):
+            # Full terminals carry the original acknowledgement in diagnostics.
+            acknowledgement = result if "after_container_hash" in result else result.get("diagnostics")
+            acknowledged = acknowledgement.get("after_container_hash") if isinstance(acknowledgement, dict) else None
+            if not isinstance(acknowledged, str):
+                raise RuntimeError("committed mutation omitted its public container guard")
+            expected = kwargs.get("expected_container_hash")
+            if expected is not None and acknowledgement.get("before_container_hash") != expected:
+                raise RuntimeError("committed mutation did not retain its supplied container guard")
+            phase_guard = acknowledged
         if kwargs.get("action") == "inspect":
             if not isinstance(result, dict) or not isinstance(result.get("contract"), dict):
                 raise RuntimeError("inspect lost its public collection contract; timing refused")
@@ -547,7 +597,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
 
     def refresh_hash() -> tuple[float, float, str]:
         wall, cpu, result, _ = invoke(action="inspect", collection=COLLECTION)
-        found = _find_container_hash(result)
+        found = phase_guard if fixture is not None else _find_container_hash(result)
         if found is None:
             raise RuntimeError("inspect did not surface a container hash")
         return wall, cpu, found
@@ -689,7 +739,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     if any(case["outcome"] != "answered" for case in query_latency.values()):
         out["phase_evidence_missing"].append("answered query latency at this size")
 
-    # A: guarded append; the client pays a container-version read before every append.
+    # A: inspect before each guarded append. Phase mode retains the previous acknowledgement's guard.
     guarded_rows: list[dict[str, float]] = []
     span_rows: list[dict[str, float]] = []
     refresh_ms: list[float] = []
@@ -720,11 +770,11 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         "p50": round(1000 * _pct(walls, 0.5), 2),
         "p95": round(1000 * _pct(walls, 0.95), 2),
     }
-    out["guard_refresh_read_ms"] = {
+    out["public_inspect_ms" if fixture is not None else "guard_refresh_read_ms"] = {
         "p50": round(1000 * _pct(refresh_ms, 0.5), 2),
         "p95": round(1000 * _pct(refresh_ms, 0.95), 2),
     }
-    out["guard_round_trip_ms"] = {
+    out["inspect_then_guarded_append_ms" if fixture is not None else "guard_round_trip_ms"] = {
         "p50": round(1000 * _pct([read + write for read, write in zip(refresh_ms, walls, strict=True)], 0.5), 2),
         "p95": round(1000 * _pct([read + write for read, write in zip(refresh_ms, walls, strict=True)], 0.95), 2),
     }
@@ -802,19 +852,20 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     pstats.Stats(profile, stream=buffer).sort_stats("tottime").print_stats(25)
     out["profile_tottime"] = buffer.getvalue()
 
-    # D: one cProfile pass over the guard-refresh read (record_memory inspect).
+    # D: one cProfile pass over public inspection; nonphase runs also acquire their guard here.
     profile = cProfile.Profile(timer=time.thread_time)
     profile.enable()
     refresh_hash()
     profile.disable()
     buffer = io.StringIO()
     pstats.Stats(profile, stream=buffer).sort_stats("cumulative").print_stats(r"exomem", 40)
-    out["profile_refresh_cumulative"] = buffer.getvalue()
+    out["profile_inspect_cumulative" if fixture is not None else "profile_refresh_cumulative"] = buffer.getvalue()
     buffer = io.StringIO()
     pstats.Stats(profile, stream=buffer).sort_stats("tottime").print_stats(25)
-    out["profile_refresh_tottime"] = buffer.getvalue()
+    out["profile_inspect_tottime" if fixture is not None else "profile_refresh_tottime"] = buffer.getvalue()
 
     if fixture is not None:
+        out["command_path"]["guard_source"] = "previous committed acknowledgement"
         complete_samples = []
         for index in range(n):
             _, _, expected = refresh_hash()

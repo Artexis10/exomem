@@ -59,7 +59,9 @@ from .vault import (
     DirectoryCensusGuard,
     PathGuard,
     PlannedWrite,
+    VaultPathError,
     WikilinkResolver,
+    admit_write_target,
     content_hash,
     escape_wikilinks_for_log,
     in_append_only_tree,
@@ -452,6 +454,10 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # Shared with `replace._resolve_kb_path` and the hosted protected-tree
     # guard. See `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
+    try:
+        admit_write_target(vault_root, rel)
+    except VaultPathError as refusal:
+        raise EditError(code=refusal.code, missing=[], reason=refusal.reason) from None
     # The literal (NFKC) spelling may be absent because the on-disk name is a
     # different Unicode normalization -- a macOS-origin NFD name on a
     # byte-exact filesystem (Linux ext4) -- or it may sit beside such a twin.
@@ -897,8 +903,10 @@ def commit_edit(
 
     # Opportunistic sub-index refresh — surfacing any drift on every write
     # keeps the indexes self-healing.
+    from .governance import connector_boundary
+
     top_index = kb / "index.md"
-    if top_index.exists():
+    if top_index.exists() and connector_boundary.effect_admission(vault_root)(top_index):
         current_top, top_guard = read_guarded_text(vault_root, top_index)
         sub_writes, new_top = indexes.compute_subindex_writes(
             vault_root, top_index_text=current_top

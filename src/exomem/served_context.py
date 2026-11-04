@@ -141,8 +141,17 @@ def finalize(root: Path, packet: dict[str, Any], *, session: str | None = None, 
     identifier = append(root, packet, session=session, purpose=purpose)
     if identifier is not None:
         packet["served_context_id"] = identifier
+        packet["served_context_evidence"] = _composition_evidence()
     else:
         packet.setdefault("diagnostics", []).append("served_context_unrecorded")
+
+
+def _composition_evidence() -> dict[str, str]:
+    # These are closed states of the served-context response schema, not vault vocabulary.
+    return {
+        "scope": "server_composition", "client_receipt": "unknown", "opening": "unknown",
+        "citation": "unknown", "use": "unknown", "historical_text": "not_retained",
+    }
 
 
 def sweep(root: Path, *, now: float | None = None) -> int:
@@ -211,6 +220,7 @@ def read(root: Path, *, served_context_id: str | None = None) -> dict[str, Any]:
             refs = [*record["stance_refs"], *(item["ref"] for item in record["slice_refs"]),
                     *(item["read_ref"] for item in task_items if item.get("read_ref"))]
             return {"state": "ready", "record": record, "current_resolution": [_current(root, ref) for ref in refs],
+                    "served_context_evidence": _composition_evidence(),
                     "meaning": "Composed authorized response metadata; not proof of client receipt or use. Refs retain no historical text.",
                     "usage": _unknown_usage()}
         task_count = (" + COALESCE(json_array_length(task_context, '$.candidates'), 0)"

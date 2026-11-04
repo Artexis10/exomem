@@ -138,14 +138,25 @@ def test_records_keep_final_metadata_and_unknown_usage_without_heat(stance_vault
 
 
 def test_locked_and_concurrent_records_do_not_fail_the_read(stance_vault):
-    identifier = served_context.append(stance_vault, _packet())
+    from exomem import commands
+    from exomem.writer_lease import invoke_command
+
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    first = invoke_command(command, stance_vault, turn="Keep a source")
+    identifier = first["served_context_id"]
     with sqlite3.connect(served_context.sidecar_path(stance_vault)) as locked:
         locked.execute("BEGIN EXCLUSIVE")
-        packet = _packet()
-        served_context.finalize(stance_vault, packet)
+        packet = invoke_command(command, stance_vault, turn="Keep a source")
+        assert not packet["abstained"] and packet["map"]["generation"] == first["map"]["generation"]
         assert "served_context_id" not in packet
+        assert "served_context_evidence" not in packet
         assert "served_context_unrecorded" in packet["diagnostics"]
         locked.rollback()
+    served_context.finalize(stance_vault, packet)
+    assert "served_context_id" not in packet and "served_context_evidence" not in packet
+    abstained = {"abstained": True, "map": {}}
+    served_context.finalize(stance_vault, abstained)
+    assert "served_context_id" not in abstained and "served_context_evidence" not in abstained
     def append(_):
         with principal.library_scope():
             return served_context.append(stance_vault, _packet())
@@ -177,6 +188,7 @@ def test_boolean_stance_preview_and_commit_refuse_the_same_invalid_write(stance_
 
 def test_final_maps_metadata_matches_the_authorized_response(stance_vault, monkeypatch):
     from exomem import commands, working_set_runtime
+    from exomem.governance import egress
     from exomem.writer_lease import invoke_command
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
@@ -186,7 +198,20 @@ def test_final_maps_metadata_matches_the_authorized_response(stance_vault, monke
     assert not first["abstained"]
     assert first["budget"]["used_chars"] <= 500
     assert first["budget"]["serialized_chars"] == context_views.serialized_chars(first)
-    record = served_context.read(stance_vault, served_context_id=first["served_context_id"])["record"]
+    evidence = first["served_context_evidence"]
+    assert evidence == {
+        "scope": "server_composition", "client_receipt": "unknown", "opening": "unknown",
+        "citation": "unknown", "use": "unknown", "historical_text": "not_retained",
+    }
+    with principal.invocation_scope():
+        assert egress.postfilter("activate_context", first, stance_vault,
+                                 request_kwargs={"turn": "Keep a source", "max_chars": 500}) == first
+    assert served_context.read(stance_vault)["retained_rows"] == 1
+    lookup = served_context.read(stance_vault, served_context_id=first["served_context_id"])
+    assert lookup["served_context_evidence"] == evidence
+    lookup["served_context_evidence"]["opening"] = "observed"
+    assert served_context.read(stance_vault, served_context_id=first["served_context_id"])["served_context_evidence"] == evidence
+    record = lookup["record"]
     assert record["map_generation"] == first["map"]["generation"]
     assert record["map_unchanged"] is first["map"].get("unchanged", False)
     assert record["stance_state"] == first["stance"]["state"]
@@ -196,6 +221,7 @@ def test_final_maps_metadata_matches_the_authorized_response(stance_vault, monke
     assert record["next_action_state"] == (first.get("next_action") or {}).get("state")
     second = invoke_command(command, stance_vault, turn="Keep a source", continuity=first.get("continuity"), max_chars=500)
     assert second["served_context_id"] != first["served_context_id"]
+    assert second["served_context_evidence"] == evidence
     assert second["map"]["unchanged"] is True
     monkeypatch.setenv("EXOMEM_ACTIVATION_STANCE", "off")
     off = invoke_command(command, stance_vault, turn="Keep a source", max_chars=500)
@@ -280,20 +306,37 @@ def test_unattributed_read_stays_unknown_and_recording_does_not_change_heat(stan
 
 
 def test_owner_cli_and_rest_read_the_same_retained_row(stance_vault, monkeypatch, capsys):
-    from test_activate_context_surface import _rest_client, _run_cli
+    import asyncio
+
+    from starlette.testclient import TestClient
+    from test_activate_context_surface import _run_cli, _surface_server
 
     from exomem import commands
 
-    identifier = served_context.append(stance_vault, _packet())
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(stance_vault))
+    mcp = _surface_server(monkeypatch)
+    client = TestClient(mcp.http_app())
+    packet = asyncio.run(mcp.call_tool("activate_context", {"turn": "Keep a source"},
+                                       run_middleware=False)).structured_content
+    activated = client.post("/api/activate_context", json={"turn": "Keep a source"},
+                            headers={"Authorization": "Bearer sekret"})
+    assert activated.status_code == 200, activated.text
+    rest_packet = activated.json()["data"]
+    assert packet["served_context_evidence"] == rest_packet["served_context_evidence"]
+    assert packet["served_context_id"] != rest_packet["served_context_id"]
+    for response in (packet, rest_packet):
+        assert response["budget"]["used_chars"] <= response["budget"]["limit_chars"]
+        assert response["budget"]["serialized_chars"] == context_views.serialized_chars(response)
+    identifier = packet["served_context_id"]
     code, output = _run_cli(["served-context", "--served-context-id", identifier, "--json"], capsys)
     assert code == 0, output
-    cli_record = json.loads(output)["data"]["record"]
-    client = _rest_client(monkeypatch)
+    cli_data = json.loads(output)["data"]
+    assert cli_data["served_context_evidence"] == packet["served_context_evidence"]
     result = client.post("/api/served_context", json={"served_context_id": identifier},
                          headers={"Authorization": "Bearer sekret"})
     assert result.status_code == 200, result.text
-    assert result.json()["data"]["record"] == cli_record
+    assert result.json()["data"]["record"] == cli_data["record"]
+    assert result.json()["data"]["served_context_evidence"] == packet["served_context_evidence"]
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "served_context")
     assert command.surfaces == frozenset({"cli", "rest"})
 

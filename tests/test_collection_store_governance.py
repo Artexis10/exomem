@@ -11,9 +11,9 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
 from exomem.collection_store.preview import preview_store
-from exomem.governance import authorization_custody, policy, schema_v4, tool
+from exomem.governance import authorization_custody, connector_boundary, policy, schema_v4, tool
 from exomem.governance import store as authority_store
-from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal, owner_principal, request_scope
 from exomem.record_memory import record_memory
 
 
@@ -85,6 +85,32 @@ def withhold(store):
     write_rule(store.root, ceiling=0)
     compiled = policy.load(store.root)
     assert not compiled.empty and not compiled.blocked
+
+
+def _record_writer(store, tmp_path, monkeypatch, *, deny_protected=True):
+    """Bind a host-granted Records writer with the fixture's connector read floor."""
+    from test_governance_egress import SCOPE_ID
+
+    writable_id = "01ARZ3NDEKTSV4RRFFQ69G5FW1"
+    residual_id = "01ARZ3NDEKTSV4RRFFQ69G5FW2"
+    scopes = store.root / "Knowledge Base/_Governance/scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "record-writes.yaml").write_text(
+        f'governance_version: 1\nid: {writable_id}\npaths: ["Records/**"]\n', encoding="utf-8")
+    (scopes / "residual.yaml").write_text(
+        f"governance_version: 1\nid: {residual_id}\nresidual: true\n", encoding="utf-8")
+    issuer = "https://memory.example.test"
+    config = tmp_path / "record-host-boundary.json"
+    config.write_text(json.dumps({
+        "version": 1, "default_denied_scope_ids": [SCOPE_ID, writable_id, residual_id], "capture_paths": [],
+        "clients": [{"issuer": issuer, "client_id": "writer",
+                     "denied_scope_ids": [SCOPE_ID, residual_id] if deny_protected else [residual_id],
+                     "writable_scope_ids": [writable_id]}],
+    }), encoding="utf-8")
+    monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(config))
+    writer = replace(_external(), client_binding=ClientBinding(issuer, "writer"),
+                     origin_session=OriginSessionBinding("session", "generation", "external"))
+    return writer
 
 
 @pytest.mark.parametrize("protection", ["row", "field"])
@@ -195,6 +221,63 @@ def test_withheld_append_refuses_without_changing_stored_data(store):
     assert tuple(store.connection.iterdump()) == before
 
 
+@pytest.mark.parametrize("authority", ["none", "other-scope", "collection-scope"])
+@pytest.mark.parametrize("operation", ["append", "update"])
+def test_readable_sql_collection_mutations_require_host_write_authority(store, tmp_path, monkeypatch, authority, operation):
+    """Read access must not let a caller append or update canonical rows outside its writable scopes."""
+    from test_governance_egress import SCOPE_ID
+
+    create(store)
+    first = store.append_record(CID, item={"title": "Existing"}, item_key=KEY, why="capture")
+    write_scope(store.root, paths="Records/**")
+    write_rule(store.root, ceiling=6)
+    who = _external()
+    if authority != "none":
+        writable_id = "01ARZ3NDEKTSV4RRFFQ69G5FW1"
+        residual_id = "01ARZ3NDEKTSV4RRFFQ69G5FW2"
+        scopes = store.root / "Knowledge Base/_Governance/scopes"
+        (scopes / "inbox.yaml").write_text(
+            f'governance_version: 1\nid: {writable_id}\npaths: ["Inbox/**"]\n', encoding="utf-8")
+        (scopes / "residual.yaml").write_text(
+            f"governance_version: 1\nid: {residual_id}\nresidual: true\n", encoding="utf-8")
+        issuer = "https://memory.example.test"
+        config = tmp_path / "collection-host-boundary.json"
+        config.write_text(json.dumps({
+            "version": 1, "default_denied_scope_ids": [SCOPE_ID, writable_id, residual_id],
+            "capture_paths": ["Knowledge Base/Inbox"],
+            "clients": [{"issuer": issuer, "client_id": "writer", "denied_scope_ids": [residual_id],
+                         "writable_scope_ids": [SCOPE_ID if authority == "collection-scope" else writable_id]}],
+        }), encoding="utf-8")
+        monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(config))
+        who = replace(who, client_binding=ClientBinding(issuer, "writer"),
+                      origin_session=OriginSessionBinding("session", "generation", who.audience_id))
+    compiled = policy.load(store.root)
+    assert not compiled.empty and not compiled.blocked
+    before = tuple(store.connection.iterdump())
+
+    def mutate():
+        if operation == "append":
+            return store.append_record(CID, item={"title": "Changed"}, item_key=OTHER, why="capture")
+        return store.update_record(
+            CID, item_key=KEY, changes={"title": "Changed"},
+            expected_container_hash=first["after_container_hash"],
+            expected_item_version=first["after_item_hash"], why="correct")
+
+    with request_scope(who):
+        assert store.inspect_collection(CID)["coverage"]["committed"] == 1
+        if authority == "collection-scope":
+            result = mutate()
+            assert result["outcome"] == "committed"
+        else:
+            with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                mutate()
+    if authority == "collection-scope":
+        versions = store.connection.execute("SELECT row_version FROM items ORDER BY item_key").fetchall()
+        assert versions == ([(1,), (1,)] if operation == "append" else [(2,)])
+    else:
+        assert tuple(store.connection.iterdump()) == before
+
+
 def test_withheld_request_replay_does_not_return_a_stored_receipt(store):
     """Transport retry cannot disclose a receipt after release was withdrawn."""
     create(store)
@@ -208,7 +291,7 @@ def test_withheld_request_replay_does_not_return_a_stored_receipt(store):
     assert tuple(store.connection.iterdump()) == before
 
 
-def test_withheld_preserved_source_refuses_before_storing_provenance(store):
+def test_withheld_preserved_source_refuses_before_storing_provenance(store, tmp_path, monkeypatch):
     """An open collection must not admit provenance from a withheld file."""
     create(store)
     source = "Knowledge Base/Sources/private.md"
@@ -217,8 +300,9 @@ def test_withheld_preserved_source_refuses_before_storing_provenance(store):
     page.write_text("---\ntype: source\n---\nPrivate evidence\n")
     write_scope(store.root, paths="Sources/**")
     write_rule(store.root, ceiling=0)
+    writer = _record_writer(store, tmp_path, monkeypatch)
     before = tuple(store.connection.iterdump())
-    with request_scope(_external()):
+    with request_scope(writer):
         with pytest.raises(collections.CollectionError, match="INVALID_RECORD_SOURCE"):
             store.append_record(CID, item={"title": "One"}, item_key=KEY,
                                 sources=(source,), why="capture")
@@ -661,7 +745,7 @@ def test_withheld_held_candidate_rolls_back_its_pending_view(store):
 
 
 @pytest.mark.parametrize("selector", ["paths", "refs", "projects", "tags", "types", "classes"])
-def test_canonical_selectors_and_exclusions_share_the_file_kernel(store, selector):
+def test_canonical_selectors_and_exclusions_share_the_file_kernel(store, tmp_path, monkeypatch, selector):
     """Each selector can restrict a canonical row and its matching exclusion removes it."""
     text = manifest_text().replace("title: Work", "title: Work\nproject: Alpha\nprojects: [Beta]")
     text = text.replace("    count:", "    tags: {type: array, items: {type: string}}\n"
@@ -675,11 +759,12 @@ def test_canonical_selectors_and_exclusions_share_the_file_kernel(store, selecto
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + f"{selector}: {json.dumps(selectors[selector])}\n")
     write_rule(store.root, ceiling=0)
-    with request_scope(_external()):
+    writer = _record_writer(store, tmp_path, monkeypatch)
+    with request_scope(writer):
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item=item, item_key=KEY, why="repeat")
     scope.write_text(scope.read_text() + f"exclude:\n  {selector}: {json.dumps(selectors[selector])}\n")
-    with request_scope(_external()):
+    with request_scope(writer):
         assert store.append_record(CID, item=item, item_key=KEY, why="repeat")["outcome"] == "replayed"
 
 
@@ -707,7 +792,7 @@ def redeem(store, who, token):
         return tool.op_govern_memory(store.root, "grant", principal=who, token=token)
 
 
-def test_preserved_source_grant_keeps_its_file_hash_basis(store, monkeypatch):
+def test_preserved_source_grant_keeps_its_file_hash_basis(store, tmp_path, monkeypatch):
     """A real file grant admits provenance only while its reviewed bytes survive."""
     import hashlib
 
@@ -719,7 +804,10 @@ def test_preserved_source_grant_keeps_its_file_hash_basis(store, monkeypatch):
     page = store.root / source
     page.parent.mkdir(parents=True)
     page.write_text("---\ntype: source\n---\nPrivate evidence\n")
+    bound = _record_writer(store, tmp_path, monkeypatch, deny_protected=False)
     who = replace(session(store, monkeypatch, paths="Sources/**"), purpose="support")
+    who = replace(who, client_binding=bound.client_binding,
+                  origin_session=replace(bound.origin_session, audience=who.audience_id))
     current = policy.load(store.root)
     decision = decide(membership.evaluate_path_only(store.root, source, current).require_classified(),
                       audience=who.audience_id, purpose="support", policy=current,
@@ -994,12 +1082,16 @@ def test_create_request_identity_conflict_does_not_expose_withheld_receipt(store
 
 
 def test_create_at_another_path_does_not_disclose_a_withheld_identity_conflict(store):
-    """An alternate path cannot probe an existing withheld canonical collection id."""
+    """An alternate path cannot probe an existing withheld canonical collection id.
+
+    A non-owner audience with no client entry writes nothing, and the refusal is decided
+    before the store looks for the identity, so the answer cannot depend on it.
+    """
     create(store)
     withhold(store)
     before = tuple(store.connection.iterdump())
     with request_scope(_external()):
-        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+        with pytest.raises(collections.CollectionError, match="WRITE_REFUSED: target is unavailable"):
             store.create_collection("Knowledge Base/Records/Other/_collection.md", manifest_text(), why="create")
     assert tuple(store.connection.iterdump()) == before
 

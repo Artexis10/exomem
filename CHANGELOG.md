@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.160.0](https://github.com/Artexis10/exomem/compare/v0.159.0...v0.160.0) (2026-11-04)
+
+
+### Features
+
+* **governance:** close unclassified content and confine restricted writes ([#2403](https://github.com/Artexis10/exomem/issues/2403)) ([14ce4a5](https://github.com/Artexis10/exomem/commit/14ce4a567b0309ed74618200773a3ec97af3215d))
+
 ## [0.159.0](https://github.com/Artexis10/exomem/compare/v0.158.1...v0.159.0) (2026-11-04)
 
 

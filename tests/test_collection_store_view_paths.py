@@ -96,6 +96,11 @@ def _files(vault):
 
 
 def test_file_tools_answer_a_withheld_view_as_missing_and_refuse_a_released_one(vault):
+    """A reader with no write authority hears one answer, and the owner hears the view's own refusal.
+
+    A non-owner audience with no client entry writes nothing, so the refusal is decided before
+    the path is looked up and a withheld view answers as an absent path does.
+    """
     def observe():
         return [_call(vault, "delete", path=SECRET, confirm=True),
                 _call(vault, "move_file", old_path=SECRET, new_path="Knowledge Base/Notes/moved.md")]
@@ -103,8 +108,8 @@ def test_file_tools_answer_a_withheld_view_as_missing_and_refuse_a_released_one(
     absent = _as(vault, _external(), observe)
     _add_secret(vault)
     views = _files(vault)
-    assert _as(vault, _external(), observe) == absent == [f"NOT_FOUND: path does not exist: {SECRET}"] * 2
-    released = _as(vault, _external(), lambda: [
+    assert _as(vault, _external(), observe) == absent == ["WRITE_REFUSED: target is unavailable"] * 2
+    released = _as(vault, owner_principal(), lambda: [
         _call(vault, "delete", path=OPEN, confirm=True),
         _call(vault, "move_file", old_path=OPEN, new_path="Knowledge Base/Notes/moved.md")])
     assert [str(answer).split(":")[0] for answer in released] == ["COLLECTION_VIEW_PATH"] * 2
@@ -201,13 +206,19 @@ def test_inbound_links_omit_a_withheld_view(vault):
 
 
 def test_a_withheld_view_title_does_not_resolve_a_writers_link(vault):
+    """A caller with no write authority is refused alike before and after the view exists.
+
+    The refusal is decided before any link resolves, so it cannot depend on the withheld view.
+    The owner's page links the view by its title.
+    """
     def write(name):
         result = _call(vault, "create_file", path=f"Knowledge Base/Inbox/{name}.md", content="See [[Acquire Northwind]].\n")
-        return (vault.root / f"Knowledge Base/Inbox/{name}.md").read_text(), result["warnings_count"]
+        page = vault.root / f"Knowledge Base/Inbox/{name}.md"
+        return page.read_text() if page.exists() else None, result
 
     absent = _as(vault, _external(), lambda: write("before"))
     _add_secret(vault)
-    assert _as(vault, _external(), lambda: write("after")) == absent
+    assert _as(vault, _external(), lambda: write("after")) == absent == (None, "WRITE_REFUSED: target is unavailable")
     assert SECRET.removesuffix(".md") in _as(vault, owner_principal(), lambda: write("owner"))[0]
 
 

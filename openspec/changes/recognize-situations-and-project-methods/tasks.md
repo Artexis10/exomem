@@ -31,6 +31,12 @@
 - [ ] 4.5 Compare identical candidate inputs with and without the interpreter in a small real-model development round; record paired outcomes, uncertainty and cost.
 - [ ] 4.6 Enable interpretation only where evidence justifies deployment; otherwise retain the pluggable interface disabled and record no benefit, with agent-only journeys verified.
 
+The 2026-11-04 local placement qualification used three synthetic candidates on a pinned 7B runtime.
+Cold and supported preloaded runs reached the unchanged 30-second adapter deadline on benign and hostile turns.
+Each input preserved the baseline pool and source identities; none returned qualified inference output.
+No quality score or benefit was established, so interpretation remains disabled.
+Tasks 4.2 and 4.5 remain unqualified; this result does not block the model-free path.
+
 ## 5. Verify and deliver the integrated behavior
 
 - [ ] 5.1 Run the existing real-agent proof route on fresh source-derived cases with independent blind judgment; verify first-answer context use and cross-client method changes.

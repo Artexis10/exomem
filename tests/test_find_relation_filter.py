@@ -276,3 +276,66 @@ def test_a_hidden_page_never_changes_a_restricted_callers_relation_filter(
 
     assert recall(present, None) != recall(absent, admit)
     assert recall(present, admit) == recall(absent, admit)
+
+
+@pytest.fixture
+def governed_anchors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from exomem.governance import policy
+    from test_governance_egress import write_scope
+
+    # Keep cold/warm boundaries deterministic; this test explicitly rebuilds as the owner.
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    vault = _vault(tmp_path, build=False)
+    _write(vault, "Knowledge Base/Private/anchor.md",
+           "---\ntype: insight\n---\n## Relations\n\n"
+           "- supports [[Knowledge Base/Notes/Insights/b]]\n")
+    write_scope(vault, paths="Notes/Insights/**")
+    residual = "01ARZ3NDEKTSV4RRFFQ69G5FW2"
+    _write(vault, "Knowledge Base/_Governance/scopes/residual.yaml",
+           f"governance_version: 1\nid: {residual}\nresidual: true\n")
+    _write(vault, "Knowledge Base/_Governance/rules/residual-external.yaml",
+           "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+           f"scope_ids: [{residual}]\naudience: external\nceiling: 0\n")
+    compiled = policy.load(vault)
+    assert not compiled.empty and not compiled.blocked
+    return vault
+
+
+@pytest.mark.parametrize("full_path", [True, False])
+def test_a_withheld_relation_anchor_matches_an_absent_anchor_before_and_after_graph_build(
+    governed_anchors: Path, full_path: bool,
+) -> None:
+    """A policy-hidden anchor must not disclose itself through graph readiness or registry selection."""
+    from exomem.governance.principal import library_scope, request_scope
+    from test_governance_egress import _external
+
+    vault = governed_anchors
+    for built in (False, True):
+        if built:
+            with library_scope():
+                epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        with request_scope(_external()):
+            hidden = _paths(vault, relations=["supports"], relation_of="Knowledge Base/Private/anchor.md" if full_path else "Private/anchor")
+            absent = _paths(vault, relations=["supports"], relation_of="Knowledge Base/Private/absent.md" if full_path else "Private/absent")
+        assert hidden == absent == set()
+
+
+@pytest.mark.parametrize("audience", ["owner", "external"])
+@pytest.mark.parametrize("full_path", [True, False])
+def test_a_visible_relation_anchor_keeps_warming_and_recall_for_owner_and_non_owner(
+    governed_anchors: Path, audience: str, full_path: bool,
+) -> None:
+    """Page release must preserve visible anchored recall, including shorthand paths and cold indexes."""
+    from exomem.governance.principal import library_scope, request_scope
+    from test_governance_egress import _external
+
+    vault = governed_anchors
+    anchor = A if full_path else "Notes/Insights/a"
+    context = library_scope if audience == "owner" else lambda: request_scope(_external())
+    with context(), pytest.raises(RetrievalIndexWarming) as excinfo:
+        _paths(vault, relations=["supports"], relation_of=anchor)
+    assert excinfo.value.status == "warming"
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    with context():
+        assert _paths(vault, relations=["supports"], relation_of=anchor) == {B}

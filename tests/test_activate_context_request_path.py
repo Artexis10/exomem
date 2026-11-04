@@ -1181,7 +1181,7 @@ def test_first_activation_after_an_edit_serves_current_units_before_its_own_refr
     from test_governance_egress import _external, write_rule, write_scope
 
     from exomem.governance import egress
-    from exomem.governance.principal import request_scope
+    from exomem.governance.principal import library_scope, request_scope
 
     page = "Knowledge Base/Products/Cargo Sled.md"
     hidden = activation_vault / "Knowledge Base/Notes/Patterns/withheld-refresh-unit.md"
@@ -1201,10 +1201,11 @@ def test_first_activation_after_an_edit_serves_current_units_before_its_own_refr
     index = working_set_index.WorkingSetIndex(activation_vault)
     index.update(freshness_stamp=stamp)
     old_token = index.token()
-    commands.op_edit(
-        activation_vault, path=page, why="Correct the operating constraint",
-        old_string="Never exceed 400 kg.", new_string="Never exceed 275 kg.",
-    )
+    with library_scope():
+        commands.op_edit(
+            activation_vault, path=page, why="Correct the operating constraint",
+            old_string="Never exceed 400 kg.", new_string="Never exceed 275 kg.",
+        )
     lexstore.ensure_fresh(activation_vault)
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     started = threading.Event()
@@ -1287,7 +1288,7 @@ def test_an_independent_publication_still_withdraws_compiled_units_without_a_pri
     """Deferral owns only this request's worker; another publisher still invalidates it."""
     from test_governance_egress import _external, write_rule, write_scope
 
-    from exomem.governance.principal import request_scope
+    from exomem.governance.principal import library_scope, request_scope
 
     page = "Knowledge Base/Products/Cargo Sled.md"
     hidden = activation_vault / "Knowledge Base/Notes/Patterns/withheld-refresh-unit.md"
@@ -1323,11 +1324,12 @@ def test_an_independent_publication_still_withdraws_compiled_units_without_a_pri
         ):
             try:
                 if publish.wait(10):
-                    commands.op_edit(
-                        activation_vault, path=page, why="Correct the operating constraint",
-                        old_string=f"Never exceed {old_limit} kg.",
-                        new_string=f"Never exceed {new_limit} kg.",
-                    )
+                    with library_scope():
+                        commands.op_edit(
+                            activation_vault, path=page, why="Correct the operating constraint",
+                            old_string=f"Never exceed {old_limit} kg.",
+                            new_string=f"Never exceed {new_limit} kg.",
+                        )
                     working_set_index.WorkingSetIndex(activation_vault).update()
             except Exception as error:
                 errors.append(error)

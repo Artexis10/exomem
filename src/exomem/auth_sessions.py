@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import errno
 import hashlib
 import hmac
@@ -20,6 +21,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
@@ -1523,3 +1525,17 @@ async def origin_session_active(who: Any) -> bool:
         ) is not None
     except (RuntimeError, ValueError, OSError, SessionStoreUnavailable):
         return False
+
+
+def origin_session_active_sync(who: Any) -> bool:
+    """Revalidate a delegated origin from a synchronous caller, retaining request evidence."""
+    if who.origin_session is None:
+        return True
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(origin_session_active(who))
+    # Synchronous job ticks may run on an ASGI loop; retain its verified request context.
+    context = contextvars.copy_context()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(context.run, lambda: asyncio.run(origin_session_active(who))).result()

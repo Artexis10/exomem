@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: d0d2f5f57e2223dbc7781b36264ab1ac3366c15d6d6c20bd17fc7a1735986c91
+  skill_contract: fd710c63184e58b1b1e77dd49356dbf33f8abce866c0ddad2ca41efb96931d56
   version: "0.1.0"
 ---
 
@@ -46,6 +46,19 @@ Bootstrap's `store` names the Exomem this connector reaches. When the user asks 
 different Exomem, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
+
+Maps activation also returns `task_context`: source-bound leads and reusable methods.
+Read a lead before treating it as a fact or an ongoing commitment.
+Methods are live governed knowledge. Read each `read_ref` when applicability is
+`read_required`, including the source's scope and exclusions, before applying it.
+A current user instruction can override a method for this task within existing authority.
+This local adaptation does not revise the reusable method or authorize external actions.
+Use the ordinary guarded writer for an authorized reusable revision.
+Carry the activation `continuity` token on later activations. If `methods.reset` is
+true, discard held method projections before using this response.
+Without method continuity, freshly read a method before reusing it.
+An unchanged map does not certify method freshness. Refresh when the task, evidence
+or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Durable personal baselines
 A stable preference, recurring routine, historical baseline, or durable affiliation

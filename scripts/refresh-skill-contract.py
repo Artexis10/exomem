@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Refresh generated authoring projections and canonical skill-contract stamps."""
+"""Refresh shared portable rules, authoring projections and skill-contract stamps."""
 
 from __future__ import annotations
 
@@ -21,6 +21,9 @@ def main() -> None:
     args = parser.parse_args()
     concise = semantic_authoring.render_concise()
     schema = workflow_skills.WORKFLOW_SKILLS_DIR.parent
+    # These headings bound the canonical portable contract in shipped skills.
+    portable_heading = "## Portable operating rules\n"
+    portable = (schema / "SKILL.md").read_text(encoding="utf-8").split(portable_heading, 1)[1].split("\n## ", 1)[0].strip()
     targets = [schema / "references" / "semantic-authoring.md"]
     targets.extend(
         source
@@ -31,6 +34,10 @@ def main() -> None:
     changes = {}
     for target in targets:
         text = target.read_text(encoding="utf-8")
+        if target.name == "SKILL.md":
+            before, remaining = text.split(portable_heading, 1)
+            _, after = remaining.split("\n## ", 1)
+            text = before + portable_heading + "\n" + portable + "\n\n## " + after
         start = text.index("<!-- exomem-semantic-authoring:")
         changes[target] = text[:start] + concise
     doc = REPO_ROOT / "docs" / "semantic-language.md"
