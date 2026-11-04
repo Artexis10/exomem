@@ -161,6 +161,130 @@ def test_tool_only_rejects_a_synthetic_hook_turn_before_staging(tmp_path: Path) 
         main(["run", "--suite", "session-close", "--client-mode", "tool-only", "--hook-turn", "--model", "unused", "--dry-run", "--out", str(tmp_path)])
 
 
+def test_credits_launcher_keeps_fresh_on_the_same_payer_and_preserves_tail_or_rejection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from import_guidance.recording import Arm
+
+    def no_subscription():
+        pytest.fail("an explicit credits route must never discover or fall back to subscription Claude")
+
+    monkeypatch.setattr(session_close, "discover_agent_envelope", no_subscription)
+    monkeypatch.setattr(session_close, "WARM_HOLD_SECONDS", 0)
+    launcher = tmp_path / "fake-harness"
+    launcher.write_text(f"#!{sys.executable}\n" + '''import argparse,json,os,sys
+from pathlib import Path
+assert sys.argv[1:3] == ["claude-credits", "run"]
+boundary = sys.argv.index("--")
+parser = argparse.ArgumentParser()
+for flag in ("--account", "--model", "--budget", "--reason"):
+ parser.add_argument(flag, required=True)
+parser.add_argument("--stream-json", action="store_true", required=True)
+args = parser.parse_args(sys.argv[3:boundary])
+# These flags belong to the maintained launcher's closed duplex protocol.
+assert not set(sys.argv[boundary+1:]) & {"-p", "--print", "--input-format", "--output-format", "--verbose", "--model", "--no-session-persistence", "--session-id", "--resume"}
+receipt = Path.cwd().parent / "launcher-receipt.json"
+messages = []
+receipt.write_text(json.dumps({"argv":sys.argv[1:], "messages":messages}))
+if args.account == "rejected-payer":
+ print("Local payer rejection.", file=sys.stderr, flush=True)
+ sys.exit(23)
+print(json.dumps({"type":"system", "subtype":"init", "session_id":str(os.getpid()), "claude_code_version":"fixture-cli", "mcp_servers":[{"name":"exomem", "status":"connected"}]}), flush=True)
+for line in sys.stdin:
+ message = json.loads(line)
+ assert message["type"] == "user" and message["message"]["role"] == "user"
+ messages.append(message["message"]["content"])
+ print(json.dumps({"type":"result", "subtype":"success", "result":"Local protocol receipt."}), flush=True)
+receipt.write_text(json.dumps({"argv":sys.argv[1:], "messages":messages}))
+settings = json.loads(Path(sys.argv[sys.argv.index("--settings")+1]).read_text())
+if not settings.get("disableAllHooks"):
+ print(json.dumps({"type":"system", "subtype":"hook_started", "hook_event":"SessionEnd"}), flush=True)
+ print(json.dumps({"type":"system", "subtype":"hook_response", "hook_event":"SessionEnd", "output":""}), flush=True)
+''')
+    launcher.chmod(0o700)
+    selected = session_close.load_cases("c01")[0]
+    arm = Arm("test", Path(__file__).resolve().parents[1])
+    for payer, mode in (("fixture-payer", "plugin"), ("rejected-payer", "tool-only")):
+        credits = session_close.CreditsRun(payer, 0.25, "Local adapter proof", executable=launcher)
+        row = session_close.run_session(selected, arm, model="local-model", repeat=0, out=tmp_path / payer, executable=launcher,
+                                        stamp={"cli_version": None, "product_shas": {"test": "test"}}, credits=credits, client_mode=mode)
+        assert row["cli_version"] is None
+        for stage, turns in ((row, selected.turns), (row["fresh"], (selected.recall_turn,))):
+            assert stage["transport"] == "claude-credits" and stage["credits_account"] == payer
+            assert stage["credits_budget_usd"] == 0.25 and stage["client_mode"] == mode
+            argv = stage["argv"]
+            assert argv[0] == str(launcher) and "--strict-mcp-config" in argv and "--include-hook-events" in argv
+            assert argv[argv.index("--budget")+1] == str(credits.budget_usd) and argv[argv.index("--reason")+1] == credits.reason
+            assert argv[argv.index("--account")+1] == payer and argv[argv.index("--model")+1] == "local-model"
+            assert argv[argv.index("--setting-sources")+1] == "project"
+            assert argv[argv.index("--allowedTools")+1] == f"mcp__{checks.SERVER}" and argv[argv.index("--tools")+1] == ""
+            receipt = json.loads((Path(stage["stream"]).parent / "launcher-receipt.json").read_text())
+            assert receipt["argv"] == argv[1:]
+            if payer == "rejected-payer":
+                assert stage["error"] and stage["returncode"] == 23 and stage["session_id"] is None
+                assert stage["settings"] == {"disableAllHooks": True} and "--append-system-prompt-file" not in argv
+            else:
+                assert stage["error"] is None and stage["stdout_eof"] and stage["actor_version"] == "fixture-cli"
+                assert stage["hook_starts"] == stage["hook_invocations"] == 1
+                assert receipt["messages"] == [[{"type": "text", "text": turn}] for turn in turns]
+                assert json.loads(Path(stage["stream"]).read_text().splitlines()[-1])["subtype"] == "hook_response"
+        if payer != "rejected-payer":
+            assert row["session_id"] != row["fresh"]["session_id"]
+
+
+def test_credits_discovery_keeps_the_selected_launcher_or_fails_without_subscription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from import_guidance.recording import Arm
+
+    def no_subscription():
+        pytest.fail("a missing credits launcher must fail without subscription discovery")
+
+    monkeypatch.setattr(session_close, "discover_agent_envelope", no_subscription)
+    monkeypatch.setattr(session_close.shutil, "which", lambda _name: None)
+    # This discovery-only check starts no child; the output guard has its own maintained tests.
+    monkeypatch.setattr(session_close, "refuse_unsafe_out_dir", lambda out: out)
+    with pytest.raises(SystemExit, match="credits launcher.*not found"):
+        session_close.run_all([], model="unused", repeats=1, out=tmp_path / "missing", arms=[], credits=session_close.CreditsRun("fixture-payer", 0.25, "Local adapter proof"))
+    launched = []
+
+    def record_launch(_case, _arm, **kwargs):
+        launched.append(kwargs)
+        return {"error": None}
+
+    monkeypatch.setattr(session_close, "run_session", record_launch)
+    launcher = tmp_path / "selected-harness"
+    monkeypatch.setattr(session_close.shutil, "which", lambda name: str(launcher) if name == "harness" else None)
+    credits = session_close.CreditsRun("fixture-payer", 0.25, "Local adapter proof")
+    session_close.run_all(session_close.load_cases("c01"), model="unused", repeats=1, out=tmp_path / "selected", arms=[Arm("test", Path(__file__).resolve().parents[1])], credits=credits)
+    assert len(launched) == 1 and launched[0]["executable"] == launcher and launched[0]["credits"] == credits
+
+
+def test_credits_cli_rejects_partial_or_invalid_payer_options_before_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from import_guidance.__main__ import main
+
+    def no_discovery(*_args, **_kwargs):
+        pytest.fail("invalid credits options must fail before case loading or executable discovery")
+
+    with monkeypatch.context() as invalid:
+        invalid.setattr(session_close, "load_cases", no_discovery)
+        invalid.setattr(session_close, "discover_agent_envelope", no_discovery)
+        base = ["run", "--suite", "session-close", "--model", "unused", "--out", str(tmp_path)]
+        for options in (["--credits-account", "fixture-payer"],
+                        ["--credits-account", " ", "--credits-budget-usd", "1", "--credits-reason", "Local proof"],
+                        ["--credits-account", "fixture-payer", "--credits-budget-usd", "1", "--credits-reason", " "],
+                        *(["--credits-account", "fixture-payer", "--credits-budget-usd", budget, "--credits-reason", "Local proof"] for budget in ("0", "nan", "inf"))):
+            with pytest.raises(SystemExit, match="--credits-"):
+                main(base + options)
+        with pytest.raises(SystemExit, match="session-close suite only"):
+            main(["run", "--model", "unused", "--out", str(tmp_path), "--credits-account", "fixture-payer", "--credits-budget-usd", "1", "--credits-reason", "Local proof"])
+    configurations = []
+
+    def record_configuration(_cases, **kwargs):
+        configurations.append(kwargs["credits"])
+        return []
+
+    monkeypatch.setattr(session_close, "run_all", record_configuration)
+    assert main(base + ["--scenario", "c01", "--product-root", f"test={Path(__file__).resolve().parents[1]}", "--credits-account", "fixture-payer", "--credits-budget-usd", "0.25", "--credits-reason", "Local proof"]) == 0
+    assert configurations == [session_close.CreditsRun("fixture-payer", 0.25, "Local proof")]
+
+
 def test_tool_only_hook_observations_reject_contamination_and_unavailable_transport() -> None:
     base = {"error": None, "hook_invocations": 0, "hook_starts": 0, "server_connected": {checks.SERVER: "connected"}}
     assert session_close.client_mode_error("tool-only", base) is None

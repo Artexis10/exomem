@@ -52,6 +52,14 @@ The [official hook setting](https://code.claude.com/docs/en/settings-reference#d
 
 Capture and fresh rows retain `client_mode`, the actual argv, supplied settings, hook starts and completed invocation counts. Work directories include the mode. Native identity, scored rows, denominators and paired intervals keep modes separate; historical rows without a mode mean plugin. Blind judge views expose neither mode nor actor identity.
 
+The native Claude route remains the default. For the maintained credits launcher, supply `--credits-account`, `--credits-budget-usd` and `--credits-reason` together. These options apply only to session-close. Empty account or reason values and nonpositive or nonfinite budgets fail before executable discovery.
+
+The adapter resolves `harness` on PATH without a shell. It uses `claude-credits run --stream-json` with the existing `--budget` option; the launcher owns framing, model and session flags. The remaining actor flags preserve strict MCP access, tool restrictions, settings, hook events and the selected client mode.
+
+The budget is the maximum requested for **each independent process**, including fresh recall. It is neither a decision-wide cap nor spending authority. The evaluation owner still agrees the total budget and reconciles costs. The maintained launcher must ship its literal duplex support before a programme run selects this route. Missing launchers and failed payer launches never fall back to subscription Claude.
+
+Capture and fresh evidence record `transport`, the requested `credits_account`, `credits_budget_usd` and actual argv. Credits runs leave the discovered native `cli_version` unset. Each stage records `actor_version` only from its actual init event, without treating the wrapper's version as the actor's version. The adapter adds no account catalog or cost policy.
+
 The key writer supplies the references and recall questions independently. Generation's `Case` object contains no key. The actor receives neither reference text nor scorer files. Cases c01, c02, c03, c07, c08, c09, c10 and c11 have fixed input recall probes. Case c11 combines a compiled-note update and an entity update in one session.
 
 For external cases, pass the same `--case-dir` to `run --suite session-close` and each `session-score` invocation. Cases keep the existing format and resolve seed identifiers against the shipped seeds. Scoring reads `<case-dir>/answer-keys/<id>.json`; actor staging receives neither the case directory nor its keys. Omit the option to use shipped cases.

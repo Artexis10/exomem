@@ -15,6 +15,7 @@ import difflib
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import queue
 import shutil
@@ -77,6 +78,29 @@ class Case:
     turns: tuple[str, ...]
     path: Path
     recall_turn: str | None = None
+
+
+@dataclass(frozen=True)
+class CreditsRun:
+    account: str
+    budget_usd: float
+    reason: str
+    executable: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not self.account.strip() or not self.reason.strip():
+            raise ValueError("--credits-account and --credits-reason must not be empty")
+        if not math.isfinite(self.budget_usd) or self.budget_usd <= 0:
+            raise ValueError("--credits-budget-usd must be positive and finite")
+
+
+def transport_metadata(credits: CreditsRun | None) -> dict:
+    # Transport names are a closed harness protocol; account values stay caller data.
+    return {
+        "transport": "claude-credits" if credits else "native",
+        "credits_account": credits.account if credits else None,
+        "credits_budget_usd": credits.budget_usd if credits else None,
+    }
 
 
 def suite_dir() -> Path:
@@ -296,15 +320,8 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
     return files
 
 
-def agent_argv(executable: Path, files: dict[str, Path], model: str) -> list[str]:
-    return [
-        str(executable),
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
+def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: CreditsRun | None = None) -> list[str]:
+    shared = [
         "--include-hook-events",
         "--strict-mcp-config",
         "--mcp-config",
@@ -319,10 +336,14 @@ def agent_argv(executable: Path, files: dict[str, Path], model: str) -> list[str
         "",
         "--max-turns",
         "40",
-        "--model",
-        model,
-        "--no-session-persistence",
     ] + (["--append-system-prompt-file", str(files["skill"])] if "skill" in files else [])
+    if credits:
+        # The maintained duplex protocol owns print, framing, model and session flags before `--`.
+        return [str(executable), "claude-credits", "run", "--account", credits.account,
+                "--model", model, "--budget", str(credits.budget_usd), "--reason", credits.reason,
+                "--stream-json", "--", *shared]
+    return [str(executable), "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+            *shared, "--model", model, "--no-session-persistence"]
 
 
 def agent_env(work: Path, case: Case) -> dict[str, str]:
@@ -569,6 +590,7 @@ def session_result(done: SimpleNamespace, expected_turns: int, client_mode: str 
         "hook_starts": sum(event.get("type") == "system" and event.get("subtype") == "hook_started" for event in stream_events(done.stdout)) if done.stdout_eof else None,
         "capture_nudges": firings,
         "session_id": init_field(done.stdout, "session_id"),
+        "actor_version": init_field(done.stdout, "claude_code_version"),
         "replies": replies_by_turn(done.stdout),
         "calls": trail["calls"],
         "compile_blocks": trail["compile"],
@@ -584,12 +606,13 @@ def session_result(done: SimpleNamespace, expected_turns: int, client_mode: str 
     return result
 
 
-def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict:
+def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE, credits: CreditsRun | None = None) -> dict:
     """A new actor and server on capture's state, with only the independently supplied question."""
     fresh = work / "fresh"
     stream = fresh / "stream.jsonl"
     row = {
         "question": case.recall_turn,
+        **transport_metadata(credits),
         "client_mode": client_mode,
         "hook_invocations": None,
         "hook_starts": None,
@@ -609,7 +632,7 @@ def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Pa
             (fresh / name).mkdir(parents=True)
         row["before"] = snapshot(work / "vault")
         files = stage_agent_files(arm, fresh, env, client_mode)
-        row.update(argv=agent_argv(executable, files, model), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
+        row.update(argv=agent_argv(executable, files, model, credits), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
         done = drive_session(
             row["argv"],
             fresh / "cwd",
@@ -641,6 +664,7 @@ def run_session(
     stamp: dict[str, str],
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
+    credits: CreditsRun | None = None,
 ) -> dict:
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
@@ -650,13 +674,14 @@ def run_session(
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case)
     files = stage_agent_files(arm, work, env, client_mode)
-    argv = agent_argv(executable, files, model)
+    argv = agent_argv(executable, files, model, credits)
     row: dict = {
         "scenario": case.id,
         "repeat": repeat,
         "model": model,
         "arm": arm.label,
         "client_mode": client_mode,
+        **transport_metadata(credits),
         "argv": argv,
         "settings": json.loads(files["settings"].read_text(encoding="utf-8")),
         "hook_invocations": None,
@@ -692,7 +717,7 @@ def run_session(
             observed=diff_vault(before, after),
         )
         if case.recall_turn is not None:
-            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env, client_mode=client_mode)
+            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env, client_mode=client_mode, credits=credits)
             if row["fresh"].get("session_id") == row.get("session_id") and row.get("session_id"):
                 row["fresh"]["error"] = "the fresh actor reused the capture session identity"
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -726,15 +751,23 @@ def run_all(
     repeat_offset: int = 0,
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
+    credits: CreditsRun | None = None,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
     out = refuse_unsafe_out_dir(out)
     out.mkdir(parents=True, exist_ok=True)
-    envelope = discover_agent_envelope()
+    if credits:
+        launcher = credits.executable or shutil.which("harness")
+        if not launcher:
+            raise SystemExit("the maintained credits launcher 'harness' was not found; no actor was started")
+        executable, cli_version = Path(launcher), None
+    else:
+        envelope = discover_agent_envelope()
+        executable, cli_version = envelope.executable, envelope.version
     stamp = {
-        "cli_version": envelope.version,
+        "cli_version": cli_version,
         "repo_sha": checkout_sha(REPO_ROOT),
         "product_shas": {arm.label: checkout_sha(arm.root) for arm in arms},
     }
@@ -749,10 +782,11 @@ def run_all(
                         repeat=repeat,
                         model=model,
                         out=out,
-                        executable=envelope.executable,
+                        executable=executable,
                         stamp=stamp,
                         hooked=hooked,
                         client_mode=client_mode,
+                        credits=credits,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()

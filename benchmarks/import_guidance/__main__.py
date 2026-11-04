@@ -35,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--case-dir", type=Path, help="session-close case inputs; seed identifiers still use shipped seeds")
     run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill")
+    run.add_argument("--credits-account", help="session-close only: select the maintained credits launcher account")
+    run.add_argument("--credits-budget-usd", type=float, help="maximum requested for each capture or fresh process; requires account and reason")
+    run.add_argument("--credits-reason", help="the maintained credits launcher's reason; requires account and budget")
     run.add_argument(
         "--suite",
         default=DEFAULT_SUITE,
@@ -115,6 +118,17 @@ def main(argv: list[str] | None = None) -> int:
             print(text)
         return 0
 
+    args.credits = None
+    credits_options = (args.credits_account, args.credits_budget_usd, args.credits_reason)
+    if any(value is not None for value in credits_options):
+        if args.suite != session_close.SUITE:
+            raise SystemExit("--credits-account, --credits-budget-usd and --credits-reason apply to the session-close suite only")
+        if any(value is None for value in credits_options):
+            raise SystemExit("--credits-account, --credits-budget-usd and --credits-reason are required together")
+        try:
+            args.credits = session_close.CreditsRun(*credits_options)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
     arms = [parse_arm(text) for text in args.product_root]
     if args.client_mode is not None and args.suite != session_close.SUITE:
         raise SystemExit("--client-mode applies to the session-close suite only")
@@ -188,6 +202,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         repeat_offset=args.repeat_offset,
         hooked=args.hook_turn,
         client_mode=args.client_mode,
+        credits=args.credits,
     )
     return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 
