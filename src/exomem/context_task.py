@@ -153,6 +153,14 @@ def _deadline_check() -> None:
         raise TimeoutError("task source preparation is unavailable")
 
 
+def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
+    """The raw fast path requires unrestricted content and no file release policy."""
+    policy, _active = egress.gate_state(root)
+    who = principal.effective_principal().with_purpose(caller.purpose)
+    return (provider is None and egress._file_policy_empty(root, policy)
+            and egress.unrestricted_content_access(root, who))
+
+
 def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expected_hash=None, provider=None, check=None):
     """Release one immutable source before its text, metadata or version can influence a task."""
     check = check or _deadline_check
@@ -165,7 +173,7 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
         return None
     check()
     method_cache = {}
-    if not caller.restricted and provider is None:
+    if full_source_access(root, caller, provider=provider):
         if expected_hash is not None:
             _raw, guard = vault.read_bounded_guarded_bytes(
                 root, source_ref, limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES, expected_hash=expected_hash,

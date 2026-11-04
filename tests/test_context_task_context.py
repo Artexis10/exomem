@@ -6,7 +6,7 @@ import pytest
 from test_activate_context_maps import _activate, _without_response_id
 from test_context_catalogue import _built, _page, _source_schema, _write
 from test_context_views import _second_vault
-from test_governance_egress import _external
+from test_governance_egress import _external, write_rule
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
@@ -295,7 +295,8 @@ def test_unavailable_method_currency_preserves_admitted_read_routes(vault: Path,
     assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
 
 
-def test_withheld_units_cannot_create_restricted_task_routes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("caller", [_external(), principal.owner_principal(surface="library")], ids=["external", "owner"])
+def test_withheld_units_cannot_create_restricted_task_routes(vault: Path, monkeypatch: pytest.MonkeyPatch, caller) -> None:
     """A mixed page stays discoverable for its visible unit without matching its withheld unit."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
@@ -303,19 +304,18 @@ def test_withheld_units_cannot_create_restricted_task_routes(vault: Path, monkey
     withheld = f"- [technique] Evaluate germination using [[{hidden}]] ^hidden\n"
     path = _page(vault, "measurement-reference", body=visible + "\n" + withheld)
     _withhold(vault, hidden, ceiling=0)
+    write_rule(vault, ceiling=0, audience=caller.audience_id)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
-    before = _activate(vault, _external(), turn="Evaluate germination", max_chars=8000)
-    allowed = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    before = _activate(vault, caller, turn="Evaluate germination", max_chars=8000)
+    allowed = _activate(vault, caller, turn="Inspect optical alignment", max_chars=8000)
     assert path in str(allowed["task_context"])
     (vault / path).write_text((vault / path).read_text().replace("\n" + withheld, ""))
     freshness.on_files_changed(vault, [vault / path])
     _built(vault).close()
     lexstore.ensure_fresh(vault)
-    after = _activate(vault, _external(), turn="Evaluate germination", max_chars=8000)
-    assert {item["source_ref"] for item in before["task_context"]["candidates"]} == {
-        item["source_ref"] for item in after["task_context"]["candidates"]
-    }
+    after = _activate(vault, caller, turn="Evaluate germination", max_chars=8000)
+    assert before["task_context"] == after["task_context"]
 
 
 def test_restricted_task_admission_precedes_candidate_limits(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -337,7 +337,8 @@ def test_restricted_task_admission_precedes_candidate_limits(vault: Path, monkey
     assert not any("measurement-reference-" in ref for ref in refs)
 
 
-def test_excerpt_only_sources_do_not_expose_task_hashes_or_metadata(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("caller", [_external(), principal.owner_principal(surface="library")], ids=["external", "owner"])
+def test_excerpt_only_sources_do_not_expose_task_hashes_or_metadata(vault: Path, monkeypatch: pytest.MonkeyPatch, caller) -> None:
     """An excerpt permission keeps canonical pull routes without exposing whole-source versions or metadata."""
     import hashlib
     import json
@@ -346,15 +347,16 @@ def test_excerpt_only_sources_do_not_expose_task_hashes_or_metadata(vault: Path,
     path = _page(vault, "measurement-reference", "title: Restricted metadata label\n",
                  body="- [technique] Inspect optical alignment ^visible\n\n" + "Neutral observation. " * 60)
     _withhold(vault, path, ceiling=5)
+    write_rule(vault, ceiling=5, audience=caller.audience_id)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     raw_hash = hashlib.sha256((vault / path).read_bytes()).hexdigest()
     reader = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
-    with principal.request_scope(_external()):
+    with principal.request_scope(caller):
         canonical = invoke_command(reader, vault, path=path)
     assert canonical["release_level"] == 5 and canonical["body"]
     assert "content_hash" not in canonical and raw_hash not in json.dumps(canonical)
-    packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+    packet = _activate(vault, caller, turn="Inspect optical alignment", max_chars=8000)
     assert packet["abstained"] is False and "map" in packet
     assert packet["task_context"]["state"] in ("partial", "unavailable")
     assert path not in {item["source_ref"] for item in packet["task_context"]["candidates"]}

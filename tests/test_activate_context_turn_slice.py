@@ -281,7 +281,9 @@ def test_a_slice_with_no_record_is_replaced_and_leaves_the_map(vault: Path) -> N
     assert guarded is not None
     assert guarded["turn_slice"] == {"state": "unavailable", "items": []}
     assert guarded["map"] == compiled_map and not guarded.get("abstained")
-    assert guarded["budget"]["used_chars"] == context_views.map_packet_chars(compiled_map)
+    assert guarded["budget"]["used_chars"] == context_views.packet_chars(
+        compiled_map, guarded.get("turn_slice"), guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+    )
 
 
 def test_a_slice_compiled_for_a_larger_packet_is_never_served(vault: Path) -> None:

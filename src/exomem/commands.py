@@ -6774,13 +6774,11 @@ def op_activate_context(
 ) -> dict:
     """Recall authorized context; abstain if uncertain.
 
-    Reuse held context; conversation supplies excerpts, not attachment reads.
-    focus is agent-authored, not human intent; clarify ambiguity.
-    Keep source identity/scope. Due/refresh grants no writes.
-    Read map/task_context refs with read_memory; read method scope/exclusions.
-    methods.reset discards held methods before reuse. Follow next_action.
-    Optional epistemic_status has counts/completeness; read_memory gives
-    items/reading provenance.
+    Reuse held context; conversation gives excerpts. Agent focus is not human intent.
+    Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
+    Read map/task_context refs and method scope/exclusions with read_memory.
+    Discard held methods on methods.reset. Follow next_action.
+    epistemic_status: counts/completeness; read_memory: provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.

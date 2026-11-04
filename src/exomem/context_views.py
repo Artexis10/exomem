@@ -1366,13 +1366,16 @@ def _activation_packet(
                     cached_leads = TurnLeads(UNAVAILABLE)
             return cached_leads
 
+        slice_block = None
+
         def prepare_slice():
-            # Protect useful slice lines within half of the existing reserve; duplicate pointers add no evidence.
-            preview = _turn_slice(
+            nonlocal slice_block
+            # Preserve the complete guarded slice; tasks use only its actual remainder.
+            slice_block = _turn_slice(
                 prepared, leads_once, world=compiled.world, limit=packet["budget"]["limit_chars"],
-                reserve=reserve // 2, timings=timings,
+                reserve=reserve, timings=timings,
             )
-            return frozenset(lead.ref for lead in leads_once(prepared.caller).leads), slice_packet_chars(preview)
+            return frozenset(item["ref"] for item in slice_block["items"]), slice_packet_chars(slice_block)
 
         if task_context is not None:
             from . import context_task
@@ -1383,9 +1386,8 @@ def _activation_packet(
             packet["budget"]["used_chars"] += task_chars
             reserve = max(0, reserve - task_chars)
         if turn_leads is not None:
-            slice_block = _turn_slice(
-                prepared, leads_once, world=compiled.world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
-            )
+            if slice_block is None:
+                prepare_slice()
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
         packet["abstained"] = False

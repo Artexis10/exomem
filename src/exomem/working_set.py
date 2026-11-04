@@ -1348,13 +1348,18 @@ def task_candidates(
     from . import (
         bm25,
         collection_claims,
+        context_task,
         context_views,
         epistemic_graph,
         lexstore,
         record_governance,
     )
+    from .governance import egress
 
-    entries = [entry for entry in catalogue.entries() if entry.path and context_views._admits(entry, caller.visible)]
+    page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+    entries = [entry for entry in catalogue.entries() if entry.path
+               and context_views._admits(entry, caller.visible)
+               and (page_visible is None or page_visible(entry.path))]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
@@ -1364,13 +1369,11 @@ def task_candidates(
     categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
     found: dict[str, dict[str, Any]] = {}
     missing: list[dict[str, str]] = []
-    restricted = caller.restricted
+    restricted = not context_task.full_source_access(vault_root, caller)
     token_corpus = None
     statistics = None
     metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
     if restricted:
-        from . import context_task
-
         projections = projections if projections is not None else {}
         token_corpus = {}
         corpus_bytes = 0

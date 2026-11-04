@@ -69,8 +69,6 @@ def test_invalid_identity_judgments_reject_the_complete_result(items) -> None:
 def test_api_disclosure_and_provider_outage_leave_the_baseline_available(vault: Path) -> None:
     """Caller admission does not authorize provider disclosure; timeout causes no fallback."""
     path = _page(vault, "restricted-comparison", body="Source data.\n")
-    source = find_corpus.CACHE.get(vault / path, vault)
-    candidates = [{"ref": path, "source_ref": path, "source_version": source.snapshot_hash}]
     write_scope(vault, paths=path)
     write_rule(vault, ceiling=0, audience="fixture-provider")
     config = context_fit.Placement(
@@ -88,6 +86,9 @@ def test_api_disclosure_and_provider_outage_leave_the_baseline_available(vault: 
 
     with principal.request_scope(OWNER):
         caller = context_views.CallerView.current(vault)
+        source = context_task.project_source(vault, path, caller)
+        assert source is not None
+        candidates = [{"ref": path, "source_ref": path, "source_version": source.version}]
         baseline, status = context_fit.interpret(vault, caller=caller, candidates=candidates, turn="Compare sources",
             conversation=working_set_conversation.NONE, placement=config, transport=httpx.MockTransport(handler))
         assert baseline == candidates and status == {"state": "unavailable"} and called == []

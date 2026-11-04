@@ -322,6 +322,10 @@ def _restricted_writer(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def _same_bytes_but_for_ids(value: object) -> str:
     if isinstance(value, dict):
         value = {key: item for key, item in value.items() if key != "served_context_id"}
+        task = value.get("task_context")
+        # The 32-hex task generation derives from source versions normalized below, which differ across fresh vaults.
+        if isinstance(task, dict) and re.fullmatch(r"[0-9a-f]{32}", task.get("generation", "")):
+            value["task_context"] = {**task, "generation": "<id>"}
     return VOLATILE.sub("<id>", json.dumps(value, sort_keys=True))
 
 

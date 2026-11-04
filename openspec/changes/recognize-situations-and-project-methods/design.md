@@ -134,8 +134,8 @@ Maps orient, profiles provide depth, stance supplies applicable standing constra
 Use the existing prose budget, serialized-size report, continuation and `next_action` mechanism.
 The map keeps the existing fixed 25% reserve so its allocation stays independent of the turn.
 Task context and the turn slice share this reserve.
-Generic task pointers already present in the guarded lead pool are omitted.
-Useful slice lines can keep up to half of the reserve; task context uses the remaining allowance.
+Preserve the complete guarded slice within this reserve; task context uses the actual remaining allowance.
+Omit generic task pointers only when the slice retains their routes.
 This preserves existing contact and due-item routes that duplicate task pointers had crowded out in development.
 Compile stance before dividing the remaining material allowance. Reserve next-action prose before compiling material.
 When task context runs, stance can use only the space above mandatory map framing divided by one minus the fixed share.

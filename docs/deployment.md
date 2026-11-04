@@ -1377,10 +1377,10 @@ The slice reads the `conversation` and the `trigger` of the request. It takes no
 
 The slice is on by default. The map compiles in a fixed share of the packet
 budget on every turn, so the map is the same on a turn that resolves nothing.
-Task context and the slice share the existing 25% reserve. Task context omits
-generic pointers already reached by the guarded slice. Useful slice lines can
-keep up to half of this reserve; task context uses the remaining allowance.
-Unused task space returns to the slice. A turn that reaches nothing gets `turn_slice.state` of
+Task context and the slice share the existing 25% reserve. The complete guarded
+slice compiles in this reserve first. Task context uses the actual remaining
+allowance and omits generic pointers only for routes that the slice retains.
+A turn that reaches nothing gets `turn_slice.state` of
 `empty`. A slice that cannot be built sets its `state` and leaves the map as it
 is. The default changed to on by an operator decision, so that the `maps` packet
 reaches pages that the map does not list; it is not the result of a measured gain.
