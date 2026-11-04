@@ -776,11 +776,7 @@ def _contradiction_fixture() -> claims.FixturePair:
 
 
 def _wire_claim_texts(monkeypatch, texts: dict[str, str]) -> None:
-    monkeypatch.setattr(
-        claims,
-        "claim_text_for_page",
-        lambda vault_root, rel_path, *, index=None: texts.get(rel_path),
-    )
+    monkeypatch.setattr(claims,"extract_claim_for_page",lambda page:texts.get(page.rel_path))
 
 
 def _proximity_finding(
@@ -839,11 +835,44 @@ def _omitted_summary() -> audit_module.AuditFinding:
 
 
 def _enrichable(tmp_path, monkeypatch, *, predict=None) -> None:
-    """Admit the verifier, wire the two pages' claims, open the claim-level gate."""
+    """Seed admitted ledger evidence; audit itself never calls the predictor."""
+    import sensing_fixture as sf
+
+    from exomem import sensing, sensing_ledger
+
     fixture = _contradiction_fixture()
     _admit(tmp_path, monkeypatch, predict or _oracle_predict())
+    digest = claims.verifier_admission().model_digest
+    identity = dataclasses.replace(sf.STUB, weights_sha256=digest)
+    sf.enable(monkeypatch, identity)
     _wire_claim_texts(monkeypatch, {_PAGE_A: fixture.claim_a, _PAGE_B: fixture.claim_b})
+    texts = (fixture.claim_a, fixture.claim_b)
+    inputs = tuple(
+        sensing.InputSlot(path, path, slot, "page-claim-v1", sensing.text_sha256(text))
+        for path, slot, text in zip((_PAGE_A, _PAGE_B), ("a", "b"), texts, strict=True)
+    )
+    request = sensing.SenseRequest(sensing.PAIR_RELATION, 2, inputs, texts)
+    reading = sensing.make_request_reading(
+        request,
+        identity,
+        vectors={"ab": sf.CONTRA, "ba": sf.CONTRA},
+        abstain_reason=None,
+        sensed_at="2026-01-01T00:00:00Z",
+    )
+    ledger = sensing_ledger.Ledger(tmp_path)
+    conn = ledger.connect()
+    ledger.append(conn, [reading])
+    conn.close()
     monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+
+
+def _enrich(vault, findings):
+    from types import SimpleNamespace
+
+    eligible = {
+        path: SimpleNamespace(rel_path=path) for finding in findings for path in finding.paths or []
+    }
+    audit_module._enrich_contradiction_polarity(vault, findings, eligible)
 
 
 # ---- 3.1 the admitted verifier is the only enrichment channel ----
@@ -856,13 +885,13 @@ def test_admitted_verifier_writes_the_label_with_digest_and_label_map(
     digest = claims.verifier_admission().model_digest
     findings = [_proximity_finding()]
 
-    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+    _enrich(tmp_path, findings)
 
     meta = findings[0].meta
     assert meta["polarity"] == "contradict"
     assert meta["polarity_method"] == "nli"
     assert meta["polarity_model_digest"] == digest
-    assert meta["polarity_label_map_version"] == "v2"
+    assert meta["polarity_label_map_version"] == "relation-v1"
     assert meta["polarity_signal_version"] == meta["signal_version"]
     assert 0.0 <= meta["polarity_score"] <= 1.0
     assert "CONTRADICT" in findings[0].detail
@@ -878,20 +907,20 @@ def test_refused_verifier_writes_no_polarity_label(tmp_path, monkeypatch) -> Non
     findings = [_proximity_finding()]
     before = dict(findings[0].meta)
 
-    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+    _enrich(tmp_path, findings)
 
     assert findings[0].meta == before
     assert not any(key.startswith("polarity") for key in findings[0].meta)
     assert "Claim-level check" not in findings[0].detail
 
 
-def test_claim_level_gate_off_enriches_nothing(tmp_path, monkeypatch) -> None:
+def test_sensing_gate_off_enriches_nothing(tmp_path, monkeypatch) -> None:
     _enrichable(tmp_path, monkeypatch)
-    monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
+    monkeypatch.setenv("EXOMEM_SENSING", "off")
     findings = [_proximity_finding()]
     before = dict(findings[0].meta)
 
-    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+    _enrich(tmp_path, findings)
 
     assert findings[0].meta == before
 
@@ -907,9 +936,9 @@ def test_enrichment_is_bounded_by_the_surfaced_set(tmp_path, monkeypatch) -> Non
         _proximity_finding(signal_version=f"sig{index:013d}") for index in range(3)
     ]
 
-    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+    _enrich(tmp_path, findings)
 
-    assert len(calls) == 3
+    assert calls == [], "ledger lookup never runs inference"
     assert all(finding.meta["polarity"] == "contradict" for finding in findings)
 
 
@@ -919,11 +948,16 @@ def test_one_raising_pair_leaves_that_entry_unenriched_and_the_pass_completes(
     fixture = _contradiction_fixture()
     _enrichable(tmp_path, monkeypatch)
     claims.verifier_admission()
-    monkeypatch.setattr(
-        claims,
-        "verifier_polarity",
-        _exploding_on(fixture.claim_a, "Knowledge Base/Notes/Insights/boom.md"),
-    )
+    from exomem import sensing_ledger
+
+    lookup = sensing_ledger.lookup_current
+
+    def unavailable(vault, request, active, label_map_version):
+        if request.inputs[0].path.endswith("boom.md"):
+            raise RuntimeError("ledger read unavailable")
+        return lookup(vault, request, active, label_map_version)
+
+    monkeypatch.setattr(sensing_ledger, "lookup_current", unavailable)
     _wire_claim_texts(
         monkeypatch,
         {
@@ -935,19 +969,10 @@ def test_one_raising_pair_leaves_that_entry_unenriched_and_the_pass_completes(
     good = _proximity_finding()
     bad = _proximity_finding(a="Knowledge Base/Notes/Insights/boom.md", b=_PAGE_B)
 
-    audit_module._enrich_contradiction_polarity(tmp_path, [bad, good])
+    _enrich(tmp_path, [bad, good])
 
     assert "polarity" not in bad.meta
     assert good.meta["polarity"] == "contradict"
-
-
-def _exploding_on(ok_claim: str, _boom_path: str):
-    def verifier_polarity(claim_a, claim_b):
-        if claim_a != ok_claim:
-            raise RuntimeError("forward pass exploded on this pair")
-        return claims.PolarityResult("contradict", 0.99, "nli")
-
-    return verifier_polarity
 
 
 # ---- 3.3 staleness binding ----
@@ -1012,16 +1037,14 @@ def test_asserted_pairs_carry_no_model_polarity_label(tmp_path, monkeypatch) -> 
     asserted = _asserted_finding()
     before = dict(asserted.meta)
 
-    audit_module._enrich_contradiction_polarity(tmp_path, [asserted])
+    _enrich(tmp_path, [asserted])
 
     assert asserted.meta == before
     assert asserted.meta["provenance"] == "asserted"
     assert "Claim-level check" not in asserted.detail
 
 
-def test_enrichment_touches_no_competing_alternatives_stance_key(
-    tmp_path, monkeypatch
-) -> None:
+def test_enrichment_touches_no_competing_alternatives_stance_key(tmp_path, monkeypatch) -> None:
     """The reader-recorded pair stance is a triage disposition under its own
     contract; enrichment writes only into the polarity namespace."""
     _enrichable(tmp_path, monkeypatch)
@@ -1029,7 +1052,7 @@ def test_enrichment_touches_no_competing_alternatives_stance_key(
     finding.meta["stance"] = "competing"
     before = dict(finding.meta)
 
-    audit_module._enrich_contradiction_polarity(tmp_path, [finding])
+    _enrich(tmp_path, [finding])
 
     added = set(finding.meta) - set(before)
     assert added == {
@@ -1039,6 +1062,7 @@ def test_enrichment_touches_no_competing_alternatives_stance_key(
         "polarity_model_digest",
         "polarity_label_map_version",
         "polarity_signal_version",
+        "polarity_reading",
     }
     assert finding.meta["stance"] == "competing"
 
@@ -1046,9 +1070,7 @@ def test_enrichment_touches_no_competing_alternatives_stance_key(
 # ---- 3.2 invariance pins ----
 
 
-def test_labelling_changes_no_signal_version_provenance_order_or_cap(
-    tmp_path, monkeypatch
-) -> None:
+def test_labelling_changes_no_signal_version_provenance_order_or_cap(tmp_path, monkeypatch) -> None:
     _enrichable(tmp_path, monkeypatch)
     findings = [
         _proximity_finding(signal_version="sig0000000000001", priority=0.95),
@@ -1069,7 +1091,7 @@ def test_labelling_changes_no_signal_version_provenance_order_or_cap(
     ]
     omitted_detail = findings[-1].detail
 
-    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+    _enrich(tmp_path, findings)
 
     after = [
         (
@@ -1090,9 +1112,7 @@ def test_labelling_changes_no_signal_version_provenance_order_or_cap(
     assert findings[1].meta["polarity"] == "contradict"
 
 
-def test_a_dismissed_entry_stays_dismissed_when_a_label_arrives(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_dismissed_entry_stays_dismissed_when_a_label_arrives(tmp_path, monkeypatch) -> None:
     """A triage decision binds to the entry's fingerprint, which is composed from
     the signal version the label may not change."""
     from exomem import review_state
@@ -1115,7 +1135,7 @@ def test_a_dismissed_entry_stays_dismissed_when_a_label_arrives(
         )
 
     before = fingerprint_of(finding)
-    audit_module._enrich_contradiction_polarity(tmp_path, [finding])
+    _enrich(tmp_path, [finding])
 
     assert finding.meta["polarity"] == "contradict"
     assert fingerprint_of(finding) == before

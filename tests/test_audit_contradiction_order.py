@@ -350,3 +350,134 @@ def test_a_remembered_sweep_is_dropped_when_the_vectors_change(
     )
 
     assert pair not in {_pair_key(f) for f in _pair_findings(_run(vault))}
+
+
+def test_audit_queues_snapshot_claims_and_drops_a_label_after_claim_edit(
+    vault: Path, monkeypatch
+) -> None:
+    import sensing_fixture as sf
+
+    from exomem import claims, sensed_model, sensor_worker
+
+    sf.enable(monkeypatch)
+    _install(vault, monkeypatch, [("Notes/Insights/claim-a.md", "Notes/Insights/claim-b.md", 0.8)])
+    store = sensed_model.ProjectionStore(vault)
+    conn = store.connect()
+    with store.write(conn):
+        sensed_model._set_meta(conn, "seeding", None)
+    conn.close()
+    monkeypatch.setattr(
+        claims,
+        "claim_text_for_page",
+        lambda *_args, **_kwargs: pytest.fail("audit consulted the unverified claim cache"),
+    )
+    first = _pair_findings(_run(vault))
+    assert len(first) == 1 and "polarity" not in first[0].meta
+    conn = sensed_model.open_readonly(vault)
+    [job] = list(sensed_model.iter_jobs(conn))
+    conn.close()
+    assert job.request.input_version == 2
+    assert [item.extractor for item in job.inputs] == ["page-claim-v1", "page-claim-v1"]
+    assert sf.sense(vault, sf.StubInstrument({job.texts: "contradicts"})) == sensor_worker.EXIT_IDLE
+    labelled = _pair_findings(_run(vault))[0]
+    assert labelled.meta["polarity"] == "contradict" and labelled.meta["polarity_reading"]
+    assert labelled.meta["signal_version"] == first[0].meta["signal_version"]
+    path = vault / first[0].paths[0]
+    path.write_text(path.read_text().replace(_BODY, "A materially changed current claim."))
+    find_module.clear_cache()
+    edited = _pair_findings(_run(vault))[0]
+    assert edited.meta["signal_version"] != labelled.meta["signal_version"]
+    assert "polarity" not in edited.meta
+    conn = sensed_model.open_readonly(vault)
+    [current_job] = list(sensed_model.iter_jobs(conn))
+    conn.close()
+    assert current_job.request_key == job.request_key
+    assert current_job.request.input_key != job.request.input_key
+
+
+def test_audit_consumes_current_ledger_evidence_while_projection_is_unavailable(
+    vault: Path, monkeypatch
+) -> None:
+    import sensing_fixture as sf
+
+    from exomem import sensed_model, sensor_worker
+
+    sf.enable(monkeypatch)
+    _install(
+        vault, monkeypatch, [("Notes/Insights/ledger-a.md", "Notes/Insights/ledger-b.md", 0.8)]
+    )
+    store = sensed_model.ProjectionStore(vault)
+    conn = store.connect()
+    with store.write(conn):
+        sensed_model._set_meta(conn, "seeding", None)
+    conn.close()
+    _run(vault)
+    assert sf.sense(vault, sf.StubInstrument()) == sensor_worker.EXIT_IDLE
+    store.wipe()
+    finding = _pair_findings(_run(vault))[0]
+    assert finding.meta["polarity"] == "neutral"
+    assert finding.meta["polarity_reading"]
+    assert not sensed_model.projection_path(vault).exists()
+
+
+def test_audit_captures_the_actual_published_release_scope_before_parsing(
+    vault: Path, monkeypatch
+) -> None:
+    import sensing_fixture as sf
+
+    from exomem import published_admission, sensed_model
+    from exomem.governance import egress
+
+    sf.enable(monkeypatch)
+    store = sensed_model.ProjectionStore(vault)
+    conn = store.connect()
+    with store.write(conn):
+        sensed_model._set_meta(conn, "seeding", None)
+    conn.close()
+    identity = ("release", ("admitted-scope",))
+    keep = published_admission.AdmittedPredicate(
+        published_admission.Admission(lambda: identity, lambda _path, _publish: (True, True))
+    )
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: keep)
+    captured = []
+    capture = sensed_model.capture_scope
+
+    def before_parse(*args, **kwargs):
+        token = capture(*args, **kwargs)
+        captured.append(token)
+        return token
+
+    def parse(_kb, _root, *, keep):
+        assert keep is expected_keep
+        assert len(captured) == 1 and isinstance(captured[0], sensed_model.ScopeToken)
+        return []
+
+    expected_keep = keep
+    monkeypatch.setattr(sensed_model, "capture_scope", before_parse)
+    monkeypatch.setattr(audit_module, "_parse_all", parse)
+    assert _run(vault) == []
+    assert not captured[0].invocation
+
+
+def test_completed_empty_audit_scope_retires_obsolete_candidates(vault: Path, monkeypatch) -> None:
+    import sensing_fixture as sf
+
+    from exomem import sensed_model
+
+    sf.enable(monkeypatch)
+    _install(
+        vault, monkeypatch, [("Notes/Insights/active-a.md", "Notes/Insights/active-b.md", 0.8)]
+    )
+    store = sensed_model.ProjectionStore(vault)
+    conn = store.connect()
+    with store.write(conn):
+        sensed_model._set_meta(conn, "seeding", None)
+    conn.close()
+    [finding] = _pair_findings(_run(vault))
+    retired = vault / finding.paths[0]
+    retired.write_text(retired.read_text().replace("status: active", "status: superseded"))
+    find_module.clear_cache()
+    assert _pair_findings(_run(vault)) == []
+    conn = sensed_model.open_readonly(vault)
+    assert list(sensed_model.iter_jobs(conn)) == []
+    conn.close()

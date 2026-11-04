@@ -348,7 +348,12 @@ def supervise(vault_root: Path, *, gate_run: bool, gate_reason: str) -> str:
         return supervisor(vault_root).step(
             gate_run=gate_run,
             gate_reason=gate_reason,
-            queue_depth=lambda: sensed_model.queue_depth(vault_root),
+            queue_depth=lambda: sum(
+                1
+                for _job in sensed_model.runnable_jobs(
+                    vault_root, refused=lambda q: question_refused(vault_root, q)
+                )
+            ),
         )
     except Exception:  # noqa: BLE001 - supervision never breaks the dreamer
         log.warning("sensor worker: supervision failed", exc_info=True)
@@ -393,6 +398,87 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def question_admission_evidence(vault_root: Path, question_type: str) -> list[Any]:
+    """Lightweight admission evidence; a later instrument supplies its artifact stats here."""
+    evidence: list[Any] = []
+    if question_type == sensing.PAIR_RELATION:
+        from . import claims, model_cache
+
+        pin = claims._active_pin()
+        if pin is not None:
+            root = (
+                model_cache.hub_dir()
+                / model_cache.snapshot_dirname(pin.model_name)
+                / "snapshots"
+                / pin.model_revision
+            )
+            for relative in pin.artifact_files:
+                try:
+                    info = (root / relative).stat()
+                    evidence.append(
+                        [
+                            relative,
+                            info.st_dev,
+                            info.st_ino,
+                            info.st_size,
+                            info.st_mtime_ns,
+                            info.st_ctime_ns,
+                        ]
+                    )
+                except OSError:
+                    evidence.append([relative, None])
+    entry = sensing.question(question_type)
+    evidence.append([entry.fixture_set, repr(sensing.LABEL_MAPS.get(entry.label_map_version))])
+    from . import sensed_model
+
+    recorded = _read_json(_state_file(vault_root, ADMISSION_FILE)) or {}
+    for instrument_id in sorted(sensed_model._question_active(question_type)):
+        evidence.append(
+            [
+                instrument_id,
+                sorted(
+                    (key, value)
+                    for key, value in recorded.items()
+                    if key == instrument_id or key.startswith(instrument_id + ":")
+                ),
+            ]
+        )
+    return evidence
+
+
+def _question_refusal_key(vault_root: Path, question_type: str) -> str:
+    from . import sensed_model
+
+    identities = sensed_model._question_active(question_type)
+    return json.dumps(
+        [
+            question_type,
+            sensing.setting(),
+            sorted(identities),
+            question_admission_evidence(vault_root, question_type),
+        ],
+        sort_keys=True,
+    )
+
+
+def question_refused(vault_root: Path, question_type: str) -> bool:
+    status = _read_json(_state_file(vault_root, STATUS_FILE)) or {}
+    refusal = (status.get("refusals") or {}).get(question_type)
+    return isinstance(refusal, dict) and refusal.get("key") == _question_refusal_key(
+        vault_root, question_type
+    )
+
+
+def admit_question(vault_root: Path, question_type: str) -> Any:
+    """Only the child calls this dispatch, after selecting the question."""
+    sensing.question(question_type)
+    if question_type == sensing.PAIR_RELATION:
+        from . import sensing_nli
+
+        return sensing_nli.admit(evidence_path=_state_file(vault_root, ADMISSION_FILE))
+    raise ValueError("question has no admitted instrument")
+
+
 def run_child(
     vault_root: Path,
     *,
@@ -402,19 +488,25 @@ def run_child(
     idle_seconds: float = IDLE_EXIT_SECONDS,
     instrument: Any = None,
     admit: Callable[[], Any] | None = None,
+    admit_selected: Callable[[str], Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     cpu_clock: Callable[[], float] = time.process_time,
 ) -> int:
-    """Sense queued pairs until idle, out of budget, or orphaned. Returns an exit code.
+    """Read the sole queue, lazily admit each question, and append ledger evidence."""
+    from . import sensed_model
 
-    Reads only the projection's queue and the ledger, and appends only to the
-    ledger. Never reads or writes the vault.
-    """
     vault_root = Path(vault_root)
     pid = os.getpid()
     started_cpu = cpu_clock()
     judgements = 0
+    ledger = sensing_ledger.Ledger(vault_root)
+    lconn = None
+    loaded = {} if instrument is None else {sensing.PAIR_RELATION: instrument}
+    refused: set[str] = set()
+    checked_refusals: set[str] = set()
+    status = _read_json(_state_file(vault_root, STATUS_FILE)) or {}
+    refusals = status.get("refusals") or {}
 
     def report(final: bool) -> None:
         _write_json(
@@ -427,33 +519,13 @@ def run_child(
             },
         )
 
-    report(False)
-    if instrument is None:
-        from . import sensing_nli
-
-        try:
-            instrument = (admit or (lambda: sensing_nli.admit(
-                evidence_path=_state_file(vault_root, ADMISSION_FILE)
-            )))()
-        except sensing_nli.Refused as refused:
-            _write_json(
-                _state_file(vault_root, STATUS_FILE),
-                {"refused": refused.reason, "detail": refused.detail[:500], "pid": pid},
-            )
-            report(True)
-            return EXIT_REFUSED
-    identity: sensing.InstrumentIdentity = instrument.identity
-    ledger = sensing_ledger.Ledger(vault_root)
-    try:
-        lconn = ledger.connect()
-    except sensing_ledger.LedgerUnavailable as error:
+    def write_status() -> None:
         _write_json(
             _state_file(vault_root, STATUS_FILE),
-            {"refused": "ledger-unavailable", "detail": str(error)[:500], "pid": pid},
+            {"refused": None, "refusals": refusals, "pid": pid},
         )
-        report(True)
-        return EXIT_REFUSED
-    _write_json(_state_file(vault_root, STATUS_FILE), {"refused": None, "pid": pid})
+
+    report(False)
     done: set[str] = set()
     last_work = clock()
     try:
@@ -461,50 +533,131 @@ def run_child(
             if cpu_clock() - started_cpu >= cpu_allotment or judgements >= judgement_allotment:
                 report(True)
                 return EXIT_BUDGET
-            batch = _next_batch(
-                vault_root, lconn, identity, done, min(BATCH, judgement_allotment - judgements)
-            )
-            if not batch:
+            conn = sensed_model.open_readonly(vault_root)
+            selected = None
+            if conn is not None:
+                try:
+                    for job in sensed_model.iter_jobs(conn):
+                        q = job.request.question_type
+                        if q not in checked_refusals:
+                            checked_refusals.add(q)
+                            if question_refused(vault_root, q):
+                                refused.add(q)
+                        if job.pair_key in done or q in refused:
+                            continue
+                        identities = (
+                            {loaded[q].identity.instrument_id: loaded[q].identity}
+                            if q in loaded
+                            else sensed_model._question_active(q)
+                        )
+                        if (
+                            lconn is not None
+                            and identities
+                            and all(
+                                sensing_ledger.has_reading(lconn, job.request.reading_id(key))
+                                for key in identities
+                            )
+                        ):
+                            done.add(job.pair_key)
+                            continue
+                        selected = job
+                        break
+                finally:
+                    conn.close()
+            if selected is None:
                 if clock() - last_work >= idle_seconds:
                     report(True)
                     return EXIT_IDLE
                 sleep(min(1.0, idle_seconds))
                 continue
+            q = selected.request.question_type
+            if q not in loaded:
+                try:
+                    loaded[q] = (
+                        admit_selected(q)
+                        if admit_selected is not None
+                        else admit()
+                        if admit is not None and q == sensing.PAIR_RELATION
+                        else admit_question(vault_root, q)
+                    )
+                except Exception as error:  # noqa: BLE001 - refusal is local to this question
+                    reason = str(getattr(error, "reason", "admission-failed"))
+                    refusals[q] = {
+                        "key": _question_refusal_key(vault_root, q),
+                        "reason": reason,
+                        "detail": str(getattr(error, "detail", error))[:500],
+                    }
+                    refused.add(q)
+                    write_status()
+                    continue
+                refusals.pop(q, None)
+                write_status()
+            selected_instrument = loaded[q]
+            identity = selected_instrument.identity
+            if lconn is None:
+                try:
+                    lconn = ledger.connect()
+                except sensing_ledger.LedgerUnavailable as error:
+                    _write_json(
+                        _state_file(vault_root, STATUS_FILE),
+                        {"refused": "ledger-unavailable", "detail": str(error)[:500], "pid": pid},
+                    )
+                    report(True)
+                    return EXIT_REFUSED
+            batch = _next_batch(
+                vault_root,
+                lconn,
+                identity,
+                done,
+                min(BATCH, judgement_allotment - judgements),
+                question_type=q,
+            )
+            if not batch:
+                continue
             last_work = clock()
             try:
-                results = instrument.judge([pair.texts for pair in batch])
-            except ValueError:
-                # Non-finite or misshapen output refuses that output: no reading,
-                # and the batch is not retried by this child.
+                if hasattr(selected_instrument, "judge_requests"):
+                    results = selected_instrument.judge_requests([job.request for job in batch])
+                else:
+                    results = selected_instrument.judge([job.texts for job in batch])
+                readings = []
+                for job, result in zip(batch, results, strict=True):
+                    if isinstance(result, Mapping):
+                        vectors, reason = result.get("vectors"), result.get("abstain_reason")
+                    else:
+                        ab, ba, reason = result
+                        vectors = None if reason is not None else {"ab": ab, "ba": ba}
+                    reading = sensing.make_request_reading(
+                        job.request,
+                        identity,
+                        vectors=vectors,
+                        abstain_reason=reason,
+                        sensed_at=_utc_now(),
+                    )
+                    if reading is not None:
+                        readings.append(reading)
+                ledger.append(lconn, readings)
+            except (ValueError, TypeError):
                 log.warning("sensor worker: a batch produced unusable output", exc_info=True)
-                done.update(pair.pair_key for pair in batch)
-                judgements += len(batch)
-                report(False)
-                continue
-            readings = []
-            for pair, (ab, ba, reason) in zip(batch, results, strict=True):
-                done.add(pair.pair_key)
-                reading = sensing.make_reading(
-                    sensing.PAIR_RELATION,
-                    identity,
-                    list(pair.inputs),
-                    ab=ab,
-                    ba=ba,
-                    abstain_reason=reason,
-                    sensed_at=_utc_now(),
-                )
-                if reading is not None:
-                    readings.append(reading)
-            ledger.append(lconn, readings)
+            done.update(job.pair_key for job in batch)
             judgements += len(batch)
             report(False)
         report(True)
         return EXIT_IDLE
     finally:
-        lconn.close()
+        if lconn is not None:
+            lconn.close()
 
 
-def _next_batch(vault_root, lconn, identity, done: set[str], limit: int) -> list:
+def _next_batch(
+    vault_root,
+    lconn,
+    identity,
+    done: set[str],
+    limit: int,
+    *,
+    question_type: str = sensing.PAIR_RELATION,
+) -> list:
     from . import sensed_model
 
     if limit <= 0:
@@ -513,19 +666,19 @@ def _next_batch(vault_root, lconn, identity, done: set[str], limit: int) -> list
     if conn is None:
         return []
     out = []
+    scheduled: set[str] = set()
     try:
-        for pair in sensed_model.queued_pairs(conn, 256):
-            if pair.pair_key in done:
+        for job in sensed_model.iter_jobs(conn):
+            if job.pair_key in done or job.request.question_type != question_type:
                 continue
-            hashes = [item.text_sha256 for item in pair.inputs]
-            if [sensing.text_sha256(text) for text in pair.texts] != hashes:
-                done.add(pair.pair_key)
-                continue
-            rid = sensing.reading_id(sensing.PAIR_RELATION, identity.instrument_id, hashes)
+            rid = job.request.reading_id(identity.instrument_id)
             if sensing_ledger.has_reading(lconn, rid):
-                done.add(pair.pair_key)
+                done.add(job.pair_key)
                 continue
-            out.append(pair)
+            if rid in scheduled:
+                continue
+            scheduled.add(rid)
+            out.append(job)
             if len(out) >= limit:
                 break
     finally:
