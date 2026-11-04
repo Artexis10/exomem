@@ -84,7 +84,7 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
                 continue
             candidates.append(working_set.LaneItem(
                 role="", level="unit", ref=unit.unit_ref, path=path, title=page.title,
-                text=working_set.bounded_text(unit.content), lifecycle=page.status_class or "",
+                text=working_set.bounded_text(unit.content), lifecycle=page.status or "",
                 updated=unit.as_of or "", anchor=path,
                 # The language schema fixes these fields; relation families come from the registry.
                 provenance={

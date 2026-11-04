@@ -1274,7 +1274,10 @@ def test_managed_guest_scene_admission_uses_pending_parent_changes(
     _forbid_whole_corpus(monkeypatch, "scene parent admission")
     with principal.request_scope(guest):
         after = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1, graph=False)
-    assert [row["path"] for row in after] == ([] if change == "reparent" else [child])
+    after_hits = after["hits"] if isinstance(after, dict) else after
+    assert [row["path"] for row in after_hits] == ([] if change == "reparent" else [child])
+    if change == "reparent":
+        assert after["next_action"]["state"] == "search_miss"
 
 
 @library_scope()

@@ -24,7 +24,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     10,
-    "sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95",
+    "sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -177,6 +177,8 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "- relations: <relation-type>: [[Target]]",
             "- verdict: <epistemic outcome>",
             "- check_by: <ISO revisit date>",
+            "- as_of: <ISO start date>",
+            "- until: <ISO last valid date>",
         ],
         "accepted_metadata_order": "flexible while rows remain leading",
         "canonical_metadata_order": [
@@ -187,10 +189,12 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "relations",
             "verdict",
             "check_by",
+            "as_of",
+            "until",
         ],
         "metadata_rule": (
             "Metadata rows are optional and leading; the canonical writer emits category, "
-            "id, tags, context, relations, verdict and check_by; category defaults to the governed kind "
+            "id, tags, context, relations, verdict, check_by, as_of and until; category defaults to the governed kind "
             "when omitted."
         ),
         "body_rule": (
@@ -652,6 +656,8 @@ def test_rich_contract_matches_canonical_writer_metadata_order_and_parser() -> N
         "relations",
         "verdict",
         "check_by",
+        "as_of",
+        "until",
     )
 
     document = semantic_units.parse_semantic_units(rendered, path="synthetic.md")

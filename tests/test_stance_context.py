@@ -348,3 +348,11 @@ def test_final_size_includes_a_late_collection_store_notice(stance_vault, monkey
     budget = packet["budget"]
     without_size = {**packet, "budget": {key: value for key, value in budget.items() if key != "serialized_chars"}}
     assert budget["serialized_chars"] == len(json.dumps(without_size, ensure_ascii=False, separators=(",", ":")))
+
+
+def test_canonical_stance_does_not_depend_on_a_status_overlay(stance_vault):
+    before = _stance(stance_vault)
+    _write(stance_vault, "Knowledge Base/_Schema/statuses.yaml", "invalid: [\n")
+    after = _stance(stance_vault)
+    assert before["state"] == "ready" and before["items"]
+    assert after == before
