@@ -6,6 +6,13 @@ on:
       - src/exomem/claims.py
       - src/exomem/sensing.py
       - src/exomem/sensing_nli.py
+      - src/exomem/sensing_ledger.py
+      - src/exomem/sensed_model.py
+      - src/exomem/sensor_worker.py
+      - src/exomem/sensor_worker_child.py
+      - src/exomem/audit.py
+      - scripts/prove-sensing-transport.py
+      - tests/test_audit_contradiction_order.py
       - tests/test_sensing_real_pin.py
       - tests/test_frozen_verifier_real.py
       - tests/test_frozen_verifiers.py
@@ -17,6 +24,13 @@ on:
       - src/exomem/claims.py
       - src/exomem/sensing.py
       - src/exomem/sensing_nli.py
+      - src/exomem/sensing_ledger.py
+      - src/exomem/sensed_model.py
+      - src/exomem/sensor_worker.py
+      - src/exomem/sensor_worker_child.py
+      - src/exomem/audit.py
+      - scripts/prove-sensing-transport.py
+      - tests/test_audit_contradiction_order.py
       - tests/test_sensing_real_pin.py
       - tests/test_frozen_verifier_real.py
       - tests/test_frozen_verifiers.py
@@ -91,6 +105,40 @@ jobs:
           EXOMEM_RUN_REAL_NLI: "1"
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+          EXOMEM_TEST_NLI_ADMISSION_OUTPUT: ${{ runner.temp }}/sensing-admission.json
         run: >-
           uv run --frozen --extra nli python -m pytest
           tests/test_frozen_verifier_real.py tests/test_sensing_real_pin.py -q -vv -s
+
+      - name: Prove installed worker, ledger and audit transport
+        run: |
+          proof_root="$RUNNER_TEMP/sensing-transport"
+          proof_dist=$(mktemp -d "$RUNNER_TEMP/sensing-wheel.XXXXXX")
+          proof_python="$PWD/.venv/bin/python"
+          proof_memory_bytes=$((5 * 1024 * 1024 * 1024))
+          mkdir -p "$proof_root"
+          uv build --wheel --out-dir "$proof_dist"
+          uv pip install --python "$proof_python" --no-deps --reinstall "$proof_dist"/*.whl
+          # The fresh hosted VM owns this service. The proof runs as the runner user.
+          sudo -n systemd-run --wait --pipe --collect \
+            --unit="sensing-transport-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --property="User=$(id -u)" --property="Group=$(id -g)" \
+            --property="MemoryMax=$proof_memory_bytes" --property=MemorySwapMax=0 \
+            --property=RuntimeMaxSec=300 --property=TimeoutStopSec=5 \
+            --property=CPUQuota=100% --working-directory="$proof_root" \
+            "$proof_python" "$PWD/scripts/prove-sensing-transport.py" \
+            --root "$proof_root" --wheel "$proof_dist"/*.whl \
+            --source-cache "$HF_HOME/hub" \
+            --audit-helper "$PWD/tests/test_audit_contradiction_order.py" \
+            --admission-evidence "$RUNNER_TEMP/sensing-admission.json" \
+            --memory-limit-bytes "$proof_memory_bytes"
+
+      - name: Retain installed transport results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sensing-transport-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sensing-transport/installed-proof-results.json
+            ${{ runner.temp }}/sensing-admission.json
+          if-no-files-found: warn

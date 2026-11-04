@@ -224,3 +224,85 @@ def test_the_config_memo_follows_the_config_path(tmp_path: Path, monkeypatch) ->
     monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(on))
     assert sensing.enabled() is True
     sensing.clear_memo()
+
+
+def test_ordered_requests_bind_extractors_anchors_and_text_not_provenance() -> None:
+    from dataclasses import replace
+
+    texts = ("A selected claim.", "A second claim.")
+    inputs = tuple(
+        sensing.InputSlot(
+            f"page-{i}", f"page-{i}.md", slot, "page-claim-v1", sensing.text_sha256(text)
+        )
+        for i, (slot, text) in enumerate(zip(("a", "b"), texts, strict=True))
+    )
+    request = sensing.SenseRequest(sensing.PAIR_RELATION, 2, inputs, texts)
+    moved = replace(
+        request, inputs=tuple(replace(item, path="moved.md", unit_ref="other") for item in inputs)
+    )
+    assert request.input_key == moved.input_key
+    assert request.reading_id("pin") == moved.reading_id("pin")
+    reversed_request = replace(
+        request,
+        inputs=(replace(inputs[1], slot="a"), replace(inputs[0], slot="b")),
+        texts=tuple(reversed(texts)),
+    )
+    assert reversed_request.input_key != request.input_key
+    assert (
+        replace(request, inputs=(replace(inputs[0], anchor="occurrence-2"), inputs[1])).input_key
+        != request.input_key
+    )
+    assert (
+        replace(request, inputs=(replace(inputs[0], extractor="unit-text-v1"), inputs[1])).input_key
+        != request.input_key
+    )
+    with pytest.raises(ValueError, match="hash mismatch"):
+        replace(request, texts=("An edited claim.", texts[1]))
+    with pytest.raises(ValueError, match="slots"):
+        replace(request, inputs=tuple(reversed(inputs)), texts=tuple(reversed(texts)))
+
+
+def test_legacy_request_and_optional_token_map_preserve_existing_identities() -> None:
+    from dataclasses import replace
+
+    texts = sorted(("First unit.", "Second unit."), key=sensing.text_sha256)
+    inputs = tuple(
+        sensing.InputUnit(str(i), f"{i}.md", sensing.text_sha256(text))
+        for i, text in enumerate(texts)
+    )
+    request = sensing.SenseRequest(sensing.PAIR_RELATION, 1, inputs, tuple(texts))
+    assert request.input_key == sensing.input_key(
+        sensing.PAIR_RELATION, [item.text_sha256 for item in inputs]
+    )
+    assert request.reading_id("pin") == sensing.reading_id(
+        sensing.PAIR_RELATION, "pin", [item.text_sha256 for item in inputs]
+    )
+    identity = sensing.InstrumentIdentity(
+        "test/model",
+        "1",
+        "0" * 64,
+        "stub",
+        "1",
+        "nli-pair-v1",
+        "relation-v1",
+        "relation-v1-multilingual",
+    )
+    assert "label_token_map" not in identity.as_dict()
+    vectors = {"ab": [0.01, 0.02, 0.97], "ba": [0.01, 0.02, 0.97]}
+    legacy = sensing.make_reading(
+        sensing.PAIR_RELATION,
+        identity,
+        inputs,
+        ab=vectors["ab"],
+        ba=vectors["ba"],
+        abstain_reason=None,
+        sensed_at="2026-01-01T00:00:00Z",
+    )
+    transported = sensing.make_request_reading(
+        request, identity, vectors=vectors, abstain_reason=None, sensed_at="2026-01-01T00:00:00Z"
+    )
+    assert transported == legacy
+    assert transported.output() == legacy.output()
+    mapped = replace(identity, label_token_map="tokens-v1")
+    assert mapped.instrument_id != identity.instrument_id
+    assert sensing.InstrumentIdentity.from_dict(mapped.as_dict()) == mapped
