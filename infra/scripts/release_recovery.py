@@ -724,6 +724,38 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
     return digest
 
 
+def family_assertion(
+    bundle: Path | None, tag: str, commit: str, images: dict, name: str, *, directory: Path | None = None
+) -> dict:
+    """Bridge the existing full release check to the admission verifier's in-toto predicate."""
+    # The plan determines families. This checks only the artifact filename's shape.
+    if name not in images or not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+        raise ValueError("family must name an image in the publication plan")
+    repository = images[name]["ref"].rsplit(":", 1)[0]
+    if bundle is not None:
+        digest = verify_image_bundle(bundle, tag, commit, repository, name)
+    elif directory is not None:
+        digest, _ = recovered_image(name, repository, tag, commit, directory)
+        if digest is None:
+            raise ValueError("family assertion requires original verified image evidence")
+    else:
+        raise ValueError("family assertion requires original image evidence")
+    profile = Path(__file__).resolve().parents[1] / "helm/platform/files/image-admission-v1.json"
+    return {
+        "repository": repository,
+        "digest": digest,
+        "predicateType": json.loads(profile.read_text())["familyPredicateType"],
+        "predicate": {
+            "family": name,
+            "source": {
+                "repository": os.environ["GITHUB_REPOSITORY"],
+                "ref": f"refs/tags/{tag}",
+                "commit": commit,
+            },
+        },
+    }
+
+
 def image_evidence(tag: str, commit: str, directory: Path) -> None:
     # These prefixes identify the release contract's image Sigstore receipts.
     names = [
@@ -931,6 +963,7 @@ def main() -> None:
             "images",
             "finish-images",
             "join-image",
+            "image-family",
         ),
     )
     parser.add_argument("--tag", required=True)
@@ -943,6 +976,9 @@ def main() -> None:
     parser.add_argument(
         "--verification-attempt",
         help="Publisher attempt checking Python publication; defaults to the original attempt",
+    )
+    parser.add_argument(
+        "--bundle", type=Path, help="Original image provenance bundle for family verification"
     )
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
@@ -999,6 +1035,21 @@ def main() -> None:
                 )
             )
         )
+    elif args.command == "image-family":
+        if args.dry_run or args.image is None:
+            parser.error("image-family requires original evidence and a published image")
+        result = family_assertion(
+            args.bundle,
+            args.tag,
+            run("git", "rev-parse", f"{args.tag}^{{commit}}"),
+            json.loads(os.environ["IMAGES"]),
+            args.image,
+            directory=args.directory,
+        )
+        path = args.directory / f"exomem-family-{args.image}.predicate.json"
+        path.write_text(json.dumps(result.pop("predicate")) + "\n")
+        result["predicatePath"] = str(path)
+        print(json.dumps(result))
     elif args.command == "join-image":
         if args.dry_run:
             parser.error("join-image publishes an index and cannot run in a dry run")

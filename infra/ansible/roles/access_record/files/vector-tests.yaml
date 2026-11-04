@@ -1,0 +1,82 @@
+tests:
+  - name: audit bodies query annotations and identity extras never enter the record
+    inputs:
+      - insert_at: audit_metadata
+        type: log
+        log_fields:
+          message: '{"auditID":"event-a","stage":"ResponseComplete","stageTimestamp":"2026-10-26T12:00:00Z","requestURI":"/api/v1/namespaces/test/secrets/key?canary=DISCARDED_CONTENT","verb":"get","user":{"username":"operator","extra":{"private":"DISCARDED_CONTENT"}},"objectRef":{"namespace":"test","resource":"secrets"},"requestObject":{"canary":"DISCARDED_CONTENT"},"responseObject":{"canary":"DISCARDED_CONTENT"},"annotations":{"private":"DISCARDED_CONTENT"},"userAgent":"DISCARDED_CONTENT","responseStatus":{"message":"DISCARDED_CONTENT"}}'
+    outputs:
+      - extract_from: audit_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.kind, "kubernetes")
+              assert_eq!(.node, "node-test")
+              assert_eq!(.boot_id, "boot-test")
+              assert_eq!(.target, "/api/v1/namespaces/test/secrets/key")
+              assert!(!contains(encode_json(.), "DISCARDED_CONTENT"))
+  - name: session projection discards raw journal command arguments and environment
+    inputs:
+      - insert_at: journal_metadata
+        type: log
+        log_fields:
+          EXOMEM_ACCESS_RECORD: "1"
+          EXOMEM_ACTION: open_session
+          EXOMEM_SOURCE_AT: "2026-10-26T12:00:00Z"
+          EXOMEM_EVENT_ID: session-open-a
+          EXOMEM_IDENTITY: operator
+          EXOMEM_SESSION_ID: "321:9876"
+          _BOOT_ID: boot-a
+          MESSAGE: DISCARDED_CONTENT
+          _CMDLINE: DISCARDED_CONTENT
+          AUDIT_FIELD_CMD: DISCARDED_CONTENT
+          ENVIRONMENT: DISCARDED_CONTENT
+    outputs:
+      - extract_from: journal_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.kind, "node_session")
+              assert_eq!(.session_id, "321:9876")
+              assert!(!contains(encode_json(.), "DISCARDED_CONTENT"))
+  - name: sudo denial retains identity and result without command content
+    inputs:
+      - insert_at: journal_metadata
+        type: log
+        log_fields:
+          AUDIT_FIELD_EXE: /usr/bin/sudo
+          _SOURCE_REALTIME_TIMESTAMP: "1793016000000000"
+          _BOOT_ID: boot-a
+          _AUDIT_ID: sudo-denial-a
+          _AUDIT_LOGINUID: "1000"
+          _AUDIT_TYPE_NAME: USER_AUTH
+          AUDIT_FIELD_ACCT: root
+          AUDIT_FIELD_RES: failed
+          _AUDIT_SESSION: "42"
+          MESSAGE: DISCARDED_CONTENT
+          AUDIT_FIELD_CMD: DISCARDED_CONTENT
+          ENVIRONMENT: DISCARDED_CONTENT
+    outputs:
+      - extract_from: journal_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.kind, "sudo")
+              assert_eq!(.result, "failed")
+              assert_eq!(.identity, "1000")
+              assert!(!contains(encode_json(.), "DISCARDED_CONTENT"))
+  - name: unrelated journal entries never reach the retained record
+    inputs:
+      - insert_at: journal_metadata
+        type: log
+        log_fields:
+          AUDIT_FIELD_EXE: /usr/bin/other
+          MESSAGE: DISCARDED_CONTENT
+    no_outputs_from: [journal_metadata]
+  - name: malformed audit lines never enter the record
+    inputs:
+      - insert_at: audit_metadata
+        type: log
+        log_fields:
+          message: DISCARDED_CONTENT
+    no_outputs_from: [audit_metadata]

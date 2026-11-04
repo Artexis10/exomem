@@ -153,3 +153,23 @@ output "cloud_backup_bucket_id" {
 output "cloud_backup_account_id" {
   value = one(b2_bucket.cloud_backups[*].account_id)
 }
+
+output "access_record_bucket" {
+  value = var.access_record_enabled ? {
+    id   = b2_bucket.access_record[0].bucket_id
+    name = b2_bucket.access_record[0].bucket_name
+  } : null
+}
+output "access_record_node_credentials" {
+  value = { for node, key in b2_application_key.access_record_node : node => {
+    id = key.application_key_id, key = key.application_key
+  } }
+  sensitive = true
+}
+output "access_record_reader_credential" {
+  value = var.access_record_enabled ? {
+    id  = b2_application_key.access_record_reader[0].application_key_id
+    key = b2_application_key.access_record_reader[0].application_key
+  } : null
+  sensitive = true
+}

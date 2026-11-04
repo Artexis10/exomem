@@ -17,8 +17,8 @@ on:
 
 # Prefer the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
 # credential lets Release Please PRs and releases trigger normal CI/release events.
-# If the app secrets are not configured on this repo yet, fall back to GITHUB_TOKEN
-# so release automation still works, with GitHub's normal recursion protection.
+# The release App owns tag creation. Its protected environment and tag ruleset
+# remain operator activation steps; source alone establishes no live protection.
 permissions:
   contents: write
   issues: write
@@ -47,6 +47,12 @@ jobs:
     outputs:
       release_branch: ${{ steps.release.outputs.pr && fromJson(steps.release.outputs.pr).headBranchName }}
     steps:
+      - name: Require the release App for tag creation
+        if: env.HAS_RELEASE_APP != 'true'
+        run: |
+          echo "::error::Configure the release App before creating a release tag"
+          exit 1
+
       - name: Mint GitHub App installation token
         if: env.HAS_RELEASE_APP == 'true'
         id: app-token
@@ -58,7 +64,7 @@ jobs:
       - uses: googleapis/release-please-action@v5
         id: release
         with:
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -137,6 +143,8 @@ jobs:
       publish_images: ${{ steps.plan.outputs.publish_images }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
 
@@ -200,6 +208,12 @@ jobs:
           fi
           git fetch --quiet --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "refs/tags/$tag^{commit}")
+          # This guards mistakes; the operator-held tag ruleset and App key custody prevent hostile refs.
+          git fetch --quiet --no-tags origin main
+          if ! git merge-base --is-ancestor "$source_commit" FETCH_HEAD; then
+            echo "::error::Release source must be contained in main"
+            exit 1
+          fi
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
           package=$(git show "$tag:pyproject.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["name"])')
           server=$(git show "$tag:server.json" | jq -er .name)
@@ -778,7 +792,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .release-tools
-          sparse-checkout: infra/scripts
+          sparse-checkout: |
+            infra/scripts
+            infra/helm/platform/files/image-admission-v1.json
 
       - name: Install distribution filename parser
         run: python3 -m pip install packaging
@@ -1026,6 +1042,48 @@ jobs:
           path: image-evidence/exomem-image-cellctl-*.sigstore.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Verify the original cloud index and prepare its family assertion
+        id: cloud-family
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && env.DRY_RUN != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          result=$(python3 .release-tools/infra/scripts/release_recovery.py image-family --tag "$TAG" --image cloud --directory image-evidence)
+          jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$result" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the verified cloud image family
+        if: ${{ !cancelled() && steps.cloud-family.outcome == 'success' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ${{ steps.cloud-family.outputs.repository }}
+          subject-digest: ${{ steps.cloud-family.outputs.digest }}
+          predicate-type: ${{ steps.cloud-family.outputs.predicateType }}
+          predicate-path: ${{ steps.cloud-family.outputs.predicatePath }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify the original cellctl index and prepare its family assertion
+        id: cellctl-family
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && env.DRY_RUN != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          result=$(python3 .release-tools/infra/scripts/release_recovery.py image-family --tag "$TAG" --image cellctl --directory image-evidence)
+          jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$result" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the verified cellctl image family
+        if: ${{ !cancelled() && steps.cellctl-family.outcome == 'success' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ${{ steps.cellctl-family.outputs.repository }}
+          subject-digest: ${{ steps.cellctl-family.outputs.digest }}
+          predicate-type: ${{ steps.cellctl-family.outputs.predicateType }}
+          predicate-path: ${{ steps.cellctl-family.outputs.predicatePath }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Verify retained evidence and finish missing discovery tags
         if: ${{ always() && !cancelled() && env.DRY_RUN != 'true' }}

@@ -187,6 +187,17 @@ class RolloutRow:
 
 
 @dataclass(frozen=True)
+class PodPlacement:
+    uid: str
+    node: str
+    created_at: datetime | None = None
+    deletion_requested_at: datetime | None = None
+    workload_kind: str = "StatefulSet"
+    workload_uid: str = ""
+    phase: str | None = None
+
+
+@dataclass(frozen=True)
 class ClusterObservation:
     """What cellctl can see for one cell's namespace this pass.
 

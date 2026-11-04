@@ -109,3 +109,7 @@
 - name: Configure and join the K3s agent
   ansible.builtin.import_tasks: agent.yml
   when: k3s_node_role == 'agent'
+
+- name: Prepare the independent retained access record
+  ansible.builtin.include_role:
+    name: access_record
