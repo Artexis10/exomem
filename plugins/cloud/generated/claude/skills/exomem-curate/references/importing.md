@@ -12,6 +12,10 @@ Check that the command's runner and `age` are on `PATH` before starting it.
 `uvx` comes with [uv](https://docs.astral.sh/uv/getting-started/installation/); [age](https://github.com/FiloSottile/age#installation) has separate installation instructions.
 Use their official instructions for the current platform when either is missing. Cloud imports need no local vault or Exomem service.
 
+An unversioned `uvx exomem` command can reuse a cached or installed CLI. Refreshing the connector or plugin does not update it.
+After a CLI fix ships, use `uvx exomem@latest` in place of that prefix when retrying the returned command.
+Keep its endpoints, other arguments and existing checkpoint. [uv's tool-version guidance](https://docs.astral.sh/uv/concepts/tools/#tool-versions) explains this refresh.
+
 The CLI opens its own browser sign-in, even when the MCP connector is already authenticated.
 Explain this before starting, and have the person authorize the same Cloud account.
 Keep the background command's output available while authorization and filing continue.
