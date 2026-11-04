@@ -210,3 +210,21 @@ The same runner SHALL accept a private prepared vault, its cases and two fixed a
 - **THEN** the summary retains each store group's descriptive head p95 and configured target
 - **AND** it marks absolute acceptance unverified regardless of the observed percentile
 - **AND** it records the CPU pressure at the start and at the end of the run
+
+#### Scenario: A prepared arm runs continuously through absolute measurement
+
+- **GIVEN** one fixed prepared arm and cases whose source labels resolve to configured groups
+- **WHEN** the private absolute runner measures that arm
+- **THEN** it finishes all retained warm-ups before timed rounds and never pauses the worker between calls
+- **AND** it retains opening, periodic, and closing monotonic CPU pressure observations, the cadence, and the largest observed gap
+- **AND** missing or invalid pressure remains unknown, and contention anywhere leaves numeric targets unverified
+- **AND** every expected warm-up and timed repeat must succeed exactly once before a numeric target comparison is verified
+- **AND** it reports configured targets without paired base samples or the CI case floor
+- **AND** overall acceptance remains unverified until independent corpus, active-watcher, runtime, and isolation proof is complete
+
+#### Scenario: Group bindings preserve source cases and reject invalid assignments
+
+- **GIVEN** unchanged observer cases and an optional external source-group binding
+- **WHEN** a used label is unresolved, a target is undeclared, distinct source labels merge, or a target group has no case
+- **THEN** the runner refuses before worker startup
+- **AND** a valid run retains the case digest, binding file digest, and original case labels
