@@ -39,6 +39,7 @@ LIVE_PATHS = {
     "infra/cellctl/tests/test_export_storage.py",
     "infra/cellctl/src/cellctl/exports.py",
     "src/exomem/cloud_export.py",
+    ".github/actions/free-runner-disk/action.yml",
 }
 
 

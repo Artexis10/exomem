@@ -378,13 +378,40 @@ def test_parallel_leaf_reservations_do_not_double_count_stock_code_mode_wrapper(
                 range(8),
             )
         )
-    dispatcher = [
-        output
-        for output in outputs
-        if output["hookSpecificOutput"].get("permissionDecision") != "deny"
-    ]
-    assert len(dispatcher) == 3
-    assert controller(report, "status", {"scope_id": scope})["reserved_operations"] == 3
+    reserved_ids = set()
+    for index, output in enumerate(outputs):
+        status = metadata(output)["status"]
+        # These are the hook protocol outcomes for an associated PreToolUse call.
+        assert status in {"reserved", "exhausted", "accounting_unavailable"}
+        denied = output["hookSpecificOutput"].get("permissionDecision") == "deny"
+        assert denied == (status == "exhausted")
+        if status == "reserved":
+            reserved_ids.add(f"leaf-{index}")
+
+    def assert_saved_reservations():
+        state = (
+            continuation.session_state_dir(tmp_path / "profile", "codex", "session-one")
+            / retrieve.REFRESH_STATE_NAME
+        )
+        saved = next(
+            item for item in json.loads(state.read_text())["scopes"] if item["scope_id"] == scope
+        )
+        assert saved["reserved_operations"] == len(saved["reservations"]) == len(reserved_ids)
+        assert {item["tool_use_id"] for item in saved["reservations"]} == reserved_ids
+        assert controller(report, "status", {"scope_id": scope})["reserved_operations"] == len(reserved_ids)
+
+    # Lock timeouts permit unaccounted dispatch; only successful reservations consume the budget.
+    assert len(reserved_ids) <= 3
+    assert_saved_reservations()
+    for index in range(3 - len(reserved_ids)):
+        call_id = f"fill-{index}"
+        output = invoke(report, envelope("codex", "PreToolUse", call=call_id))
+        assert metadata(output)["status"] == "reserved"
+        assert output["hookSpecificOutput"].get("permissionDecision") != "deny"
+        reserved_ids.add(call_id)
+    exhausted = invoke(report, envelope("codex", "PreToolUse", call="over-budget"))
+    assert metadata(exhausted)["status"] == "exhausted"
+    assert exhausted["hookSpecificOutput"]["permissionDecision"] == "deny"
     post = metadata(
         invoke(
             report,
@@ -396,6 +423,7 @@ def test_parallel_leaf_reservations_do_not_double_count_stock_code_mode_wrapper(
         )
     )
     assert "boundary" not in post and post["reserved_operations"] == 3
+    assert_saved_reservations()
 
 
 @pytest.mark.parametrize("client", ["codex", "claude"])

@@ -1145,6 +1145,89 @@ def _checkpoints(rig: Rig) -> list[Path]:
     return list(rig.tmp.glob("checkpoint/window-*/checkpoint.json"))
 
 
+@pytest.mark.parametrize("interrupted", ["prepare", "importing"])
+def test_a_held_window_resumes_before_the_stopped_cell_is_contacted(rig, interrupted):
+    """Catches a rerun that needs MCP while its own unfinished upload keeps the cell stopped."""
+    if interrupted == "prepare":
+        rig.files(a01__bin=800, a02__bin=800)
+        rig.cloud.on_read = _network_error
+        with pytest.raises(CloudImportError):
+            rig.run()
+        old = _first_window(rig)["import_id"]
+        rig.cloud.rows[old].update(observed_state="stopping", recipient=None)
+        reads = []
+
+        def key_becomes_ready(import_id):
+            reads.append(import_id)
+            if len(reads) > 1 and rig.cloud.rows[old]["recipient"] is None:
+                rig.cloud.rows[old].update(observed_state="key_ready", recipient=rig.cloud.recipient)
+
+        rig.cloud.on_read = key_becomes_ready
+    else:
+        old = _stop_after_complete_while_cloud_imports(rig)
+        rig.cloud.rows[old]["observed_state"] = "importing"
+        rig.cloud.read_count = 0
+
+    def stopped_cell(call):
+        if rig.cloud.holds_cell(rig.cloud.rows[old]):
+            raise httpx2.ConnectError("the cell is stopped for this import")
+
+    rig.cell.before_reply = stopped_cell
+
+    result = rig.run(poll_seconds=0.001)
+    rig.run()
+
+    assert result["import_ids"] == [old] and len(rig.cloud.rows) == 1
+    assert rig.cloud.completed == [old] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
+    assert not _checkpoints(rig)
+
+
+def test_a_held_resend_resumes_before_mcp_and_clears_its_old_residual_once(rig):
+    """Catches a REST resume that loses the callback that acknowledges the old residual record."""
+    _series_with_a_residual(rig)
+    original = _window_of(rig, "a2.bin")
+    rig.cell.discard(original, ["a2.bin"])
+    rig.cloud.fail_prepare_once = True
+    with pytest.raises(CloudImportError):
+        rig.run(resend_residual=True)
+    old = json.loads((rig.tmp / "checkpoint" / "series-resend.json").read_text())["windows"][0]["import_id"]
+
+    def stopped_cell(call):
+        if rig.cloud.holds_cell(rig.cloud.rows[old]):
+            raise httpx2.ConnectError("the cell is stopped for this import")
+
+    rig.cell.before_reply = stopped_cell
+
+    result = rig.run(resend_residual=True)
+
+    assert result["import_ids"] == [old] and len(rig.cloud.rows) == 5
+    assert rig.cloud.completed.count(old) == 1
+    assert rig.cell.acknowledged == [(original, ["a2.bin"], 5)]
+    assert not (rig.tmp / "checkpoint" / "series-resend.json").exists()
+
+
+@pytest.mark.parametrize("row_state", [None, "done", "failed"])
+def test_a_missing_finished_or_ended_window_waits_for_receipts_before_any_replay(rig, row_state):
+    """Catches an early replay that bypasses stale-checkpoint or receipt reconciliation."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    if row_state is None:
+        del rig.cloud.rows[old]
+    elif row_state == "done":
+        rig.cloud.release()
+    else:
+        rig.cloud.rows[old]["observed_state"] = row_state
+    rig.cloud.held.clear()
+    creates = rig.cloud.creates
+    rig.cell.before_reply = _network_error
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+
+    assert stop.value.code == "NETWORK_ERROR"
+    assert rig.cloud.creates == creates and len(_checkpoints(rig)) == 1
+    assert _first_window(rig)["import_id"] == old and _first_window(rig)["attempts"] == []
+
+
 def test_rule_e_a_checkpoint_whose_import_cloud_has_no_row_for_is_dropped_and_the_window_lands_once(rig):
     """Rule (e): catches a stale checkpoint that a rerun resumes, so it waits on a new row that never gets an upload."""
     old = _stop_after_complete_while_cloud_imports(rig)
