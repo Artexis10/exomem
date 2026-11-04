@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.159.0](https://github.com/Artexis10/exomem/compare/v0.158.1...v0.159.0) (2026-11-04)
+
+
+### Features
+
+* **relations:** offer specific relations and promote referents without nudges ([#2256](https://github.com/Artexis10/exomem/issues/2256)) ([05e90fe](https://github.com/Artexis10/exomem/commit/05e90fe02287de72040e4e5e03993de0a89614b9))
+
+
+### Bug Fixes
+
+* **cellctl:** make restic retention forget old snapshots ([#2372](https://github.com/Artexis10/exomem/issues/2372)) ([a08b6bb](https://github.com/Artexis10/exomem/commit/a08b6bb6882bd19000faf3f22ccaf202a468ca0d))
+* **cellctl:** restore shell quoting import for backup jobs ([#2397](https://github.com/Artexis10/exomem/issues/2397)) ([768ee25](https://github.com/Artexis10/exomem/commit/768ee257b104d4d6f91994749726201f393fbd75))
+* **cloud:** recover imports and preserve filed destinations ([#2401](https://github.com/Artexis10/exomem/issues/2401)) ([117154e](https://github.com/Artexis10/exomem/commit/117154ed7ac8fe2b790650c91a78969905b8f072))
+* restore backup rendering and specify activation context ([#2399](https://github.com/Artexis10/exomem/issues/2399)) ([16d912d](https://github.com/Artexis10/exomem/commit/16d912d6bce8450f57f8a1d7d5856bdeaf22faf9))
+* verify stored bytes before artifact deduplication ([#2402](https://github.com/Artexis10/exomem/issues/2402)) ([4db00f9](https://github.com/Artexis10/exomem/commit/4db00f9c4771bc2c10b0bc6b2e4acc414de5146e))
+
 ## [0.158.1](https://github.com/Artexis10/exomem/compare/v0.158.0...v0.158.1) (2026-11-03)
 
 
