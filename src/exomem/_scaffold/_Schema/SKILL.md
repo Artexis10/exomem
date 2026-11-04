@@ -120,6 +120,19 @@ different Exomem, use the connector they named; if it is unavailable, say so pla
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
+Maps activation also returns `task_context`: source-bound leads and reusable methods.
+Read a lead before treating it as a fact or an ongoing commitment.
+Methods are live governed knowledge. Read each `read_ref` when applicability is
+`read_required`, including the source's scope and exclusions, before applying it.
+A current user instruction can override a method for this task within existing authority.
+This local adaptation does not revise the reusable method or authorize external actions.
+Use the ordinary guarded writer for an authorized reusable revision.
+Carry the activation `continuity` token on later activations. If `methods.reset` is
+true, discard held method projections before using this response.
+Without method continuity, freshly read a method before reusing it.
+An unchanged map does not certify method freshness. Refresh when the task, evidence
+or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
+
 ## Proactive engagement
 
 Use the live prominence level: `off` means explicit requests only; `light` means

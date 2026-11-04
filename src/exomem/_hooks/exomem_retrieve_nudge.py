@@ -2170,11 +2170,36 @@ def _format_slice_block(block: object, max_chars: int) -> str:
     return "\n".join([leading, *kept, *tail])
 
 
+def _format_task_context(block: object, max_chars: int) -> str:
+    """Render current read routes, with invalidation before every method projection."""
+    if not isinstance(block, dict):
+        return ""
+    methods = block.get("methods") or {}
+    lines = []
+    if methods.get("reset"):
+        lines.append(_packet_line("methods", str(methods.get("advice") or "Discard held methods and read current sources before reuse."), ""))
+    for item in block.get("candidates") or ():
+        lines.append(_packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or "")))
+    for item in methods.get("items") or ():
+        lines.append(_packet_line("method", f"{item.get('attribution', '')}; read the source for applicability and exclusions.", str(item.get("read_ref") or "")))
+    if lines:
+        lines.insert(0, _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""))
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
+
+
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
     """The map block, then the turn slice the packet carries beside it, and whether the map was complete."""
-    text, complete = _format_map_block(packet["map"], max_chars, last_generation)
-    turn = _format_slice_block(packet.get("turn_slice"), max_chars - len(text) - (1 if text else 0))
-    return ("\n".join([text, turn]) if text else turn) if turn else text, complete
+    task = _format_task_context(packet.get("task_context"), max_chars)
+    remaining = max(0, max_chars - len(task) - (1 if task else 0))
+    text, complete = _format_map_block(packet["map"], remaining, last_generation)
+    turn = _format_slice_block(packet.get("turn_slice"), remaining - len(text) - (1 if text else 0))
+    return "\n".join(part for part in (task, text, turn) if part), complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:

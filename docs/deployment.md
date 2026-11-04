@@ -1377,12 +1377,15 @@ The slice reads the `conversation` and the `trigger` of the request. It takes no
 
 The slice is on by default. The map compiles in a fixed share of the packet
 budget on every turn, so the map is the same on a turn that resolves nothing.
-The slice takes the rest. A turn that reaches nothing gets `turn_slice.state` of
+Task context and the slice share the existing 25% reserve. Task context omits
+generic pointers already reached by the guarded slice. Useful slice lines can
+keep up to half of this reserve; task context uses the remaining allowance.
+Unused task space returns to the slice. A turn that reaches nothing gets `turn_slice.state` of
 `empty`. A slice that cannot be built sets its `state` and leaves the map as it
 is. The default changed to on by an operator decision, so that the `maps` packet
 reaches pages that the map does not list; it is not the result of a measured gain.
 
-To go back to the map alone, add one line to the service environment and restart
+To disable the turn slice, add one line to the service environment and restart
 the service:
 
 ```bash
@@ -1392,7 +1395,7 @@ EXOMEM_ACTIVATION_TURN_SLICE=off
 1. If the install is managed (`--seamless`), add the line to `service.env`, usually `~/.config/exomem/service.env`, and run `bash scripts/upgrade.sh --package-version <the serving version>`. The next worker re-reads `service.env`. Without `--package-version`, the command also stages a newer release when one exists.
 2. If the install is a release install that is not managed, add the line to the dotenv file that you gave to the installer, and run the same `bash scripts/install-service.sh --release` command again.
 3. If the service runs from a source checkout, add the line to the checkout's `.env` and run `bash scripts/restart.sh`.
-4. Call `recall_context` once. The packet has no `turn_slice` block, and the map is the packet that the packet mode alone gives.
+4. Call `recall_context` once. The packet has no `turn_slice` block; task context keeps its independent behavior.
 
 To return to the slice, change the line to `EXOMEM_ACTIVATION_TURN_SLICE=on` and
 restart in the same way, then call `recall_context` once with a turn that names a
@@ -1407,6 +1410,56 @@ cell.
 Any value other than `off` serves the slice. A value other than `on` or `off`
 also logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using on`. The
 setting has no effect in the `anchors` mode.
+
+### Task context and live methods
+
+The `task_context` block supplies bounded leads from admitted catalogue carriers,
+including notes, episodes, collections and governed methods outside anchor
+neighborhoods. These leads require source reads before the client uses them as
+facts or ongoing intentions. An incomplete discovery returns `partial` or
+`unavailable`; it does not establish that the knowledge is absent.
+
+A method projection binds the whole source version, including scope and exclusions
+outside a selected unit. Its `read_required` applicability requires the full source
+read before use. Current user instructions can adapt a method for one task.
+An authorized reusable revision uses the ordinary guarded writer.
+
+Clients carry the activation continuity token across requests. Method invalidation
+runs before task selection and does not depend on map freshness. A true
+`task_context.methods.reset` discards the held method set before the client uses
+new projections. Missing and withheld sources produce the same generic reset.
+A client that omits method continuity must read a source again before reuse.
+
+### Optional context-fit interpretation
+
+Interpretation is disabled unless the process environment names an operator-owned
+JSON file through `EXOMEM_CONTEXT_FIT_CONFIG`. Keep that file outside the vault.
+It selects exactly one placement and supplies these deployment values:
+
+- `placement`: `local` or `api`.
+- `runtime`: `ollama` for local placement, or `openai` for a compatible API.
+- `endpoint`, `model`, `model_revision` and `runtime_version`: the measured deployment identity.
+- `timeout_seconds`, `max_input_chars`, `max_output_tokens` and `resource_allowance_gib`: the deployment allowance.
+- For an API, `provider_audience` and `disclosure_authorized: true`: explicit provider disclosure authority.
+- Optionally, `credential_env`: the name of the environment variable that holds the API credential.
+
+Local placement requires a loopback IP endpoint. The adapter verifies the installed
+model digest and runtime version before it sends request data. Ollama receives the
+output schema through its documented [structured-output interface](https://docs.ollama.com/capabilities/structured-outputs).
+The API placement separately checks provider disclosure for every candidate source.
+Full source input requires full disclosure for both the caller and the provider.
+Excerpt-only admission retains baseline discovery and ordinary client reads.
+Neither placement changes the caller's admission or silently selects another provider.
+
+The adapter validates every returned identity, source version and fit label.
+Valid labels only order the existing pool; omitted judgments remain uncertain.
+Invalid output, missing capability, input overflow and timeout preserve baseline
+discovery. Turn text, prompts and fit judgments remain request-local.
+Reported resource allowance comes from configuration; it is not measured resource use.
+
+Keep interpretation disabled until a paired real-model check establishes benefit
+for that deployment. Remove `EXOMEM_CONTEXT_FIT_CONFIG` from the process environment
+to restore the agent-only path. This rollback leaves canonical methods intact.
 
 ### The map while the vault changes
 

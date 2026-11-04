@@ -320,7 +320,7 @@ def test_a_slice_that_cannot_be_built_keeps_the_map(vault: Path, monkeypatch: py
     assert failed["turn_slice"]["state"] == "unavailable" and failed["turn_slice"]["items"] == []
     assert failed["map"] == expected["map"]
     assert failed["continuity"] == expected["continuity"]
-    assert failed["budget"]["used_chars"] == context_views.map_packet_chars(failed["map"])
+    assert failed["budget"]["used_chars"] == context_views.packet_chars(failed["map"], failed.get("turn_slice"), failed.get("task_context"))
 
 
 def test_a_compile_that_abstains_inside_serve_is_an_unavailable_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -552,11 +552,11 @@ def test_the_packet_stays_within_its_limit_at_every_budget(vault: Path, max_char
         packet = _activate(vault, caller, turn=NAMING_TURN, max_chars=max_chars)
         used, limit = packet["budget"]["used_chars"], packet["budget"]["limit_chars"]
         assert limit == max_chars and used <= limit
-        assert used == context_views.packet_chars(packet["map"], packet["turn_slice"])
+        assert used == context_views.packet_chars(packet["map"], packet["turn_slice"], packet.get("task_context"))
 
 
-def test_the_setting_off_restores_the_map_alone(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    """`off` is the rollback: no slice, no resolver, and the map compiles at the whole limit."""
+def test_the_setting_off_preserves_independent_task_context(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """`off` removes the slice and resolver while task context shares the same fixed map allowance."""
     _structured(vault)
     with_slice = _activate(vault, turn=SLED_TURN)
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
@@ -564,8 +564,8 @@ def test_the_setting_off_restores_the_map_alone(vault: Path, monkeypatch: pytest
     off = _activate(vault, turn=SLED_TURN, include_timings=True)
     assert "turn_slice" not in off
     assert not any(stage.startswith("working_set.lexical") for stage in off["timings"]["stages"])
-    assert off["budget"]["used_chars"] == context_views.map_packet_chars(off["map"])
-    assert len(off["map"]["items"]) >= len(with_slice["map"]["items"])
+    assert off["budget"]["used_chars"] == context_views.packet_chars(off["map"], None, off.get("task_context"))
+    assert off["map"] == with_slice["map"]
     # An invalid value is not the rollback: it serves the slice and says so once.
     monkeypatch.setattr(working_set_runtime, "_SLICE_WARNING_EMITTED", False)
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "maybe")

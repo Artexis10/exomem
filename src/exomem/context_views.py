@@ -1239,6 +1239,7 @@ def activation_packet(
     vault_root: Path, max_chars: int, *, purpose: str | None = None,
     generation: Mapping[str, Any], timings: find_types.FindTimings | None = None,
     turn_leads: Callable[[CallerView], TurnLeads] | None = None, known_generation: str | None = None,
+    task_context: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1252,14 +1253,15 @@ def activation_packet(
     """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-            return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation)
-    return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation)
+            return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation, task_context)
+    return _activation_packet(vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation, task_context)
 
 
 def _activation_packet(
     root: Path, max_chars: int, purpose: str | None, generation: Mapping[str, Any],
     timings: find_types.FindTimings | None, turn_leads: Callable[[CallerView], TurnLeads] | None = None,
     known_generation: str | None = None,
+    task_context: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1286,7 +1288,9 @@ def _activation_packet(
         }
         view = _usable(prepared)
         description = _map_description()
-        reserve = 0 if turn_leads is None else _slice_reserve(max_chars)
+        # Task invalidation still needs the fixed share when no complete slice line fits.
+        reserve = (int(max_chars * TURN_SLICE_SHARE) if task_context is not None
+                   else (0 if turn_leads is None else _slice_reserve(max_chars)))
         map_chars = max_chars - reserve - len(description) - 1
         compiled = None
         if view is None:
@@ -1323,9 +1327,37 @@ def _activation_packet(
         )
         packet["map"] = block
         packet["budget"]["used_chars"] = map_packet_chars(block)
+        cached_leads = None
+
+        def leads_once(caller):
+            nonlocal cached_leads
+            if cached_leads is None:
+                try:
+                    cached_leads = turn_leads(caller) if turn_leads is not None else TurnLeads(SLICE_SKIPPED)
+                except Exception:  # noqa: BLE001 - optional leads cannot discard the compiled map
+                    log.warning("turn leads unavailable", exc_info=True)
+                    cached_leads = TurnLeads(UNAVAILABLE)
+            return cached_leads
+
+        def prepare_slice():
+            # Protect useful slice lines within half of the existing reserve; duplicate pointers add no evidence.
+            preview = _turn_slice(
+                prepared, leads_once, world=compiled.world, limit=packet["budget"]["limit_chars"],
+                reserve=reserve // 2, timings=timings,
+            )
+            return frozenset(lead.ref for lead in leads_once(prepared.caller).leads), slice_packet_chars(preview)
+
+        if task_context is not None:
+            from . import context_task
+
+            task_block = task_context(prepared.caller, catalogue, reserve, prepare_slice if turn_leads is not None else None)
+            packet["task_context"] = context_task.pin(root, prepared.caller, task_block, limit=max_chars)
+            task_chars = context_task.packet_chars(task_block)
+            packet["budget"]["used_chars"] += task_chars
+            reserve = max(0, reserve - task_chars)
         if turn_leads is not None:
             slice_block = _turn_slice(
-                prepared, turn_leads, world=compiled.world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
+                prepared, leads_once, world=compiled.world, limit=packet["budget"]["limit_chars"], reserve=reserve, timings=timings
             )
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
@@ -1457,9 +1489,15 @@ def slice_packet_chars(block: Mapping[str, Any]) -> int:
     return len("\n".join(lines)) + 1
 
 
-def packet_chars(map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | None) -> int:
-    """What a maps packet is charged: its map, and its turn slice when it carries one."""
-    return map_packet_chars(map_block) + (0 if slice_block is None else slice_packet_chars(slice_block))
+def packet_chars(
+    map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | None,
+    task_block: Mapping[str, Any] | None = None,
+) -> int:
+    """Charge all admitted maps-packet prose through the same accounting path."""
+    from . import context_task
+
+    return (map_packet_chars(map_block) + (0 if slice_block is None else slice_packet_chars(slice_block))
+            + (0 if task_block is None else context_task.packet_chars(task_block)))
 
 
 def _slice_reserve(max_chars: int) -> int:
