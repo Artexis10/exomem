@@ -2,7 +2,7 @@
 
 ### Requirement: A miss remains linked to its evidence
 
-A source-backed correction SHALL NOT require an incident record. When the user asks to record or learn from the miss, a workflow skill engages this workflow, or the live engagement policy delegates filing an observed outcome, the agent workflow SHALL link the observed miss, source-backed expectation, available context, correction, write receipts, and verification evidence in an existing incident collection. When the response that preceded the miss carried a `served_context_id` (served-context-record), the workflow SHALL link the delivered context by that id instead of copying its refs. Missing evidence SHALL remain explicit, and a delivered-context row that is absent or expired SHALL be recorded as a gap. Collection manifests SHALL own field names and lifecycle values.
+A source-backed correction SHALL NOT require an incident record. When the user asks to record or learn from the miss, a workflow skill engages this workflow, or the live engagement policy delegates filing an observed outcome, the agent workflow SHALL link the observed miss, source-backed expectation, available context, correction, write receipts, and verification evidence in an existing incident collection. When the response that preceded the miss carried a `served_context_id` (served-context-record), the workflow SHALL link its composed response metadata by that id instead of copying its refs. The row SHALL NOT prove client receipt or use. Missing evidence SHALL remain explicit; report absent or independently established expiry as a gap. Collection manifests SHALL own field names and lifecycle values.
 
 #### Scenario: The user asks only for the fix
 
@@ -24,7 +24,7 @@ A source-backed correction SHALL NOT require an incident record. When the user a
 - **WHEN** an existing incident collection declares different field names or lifecycle values
 - **THEN** the agent follows that schema and reports missing fields instead of introducing product-defined values
 
-#### Scenario: An incident links its delivered context by row id
+#### Scenario: An incident links its response metadata by row id
 
 - **WHEN** the user asks to record a miss that followed a response carrying a `served_context_id`
-- **THEN** the incident links that id as its delivered context, and the owner read-out can resolve the id to the map generation, stance line refs and slice refs that the activation served
+- **THEN** the incident links that id as composed response metadata; owner lookup resolves the retained row or reports the evidence gap without inferring client receipt

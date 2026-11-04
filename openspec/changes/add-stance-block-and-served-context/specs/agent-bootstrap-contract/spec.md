@@ -1,19 +1,20 @@
 ## MODIFIED Requirements
 
 ### Requirement: Generic guidance carries the activation line
-At balanced and maximal prominence, the generic client workflow guidance served by
-bootstrap SHALL include one line instructing the agent to call `activate_context`
-with the user's turn before answering a substantive turn that has no prior
-conversation context, and to follow a returned `next_action` when present
-(read-next-action); at light and off it SHALL be absent. The line SHALL NOT repeat a
-per-state move, such as the `anchor` call for an `ambiguous` packet, because the
-`next_action` state table holds it. The line SHALL cost at most 220 bytes in the
-served JSON and SHALL be byte-identical between the served projection and the shipped
-scaffold's recall loop. With the line present the compact profile SHALL stay within its
-byte ceiling at every prominence level and on every client surface, and SHALL keep at
-least its 512-byte headroom warning margin at the default (balanced) level. The maximal
-level was already inside that warning margin before this line existed, so the margin is
-not required of it; its measured headroom SHALL be recorded beside the ceiling constant.
+At balanced and maximal prominence, bootstrap's generic workflow guidance SHALL
+include its capability-selected recall carrier before a substantive turn with no
+prior context. Use the existing activation carrier where activation is exposed,
+and the existing search carrier on reduced surfaces that expose search without
+activation. At light and off this initiated-recall line SHALL be absent.
+
+Each carrier SHALL add the command-independent sentence "Follow `next_action` when
+present." and SHALL name no unavailable call. Per-state moves SHALL come from the
+shared source. Each served carrier SHALL cost at most 220 bytes and SHALL match
+its corresponding scaffold projection byte for byte; different capability
+projections need not contain identical call text. The compact payload SHALL stay
+within its ceiling on every surface and prominence level. Balanced SHALL retain
+at least 512 bytes of headroom. Maximal's measured headroom SHALL remain recorded
+beside the ceiling constant, without a new 512-byte requirement.
 
 #### Scenario: Ceiling holds at every level, margin at the default
 - **WHEN** the compact bootstrap is served at each of off, light, balanced and maximal,
@@ -29,37 +30,26 @@ not required of it; its measured headroom SHALL be recorded beside the ceiling c
 
 #### Scenario: The line points at the next move
 - **WHEN** bootstrap is served at balanced
-- **THEN** the activation line tells the agent to follow `next_action` when present,
-  and it names no per-state move
+- **THEN** the selected recall carrier tells the agent to follow `next_action` when present,
+  and it names no per-state move or unavailable call
 
 ## ADDED Requirements
 
-### Requirement: Bootstrap teaches the stance-line route
-At `balanced` and `maximal`, the capture axis of the engagement contract SHALL name a
-behavioural correction that applies to every task as a capture class beside its existing
-classes. The client model SHALL judge whether a user statement corrects how the agent
-should behave on every task. The agent SHALL propose the exact stance line and cite the
-user's words as its source, either an episode `said` line or a captured Source, and SHALL
-write the line on a stance page (stance-block) only after the user confirms in the
-conversation. A later line SHALL replace an earlier one through `supersedes`. The agent
-SHALL NOT propose a rule for one kind of task or one entity as a stance line, because a
-stance line serves on every task. At `light` the agent SHALL write a stance line only
-when asked, and at `off` it SHALL only propose. The server SHALL add no correction
-detector: no word list, cue list or classifier SHALL decide that a statement is a
-correction. Both `SKILL.md` copies, `prominence.py`, the scaffold's recall loop and the
-bootstrap `intent_boundary` and `capture_examples` SHALL carry the same rule, and the
-compact payload SHALL stay within its measured ceiling.
+### Requirement: Bootstrap teaches the authorized stance-line route
+At balanced and maximal prominence, the client model MAY initiate a proposal for a correction that applies to every task. It SHALL propose the exact line and cite the user's words. It SHALL write only with authority for that exact global line and any page promotion. An explicit request for that exact action SHALL count as authority without another confirmation. Otherwise an initiated proposal SHALL wait for confirmation. Marking an existing page SHALL cover every resulting global unit.
 
-#### Scenario: A confirmed correction becomes a stance line
-- **WHEN** at `balanced` the user says that the agent must never treat a draft as final
-  without a stated review, and confirms the agent's proposed stance line
-- **THEN** the agent writes the line on a stance page with its source, and the next maps
-  packet's stance block serves the line
+At light, write only on request. At off, initiate no capture or proposal, but honor an explicit request. These rules SHALL preserve the existing engagement gate. Scoped rules SHALL remain ordinary compiled knowledge. Replacements SHALL use same-page unit supersession or existing page supersession. No server cue list or classifier SHALL judge correction meaning.
+
+The scaffold, its deployed skill copies, prominence and bootstrap SHALL derive this rule from their maintained source path. Preserve bootstrap's capability-aware activation or search carrier; do not replace it with an unconditional literal tool call. The next-action sentence SHALL be command-independent, and the compact payload SHALL retain its existing ceiling and default margin.
 
 #### Scenario: An unconfirmed proposal is not written
-- **WHEN** the agent proposes a stance line and the user does not confirm it
-- **THEN** no line is written, and no packet serves the proposal
+- **WHEN** the agent initiates a proposal and the user declines or gives no confirmation
+- **THEN** no stance line or page promotion is written
 
-#### Scenario: Off only proposes
-- **WHEN** the engagement level is `off` and the user corrects the agent's behaviour
-- **THEN** the agent may propose the exact stance line and its source, and writes nothing
+#### Scenario: An exact request at off remains actionable
+- **WHEN** at off the user explicitly asks to save an exact global stance line with its source
+- **THEN** the agent makes that authorized write without a second confirmation
+
+#### Scenario: A scoped correction stays out of stance
+- **WHEN** a correction applies to one entity or one kind of task
+- **THEN** the agent does not promote it into the global stance block

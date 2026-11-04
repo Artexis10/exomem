@@ -538,8 +538,8 @@ def test_writer_resolver_snapshot_forks_without_mutating_shared_cache(vault: Pat
     before = (
         set(shared.full_paths),
         set(shared.kb_stripped),
-        {key: list(value) for key, value in shared.stems.items()},
-        {key: list(value) for key, value in shared.titles.items()},
+        dict(shared.stems),  # Buckets are immutable tuples, so a shallow copy is an exact snapshot.
+        dict(shared.titles),
     )
 
     detached = find.writer_resolver_snapshot(vault)

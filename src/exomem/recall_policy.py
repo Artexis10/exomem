@@ -293,11 +293,17 @@ def admitted_relative_paths(vault_root: Path, paths: Iterable[Path]) -> frozense
     before they ask for the next, and a shared proof would leave an ancestor
     swapped in that time unseen.
     """
+    return frozenset(rel for _path, rel in iter_admitted_relative(vault_root, paths))
+
+
+def iter_admitted_relative(vault_root: Path, paths: Iterable[Path]) -> Iterator[tuple[Path, str]]:
+    """`admitted_relative_paths` as `(path, relative spelling)` pairs, for a caller that keys on the path."""
     root = Path(vault_root)
     proven: set[str] = set()
-    return frozenset(
-        rel for path in paths if (rel := _admitted_relative(root, path, proven)) is not None
-    )
+    for path in paths:
+        rel = _admitted_relative(root, path, proven)
+        if rel is not None:
+            yield path, rel
 
 
 def recall_policy_identity(vault_root: Path) -> tuple[str, str]:

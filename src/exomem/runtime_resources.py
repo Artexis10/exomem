@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
@@ -34,6 +35,8 @@ _NATIVE_ENV = {
     "TOKENIZERS_PARALLELISM": "false",
 }
 _background_priority_applied: bool | None = None
+_MEMINFO = Path("/proc/meminfo")
+_PROC_STATUS = Path("/proc/self/status")
 _MODEL_WORK: ContextVar[tuple[str, threading.Event | None]] = ContextVar(
     "exomem_model_work", default=("foreground", None)
 )
@@ -101,11 +104,9 @@ def preload_local_dotenv_policy() -> None:
     own later one. Never from inside a vault, for the same reason: a `.env`
     a remote writer planted there must not configure even resource policy.
     """
-    if os.environ.get("EXOMEM_HOSTED_CELL", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return
     from . import cloud_cell
 
-    if cloud_cell.cloud_mode_enabled():
+    if cloud_cell.hosted_mode_enabled() or cloud_cell.cloud_mode_enabled():
         return
     from .dotenv_guard import working_directory_dotenv
 
@@ -194,13 +195,7 @@ def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
     from . import cloud_cell
 
-    hosted = str(values.get("EXOMEM_HOSTED_CELL", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    default = cloud_cell.cloud_mode_enabled(values) and not hosted
+    default = cloud_cell.cloud_mode_enabled(values) and not cloud_cell.hosted_mode_enabled(values)
     raw = values.get(ONNX_SHARE_WEIGHTS_ENV)
     if raw is None or not str(raw).strip():
         return default
@@ -661,6 +656,47 @@ def lower_background_priority(*, platform: str | None = None) -> bool:
     except OSError:
         _background_priority_applied = False
     return _background_priority_applied
+
+
+def available_memory() -> int | None:
+    """Bytes of memory a new process can have, or None when the host does not say.
+
+    `MemAvailable` where the kernel reports it (Linux); elsewhere the free
+    physical pages, which leave out reclaimable cache and so read low.
+    """
+    try:
+        with open(_MEMINFO, encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def peak_rss_bytes() -> int | None:
+    """This process's peak resident memory in bytes, or None when the host does not say.
+
+    `VmHWM` where the kernel reports it (Linux); elsewhere `ru_maxrss`, which is
+    bytes on macOS and kilobytes on the other Unixes.
+    """
+    try:
+        with open(_PROC_STATUS, encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, OSError, ValueError):
+        return None
+    return peak if sys.platform == "darwin" else peak * 1024
 
 
 def effective_online_cpus() -> int:

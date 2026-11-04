@@ -1,81 +1,90 @@
+## Purpose
+
+Keep private, bounded metadata of composed activation responses so an owner can inspect context without claiming client receipt or use.
+
 ## ADDED Requirements
 
-### Requirement: One append-only table records what each activation served
+### Requirement: One append-only table records the authorized response metadata
 
-Exomem SHALL keep one SQLite table, the served-context record, in the vault state directory beside the heat sidecar. Each maps-mode activation SHALL write one row with these fields:
+Exomem SHALL keep one SQLite table in tenant state beside the heat sidecar. Each successfully recorded maps activation SHALL append one row after all response carriers attach their fields and final egress determines the released material. The row SHALL contain:
 
-- a row id, the derived session key that heat uses, and the time;
-- the caller's principal and view;
-- the map generation, never the map items;
-- the stance state and the refs of the stance lines that the block served, when the packet carries a stance block;
-- the slice refs, each with its match value, and the slice state;
-- the `next_action` state, when the response carries one;
-- the upkeep items that the response surfaced, each by the item id that the upkeep queue assigns, when the response carries any.
+- a fresh row id and timestamp;
+- authenticated principal and view bindings;
+- an existing usable derived session key, or an explicit absent state;
+- map generation and whether the map response was unchanged;
+- stance state and served line refs when present;
+- slice state and served refs with match values;
+- the `next_action` state when present;
+- surfaced upkeep identities as the final response carries them, including queue item id and fingerprint when supplied.
 
-A row SHALL hold refs, generations and closed states only, never vault text or conversation text. A slice ref that the turn's conversation reached SHALL be recorded as a served ref like any other, and no conversation field SHALL be recorded. The table SHALL be append-only: no path SHALL update a row, and only the retention sweep SHALL delete one. Opens and cites SHALL NOT be copied into the record; they stay in heat under the same session key.
+The row SHALL contain no vault text, conversation field, purpose text or raw caller session. Recording SHALL NOT mint a thread or substitute transport identity. A row proves composed authorized response metadata, not transport receipt, opening, citation or use. Refs identify material without retaining its historical text. Rows SHALL remain unchanged after page rename or deletion; current resolution SHALL be reported separately.
 
-#### Scenario: A row holds refs and states, not text
+#### Scenario: A cached response gets a fresh row
 
-- **WHEN** a maps packet serves two stance lines and three slice items, and the response carries no `next_action`
-- **THEN** the record gains one row with the map generation, stance state `ready` with the two line refs, the three slice refs with their match, and slice state `ready`, and no `next_action` state
-- **AND** no column holds the turn, a conversation field or any page text
+- **WHEN** two requests use the same cached packet
+- **THEN** each successful recording has a distinct id, and the cache contains neither id
 
-#### Scenario: A surfaced upkeep item is recorded by its id
+#### Scenario: A keyless response remains keyless
 
-- **WHEN** the response surfaces one upkeep item
-- **THEN** the row records the item id that the upkeep queue assigns, and no text of the item
+- **WHEN** an activation has no usable existing conversation key
+- **THEN** its row records that absence and creates no substitute identity
 
-### Requirement: Recording never slows or fails the activation
+#### Scenario: An unchanged map is distinguishable
 
-The activation SHALL write its row after the packet is built, with a short busy timeout, and SHALL never fail, retry or wait on the write. The response SHALL carry the row id as `served_context_id`, added after the packet cache lookup and never stored in the cached packet. When the write fails, the response SHALL omit `served_context_id` and its diagnostics part SHALL name `served_context_unrecorded`. The record SHALL NOT share a cache with the heat ring, so a row write invalidates no heat cache.
+- **WHEN** a response returns a map generation with an unchanged reply and no map items
+- **THEN** the row records that generation and the unchanged state
 
-#### Scenario: A locked table leaves the activation served
+#### Scenario: Upkeep matches the final response
 
-- **WHEN** the record's database is locked past the busy timeout
-- **THEN** the packet is served unchanged, `served_context_id` is absent, and the diagnostics part names `served_context_unrecorded`
+- **WHEN** a response surfaces an upkeep item after other carriers run
+- **THEN** the row records its final queue identity and supplied fingerprint, without item text
 
-#### Scenario: A cached packet gets a fresh row id
+### Requirement: Recording has bounded best-effort latency
 
-- **WHEN** two identical requests are served, the second from the packet cache
-- **THEN** each response carries its own `served_context_id`, and the cached packet holds neither
+Recording SHALL use one bounded SQLite insert with a declared short timeout, no retries and no propagated failure. It SHALL invalidate no heat cache. A successful response SHALL carry `served_context_id` after cache lookup. A failed insert SHALL omit that id and name `served_context_unrecorded` in diagnostics. Its measured stage latency SHALL be reported; it SHALL NOT be described as zero cost.
 
-### Requirement: Rows expire by age and by count
+#### Scenario: A locked database leaves the read served
 
-A retention sweep SHALL delete rows older than `SERVED_CONTEXT_RETENTION_DAYS` (30) and the oldest rows above `SERVED_CONTEXT_MAX_ROWS` (100,000). The sweep SHALL run outside the activation request. The read-out SHALL report the window that the remaining rows cover.
+- **WHEN** the insert cannot complete within its timeout
+- **THEN** the read returns its authorized context without an id, with `served_context_unrecorded` in diagnostics
 
-#### Scenario: Old rows leave the table
+### Requirement: Retention bounds the table
 
-- **WHEN** the sweep runs and the table holds rows from 31 days ago
-- **THEN** those rows are deleted and every younger row remains
+A sweep outside activation SHALL remove rows older than `SERVED_CONTEXT_RETENTION_DAYS` (30) and the oldest rows above `SERVED_CONTEXT_MAX_ROWS` (100,000). Only that sweep SHALL delete rows. Lookup SHALL distinguish absent from expiry supported by retention evidence; missing alone SHALL NOT mean expired.
 
-### Requirement: Rows stay with their caller and out of host logs
+#### Scenario: A missing id has no inferred history
 
-Rows SHALL live only in the vault state directory, which is tenant state in a hosted cell, and SHALL never be written to a host log, a timing record or the activation log. Every row SHALL be recorded under the caller's principal and view. No tool, route or packet SHALL serve one caller's rows to another caller. Only the owner read-out SHALL read rows across principals.
+- **WHEN** lookup finds no row and has no retention evidence for that id
+- **THEN** it reports absent, without claiming that the row expired
 
-#### Scenario: A delegated caller cannot read rows
+### Requirement: Only verified owner authority reads rows
 
-- **WHEN** a nonowner principal asks any surface for served-context rows
-- **THEN** no surface returns them
+Rows SHALL remain in tenant state, including content-private cells, and SHALL never enter host, timing or activation logs. Lookup SHALL verify owner authority before revealing existence or contents. A row id, declared client or session SHALL grant no access. Only verified owner authority SHALL permit reading across principals. The owner command SHALL use one leaf on the CLI and owner REST facade.
 
-### Requirement: The owner reads the record through one command
+#### Scenario: A row id grants no authority
 
-An owner-only command SHALL report the served, opened and cited counts of slice refs, with their sample sizes in rows and sessions. It SHALL join the record with heat `read` and `cite` events by session key and time, and it SHALL report the windows that both sources cover, because the heat ring can cover less time than the record. A count that a source could not cover SHALL be reported as unknown, never as zero. Given a `served_context_id`, the command SHALL show that one row, or report it as absent or expired. The command SHALL be reachable on the CLI and on the owner's REST facade over one leaf.
+- **WHEN** a nonowner supplies another principal's valid row id
+- **THEN** the response discloses neither its existence nor its contents
 
-#### Scenario: An incident's row id resolves
+### Requirement: Summaries describe retained records and unknown usage
 
-- **WHEN** the owner asks the command for a `served_context_id` that an incident links
-- **THEN** the command shows that row's map generation, stance line refs and slice refs, or reports that the row has expired
+The owner command SHALL report retained row count, recorded ref occurrences and first/last retained row timestamps. It SHALL label these as retained records, never all activations. Session sample size SHALL remain unknown wherever usable session identity is absent. Opened and cited observations SHALL be explicitly unknown with reasons that name attribution and coverage limits. The command SHALL NOT join empty session keys, use transport identity as conversation identity or infer causation from timestamp proximity. Missing heat events SHALL NOT establish zero use.
 
-#### Scenario: The read-out names its windows
+#### Scenario: A transcript read is not attributed telemetry
 
-- **WHEN** the record covers 30 days and the heat ring covers 9 days
-- **THEN** the read-out reports both windows, and its opened and cited counts cover only the 9 days with heat
+- **WHEN** a recorded activation is followed by a real read whose heat event has no matching conversation identity
+- **THEN** the summary reports opened and cited observations as unknown, even though the read occurred
 
-### Requirement: The record learns nothing by itself
+#### Scenario: Retained timestamps do not prove completeness
 
-The served-context record SHALL add no automatic learning: no path SHALL change a stance line, a ranking or a packet because of a row. Any later change built on the record SHALL reach the vault only through a proposal that the owner reviews.
+- **WHEN** retained rows span thirty days and some insert attempts failed
+- **THEN** the summary describes its retained rows and their timestamp range without claiming complete activation coverage
 
-#### Scenario: A slice ref that nobody opens keeps its selection
+### Requirement: Recording changes no selection and retires no separate ledger
 
-- **WHEN** a slice ref is served in many rows and opened in none
-- **THEN** its selection and its ranking are unchanged until the owner edits the vault
+Record operations SHALL change no ranking, selection or authored knowledge. Independent existing heat behavior SHALL remain unchanged. A separate surfaced-item ledger SHALL remain until a replacement proves equivalent identity, fingerprints, surface coverage and durability. This fallible maps record alone SHALL NOT retire it.
+
+#### Scenario: Unopened recorded material keeps its selection
+
+- **WHEN** a ref occurs in many retained rows and the command cannot measure its use
+- **THEN** the record changes neither that ref's selection nor its ranking

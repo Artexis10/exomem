@@ -249,7 +249,8 @@ class AdoptionRunStore:
     def planned_write(self, run: dict) -> PlannedWrite:
         """The run object as a write, so a caller can commit it inside a larger batch."""
         run["updated"] = _now_iso()
-        content = json.dumps(run, indent=2, ensure_ascii=False, default=str) + "\n"
+        # Compact: an import commits this object every 25 items, and indenting a multi-megabyte run costs real time.
+        content = json.dumps(run, ensure_ascii=False, default=str) + "\n"
         return PlannedWrite(path=self._run_file(run["run_id"]), content=content)
 
     def save(self, run: dict) -> None:

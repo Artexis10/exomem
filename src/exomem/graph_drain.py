@@ -362,7 +362,7 @@ def debt_pending(vault_root: Path) -> bool:
     """True when the graph owes work of any kind. Read-only; never raises.
 
     The public probe for work that must yield to graph convergence (the
-    dreamer's idle gate). Queued receipts, a standing whole-vault marker, a
+    dreamer's tick gate). Queued receipts, a standing whole-vault marker, a
     stopped rebuild's barrier and an unreadable graph all count. It reads the
     same predicates the drain schedules on and repairs nothing: no marker is
     raised and no recovery is attempted. An unreadable probe answers True, the

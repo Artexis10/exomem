@@ -345,6 +345,53 @@ def test_incremental_reconcile_matches_full_rebuild(
     assert incremental.as_dict() == rebuilt.as_dict()
 
 
+def _resolver_maps(context) -> dict:
+    """The corpus resolver as plain values; `as_dict` leaves it out."""
+    return {
+        "entries": list(context.resolver_entries),
+        "full_paths": sorted(context.resolver_full_paths),
+        "kb_stripped": sorted(context.resolver_kb_stripped),
+        "stems": dict(context.resolver_stems),
+        "titles": dict(context.resolver_titles),
+        "candidates_by_key": dict(context.resolver_candidates_by_key),
+    }
+
+
+@pytest.mark.parametrize("change", ["added", "removed", "renamed"])
+def test_page_delta_patches_the_resolver_as_a_full_rebuild_would(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    # A wrong patch keeps a removed page or misses an added one, so links resolve to the wrong page.
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    # Each change edits a title, stem or KB-relative key that another page still holds.
+    (notes / "three.md").write_text(_page(title="Two"), encoding="utf-8")
+    (notes / "Sub").mkdir()
+    (notes / "Sub" / "one.md").write_text(_page(title="Nested"), encoding="utf-8")
+    (vault / "Notes" / "Insights").mkdir(parents=True)
+    (vault / "Notes" / "Insights" / "three.md").write_text(_page(title="Root"), encoding="utf-8")
+    _shared_context(vault)
+    if change == "added":
+        (notes / "four.md").write_text(_page(title="Two"), encoding="utf-8")
+    elif change == "removed":
+        (notes / "three.md").unlink()
+    else:
+        (notes / "Sub" / "one.md").rename(notes / "Sub" / "uno.md")
+
+    def refuse_rebuild(*args, **kwargs):
+        raise AssertionError("the page delta must patch the corpus, not rebuild it")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_contract, "_context_from_state_map", refuse_rebuild)
+        incremental = _shared_context(vault)
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert _resolver_maps(incremental) == _resolver_maps(rebuilt)
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
 def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -700,6 +747,65 @@ def test_cold_build_absorbs_markdown_churn_instead_of_discarding_cache(
     assert builds == 1
     assert first.pages[_PAGE_REL].title == "Changed during build"
     assert second is first
+
+
+def test_a_cold_build_that_writes_outrun_still_spares_the_next_reader(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm-up beside a steady writer keeps its build for the next reader.
+
+    A standby warms while the serving worker writes. When every census
+    confirmation after the build differs from the one before it, warm-up threw
+    the build away and failed, and the promoted worker paid the whole cold build
+    again. The kept build must still never answer from a page it has not read.
+    """
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
+    )
+    real_census = semantic_contract._deferred_corpus_census
+    writes = 0
+
+    def census_beside_a_writer(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        # A longer title each time, so the size moves even within one mtime tick.
+        (vault / _PAGE_REL).write_text(_page(title="Write " + "x" * writes), encoding="utf-8")
+        return real_census(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", census_beside_a_writer)
+    real_with_census = semantic_contract._build_corpus_context_with_census
+    returned_census: list[object] = []
+
+    def recorded_with_census(*args, **kwargs):
+        context, census = real_with_census(*args, **kwargs)
+        returned_census.append(census)
+        return context, census
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_with_census", recorded_with_census)
+    semantic_contract.warm_corpus_context(vault)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_with_census", real_with_census)
+    monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", real_census)
+    # No single walk describes the kept context, so the builder names no census.
+    assert returned_census == [None]
+    # One more write that no event reports, as from another process.
+    other_rel = "Knowledge Base/Notes/Insights/two.md"
+    (vault / other_rel).write_text(_page(title="Unreported write"), encoding="utf-8")
+    real_build = semantic_contract._build_corpus_context_uncached
+    builds = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", counted_build)
+    context = _shared_context(vault)
+
+    assert builds == 0
+    assert context.pages[_PAGE_REL].title == "Write " + "x" * writes
+    assert context.pages[other_rel].title == "Unreported write"
 
 
 def test_concurrent_cold_builds_share_one_uncached_result(

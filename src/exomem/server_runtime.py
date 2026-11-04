@@ -1096,14 +1096,12 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
 def _start_dreamer(vault_root: Path) -> Any | None:
     """Start the default-off upkeep worker, or nothing.
 
-    Local service only. A hosted cell never reaches this starter, and a cloud
-    cell declines here: both would need their own worker registration and
-    review before a background proposal worker runs for a tenant.
+    The local service and a cloud cell start it the same way, when the setting
+    (`EXOMEM_DREAMER`) is on. The worker writes only its own sidecar under the
+    process's state root, so a cell's worker stays inside that cell.
     """
-    from . import cloud_cell, dreamer
+    from . import dreamer
 
-    if cloud_cell.cloud_mode_enabled():
-        return None
     try:
         return dreamer.start(vault_root)
     except Exception as exc:  # noqa: BLE001 - upkeep must never break startup

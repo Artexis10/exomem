@@ -10,7 +10,7 @@ from pathlib import Path
 # The reused harnesses (`epistemic`, `membench`) are top-level packages under benchmarks/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from import_guidance import report, runner  # noqa: E402
+from import_guidance import report, runner, store_report  # noqa: E402
 from import_guidance.recording import parse_arm  # noqa: E402
 from import_guidance.scripted_replies import DEFAULT_SUITE  # noqa: E402
 
@@ -59,8 +59,22 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--baseline", required=True, help="the baseline arm's label")
     rep.add_argument("--candidate", required=True, help="the candidate arm's label")
     rep.add_argument("--out", type=Path, help="write the report here instead of printing it")
+    store = sub.add_parser(
+        "store-report", help="pass counts for the store-identity cases (07 to 09) from runs.jsonl"
+    )
+    store.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files")
+    store.add_argument("--baseline", required=True, help="the baseline arm's label")
+    store.add_argument("--candidate", required=True, help="the candidate arm's label")
+    store.add_argument("--out", type=Path, help="write the tables here instead of printing them")
     args = parser.parse_args(argv)
 
+    if args.command == "store-report":
+        text = store_report.build(args.runs, baseline=args.baseline, candidate=args.candidate)
+        if args.out:
+            args.out.write_text(text, encoding="utf-8")
+        else:
+            print(text)
+        return 0
     if args.command == "report":
         text = report.build(args.runs, baseline=args.baseline, candidate=args.candidate)
         if args.out:

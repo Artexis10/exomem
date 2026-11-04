@@ -656,12 +656,46 @@ def test_a_catalogue_that_cannot_be_adopted_rebuilds_after_promotion(
     _stub_graph_and_models(monkeypatch)
     service_standby.enter_standby()
     service_standby.warm(root)
-    monkeypatch.setattr(lexstore, "adopt_detached_catalog", lambda *_a: False)
+    monkeypatch.setattr(lexstore, "adopt_detached_catalog", lambda *_a, **_k: False)
 
     record = service_standby.promote(root, migrated=False)
 
     assert record["lexical_catalogue"] == "rebuild-after-promotion"
     assert "catalogue_handoff" not in record["carried_from_standby"]
+
+
+def test_a_busy_barrier_at_promotion_gives_up_adoption_before_the_request_times_out(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervisor discards a standby whose promote request outlives its cap."""
+    import threading
+
+    root = older_catalogue
+    _stub_graph_and_models(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with lexstore.get_store(root)._publication_lock():
+            held.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    # Half a second of budget is left for adoption; the barrier's own bound is 5 s.
+    request_seconds = service_standby.PROMOTION_REQUEST_RESERVE_SECONDS + 0.5
+    try:
+        assert held.wait(10)
+        started = time.monotonic()
+        record = service_standby.promote(root, migrated=False, request_seconds=request_seconds)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        holder.join(30)
+
+    assert record["lexical_catalogue"] == "rebuild-after-promotion"
+    assert elapsed < request_seconds
 
 
 def _promote_over_older_catalogue(

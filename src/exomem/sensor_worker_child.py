@@ -1,13 +1,15 @@
 """Entry point for the disposable sensor worker child.
 
 Locks the vault's sensor slot before importing any model code, lowers its own
-priority, and runs `sensor_worker.run_child`. The supervisor has already forced
-CPU (`CUDA_VISIBLE_DEVICES=""`) and one thread in this process's environment.
+priority and its OOM-kill rank, and runs `sensor_worker.run_child`. The
+supervisor has already forced CPU (`CUDA_VISIBLE_DEVICES=""`) and one thread in
+this process's environment.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 from pathlib import Path
 
 
@@ -18,6 +20,10 @@ def main(argv: list[str] | None = None) -> int:
     # device can be initialised by the forward pass even with `device="cpu"`.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ.setdefault("OMP_NUM_THREADS", "1")
+    # Best effort, Linux only: the kernel's OOM killer then picks this child
+    # before the service, whose memory the child must never cost.
+    with contextlib.suppress(OSError):
+        Path("/proc/self/oom_score_adj").write_text("1000", encoding="ascii")
     from .runtime_resources import bootstrap
 
     bootstrap()

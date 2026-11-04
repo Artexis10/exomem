@@ -13,7 +13,7 @@ The managed warm SHALL mark its required stages finished — the retrieval catal
 
 #### Scenario: Admission is not re-proved before the required stages finish
 
-- **WHEN** retrieval admission is revoked while the required warm stages are still running
+- **WHEN** this process has not admitted retrieval since its current warm began, and the required warm stages are still running
 - **THEN** retrieval is reported as warming until those stages finish or the catalogue repair publishes
 
 #### Scenario: A failing proof after the required stages still fails closed

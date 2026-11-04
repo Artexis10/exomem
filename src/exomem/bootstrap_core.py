@@ -66,8 +66,8 @@ SECTIONS: dict[str, tuple[tuple[str, ...], str]] = {
         "the epistemic vocabulary, capture-the-outcome and prediction guidance; the due-item list",
     ),
     "diagnostics_reading": (
-        ("performance_profiles", "server", "latency"),
-        "reading timings; recall-latency breaches; compute policy and tool-surface identity in full",
+        ("performance_profiles", "server", "latency", "store"),
+        "reading timings; recall-latency breaches; compute policy, tool-surface and store identity in full",
     ),
 }
 
@@ -348,6 +348,7 @@ def project_core(reference: dict) -> dict:
 #: static operating rules, not this state.
 _SESSION_LIVE_KEYS = (
     "contract_version",
+    "store",
     "active_capabilities",
     "governance",
     "workflow_contracts",

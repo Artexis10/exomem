@@ -852,8 +852,9 @@ _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
 _PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
 # A promoted standby adopts its detached catalogue inside the promotion request,
-# which the supervisor caps at ten seconds; a busier barrier leaves the live
-# catalogue to the ordinary repair instead of timing that request out.
+# which the supervisor caps (`service_manager.PROMOTE_REQUEST_SECONDS`, ten
+# seconds on an older supervisor); a busier barrier leaves the live catalogue to
+# the ordinary repair instead of timing that request out.
 _PUBLICATION_TIMEOUT_ADOPT = 5.0
 
 
@@ -2219,9 +2220,14 @@ def build_detached_catalog(
     return get_store(vault_root).build_detached_catalog(cancel=cancel)
 
 
-def adopt_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> bool:
-    """Publish a catalogue this process built detached over the live one."""
-    return get_store(vault_root).adopt_detached_catalog(detached)
+def adopt_detached_catalog(
+    vault_root: Path, detached: DetachedCatalog, *, timeout: float | None = None
+) -> bool:
+    """Publish a catalogue this process built detached over the live one.
+
+    `timeout` caps the publication barrier wait below its usual bound.
+    """
+    return get_store(vault_root).adopt_detached_catalog(detached, timeout=timeout)
 
 
 def discard_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> None:
@@ -8812,7 +8818,9 @@ class LexicalStore:
             finally:
                 detached.finished.set()
 
-    def adopt_detached_catalog(self, detached: DetachedCatalog) -> bool:
+    def adopt_detached_catalog(
+        self, detached: DetachedCatalog, *, timeout: float | None = None
+    ) -> bool:
         """Publish a catalogue this process built detached, replacing the live one.
 
         Called by a promoted standby that now owns the vault. Under the
@@ -8825,7 +8833,12 @@ class LexicalStore:
 
         published = False
         try:
-            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_ADOPT):
+            wait = (
+                _PUBLICATION_TIMEOUT_ADOPT
+                if timeout is None
+                else max(0.0, min(_PUBLICATION_TIMEOUT_ADOPT, timeout))
+            )
+            with self._publication_lock(timeout=wait):
                 if self._detached_catalog_current(detached.path):
                     published = self._replace_live_catalog(detached.path)
                 else:
