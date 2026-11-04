@@ -48,6 +48,8 @@ Layout:
 
 The key writer supplies the references and recall questions independently. Generation's `Case` object contains no key. The actor receives neither reference text nor scorer files. Cases c01, c02, c03, c07, c08, c09, c10 and c11 have fixed input recall probes. Case c11 combines a compiled-note update and an entity update in one session.
 
+For external cases, pass the same `--case-dir` to `run --suite session-close` and each `session-score` invocation. Cases keep the existing format and resolve seed identifiers against the shipped seeds. Scoring reads `<case-dir>/answer-keys/<id>.json`; actor staging receives neither the case directory nor its keys. Omit the option to use shipped cases.
+
 1. Select both checkouts with `--product-root`, the actor with `--model`, and the number of repeats with `--repeats`.
 2. Run the existing `run` command with `--suite session-close` and an output directory outside every repository to capture raw runs.
 3. Add `--dry-run` to seed and validate without starting actors, or `--hook-turn` to append the arm's own close prompt.

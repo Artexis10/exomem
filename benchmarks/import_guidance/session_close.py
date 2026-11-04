@@ -111,8 +111,8 @@ def load_case(path: Path) -> Case:
     )
 
 
-def load_cases(selector: str) -> list[Case]:
-    cases = [load_case(p) for p in sorted(suite_dir().glob("*.json"))]
+def load_cases(selector: str, case_dir: Path | None = None) -> list[Case]:
+    cases = [load_case(p) for p in sorted((case_dir or suite_dir()).glob("*.json"))]
     chosen = cases if selector == "all" else [c for c in cases if c.id == selector or c.id.startswith(selector)]
     if not chosen:
         raise SystemExit(f"no case matches {selector!r}: {[c.id for c in cases]}")

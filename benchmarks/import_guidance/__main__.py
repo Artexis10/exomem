@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
     )
+    run.add_argument("--case-dir", type=Path, help="session-close case inputs; seed identifiers still use shipped seeds")
     run.add_argument(
         "--suite",
         default=DEFAULT_SUITE,
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         help="score session-close runs against the answer key and a blind judge; refuses while a key is missing",
     )
     score.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files")
+    score.add_argument("--case-dir", type=Path, help="case inputs with adjacent scorer-only answer-keys")
     score.add_argument("--baseline", required=True, help="the baseline arm's label")
     score.add_argument("--candidate", required=True, help="the candidate arm's label")
     score.add_argument("--judge-model", default="opus", help="used only with --automatic-judge")
@@ -89,10 +91,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "session-score":
         if args.prepare_judge or not (args.judgments or args.automatic_judge):
-            count = session_score.prepare_native(args.runs, out=args.out)
+            count = session_score.prepare_native(args.runs, out=args.out, case_dir=args.case_dir)
             print(f"Prepared {count} blind items in {args.out / 'judge-views.jsonl'}. Keep private/judge-map.json from the evaluator.")
             return 0
-        scored = session_score.score_all(args.runs, out=args.out, judge_model=args.judge_model, judgments=args.judgments, automatic_judge=args.automatic_judge)
+        scored = session_score.score_all(args.runs, out=args.out, judge_model=args.judge_model, judgments=args.judgments, automatic_judge=args.automatic_judge, case_dir=args.case_dir)
         text = session_score.build_report(scored, baseline=args.baseline, candidate=args.candidate)
         (args.out / "report.md").write_text(text, encoding="utf-8")
         print(text)
@@ -113,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     arms = [parse_arm(text) for text in args.product_root]
+    if args.case_dir is not None and args.suite != session_close.SUITE:
+        raise SystemExit("--case-dir applies to the session-close suite only")
     if args.hook_turn and args.suite != session_close.SUITE:
         raise SystemExit("--hook-turn applies to the session-close suite only")
     if args.suite == session_close.SUITE:
@@ -157,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_session_close(args: argparse.Namespace, arms: list) -> int:
-    cases = session_close.load_cases(args.scenario)
+    cases = session_close.load_cases(args.scenario, case_dir=args.case_dir)
     if not arms:
         raise SystemExit("the session-close suite needs at least one --product-root arm")
     if args.dry_run:

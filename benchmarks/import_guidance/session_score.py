@@ -416,9 +416,9 @@ def native_views(case: Case, key: dict, row: dict) -> dict[str, tuple[str, tuple
     return views
 
 
-def prepare_native(runs: Sequence[Path], *, out: Path) -> int:
+def prepare_native(runs: Sequence[Path], *, out: Path, case_dir: Path | None = None) -> int:
     """Export blind prompts separately from the run mapping; start no model."""
-    cases = {c.id: c for c in load_cases("all")}
+    cases = {c.id: c for c in load_cases("all", case_dir=case_dir)}
     rows, _replaced = read_rows(runs)
     keys = refuse_unkeyed([cases[sid] for sid in dict.fromkeys(r["scenario"] for r in rows)])
     items, mapping = [], {}
@@ -475,8 +475,8 @@ def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: d
     return answers
 
 
-def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", judgments: Path | None = None, automatic_judge: bool = False) -> list[dict]:
-    cases = {c.id: c for c in load_cases("all")}
+def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", judgments: Path | None = None, automatic_judge: bool = False, case_dir: Path | None = None) -> list[dict]:
+    cases = {c.id: c for c in load_cases("all", case_dir=case_dir)}
     rows, _replaced = read_rows(runs)
     keys = refuse_unkeyed([cases[sid] for sid in dict.fromkeys(r["scenario"] for r in rows)])
     out.mkdir(parents=True, exist_ok=True)

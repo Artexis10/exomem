@@ -70,6 +70,55 @@ def test_every_shipped_case_loads_and_the_variants_change_only_engagement() -> N
     assert all(c.turns[-1].startswith("That's all for today") for c in cases.values())
 
 
+def test_external_cases_use_adjacent_truth_without_exposing_it_to_actor_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from import_guidance.__main__ import main
+    from import_guidance.recording import Arm
+
+    [default] = session_close.load_cases("c01")
+    case_dir = tmp_path / "cases"
+    (case_dir / "answer-keys").mkdir(parents=True)
+    (case_dir / default.path.name).write_bytes(default.path.read_bytes())
+    shipped_key = default.path.parent / "answer-keys" / f"{default.id}.json"
+    key_bytes = shipped_key.read_bytes()
+    external_key = case_dir / "answer-keys" / shipped_key.name
+    external_key.write_bytes(key_bytes)
+    truth = json.loads(key_bytes)
+    [external] = session_close.load_cases("c01", case_dir=case_dir)
+    assert external.turns == default.turns and external.seed == default.seed
+    assert external.path.parent == case_dir and not hasattr(external, "answer_key")
+    read_text, scoring, key_reads = Path.read_text, False, set()
+
+    def observe_reads(path: Path, *args, **kwargs):
+        if path in (shipped_key, external_key):
+            assert scoring and path == external_key, "generation must not read keys; scoring must use adjacent external truth"
+            key_reads.add(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", observe_reads)
+    root = Path(__file__).resolve().parents[1]
+    assert main(["run", "--suite", "session-close", "--case-dir", str(case_dir), "--scenario", "c01", "--model", "unused", "--product-root", f"test={root}", "--dry-run", "--out", str(tmp_path / "run")]) == 0
+    work = tmp_path / "actor"
+    work.mkdir()
+    env = session_close.pinned_env(Arm("test", root), work, external)
+    files = session_close.stage_agent_files(Arm("test", root), work, env)
+    staged = "\n".join(path.read_text() for path in files.values())
+    assert not key_reads and str(case_dir) not in staged and truth["reference"] not in staged
+    scoring = True
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text(json.dumps({"scenario": external.id, "repeat": 0, "model": "test", "arm": "test", "error": None,
+                                "observed": observed(pages={PERSON: {"compiled": False, "cites": []}}, recaps=False)}) + "\n")
+    out = tmp_path / "scores"
+    arguments = ["session-score", str(runs), "--case-dir", str(case_dir), "--baseline", "test", "--candidate", "test", "--out", str(out)]
+    assert main(arguments) == 0
+    assert truth["reference"] in json.loads((out / "judge-views.jsonl").read_text())["prompt"]
+    assert main(arguments + ["--judgments", str(tmp_path / "missing-judgments.jsonl")]) == 0
+    score = json.loads((out / "scores.jsonl").read_text())
+    assert score["recap_rule"] == truth["recap"] and score["restraint_case"] == (not truth["must_change"])
+    assert key_reads == {external_key} and external_key.read_bytes() == key_bytes
+    with pytest.raises(SystemExit, match="--case-dir applies to the session-close suite only"):
+        main(["run", "--case-dir", str(case_dir), "--model", "unused", "--dry-run", "--out", str(tmp_path / "other")])
+
+
 def routine(sources: str) -> str:
     return f"---\ntype: pattern\nsources: {sources}\n---\n\n# Sunday meal-prep routine\n\nOrder groceries on Friday.\n"
 
