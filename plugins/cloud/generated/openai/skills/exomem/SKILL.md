@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 378ec4d494b238b358dbfab8ef79cdda6d0199fc975ad3a6455f05cca7734964
+  skill_contract: 45524a0cbae2047c8c5c677755ab78cbcdcff79ddeb3e19713cebdd5a711c365
   version: "0.32.0"
 ---
 
@@ -164,6 +164,8 @@ If activation returns a map, read it as an index of what exists. Pull by ref
 with `read_memory` or use `search_memory` before answering; cite the refs you use.
 A map whose entries are mostly unfiled lacks topic declarations: declare them on
 topic carriers, as the routing row above says.
+
+When discussing context evidence, distinguish composed records from actual receipt, opening, citation or use; read [context learning](references/context-learning.md#locate-the-first-supported-failure) for audit details.
 
 After new evidence, a task change, or continuation restoration, judge whether
 the context needs refresh. When the exposed tool supports it, set

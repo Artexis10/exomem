@@ -12,7 +12,7 @@ from dataclasses import replace
 
 import pytest
 from test_collection_store_service import CID, service  # noqa: F401 - service is a fixture
-from test_connector_boundary import PRIVATE, SCOPE, configured_boundary  # noqa: F401 - a fixture
+from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - a fixture
 
 from exomem import commands, writer_lease
 from exomem.governance.principal import request_scope
@@ -66,6 +66,9 @@ def test_a_policy_changed_during_a_store_routed_write_applies_to_what_it_release
     """Defect: a write releases under the policy it loaded before it waited for the mutation boundary,
     so a scope that grew to cover a page while the write ran does not apply to what the caller receives."""
     _, authenticate = configured_boundary
+    (vault / "Knowledge Base/_Governance/scopes/inbox.yaml").write_text(
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Records/**"]\n', encoding="utf-8",
+    )
     who = authenticate("limited")
     scope = vault / "Knowledge Base/_Governance/scopes/private.yaml"
 

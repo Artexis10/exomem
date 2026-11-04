@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from exomem import held_fs, originals, reserved_paths
+from exomem.governance.principal import library_scope
 
 
 @pytest.fixture
@@ -41,11 +42,12 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
 def _preserved(vault: Path, *, category="samples") -> Path:
     from exomem import media_jobs, preserve
 
-    captured = preserve.preserve(vault, scope="Test", category=category, filename="sample.txt",
-                                 content="The durable transcript contains a searchable observation.")
-    path = vault / captured.path
-    preserve.update_sidecar_extraction(vault, vault / captured.sidecar_path,
-                                      text="A searchable observation.", engine="text")
+    with library_scope():
+        captured = preserve.preserve(vault, scope="Test", category=category, filename="sample.txt",
+                                     content="The durable transcript contains a searchable observation.")
+        path = vault / captured.path
+        preserve.update_sidecar_extraction(vault, vault / captured.sidecar_path,
+                                          text="A searchable observation.", engine="text")
     media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
     return path
 

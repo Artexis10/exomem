@@ -18,6 +18,7 @@ from exomem import (
     state_paths,
 )
 from exomem.governance import lifecycle
+from exomem.governance.principal import library_scope
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows lifecycle contract")
 
@@ -216,7 +217,7 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
         monkeypatch.setattr(lifecycle, "_checkpoint", drift)
         expected = "LIFECYCLE_CENSUS_DRIFT"
 
-    with pytest.raises(delete_file.DeleteFileError) as error:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(tmp_path, path=relative, confirm=True)
 
     assert error.value.code == expected
@@ -265,7 +266,7 @@ def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
     monkeypatch.setattr(lifecycle, "_device", device)
     monkeypatch.setattr(filesystem_type, "flush_directory", refuse_epoch_flush)
 
-    with pytest.raises(delete_file.DeleteFileError) as error:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(tmp_path, path=relative, confirm=True)
 
     assert error.value.code == "GRAPH_SYNC_DELETION_ROLLBACK_FAILED"
@@ -357,7 +358,7 @@ def test_windows_deletion_post_rename_flush_refusal_durably_inverse_restores_pri
     monkeypatch.setattr(graph_sync, "restore_deletion_epoch", restore)
     monkeypatch.setattr(lifecycle, "abort_deletion", abort)
 
-    with pytest.raises(delete_file.DeleteFileError) as error:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(
             tmp_path,
             path=relative,
@@ -402,7 +403,7 @@ def test_windows_deletion_inverse_move_failure_retains_epoch_and_marker_for_reco
 
     monkeypatch.setattr(reserved_paths, "move_generic_path", refuse_inverse)
 
-    with pytest.raises(delete_file.DeleteFileError) as error:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(
             tmp_path,
             path=relative,
@@ -425,7 +426,8 @@ def _deleted_governed_note(vault: Path, name: str) -> tuple[str, Path, delete_fi
         encoding="utf-8",
     )
     _govern(vault, relative)
-    deleted = delete_file.delete_file(vault, path=relative, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=relative, confirm=True)
     return relative, source, deleted
 
 
@@ -462,7 +464,7 @@ def test_windows_recovery_post_rename_flush_refusal_durably_inverse_restores_pri
     monkeypatch.setattr(graph_sync, "restore_deletion_epoch", restore)
     monkeypatch.setattr(lifecycle, "abort_recovery", abort)
 
-    with pytest.raises(recover_from_trash.RecoverError) as error:
+    with library_scope(), pytest.raises(recover_from_trash.RecoverError) as error:
         recover_from_trash.recover_from_trash(tmp_path, trash_path=deleted.trash_path)
 
     assert error.value.code == "LIFECYCLE_PATH_UNSAFE"
@@ -503,7 +505,7 @@ def test_windows_recovery_inverse_move_failure_retains_epoch_and_marker_for_reco
 
     monkeypatch.setattr(reserved_paths, "move_generic_path", refuse_inverse)
 
-    with pytest.raises(recover_from_trash.RecoverError) as error:
+    with library_scope(), pytest.raises(recover_from_trash.RecoverError) as error:
         recover_from_trash.recover_from_trash(tmp_path, trash_path=deleted.trash_path)
 
     assert error.value.code == "GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED"

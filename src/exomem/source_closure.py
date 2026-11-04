@@ -67,6 +67,8 @@ class SourceClosurePlan:
     backref_writes: tuple[vault.PlannedWrite, ...]
     fingerprint: str
     required_guards: tuple[vault.PathGuard, ...] = ()
+    #: Cited Sources whose back-reference was skipped because the writer may not write them.
+    skipped_backrefs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,17 +284,29 @@ def _backref_writes(
     inspection: SourceClosureInspection,
     prior: SourceClosureInspection,
     destination: str,
-) -> tuple[vault.PlannedWrite, ...]:
+) -> tuple[tuple[vault.PlannedWrite, ...], tuple[ResolvedSource, ...]]:
+    """The guarded back-reference writes, and the Sources a restricted writer may not write.
+
+    A skipped Source stays unchanged and is neither written nor refused; the plan still guards
+    its version through `required_guards`.
+    """
     if not inspection.closed:
-        return ()
+        return (), ()
+    from .governance import connector_boundary
+
+    admitted = connector_boundary.effect_admission(root)
     target = destination.removesuffix(".md")
     rendered = vault.render_wikilink_target(target, root)
     wikilink = f"[[{rendered}]]"
     final_by_path = {item.path: item for item in inspection.resolved}
     prior_by_path = {item.path: item for item in prior.resolved}
     writes: list[vault.PlannedWrite] = []
+    skipped: list[ResolvedSource] = []
     for path in sorted(set(final_by_path) | set(prior_by_path)):
         item = final_by_path.get(path) or prior_by_path[path]
+        if not admitted(path):
+            skipped.append(item)
+            continue
         updated = item.source
         if path in final_by_path and item.supports_backref:
             updated = vault.append_frontmatter_list_item(updated, "ingested_into", wikilink)
@@ -302,7 +316,7 @@ def _backref_writes(
         # supported back-reference field: it rechecks the source version in the
         # same atomic batch as the derived page.
         writes.append(vault.PlannedWrite(root / path, updated, guard=item.guard))
-    return tuple(writes)
+    return tuple(writes), tuple(skipped)
 
 
 def prepare_source_closure(
@@ -333,7 +347,7 @@ def prepare_source_closure(
         if prior_markdown is not None
         else SourceClosureInspection((), (), ())
     )
-    writes = _backref_writes(
+    writes, skipped = _backref_writes(
         root,
         inspection=inspection,
         prior=prior,
@@ -345,11 +359,15 @@ def prepare_source_closure(
         prior,
         writes,
         _fingerprint(inspection, writes),
-        tuple(
-            guard for item in (*inspection.resolved, *prior.resolved)
-            for guard in item.resolution_guards
-            if guard.target not in {write.path.relative_to(root).as_posix() for write in writes}
+        (
+            *(
+                guard for item in (*inspection.resolved, *prior.resolved)
+                for guard in item.resolution_guards
+                if guard.target not in {write.path.relative_to(root).as_posix() for write in writes}
+            ),
+            *(item.guard for item in skipped),
         ),
+        tuple(item.path for item in skipped),
     )
 
 
@@ -385,6 +403,18 @@ def enforce_source_closure(
             "a cited source changed after source closure; retry the operation",
             {},
         )
+
+
+def skipped_warnings(plan: SourceClosurePlan) -> list[str]:
+    """One warning when the plan skipped a cited Source's back-reference, with no path in it.
+
+    A restricted caller's response drops any warning that embeds a vault path in prose, because
+    the egress filter cannot tell a readable path from a withheld one inside a sentence.
+    """
+    if not plan.skipped_backrefs:
+        return []
+    count = len(plan.skipped_backrefs)
+    return [f"ingested_into back-ref skipped for {count} cited source{'s' if count != 1 else ''} outside your write scope"]
 
 
 def merge_backref_writes(
@@ -425,5 +455,6 @@ __all__ = [
     "merge_backref_writes",
     "prepare_source_closure",
     "resolve_reference",
+    "skipped_warnings",
     "source_claims",
 ]

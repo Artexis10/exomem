@@ -9,7 +9,9 @@ Policy is strict YAML, one document per file, under three subfolders:
 
 - `scopes/*.yaml` — which pages a policy applies to. A scope is a named
   selector: a path glob, a project, a tag, a type, an explicit reference, or
-  some combination, plus an optional `exclude` for carving out exceptions.
+  some combination, plus an optional `exclude` for carving out exceptions. One
+  scope may instead carry `residual: true` with no selector: it selects every
+  page that no other scope selects.
 - `rules/*.yaml` — for a scope, an audience, and a disclosure ceiling. A rule
   can optionally be conditioned on a declared purpose.
 - `grants/*.yaml` — standing exceptions that can raise (never lower) a

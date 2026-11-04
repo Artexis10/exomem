@@ -5832,15 +5832,17 @@ def is_vault_root(value: Any) -> bool:
     return isinstance(value, (str, os.PathLike))
 
 
-def _current_read_parent_binding(vault_root: Path, parent: Mapping[str, Any]) -> tuple[str, str] | None:
-    """Bind only this current read's stable parent ref to its guarded page."""
-    path = parent.get("path")
-    if not isinstance(path, str):
+def _bind_current_parent(
+    vault_root: Path, *, path: str, content_hash: str, expected_ref: str | None = None,
+) -> tuple[str, str] | None:
+    """Bind a current stable parent ref only after its exact guarded bytes prove it."""
+    if not isinstance(path, str) or not isinstance(content_hash, str):
         return None
     try:
         source, guard = vault.read_guarded_text(vault_root, vault_root / path)
         reference = memory_refs.ref_from_markdown(source)
-        if reference is None or reference != parent.get("ref") or vault.content_hash(source) != parent.get("content_hash"):
+        if (reference is None or expected_ref is not None and reference != expected_ref
+                or vault.content_hash(source) != content_hash):
             return None
         guard.recheck(vault_root)
     except (OSError, ValueError):
@@ -5907,13 +5909,25 @@ def postfilter(
         return cleaned
     vault_root = Path(vault_root)
     parent_binding = None
-    if command_name == "read_memory" and isinstance(result, Mapping) and "revision_history" in result:
+    if (command_name == "read_memory" and isinstance(result, Mapping)
+            and ("unit_ref" in result or "revision_history" in result)):
         parent = result if "path" in result else result.get("parent")
         if isinstance(parent, Mapping) and memory_refs.parse_memory_ref(parent.get("ref")) is not None:
-            parent_binding = _current_read_parent_binding(vault_root, parent)
-            if parent_binding is None:
-                result = dict(result)
-                result.pop("revision_history")
+            parent_binding = _bind_current_parent(
+                vault_root, path=parent.get("path"), content_hash=parent.get("content_hash"),
+                expected_ref=parent["ref"],
+            )
+        if parent_binding is None and "revision_history" in result:
+            result = dict(result)
+            result.pop("revision_history")
+    # The public terminal schema fixes these state and unit-reference fields.
+    if (isinstance(result, Mapping) and result.get("ok") is True
+            and result.get("state") == "committed" and result.get("status") == "committed"
+            and result.get("terminal") is True and result.get("mutated") is True
+            and ("unit_ref" in result or "removed_unit_ref" in result)):
+        parent_binding = _bind_current_parent(
+            vault_root, path=result.get("path"), content_hash=result.get("after_hash"),
+        )
     view_purpose = None
     if command_name == "read_memory" and isinstance(result, Mapping):
         from .. import context_views

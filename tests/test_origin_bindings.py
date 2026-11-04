@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from granted_writer import grant_writer
 
 from exomem import origin_bindings, provenance, semantic_index, source_closure
 from exomem.governance import egress
@@ -13,6 +14,22 @@ from exomem.vault import PlannedWrite, batch_atomic_write
 _ID = "12345678-1234-5678-1234-567812345678"
 _REF = f"exomem://memory/{_ID}"
 _PATH = "Knowledge Base/Sources/original.md"
+_SOURCE_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAA"  # the scope `_write_source_rule` gives Sources/**
+
+
+def _client_a_writer(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> RequestPrincipal:
+    """`client-a` as a fenced writer: its inbox is the insight folder, and it may update the Sources it cites.
+
+    Call it after `_write_source_rule`, because arming pins the policy's scopes. A note that cites
+    a Source writes that Source's backlink, so the Source scope is one of its writable scopes.
+    """
+    return grant_writer(
+        vault, tmp_path, monkeypatch, writable_paths=["Notes/**"],
+        capture_paths=["Knowledge Base/Notes/Insights"], writable_scopes=[_SOURCE_SCOPE_ID],
+        audience="client-a",
+    )("client-a")
 
 
 def _write(
@@ -186,7 +203,9 @@ def test_prepared_inputs_survive_the_real_source_closure_batch(vault: Path) -> N
     assert "derived" in (vault / _PATH).read_text(encoding="utf-8")
 
 
-def test_batch_refuses_policy_narrowing_after_output_is_installed(vault: Path) -> None:
+def test_batch_refuses_policy_narrowing_after_output_is_installed(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A final fresh policy check rolls back both the output and its Source backlink."""
     from test_episode_recovery import _write_source_rule
 
@@ -196,8 +215,9 @@ def test_batch_refuses_policy_narrowing_after_output_is_installed(vault: Path) -
     destination = "Knowledge Base/Notes/Insights/derived.md"
     output = vault / destination
     _write_source_rule(vault, ceiling=6)
+    writer = _client_a_writer(vault, tmp_path, monkeypatch)
     rule = vault / "Knowledge Base/_Governance/rules/episode-source-client-a.yaml"
-    with request_scope(RequestPrincipal(audience_id="client-a")):
+    with request_scope(writer):
         prepared = origin_bindings.prepare_origin_inputs(vault, source)
         closure = source_closure.prepare_source_closure(vault, source, destination=destination)
         writes = [*closure.backref_writes, PlannedWrite(output, source)]
@@ -386,7 +406,7 @@ def test_edit_refuses_new_origin_metadata_bound_to_stale_evidence(vault: Path) -
 
 
 def test_note_rolls_back_if_input_permission_narrows_after_publication(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Production creation must wire the final policy gate, not just prepare inputs."""
     from test_episode_recovery import _write_source_rule
@@ -400,6 +420,7 @@ def test_note_rolls_back_if_input_permission_narrows_after_publication(
         {"inputs": {"original": binding}, "assessments": [], "bindings": []}
     )
     _write_source_rule(vault, ceiling=6)
+    writer = _client_a_writer(vault, tmp_path, monkeypatch)
     rule = vault / "Knowledge Base/_Governance/rules/episode-source-client-a.yaml"
     output = vault / "Knowledge Base/Notes/Insights/late-policy-change.md"
 
@@ -411,7 +432,7 @@ def test_note_rolls_back_if_input_permission_narrows_after_publication(
             )
 
     monkeypatch.setattr(vault_module, "_after_batch_destination_published", narrow_after_install)
-    with request_scope(RequestPrincipal(audience_id="client-a")):
+    with request_scope(writer):
         with pytest.raises(note.NoteError) as failure:
             note.note(
                 vault,
@@ -617,7 +638,8 @@ def _parent_with_origin(vault: Path, *, configured: bool) -> tuple[object, str]:
             "bindings": [],
         }
     )
-    with request_scope(RequestPrincipal(audience_id="client-a")):
+    # The owner authors the parent: the subject of each caller is the restricted read of it.
+    with request_scope(owner_principal(surface="mcp")):
         created = note.note(
             vault,
             content=block + "\n\n## Observations\n\n- [finding] Public claim ^claim\n",
@@ -827,7 +849,7 @@ def test_unassessed_parent_payload_is_hidden_but_raw_capture_is_uninterpreted(va
 
 @pytest.mark.parametrize("change", ["bytes", "permission"])
 def test_public_origin_read_checks_earlier_inputs_after_later_resolution(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     """A later input read cannot preserve attribution after an earlier input changes."""
     from test_episode_recovery import _write_source_rule
@@ -842,6 +864,7 @@ def test_public_origin_read_checks_earlier_inputs_after_later_resolution(
         identity="12345678-1234-5678-1234-567812345679",
     )
     _write_source_rule(vault, ceiling=6)
+    writer = _client_a_writer(vault, tmp_path, monkeypatch)
     reason = "Assessment whose inputs must both remain available."
     carrier = provenance.encode_origin(
         {
@@ -873,7 +896,7 @@ def test_public_origin_read_checks_earlier_inputs_after_later_resolution(
                 _write_source_rule(root, ceiling=0)
         return proof
 
-    with request_scope(RequestPrincipal(audience_id="client-a")):
+    with request_scope(writer):
         created = note.note(
             vault,
             content=carrier + "\n\nPublic claim.\n",

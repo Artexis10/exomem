@@ -40,6 +40,7 @@ from . import (
     freshness,
     lifecycle_statuses,
     note_types,
+    recap_folder,
     sidecar_store,
     source_taxonomy,
     topic_carriers,
@@ -785,7 +786,7 @@ class _Fold:
         self.page_anchors = {row.path: row for row in anchors if row.anchor_id == row.path and row.kind != "collection"}
         self.other_anchors = [row for row in anchors if row.anchor_id != row.path and row.kind != "collection"]
         self.collections = _collections(vault_root, self.activation_token)
-        self.thread_folder = f"{self.kb}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}"
+        self.thread_folders = recap_folder.recap_folders(vault_root)
         self.stored = {row.entry_id: row for row in _stored(conn)}
         self.stored_pending = {str(path) for (path,) in conn.execute("SELECT path FROM pending")}
         self.meta = {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM catalogue_meta")}
@@ -977,7 +978,7 @@ class _Fold:
         if rel in self.collections:
             return KIND_COLLECTION, ""
         folder, _, name = rel.rpartition("/")
-        if folder == self.thread_folder:
+        if folder in self.thread_folders:
             return (KIND_THREAD, "") if episode_capture.filename_parts(name) is not None else None
         from . import recall_policy
 

@@ -15,7 +15,7 @@ import pytest
 from exomem import create_file, move_file, preserve, reserved_paths
 from exomem.file_watcher import FileWatcher
 from exomem.governance import artifact_census, egress, lifecycle, membership, policy
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
 
 KB = "Knowledge Base"
 WITHHELD_DIR = f"{KB}/Notes/Patterns"
@@ -93,14 +93,15 @@ def test_a_service_written_artifact_is_withheld_at_once_without_the_owner(
     _publish(vault)
     walks.clear()
 
-    result = preserve.preserve_bytes(
-        vault,
-        scope="Rental",
-        category="clips",
-        filename="orchid-quarterly-terms.pdf",
-        data=b"%PDF-1.4",
-        text="terms",
-    )
+    with library_scope():
+        result = preserve.preserve_bytes(
+            vault,
+            scope="Rental",
+            category="clips",
+            filename="orchid-quarterly-terms.pdf",
+            data=b"%PDF-1.4",
+            text="terms",
+        )
 
     bare = _gate(vault, "See orchid-quarterly-terms.pdf for the terms.")
     by_path = _gate(vault, f"See {result.path} for the terms.")
@@ -116,9 +117,10 @@ def test_a_service_created_text_file_is_withheld_at_once(vault: Path, walks: lis
     _publish(vault)
     walks.clear()
 
-    create_file.create_file(
-        vault, path=f"{WITHHELD_DIR}/orchid-service-note.txt", content="Internal note.\n"
-    )
+    with library_scope():
+        create_file.create_file(
+            vault, path=f"{WITHHELD_DIR}/orchid-service-note.txt", content="Internal note.\n"
+        )
 
     released = _gate(vault, "See orchid-service-note.txt for the note.")
     assert egress.WITHHELD_REFERENCE in released
@@ -280,9 +282,10 @@ def test_a_service_rename_into_a_withheld_folder_is_withheld_at_once(
     _publish(vault)
     walks.clear()
 
-    move_file.move_file(
-        vault, old_path=source, new_path=f"{WITHHELD_DIR}/orchid-final-chart.pdf"
-    )
+    with library_scope():
+        move_file.move_file(
+            vault, old_path=source, new_path=f"{WITHHELD_DIR}/orchid-final-chart.pdf"
+        )
 
     released = _gate(vault, "See orchid-final-chart.pdf for the chart.")
     assert egress.WITHHELD_REFERENCE in released
@@ -297,9 +300,10 @@ def test_a_generic_directory_move_adds_the_files_it_brings_to_the_census(
     _publish(vault)
     walks.clear()
 
-    reserved_paths.move_generic_path(
-        vault, f"{RELEASED_DIR}/Batch", f"{WITHHELD_DIR}/Lot", source_kind="directory"
-    )
+    with library_scope():
+        reserved_paths.move_generic_path(
+            vault, f"{RELEASED_DIR}/Batch", f"{WITHHELD_DIR}/Lot", source_kind="directory"
+        )
 
     arrived = f"{WITHHELD_DIR}/Lot/orchid-batch-chart.pdf"
     assert arrived in artifact_census.published_view(vault).paths(arrived.casefold())

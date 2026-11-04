@@ -40,11 +40,13 @@ def test_armed_export_carries_protection_and_actual_v1_reader_refuses(configured
 
 
 def test_restore_installs_protection_without_source_clients_and_waits_for_destination_config(configured_boundary, vault, tmp_path, monkeypatch):
-    from test_connector_boundary import PRIVATE, PUBLIC, SCOPE
+    from test_connector_boundary import PRIVATE, PUBLIC, RESIDUAL, SCOPE
 
-    from exomem.governance import egress, policy
+    from exomem import commands, find_corpus, writer_lease
+    from exomem.governance import egress, membership, policy
 
     config, _ = configured_boundary
+    public_bytes = (vault / PUBLIC).read_bytes()
     authority = state_migration.assert_offline_migration_authority(source="isolated restore stop window")
     from exomem import state_paths
 
@@ -77,6 +79,26 @@ def test_restore_installs_protection_without_source_clients_and_waits_for_destin
     monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(destination_config))
     state_migration.require_vault_state_ready(destination)
     who = principal.owner_principal(surface="rest")
+    current = policy.load(destination)
+    assert current.residual_scope_id == RESIDUAL
+    public_page = destination / PUBLIC
+    parsed = find_corpus.parse_page(public_page, public_page.stat().st_mtime, destination)
+    assert parsed is not None and membership.evaluate(parsed, current) == frozenset({RESIDUAL})
+    assert not egress.quick_page_visible(destination, PUBLIC, principal=who)
+    assert (destination / PUBLIC).read_bytes() == public_bytes
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
+    with principal.library_scope():
+        proposal = writer_lease.invoke_command(
+            command, destination, operation="propose",
+            intent="Classify the destination public page",
+            documents={"scopes/destination-public.yaml":
+                       'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC0\npaths: ["Notes/public.md"]\n'},
+            selector_paths=["Notes/public.md"], target_ceiling=6, duration="standing",
+        )
+        committed = writer_lease.invoke_command(
+            command, destination, operation="commit", proposal_id=proposal["diagnostics"]["proposal_id"],
+        )
+    assert committed["status"] == "committed"
     assert egress.quick_page_visible(destination, PUBLIC, principal=who)
     assert not egress.quick_page_visible(destination, PRIVATE, principal=who)
 
@@ -169,8 +191,13 @@ def test_interrupted_protection_restore_resumes_original_proposal(configured_bou
         proposal(*args, **kwargs)
         raise OSError("process stopped after proposal insertion")
 
+    # The restore writes one document per protective scope, and the bare crash point stops after the
+    # first. "After the target write" here means after the last, so the vault holds the whole prepared state.
+    last_document = len(connector_boundary.read_requirement(vault)["protected_scopes"])
+
     def interrupted_commit(*args, **kwargs):
-        return commit(*args, **kwargs, crash_at=boundary)
+        crash = f"after_target_write:{last_document}" if boundary == "after_target_write" else boundary
+        return commit(*args, **kwargs, crash_at=crash)
 
     def interrupted_install(*args, **kwargs):
         install(*args, **kwargs)

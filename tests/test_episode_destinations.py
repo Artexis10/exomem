@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from granted_writer import grant_writer
 
 from exomem import commands, curation, episode_workflow, memory_refs
 from exomem import episode_model as model
@@ -180,6 +181,21 @@ def _candidate(result: dict, key: str) -> dict:
     return next(item for item in result["candidates"] if item["candidate_key"] == key)
 
 
+WITHHELD_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAC"  # the scope `_withhold_notes_from` gives the withheld notes
+
+
+def _inbox_writer(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RequestPrincipal:
+    """Bind `client-a` to one inbox per tree, so its recap and its notes land where it can read them.
+
+    Call it after `_withhold_notes_from`, because arming pins the policy's scopes.
+    """
+    return grant_writer(
+        vault, tmp_path, monkeypatch, writable_paths=["Sources/Inbox/client-a/**", "Notes/Inbox/client-a/**"],
+        capture_paths=["Knowledge Base/Sources/Inbox/client-a", "Knowledge Base/Notes/Inbox/client-a"],
+        protected=[WITHHELD_SCOPE_ID], audience="client-a",
+    )("client-a")
+
+
 def _withhold_notes_from(vault: Path, audience: str) -> None:
     root = vault / "Knowledge Base" / "_Governance"
     (root / "scopes").mkdir(parents=True, exist_ok=True)
@@ -296,13 +312,16 @@ def test_a_stale_alternative_version_needs_a_fresh_read(vault: Path, owner) -> N
     assert _journal(vault) == before
 
 
-def test_a_withheld_alternative_is_refused_exactly_like_an_unknown_one(vault: Path) -> None:
+def test_a_withheld_alternative_is_refused_exactly_like_an_unknown_one(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     visible = _write_note(vault, "visible-practice", "11111111-7d7d-4d7d-8d7d-7d7d7d7d7d7d", "V.")
     withheld = _write_note(vault, "withheld-practice", "22222222-7d7d-4d7d-8d7d-7d7d7d7d7d7d", "W.")
     unknown = memory_refs.memory_ref("33333333-7d7d-4d7d-8d7d-7d7d7d7d7d7d")
     _withhold_notes_from(vault, "client-a")
+    writer = _inbox_writer(vault, tmp_path, monkeypatch)
     errors: list[str] = []
-    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+    with request_scope(writer):
         _record(vault)
         accepted = _episode(
             vault,
@@ -383,14 +402,17 @@ def test_an_existing_page_home_is_the_page_its_leaves_write(vault: Path, owner) 
         assert _candidate(prepared, candidate)["leaves"][0]["bound"] is True
 
 
-def test_a_withheld_home_is_refused_exactly_like_an_unknown_one(vault: Path) -> None:
+def test_a_withheld_home_is_refused_exactly_like_an_unknown_one(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     withheld = _write_note(vault, "withheld-practice", "22222222-7d7d-4d7d-8d7d-7d7d7d7d7d7d", "W.")
     hidden_ref = _ref(vault, withheld)
     hidden_version = _version(vault, withheld)
     _withhold_notes_from(vault, "client-a")
+    writer = _inbox_writer(vault, tmp_path, monkeypatch)
     unknown_path = f"{INSIGHTS}/withheld-missing.md"
     errors: list[str] = []
-    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+    with request_scope(writer):
         _record(vault)
         for target, path in (
             (hidden_ref, withheld),

@@ -31,6 +31,9 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, new_id, normalize_id
 
+#: The fixed storage folder below the knowledge base that holds one review record per page; the write gate
+#: (`governance.policy.is_workflow_state_path`) reads it from here.
+REVIEW_FOLDER = ("_Schema", "relation-reviews")
 _SCHEMA_VERSION = 2
 _OPERATIONS = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
 _KINDS = frozenset({"reviewed_none", "bootstrap", "qualifying"})
@@ -737,12 +740,12 @@ def draft_token_hash(value: object) -> str:
 
 def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
-    return Path(vault_root) / kb_dirname() / "_Schema" / "relation-reviews" / f"{identity}.json"
+    return Path(vault_root, kb_dirname(), *REVIEW_FOLDER) / f"{identity}.json"
 
 
 def _lifecycle_reference(page_identity: str, name: str) -> str:
     return (
-        f"{kb_dirname()}/_Schema/relation-reviews/lifecycle/"
+        f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/lifecycle/"
         f"{page_identity}/{name}"
     )
 
@@ -2568,9 +2571,9 @@ def _capture_review_directory(
     root: Path,
     nested: tuple[str, ...] = (),
 ) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
-    directory = root / kb_dirname() / "_Schema" / "relation-reviews" / Path(*nested)
+    directory = Path(root, kb_dirname(), *REVIEW_FOLDER, *nested)
     current = root
-    components = (kb_dirname(), "_Schema", "relation-reviews", *nested)
+    components = (kb_dirname(), *REVIEW_FOLDER, *nested)
     identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:

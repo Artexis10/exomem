@@ -485,10 +485,14 @@ def test_a_created_entity_names_the_page_that_led_to_it_in_its_log_entry(vault: 
     assert f"Origin: {NOTE}." in _log_entry(vault, created)
 
 
-def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Path) -> None:
+def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from granted_writer import grant_writer
+
     from exomem.governance import egress as egress_module
     from exomem.governance import membership, policy
-    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.governance.principal import library_scope, request_scope
 
     gov = vault / "Knowledge Base" / "_Governance"
     (gov / "scopes").mkdir(parents=True)
@@ -507,9 +511,14 @@ def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Pa
     membership.clear_memo()
     egress_module.clear_decision_memo()
     missing = "Knowledge Base/Notes/Insights/a-page-that-was-never-written.md"
+    # The restricted audience writes entities through a client entry; it never reads Insights.
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch, protected=[scope_id],
+        writable_paths=["Entities/**"], capture_paths=["Knowledge Base/Entities"],
+    )
 
     def create_as_external(name: str, ref: str) -> dict:
-        with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with request_scope(writer("external")):
             return commands.op_connect_memory(
                 vault, operation="create-entity", entity_type="concept", name=name,
                 summary="A synthetic accounting concept used to exercise provenance.", ref=ref,
@@ -518,15 +527,20 @@ def test_an_origin_the_caller_cannot_read_is_unknown_and_never_refuses(vault: Pa
     withheld_result = create_as_external("Tidal Ledger", NOTE)
     missing_result = create_as_external("Harbour Reconciliation", missing)
 
+    log_text = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
     for result in (withheld_result, missing_result):
         assert result["path"].startswith("Knowledge Base/Entities/Concepts/"), "the entity was created"
         assert "never-written" not in repr(result) and NOTE not in repr(result)
         assert result.keys() == withheld_result.keys()
         assert result["warnings"] == []
-        entry = _log_entry(vault, result["path"])
-        assert "Origin: unknown." in entry
-        assert NOTE not in entry and missing not in entry
-    assert commands._creation_origin(vault, NOTE)["path"] == NOTE, "the owner reads the page"
+        # The restricted writer may not write the activity log, so its creation leaves no entry that could name an origin.
+        assert result["path"].removeprefix("Knowledge Base/").removesuffix(".md") not in log_text
+    assert NOTE not in log_text and missing not in log_text
+    with request_scope(writer("external")):
+        for ref in (NOTE, missing):
+            assert commands._creation_origin(vault, ref)["path"] is None, "an unreadable origin is unknown"
+    with library_scope():
+        assert commands._creation_origin(vault, NOTE)["path"] == NOTE, "the owner reads the page"
 
 
 # --------------------------------------------------------------------------- #

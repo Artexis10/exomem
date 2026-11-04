@@ -1111,34 +1111,37 @@ def _seed_adoption_run(vault: Path, *, run_ref: str) -> None:
     """
     from exomem.adoption_run import AdoptionRunStore
 
-    AdoptionRunStore(vault).save(
-        {
-            "schema_version": 1,
-            "run_id": ADOPTION_RUN_ID,
-            "run_ref": run_ref,
-            "created": "2026-01-01T00:00:00Z",
-            "phase": "selecting",
-            "source_root": "",
-            "scan_summary": {},
-            "inventory": [
-                {
-                    "path": ADOPTION_WITHHELD,
-                    "bytes": 10,
-                    "mtime": 0.0,
-                    "eligible": True,
-                    "junk": False,
-                    "reason": None,
-                }
-            ],
-            "inventory_truncated": 0,
-            "selection": {"paths": [ADOPTION_WITHHELD]},
-            "plan": None,
-            "outcomes": {},
-            "finish": None,
-            "cancel": None,
-            "errors": [],
-        }
-    )
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        AdoptionRunStore(vault).save(
+            {
+                "schema_version": 1,
+                "run_id": ADOPTION_RUN_ID,
+                "run_ref": run_ref,
+                "created": "2026-01-01T00:00:00Z",
+                "phase": "selecting",
+                "source_root": "",
+                "scan_summary": {},
+                "inventory": [
+                    {
+                        "path": ADOPTION_WITHHELD,
+                        "bytes": 10,
+                        "mtime": 0.0,
+                        "eligible": True,
+                        "junk": False,
+                        "reason": None,
+                    }
+                ],
+                "inventory_truncated": 0,
+                "selection": {"paths": [ADOPTION_WITHHELD]},
+                "plan": None,
+                "outcomes": {},
+                "finish": None,
+                "cancel": None,
+                "errors": [],
+            }
+        )
 
 
 def _read_import_resource(vault: Path, uri: str) -> str:

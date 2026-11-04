@@ -42,9 +42,9 @@ from . import (
     context_intents,
     context_roles,
     lifecycle_statuses,
+    recap_folder,
     request_budget,
     semantic_units,
-    source_taxonomy,
     working_set_conversation,
     working_set_currency,
     working_set_heat,
@@ -5336,6 +5336,7 @@ def _referent_filters(
         str(getattr(row, "path", "") or ""): row for row in rows if getattr(row, "path", "")
     }
     collections = _recent_collection_dirs((*by_path, *heat.all_rows))
+    inboxes = recap_folder.inbox_folders(root)
     retired = {
         path
         for path, row in by_path.items()
@@ -5343,7 +5344,10 @@ def _referent_filters(
     }
 
     def admissible(path: str) -> bool:
-        return path not in retired and _recent_reason_for(path, collections=collections) == "edited"
+        return (
+            path not in retired
+            and _recent_reason_for(path, collections=collections, inboxes=inboxes) == "edited"
+        )
 
     def eligible(path: str) -> bool:
         if path in by_path:
@@ -5594,6 +5598,7 @@ def _recent_context(
     # left the exclusion inert on exactly the path where the other is all
     # there is.
     collections = _recent_collection_dirs((*by_path, *heat.all_rows))
+    inboxes = recap_folder.inbox_folders(vault_root)
     order = {contact.path: position for position, contact in enumerate(contacts)}
     times = {contact.path: contact.ts_ns for contact in contacts}
     offered: dict[str, str] = {}
@@ -5602,12 +5607,12 @@ def _recent_context(
     for contact in contacts:
         if contact.reason == "episode":
             # A recap page's only contact is its own `episode_page` event.
-            if _recent_reason_for(contact.path) == "episode":
+            if _recent_reason_for(contact.path, inboxes=inboxes) == "episode":
                 episode_times[contact.path] = contact.ts_ns
             continue
         if min(taken.values()) >= limit:
             continue
-        kind = _recent_reason_for(contact.path, collections=collections)
+        kind = _recent_reason_for(contact.path, collections=collections, inboxes=inboxes)
         if not kind or kind == "episode":
             continue
         # A captured session stays `captured` whoever touched it last: its
@@ -5625,7 +5630,7 @@ def _recent_context(
         offered.setdefault(rel, "planning")
     # An episode is offered once per conversation, its newest revision, never
     # per file.
-    for rel in _recent_episodes(episode_times, limit=RECENT_EPISODES_MAX):
+    for rel in _recent_episodes(episode_times, limit=RECENT_EPISODES_MAX, inboxes=inboxes):
         offered[rel] = "episode"
     # Retired state is never offered, as the hot profile never offers it: a
     # retired status or a `superseded_by` pointer, read from the request's
@@ -5733,10 +5738,12 @@ def _recent_collection_dirs(paths: Iterable[str]) -> frozenset[str]:
     return frozenset(rel[: -len(marker)] for rel in paths if rel.endswith(marker))
 
 
-_EPISODE_PREFIX = f"Sources/{source_taxonomy.EPISODE_PATH_LABEL}/"
+_EPISODE_PREFIX = recap_folder.SHARED_INNER
 
 
-def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -> str:
+def _recent_reason_for(
+    rel: str, *, collections: frozenset[str] = frozenset(), inboxes: tuple[str, ...] = (),
+) -> str:
     """`edited`, `captured`, `episode`, or `""` for a page that is not working context.
 
     Raw material and operational state are excluded by the SAME path rules the
@@ -5750,6 +5757,9 @@ def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -
     activity log is rewritten by every confirmed write, so without excluding it
     it would be the most recently edited page on every turn and this block
     would say nothing else.
+
+    A restricted writer's recaps live in its inbox, not the shared folder; `inboxes`
+    names the recap folder of each configured capture path (`recap_folder.inbox_folders`).
     """
     from . import find_corpus
     from .kbdir import kb_prefix
@@ -5765,7 +5775,7 @@ def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -
         return ""
     if inner.startswith("Evidence/"):
         return ""
-    if inner.startswith(_EPISODE_PREFIX):
+    if inner.startswith(_EPISODE_PREFIX) or recap_folder.under(inboxes, rel):
         return "episode"
     if inner.startswith("Sources/"):
         return "captured" if inner.startswith("Sources/Sessions/") else ""
@@ -5863,7 +5873,9 @@ def _recent_planning(
     return tuple(plans[:limit])
 
 
-def _recent_episodes(times: Mapping[str, int], *, limit: int) -> tuple[str, ...]:
+def _recent_episodes(
+    times: Mapping[str, int], *, limit: int, inboxes: tuple[str, ...] = (),
+) -> tuple[str, ...]:
     """The newest revision of each of the most recent episodes, newest first.
 
     String work over the recap pages' heat contacts (`times`): no read, no
@@ -5878,7 +5890,7 @@ def _recent_episodes(times: Mapping[str, int], *, limit: int) -> tuple[str, ...]
 
     newest: dict[str, tuple[str, str]] = {}
     for rel in times:
-        if _recent_reason_for(rel) != "episode":
+        if _recent_reason_for(rel, inboxes=inboxes) != "episode":
             continue
         parts = episode_capture.filename_parts(rel.rsplit("/", 1)[-1])
         group, order = (parts[0], parts[1]) if parts is not None else (rel, "")

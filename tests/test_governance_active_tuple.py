@@ -64,7 +64,7 @@ from exomem.governance import (
     schema_v4,
     store,
 )
-from exomem.governance.principal import owner_principal
+from exomem.governance.principal import library_scope, owner_principal
 
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -2013,14 +2013,15 @@ def test_govern_memory_v4_suspend_expires_changed_grant_member_with_valid_manife
         connection.close()
     changed_source = "---\ntype: note\n---\nchanged member bytes\n"
     changed_fingerprint = hashlib.sha256(changed_source.encode()).hexdigest()
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=member_path,
-        after_source=changed_source,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(original_source),
-    )
-    semantic_writes.commit_existing(vault, preflight=preflight)
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=member_path,
+            after_source=changed_source,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(original_source),
+        )
+        semantic_writes.commit_existing(vault, preflight=preflight)
 
     with reserved_paths._owner_authority_scope("govern_memory"):
         suspended = op_govern_memory(
@@ -2577,14 +2578,15 @@ def test_govern_memory_v4_undo_rebuilds_catalog_membership_for_restored_selector
             proposal_id=proposed["proposal_id"],
             now=now + 2,
         )
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(before),
-    )
-    semantic_writes.commit_existing(vault, preflight=preflight)
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
+        semantic_writes.commit_existing(vault, preflight=preflight)
 
     with reserved_paths._owner_authority_scope("govern_memory"):
         undone = op_govern_memory(
@@ -2948,14 +2950,15 @@ def test_v4_incomplete_historical_mirror_recovers_after_content_tuple_and_gc(
                 now=now + 1,
             )
 
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(before),
-    )
-    semantic_writes.commit_existing(vault, preflight=preflight)
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
+        semantic_writes.commit_existing(vault, preflight=preflight)
 
     def collected(*_args, **_kwargs):
         raise AssertionError("historical mirror reopened projection storage")
@@ -4802,17 +4805,18 @@ def test_content_publication_wins_a_race_with_a_reviewed_policy_commit(
             now=now + 1,
         )
 
-    edit_preflight = (
-        semantic_writes.preflight_existing(
-            vault,
-            path=relative,
-            after_source=after,
-            operation="edit",
-            expected_before_hash=vault_module.content_hash(before),
+    with library_scope():
+        edit_preflight = (
+            semantic_writes.preflight_existing(
+                vault,
+                path=relative,
+                after_source=after,
+                operation="edit",
+                expected_before_hash=vault_module.content_hash(before),
+            )
+            if mutation == "edit"
+            else None
         )
-        if mutation == "edit"
-        else None
-    )
 
     content_inside_transaction = threading.Event()
     release_content = threading.Event()
@@ -4856,33 +4860,34 @@ def test_content_publication_wins_a_race_with_a_reviewed_policy_commit(
             )
 
     def commit_content() -> object:
-        content_thread_id.append(threading.get_ident())
-        if mutation == "create":
-            return create_file_module.create_file(
+        with library_scope():
+            content_thread_id.append(threading.get_ident())
+            if mutation == "create":
+                return create_file_module.create_file(
+                    vault,
+                    path=relative,
+                    content="Created during the tuple race.\n",
+                    frontmatter={"title": "Race", "status": "draft"},
+                    today=dt.date(2026, 8, 26),
+                )
+            if mutation == "edit":
+                assert edit_preflight is not None
+                return semantic_writes.commit_existing(vault, preflight=edit_preflight)
+            if mutation == "delete":
+                return delete_file_module.delete_file(
+                    vault,
+                    path=relative,
+                    confirm=True,
+                    today=dt.date(2026, 8, 26),
+                    now=dt.datetime.fromtimestamp(now),
+                )
+            assert companion_payload is not None and companion_proposal_id is not None
+            return _commit_companion_backfill(
                 vault,
-                path=relative,
-                content="Created during the tuple race.\n",
-                frontmatter={"title": "Race", "status": "draft"},
-                today=dt.date(2026, 8, 26),
+                companion_payload,
+                proposal_id=companion_proposal_id,
+                now=now + 2,
             )
-        if mutation == "edit":
-            assert edit_preflight is not None
-            return semantic_writes.commit_existing(vault, preflight=edit_preflight)
-        if mutation == "delete":
-            return delete_file_module.delete_file(
-                vault,
-                path=relative,
-                confirm=True,
-                today=dt.date(2026, 8, 26),
-                now=dt.datetime.fromtimestamp(now),
-            )
-        assert companion_payload is not None and companion_proposal_id is not None
-        return _commit_companion_backfill(
-            vault,
-            companion_payload,
-            proposal_id=companion_proposal_id,
-            now=now + 2,
-        )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         policy_future = executor.submit(commit_policy)
@@ -5352,14 +5357,15 @@ def test_semantic_edit_publishes_the_next_v4_catalog_before_returning(
         now=now,
     )
 
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(before),
-    )
-    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
+        committed = semantic_writes.commit_existing(vault, preflight=preflight)
 
     assert committed.mutated is True
     assert target.read_text(encoding="utf-8") == after
@@ -5416,13 +5422,14 @@ def test_semantic_creation_publishes_the_next_v4_catalog_before_returning(
         now=now,
     )
 
-    created = create_file_module.create_file(
-        vault,
-        path=relative,
-        content="New governed note.\n",
-        frontmatter={"title": "New", "status": "draft"},
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        created = create_file_module.create_file(
+            vault,
+            path=relative,
+            content="New governed note.\n",
+            frontmatter={"title": "New", "status": "draft"},
+            today=dt.date(2026, 8, 25),
+        )
 
     assert created.creation is not None
     source = (vault / relative).read_text(encoding="utf-8")
@@ -5486,13 +5493,14 @@ def test_semantic_creation_publishes_index_and_log_auxiliaries_in_one_generation
         now=now,
     )
 
-    created = create_file_module.create_file(
-        vault,
-        path=relative,
-        content="New governed note.\n",
-        frontmatter={"title": "New", "status": "draft"},
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        created = create_file_module.create_file(
+            vault,
+            path=relative,
+            content="New governed note.\n",
+            frontmatter={"title": "New", "status": "draft"},
+            today=dt.date(2026, 8, 25),
+        )
 
     assert created.creation is not None
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
@@ -5564,13 +5572,14 @@ def test_markdown_removal_and_log_write_publish_one_v4_catalog_generation(
         reject_graph_corpus,
     )
 
-    removed = delete_file_module.delete_file(
-        vault,
-        path=relative,
-        confirm=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        removed = delete_file_module.delete_file(
+            vault,
+            path=relative,
+            confirm=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
     assert not (vault / relative).exists()
     assert (vault / removed.trash_path).is_file()
@@ -5656,14 +5665,15 @@ def test_v4_file_trash_removes_inbound_graph_edge_in_one_generation(
         now=now,
     )
 
-    removed = delete_file_module.delete_file(
-        vault,
-        path=removed_relative,
-        confirm=True,
-        force_orphan=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        removed = delete_file_module.delete_file(
+            vault,
+            path=removed_relative,
+            confirm=True,
+            force_orphan=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
     assert not (vault / removed_relative).exists()
     assert (vault / removed.trash_path).is_file()
@@ -5725,14 +5735,15 @@ def test_v4_trash_refuses_unsupported_non_markdown_before_moving_bytes(
         now=now,
     )
 
-    with pytest.raises(delete_file_module.DeleteFileError) as blocked:
-        delete_file_module.delete_file(
-            vault,
-            path=relative,
-            confirm=True,
-            today=dt.date(2026, 8, 25),
-            now=dt.datetime.fromtimestamp(now),
-        )
+    with library_scope():
+        with pytest.raises(delete_file_module.DeleteFileError) as blocked:
+            delete_file_module.delete_file(
+                vault,
+                path=relative,
+                confirm=True,
+                today=dt.date(2026, 8, 25),
+                now=dt.datetime.fromtimestamp(now),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert blocked.value.reason == "non-Markdown content publication is not available"
@@ -5785,14 +5796,15 @@ def test_v4_directory_trash_retires_all_rows_and_publishes_log_once(
         now=now,
     )
 
-    removed = delete_directory_module.delete_directory(
-        vault,
-        path=directory,
-        confirm=True,
-        recursive=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        removed = delete_directory_module.delete_directory(
+            vault,
+            path=directory,
+            confirm=True,
+            recursive=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
     assert not (vault / directory).exists()
     assert (vault / removed.trash_path).is_dir()
@@ -5879,15 +5891,16 @@ def test_v4_directory_trash_removes_inbound_graph_edge_in_one_generation(
         now=now,
     )
 
-    removed = delete_directory_module.delete_directory(
-        vault,
-        path=directory,
-        confirm=True,
-        recursive=True,
-        force_orphan=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        removed = delete_directory_module.delete_directory(
+            vault,
+            path=directory,
+            confirm=True,
+            recursive=True,
+            force_orphan=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
     assert not (vault / directory).exists()
     assert (vault / removed.trash_path).is_dir()
@@ -5949,15 +5962,16 @@ def test_v4_directory_trash_refuses_non_markdown_child_before_moving_tree(
         now=now,
     )
 
-    with pytest.raises(delete_directory_module.DeleteDirectoryError) as blocked:
-        delete_directory_module.delete_directory(
-            vault,
-            path=directory,
-            confirm=True,
-            recursive=True,
-            today=dt.date(2026, 8, 25),
-            now=dt.datetime.fromtimestamp(now),
-        )
+    with library_scope():
+        with pytest.raises(delete_directory_module.DeleteDirectoryError) as blocked:
+            delete_directory_module.delete_directory(
+                vault,
+                path=directory,
+                confirm=True,
+                recursive=True,
+                today=dt.date(2026, 8, 25),
+                now=dt.datetime.fromtimestamp(now),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert blocked.value.reason == "non-Markdown content publication is not available"
@@ -6008,15 +6022,16 @@ def test_v4_directory_trash_does_not_restore_tree_after_publication_uncertainty(
         lose_publication_terminal,
     )
 
-    with pytest.raises(delete_directory_module.DeleteDirectoryError) as uncertain:
-        delete_directory_module.delete_directory(
-            vault,
-            path=directory,
-            confirm=True,
-            recursive=True,
-            today=today,
-            now=dt.datetime.fromtimestamp(now),
-        )
+    with library_scope():
+        with pytest.raises(delete_directory_module.DeleteDirectoryError) as uncertain:
+            delete_directory_module.delete_directory(
+                vault,
+                path=directory,
+                confirm=True,
+                recursive=True,
+                today=today,
+                now=dt.datetime.fromtimestamp(now),
+            )
 
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     assert not (vault / directory).exists()
@@ -6063,15 +6078,16 @@ def test_v4_directory_trash_refuses_tree_drift_before_catalog_preparation(
 
     monkeypatch.setattr(graph_sync, "begin_deletion_transition", drift_then_begin)
 
-    with pytest.raises(delete_directory_module.DeleteDirectoryError) as blocked:
-        delete_directory_module.delete_directory(
-            vault,
-            path=directory,
-            confirm=True,
-            recursive=True,
-            today=dt.date(2026, 8, 25),
-            now=dt.datetime.fromtimestamp(now),
-        )
+    with library_scope():
+        with pytest.raises(delete_directory_module.DeleteDirectoryError) as blocked:
+            delete_directory_module.delete_directory(
+                vault,
+                path=directory,
+                confirm=True,
+                recursive=True,
+                today=dt.date(2026, 8, 25),
+                now=dt.datetime.fromtimestamp(now),
+            )
 
     assert blocked.value.code == "PATH_GUARD_CHANGED"
     assert target.read_text(encoding="utf-8") == source
@@ -6111,19 +6127,21 @@ def test_v4_file_recovery_inserts_row_and_publishes_log_once(
         activation_state_digest=migration.activation_state_digest,
         now=now,
     )
-    trashed = delete_file_module.delete_file(
-        vault,
-        path=relative,
-        confirm=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        trashed = delete_file_module.delete_file(
+            vault,
+            path=relative,
+            confirm=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
-    recovered = recover_module.recover_from_trash(
-        vault,
-        trash_path=trashed.trash_path,
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        recovered = recover_module.recover_from_trash(
+            vault,
+            trash_path=trashed.trash_path,
+            today=dt.date(2026, 8, 25),
+        )
 
     assert recovered.restored_path == relative
     assert (vault / relative).read_text(encoding="utf-8") == source
@@ -6195,11 +6213,12 @@ def test_v4_file_recovery_publishes_resolved_graph_successors(
         now=now,
     )
 
-    recovered = recover_module.recover_from_trash(
-        vault,
-        trash_path=trash_relative,
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        recovered = recover_module.recover_from_trash(
+            vault,
+            trash_path=trash_relative,
+            today=dt.date(2026, 8, 25),
+        )
 
     assert recovered.restored_path == restored_relative
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
@@ -6285,20 +6304,22 @@ def test_v4_directory_recovery_inserts_every_row_in_one_generation(
         activation_state_digest=migration.activation_state_digest,
         now=now,
     )
-    trashed = delete_directory_module.delete_directory(
-        vault,
-        path=directory,
-        confirm=True,
-        recursive=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        trashed = delete_directory_module.delete_directory(
+            vault,
+            path=directory,
+            confirm=True,
+            recursive=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
-    recovered = recover_module.recover_from_trash(
-        vault,
-        trash_path=trashed.trash_path,
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        recovered = recover_module.recover_from_trash(
+            vault,
+            trash_path=trashed.trash_path,
+            today=dt.date(2026, 8, 25),
+        )
 
     assert recovered.restored_path == directory
     assert (vault / first_relative).read_text(encoding="utf-8") == first
@@ -6357,12 +6378,13 @@ def test_v4_recovery_refuses_non_markdown_before_moving_bytes(
         now=now,
     )
 
-    with pytest.raises(recover_module.RecoverError) as blocked:
-        recover_module.recover_from_trash(
-            vault,
-            trash_path=trash_relative,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(recover_module.RecoverError) as blocked:
+            recover_module.recover_from_trash(
+                vault,
+                trash_path=trash_relative,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert blocked.value.reason == "non-Markdown content publication is not available"
@@ -6403,13 +6425,14 @@ def test_v4_recovery_does_not_inverse_rename_after_publication_uncertainty(
         activation_state_digest=migration.activation_state_digest,
         now=now,
     )
-    trashed = delete_file_module.delete_file(
-        vault,
-        path=relative,
-        confirm=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        trashed = delete_file_module.delete_file(
+            vault,
+            path=relative,
+            confirm=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
 
     def lose_publication_terminal(_prepared) -> None:
         raise catalog_publication.CatalogPublicationError("lost terminal")
@@ -6420,12 +6443,13 @@ def test_v4_recovery_does_not_inverse_rename_after_publication_uncertainty(
         lose_publication_terminal,
     )
 
-    with pytest.raises(recover_module.RecoverError) as uncertain:
-        recover_module.recover_from_trash(
-            vault,
-            trash_path=trashed.trash_path,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(recover_module.RecoverError) as uncertain:
+            recover_module.recover_from_trash(
+                vault,
+                trash_path=trashed.trash_path,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     assert (vault / relative).read_text(encoding="utf-8") == source
@@ -6464,14 +6488,15 @@ def test_v4_directory_recovery_refuses_tree_drift_before_rename(
         activation_state_digest=migration.activation_state_digest,
         now=now,
     )
-    trashed = delete_directory_module.delete_directory(
-        vault,
-        path=directory,
-        confirm=True,
-        recursive=True,
-        today=dt.date(2026, 8, 25),
-        now=dt.datetime.fromtimestamp(now),
-    )
+    with library_scope():
+        trashed = delete_directory_module.delete_directory(
+            vault,
+            path=directory,
+            confirm=True,
+            recursive=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
     real_begin = graph_sync.begin_recovery_transition
     added = vault / trashed.trash_path / "added.md"
 
@@ -6481,12 +6506,13 @@ def test_v4_directory_recovery_refuses_tree_drift_before_rename(
 
     monkeypatch.setattr(graph_sync, "begin_recovery_transition", drift_then_begin)
 
-    with pytest.raises(recover_module.RecoverError) as blocked:
-        recover_module.recover_from_trash(
-            vault,
-            trash_path=trashed.trash_path,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(recover_module.RecoverError) as blocked:
+            recover_module.recover_from_trash(
+                vault,
+                trash_path=trashed.trash_path,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert blocked.value.code == "PATH_GUARD_CHANGED"
     assert not (vault / directory).exists()
@@ -6562,12 +6588,13 @@ def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
         capture_graph_provider,
     )
 
-    moved = move_file_module.move_file(
-        vault,
-        old_path=old_relative,
-        new_path=new_relative,
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        moved = move_file_module.move_file(
+            vault,
+            old_path=old_relative,
+            new_path=new_relative,
+            today=dt.date(2026, 8, 25),
+        )
 
     assert moved.wikilinks_updated == 1
     assert graph_providers and callable(graph_providers[-1])
@@ -6670,13 +6697,14 @@ def test_v4_move_refuses_unsupported_non_markdown_before_moving_bytes(
         now=now,
     )
 
-    with pytest.raises(move_file_module.MoveFileError) as blocked:
-        move_file_module.move_file(
-            vault,
-            old_path=old_relative,
-            new_path=new_relative,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(move_file_module.MoveFileError) as blocked:
+            move_file_module.move_file(
+                vault,
+                old_path=old_relative,
+                new_path=new_relative,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert blocked.value.reason == "non-Markdown content publication is not available"
@@ -6717,13 +6745,14 @@ def test_v4_move_refuses_markdown_to_non_markdown_before_moving_bytes(
         now=now,
     )
 
-    with pytest.raises(move_file_module.MoveFileError) as blocked:
-        move_file_module.move_file(
-            vault,
-            old_path=old_relative,
-            new_path=new_relative,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(move_file_module.MoveFileError) as blocked:
+            move_file_module.move_file(
+                vault,
+                old_path=old_relative,
+                new_path=new_relative,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert blocked.value.reason == "non-Markdown content publication is not available"
@@ -6770,13 +6799,14 @@ def test_v4_move_refuses_paired_artifact_until_companion_publication_exists(
         now=now,
     )
 
-    with pytest.raises(move_file_module.MoveFileError) as blocked:
-        move_file_module.move_file(
-            vault,
-            old_path=old_page,
-            new_path=new_page,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(move_file_module.MoveFileError) as blocked:
+            move_file_module.move_file(
+                vault,
+                old_path=old_page,
+                new_path=new_page,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert blocked.value.reason == "non-Markdown content publication is not available"
@@ -6828,13 +6858,14 @@ def test_v4_move_does_not_undo_bytes_after_catalog_outcome_becomes_uncertain(
         lose_publication_terminal,
     )
 
-    with pytest.raises(move_file_module.MoveFileError) as uncertain:
-        move_file_module.move_file(
-            vault,
-            old_path=old_relative,
-            new_path=new_relative,
-            today=dt.date(2026, 8, 25),
-        )
+    with library_scope():
+        with pytest.raises(move_file_module.MoveFileError) as uncertain:
+            move_file_module.move_file(
+                vault,
+                old_path=old_relative,
+                new_path=new_relative,
+                today=dt.date(2026, 8, 25),
+            )
 
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     assert not (vault / old_relative).exists()
@@ -6915,7 +6946,8 @@ def test_media_reconciliation_publishes_new_sidecar_in_next_v4_catalog(
         now=now,
     )
 
-    result = media_processing.reconcile_media(vault, sidecar.with_suffix(""))
+    with library_scope():
+        result = media_processing.reconcile_media(vault, sidecar.with_suffix(""))
 
     assert result is not None
     assert result.sidecar_path == sidecar
@@ -6972,21 +7004,22 @@ def test_scene_frame_bytes_and_companion_publish_one_v4_catalog_successor(
         encoding="utf-8",
     )
 
-    pairs = scene_frames.write_scene_frames(
-        vault,
-        video,
-        [
-            (
-                embeddings.Scene(
-                    start_ts=8.0,
-                    end_ts=12.0,
-                    rep_ts=10.0,
-                    boundary_score=0.5,
-                ),
-                Image(),
-            )
-        ],
-    )
+    with library_scope():
+        pairs = scene_frames.write_scene_frames(
+            vault,
+            video,
+            [
+                (
+                    embeddings.Scene(
+                        start_ts=8.0,
+                        end_ts=12.0,
+                        rep_ts=10.0,
+                        boundary_score=0.5,
+                    ),
+                    Image(),
+                )
+            ],
+        )
 
     assert len(pairs) == 1
     jpg, sidecar = pairs[0]
@@ -7007,22 +7040,23 @@ def test_scene_frame_bytes_and_companion_publish_one_v4_catalog_successor(
     ]
 
     before = {path: path.read_bytes() for path in (jpg, sidecar)}
-    with pytest.raises(catalog_publication.CatalogCommitError) as blocked:
-        scene_frames.write_scene_frames(
-            vault,
-            video,
-            [
-                (
-                    embeddings.Scene(
-                        start_ts=38.0,
-                        end_ts=42.0,
-                        rep_ts=40.0,
-                        boundary_score=0.5,
-                    ),
-                    Image(),
-                )
-            ],
-        )
+    with library_scope():
+        with pytest.raises(catalog_publication.CatalogCommitError) as blocked:
+            scene_frames.write_scene_frames(
+                vault,
+                video,
+                [
+                    (
+                        embeddings.Scene(
+                            start_ts=38.0,
+                            end_ts=42.0,
+                            rep_ts=40.0,
+                            boundary_score=0.5,
+                        ),
+                        Image(),
+                    )
+                ],
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert {path: path.read_bytes() for path in (jpg, sidecar)} == before
@@ -7087,22 +7121,23 @@ def test_scene_frame_batch_replaces_parent_clip_samples_in_same_v4_successor(
         lambda texts, *, is_query: [(9.0, 1.0) for _text in texts],
     )
 
-    pairs = scene_frames.write_scene_frames(
-        vault,
-        video,
-        [
-            (
-                embeddings.Scene(
-                    start_ts=8.0,
-                    end_ts=12.0,
-                    rep_ts=10.0,
-                    boundary_score=0.5,
-                ),
-                Image(),
-            )
-        ],
-        parent_clip_samples=new_samples,
-    )
+    with library_scope():
+        pairs = scene_frames.write_scene_frames(
+            vault,
+            video,
+            [
+                (
+                    embeddings.Scene(
+                        start_ts=8.0,
+                        end_ts=12.0,
+                        rep_ts=10.0,
+                        boundary_score=0.5,
+                    ),
+                    Image(),
+                )
+            ],
+            parent_clip_samples=new_samples,
+        )
 
     assert len(pairs) == 1
     _jpg, frame_sidecar = pairs[0]
@@ -7163,12 +7198,13 @@ def test_media_extraction_update_publishes_exact_v4_catalog_successor(
         now=now,
     )
 
-    preserve.update_sidecar_extraction(
-        vault,
-        sidecar,
-        text="Governed transcript.",
-        engine="test-engine",
-    )
+    with library_scope():
+        preserve.update_sidecar_extraction(
+            vault,
+            sidecar,
+            text="Governed transcript.",
+            engine="test-engine",
+        )
 
     after = sidecar.read_text(encoding="utf-8")
     assert "Governed transcript." in after
@@ -7213,8 +7249,9 @@ def test_media_reconciliation_refuses_model_bound_v4_before_sidecar_bytes(
         model_bound,
     )
 
-    with pytest.raises(media_processing.MediaProcessingError) as blocked:
-        media_processing.reconcile_media(vault, sidecar.with_suffix(""))
+    with library_scope():
+        with pytest.raises(media_processing.MediaProcessingError) as blocked:
+            media_processing.reconcile_media(vault, sidecar.with_suffix(""))
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert not sidecar.exists()
@@ -7248,13 +7285,14 @@ def test_media_catalog_uncertainty_keeps_committed_sidecar_bytes(
         lose_publication_terminal,
     )
 
-    with pytest.raises(catalog_publication.CatalogPublicationError, match="lost terminal"):
-        preserve.update_sidecar_extraction(
-            vault,
-            sidecar,
-            text="Committed before the terminal was lost.",
-            engine="test-engine",
-        )
+    with library_scope():
+        with pytest.raises(catalog_publication.CatalogPublicationError, match="lost terminal"):
+            preserve.update_sidecar_extraction(
+                vault,
+                sidecar,
+                text="Committed before the terminal was lost.",
+                engine="test-engine",
+            )
 
     assert "Committed before the terminal was lost." in sidecar.read_text(encoding="utf-8")
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
@@ -7278,25 +7316,27 @@ def test_media_failure_and_pending_updates_each_publish_a_v4_successor(
         now=now,
     )
 
-    preserve.update_sidecar_processing_failure(
-        vault,
-        sidecar,
-        state=media_jobs.BLOCKED,
-        attempts=1,
-        error="runtime unavailable",
-        retryable=True,
-        next_action="restore the runtime",
-    )
+    with library_scope():
+        preserve.update_sidecar_processing_failure(
+            vault,
+            sidecar,
+            state=media_jobs.BLOCKED,
+            attempts=1,
+            error="runtime unavailable",
+            retryable=True,
+            next_action="restore the runtime",
+        )
     blocked = sidecar.read_text(encoding="utf-8")
     first = authorization_custody.load_authorization_custody(vault, now=now + 1)
     assert first.control.activation_epoch == 2
 
-    assert preserve.update_sidecar_processing_pending(
-        vault,
-        sidecar,
-        attempts=2,
-        expected_hash=vault_module.content_hash(blocked),
-    )
+    with library_scope():
+        assert preserve.update_sidecar_processing_pending(
+            vault,
+            sidecar,
+            attempts=2,
+            expected_hash=vault_module.content_hash(blocked),
+        )
     after = sidecar.read_text(encoding="utf-8")
     second = authorization_custody.load_authorization_custody(vault, now=now + 2)
     assert second.control.activation_epoch == 3
@@ -7336,11 +7376,12 @@ def test_mark_processing_unavailable_publishes_sidecar_before_job_terminal(
         )
     )
 
-    changed = media_processing.mark_processing_unavailable(
-        vault,
-        reason="runtime unavailable",
-        next_action="restore the runtime",
-    )
+    with library_scope():
+        changed = media_processing.mark_processing_unavailable(
+            vault,
+            reason="runtime unavailable",
+            next_action="restore the runtime",
+        )
 
     assert changed == 1
     assert store_instance.get(job_id).state == media_jobs.BLOCKED
@@ -7368,11 +7409,12 @@ def test_existing_binary_backfill_pages_publish_v4_catalog_membership(
         now=now,
     )
 
-    created_media, media_created = preserve.ensure_media_sidecar(
-        vault,
-        media_sidecar.with_suffix(""),
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        created_media, media_created = preserve.ensure_media_sidecar(
+            vault,
+            media_sidecar.with_suffix(""),
+            today=dt.date(2026, 8, 25),
+        )
 
     assert media_created and created_media == media_sidecar
     first = authorization_custody.load_authorization_custody(vault, now=now + 1)
@@ -7381,11 +7423,12 @@ def test_existing_binary_backfill_pages_publish_v4_catalog_membership(
     artifact = vault / "Knowledge Base" / "Evidence" / "Files" / "sample.bin"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(b"existing artifact")
-    artifact_page, page_created = preserve.ensure_artifact_page(
-        vault,
-        artifact,
-        today=dt.date(2026, 8, 25),
-    )
+    with library_scope():
+        artifact_page, page_created = preserve.ensure_artifact_page(
+            vault,
+            artifact,
+            today=dt.date(2026, 8, 25),
+        )
 
     assert page_created
     second = authorization_custody.load_authorization_custody(vault, now=now + 2)
@@ -7418,14 +7461,15 @@ def test_preserve_binary_publishes_bound_companion_and_v4_catalog_successor(
         now=now,
     )
 
-    result = preserve.preserve_bytes(
-        vault,
-        scope="Private",
-        category="files",
-        filename="payload.bin",
-        data=b"governed binary payload",
-        today=dt.date(2026, 8, 26),
-    )
+    with library_scope():
+        result = preserve.preserve_bytes(
+            vault,
+            scope="Private",
+            category="files",
+            filename="payload.bin",
+            data=b"governed binary payload",
+            today=dt.date(2026, 8, 26),
+        )
 
     bound = companions.classify(vault, result.path)
     assert bound.projects == ()
@@ -7473,14 +7517,15 @@ def test_preserve_v4_updates_navigation_in_the_same_projection_generation(
         now=now,
     )
 
-    result = preserve.preserve_bytes(
-        vault,
-        scope="Private",
-        category="files",
-        filename="with-navigation.bin",
-        data=b"governed payload",
-        today=dt.date(2026, 8, 26),
-    )
+    with library_scope():
+        result = preserve.preserve_bytes(
+            vault,
+            scope="Private",
+            category="files",
+            filename="with-navigation.bin",
+            data=b"governed payload",
+            today=dt.date(2026, 8, 26),
+        )
 
     assert "with-navigation.bin" in index.read_text(encoding="utf-8")
     assert "with-navigation.bin" in log.read_text(encoding="utf-8")
@@ -7533,15 +7578,16 @@ def test_preserve_binary_rebuilds_vector_measurements_before_v4_activation(
 
     monkeypatch.setattr(embeddings, "embed_texts", embed_target)
 
-    result = preserve.preserve_bytes(
-        vault,
-        scope="Private",
-        category="files",
-        filename="vector.bin",
-        data=b"vector-backed payload",
-        text="projection-only searchable text",
-        today=dt.date(2026, 8, 26),
-    )
+    with library_scope():
+        result = preserve.preserve_bytes(
+            vault,
+            scope="Private",
+            category="files",
+            filename="vector.bin",
+            data=b"vector-backed payload",
+            text="projection-only searchable text",
+            today=dt.date(2026, 8, 26),
+        )
 
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
     active, manifest, items = _load_active_projection_items(
@@ -7606,15 +7652,16 @@ def test_preserve_binary_v4_preflight_failure_leaves_no_canonical_bytes(
         "prepare_planned_markdown_batch",
         refuse,
     )
-    with pytest.raises(catalog_publication.CatalogCommitError) as blocked:
-        preserve.preserve_bytes(
-            vault,
-            scope="Private",
-            category="files",
-            filename="blocked.bin",
-            data=b"must not commit",
-            today=dt.date(2026, 8, 26),
-        )
+    with library_scope():
+        with pytest.raises(catalog_publication.CatalogCommitError) as blocked:
+            preserve.preserve_bytes(
+                vault,
+                scope="Private",
+                category="files",
+                filename="blocked.bin",
+                data=b"must not commit",
+                today=dt.date(2026, 8, 26),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     folder = vault / "Knowledge Base" / "Evidence" / "Private" / "files"
@@ -7646,15 +7693,16 @@ def test_preserve_binary_v4_catalog_terminal_loss_is_explicitly_uncertain(
         "publish_markdown_batch",
         lose_terminal,
     )
-    with pytest.raises(catalog_publication.CatalogCommitError) as uncertain:
-        preserve.preserve_bytes(
-            vault,
-            scope="Private",
-            category="files",
-            filename="uncertain.bin",
-            data=b"canonical bytes committed",
-            today=dt.date(2026, 8, 26),
-        )
+    with library_scope():
+        with pytest.raises(catalog_publication.CatalogCommitError) as uncertain:
+            preserve.preserve_bytes(
+                vault,
+                scope="Private",
+                category="files",
+                filename="uncertain.bin",
+                data=b"canonical bytes committed",
+                today=dt.date(2026, 8, 26),
+            )
 
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     folder = vault / "Knowledge Base" / "Evidence" / "Private" / "files"
@@ -7707,25 +7755,26 @@ def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(
         vault,
         vault / auxiliary_relative,
     )
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=primary_relative,
-        after_source=primary_after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(primary_before),
-    )
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=primary_relative,
+            after_source=primary_after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(primary_before),
+        )
 
-    committed = semantic_writes.commit_existing(
-        vault,
-        preflight=preflight,
-        auxiliary_writes=(
-            vault_module.PlannedWrite(
-                vault / auxiliary_relative,
-                auxiliary_after,
-                guard=auxiliary_guard,
+        committed = semantic_writes.commit_existing(
+            vault,
+            preflight=preflight,
+            auxiliary_writes=(
+                vault_module.PlannedWrite(
+                    vault / auxiliary_relative,
+                    auxiliary_after,
+                    guard=auxiliary_guard,
+                ),
             ),
-        ),
-    )
+        )
 
     assert committed.mutated is True
     assert (vault / primary_relative).read_text(encoding="utf-8") == primary_after
@@ -7805,15 +7854,16 @@ def test_semantic_edit_rebuilds_only_changed_vectors_before_v4_activation(
         return tuple((9.0, float(index + 1)) for index, _text in enumerate(texts))
 
     monkeypatch.setattr(embeddings, "embed_texts", embed_target)
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=changed_path,
-        after_source=changed_after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(changed_before),
-    )
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=changed_path,
+            after_source=changed_after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(changed_before),
+        )
 
-    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+        committed = semantic_writes.commit_existing(vault, preflight=preflight)
 
     assert committed.mutated is True
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
@@ -7924,15 +7974,16 @@ def test_semantic_edit_carries_complete_clip_family_into_the_same_v4_successor(
         "embed_texts",
         lambda texts, *, is_query: [(9.0, 1.0) for _text in texts],
     )
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=note_path,
-        after_source=note_after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(note_before),
-    )
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=note_path,
+            after_source=note_after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(note_before),
+        )
 
-    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+        committed = semantic_writes.commit_existing(vault, preflight=preflight)
 
     assert committed.mutated is True
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
@@ -8113,17 +8164,18 @@ def test_vector_catalog_preflight_refuses_unknown_measurement_family_before_byte
         unsupported,
     )
 
-    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
-        semantic_writes.commit_existing(
-            vault,
-            preflight=semantic_writes.preflight_existing(
+    with library_scope():
+        with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+            semantic_writes.commit_existing(
                 vault,
-                path=relative,
-                after_source=after,
-                operation="edit",
-                expected_before_hash=vault_module.content_hash(before),
-            ),
-        )
+                preflight=semantic_writes.preflight_existing(
+                    vault,
+                    path=relative,
+                    after_source=after,
+                    operation="edit",
+                    expected_before_hash=vault_module.content_hash(before),
+                ),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert target.read_text(encoding="utf-8") == before
@@ -8173,17 +8225,18 @@ def test_vector_rebuild_failure_refuses_catalog_mutation_before_bytes(
             ),
         )
 
-    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
-        semantic_writes.commit_existing(
-            vault,
-            preflight=semantic_writes.preflight_existing(
+    with library_scope():
+        with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+            semantic_writes.commit_existing(
                 vault,
-                path=relative,
-                after_source=after,
-                operation="edit",
-                expected_before_hash=vault_module.content_hash(before),
-            ),
-        )
+                preflight=semantic_writes.preflight_existing(
+                    vault,
+                    path=relative,
+                    after_source=after,
+                    operation="edit",
+                    expected_before_hash=vault_module.content_hash(before),
+                ),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert target.read_text(encoding="utf-8") == before
@@ -8289,26 +8342,27 @@ def test_semantic_edit_refuses_auxiliary_catalog_drift_before_changing_bytes(
         vault,
         vault / auxiliary_relative,
     )
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=primary_relative,
-        after_source=primary_after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(primary_before),
-    )
-
-    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
-        semantic_writes.commit_existing(
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
             vault,
-            preflight=preflight,
-            auxiliary_writes=(
-                vault_module.PlannedWrite(
-                    vault / auxiliary_relative,
-                    auxiliary_requested,
-                    guard=auxiliary_guard,
-                ),
-            ),
+            path=primary_relative,
+            after_source=primary_after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(primary_before),
         )
+
+        with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+            semantic_writes.commit_existing(
+                vault,
+                preflight=preflight,
+                auxiliary_writes=(
+                    vault_module.PlannedWrite(
+                        vault / auxiliary_relative,
+                        auxiliary_requested,
+                        guard=auxiliary_guard,
+                    ),
+                ),
+            )
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert "content identity" in blocked.value.reason
@@ -8350,16 +8404,17 @@ def test_semantic_edit_refuses_catalog_drift_before_changing_bytes(
         now=now,
     )
     target.write_text(drifted_source, encoding="utf-8")
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=requested_source,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(drifted_source),
-    )
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=requested_source,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(drifted_source),
+        )
 
-    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
-        semantic_writes.commit_existing(vault, preflight=preflight)
+        with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+            semantic_writes.commit_existing(vault, preflight=preflight)
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert target.read_text(encoding="utf-8") == drifted_source
@@ -8408,15 +8463,16 @@ def test_semantic_edit_recovers_lost_catalog_registry_acknowledgement(
         real_crash_point(point)
 
     monkeypatch.setattr(schema_v4, "_crash_point", lose_first_ack)
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(before),
-    )
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
 
-    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+        committed = semantic_writes.commit_existing(vault, preflight=preflight)
 
     assert crashed is True
     assert committed.mutated is True
@@ -8469,16 +8525,17 @@ def test_semantic_edit_refuses_model_namespace_before_changing_bytes(
         "namespace_evidence_from_snapshot",
         model_bound,
     )
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=after,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(before),
-    )
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
 
-    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
-        semantic_writes.commit_existing(vault, preflight=preflight)
+        with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+            semantic_writes.commit_existing(vault, preflight=preflight)
 
     assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
     assert target.read_text(encoding="utf-8") == before
@@ -8538,14 +8595,15 @@ def test_abandoned_content_preparation_does_not_poison_next_catalog_generation(
     assert not projection_store.variant_store_path(
         vault, selected.target_key
     ).exists()
-    preflight = semantic_writes.preflight_existing(
-        vault,
-        path=relative,
-        after_source=selected_candidate,
-        operation="edit",
-        expected_before_hash=vault_module.content_hash(before),
-    )
-    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+    with library_scope():
+        preflight = semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=selected_candidate,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
+        committed = semantic_writes.commit_existing(vault, preflight=preflight)
     assert committed.mutated is True
     assert target.read_text(encoding="utf-8") == selected_candidate
 
@@ -8874,15 +8932,17 @@ def test_legacy_navigation_capture_preserves_measurement_closure(tmp_path, monke
         frontmatter={"title": "New", "status": "draft", "type": "insight"},
         today=dt.date(2026, 9, 19),
     )
-    draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
+    with library_scope():
+        draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
 
-    result = create_file_module.create_file(
-        vault,
-        draft_id=draft.draft_id,
-        draft_hash=draft.draft_hash,
-        draft_token=draft.draft_token,
-        **kwargs,
-    )
+    with library_scope():
+        result = create_file_module.create_file(
+            vault,
+            draft_id=draft.draft_id,
+            draft_hash=draft.draft_hash,
+            draft_token=draft.draft_token,
+            **kwargs,
+        )
 
     assert result.path == kwargs["path"]
     custody = authorization_custody.load_authorization_custody(vault, now=int(time.time()))
@@ -8941,19 +9001,21 @@ def test_legacy_navigation_capture_refuses_postprepare_file_drift(tmp_path, monk
         frontmatter={"title": "New", "status": "draft", "type": "insight"},
         today=dt.date(2026, 9, 19),
     )
-    draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
+    with library_scope():
+        draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
     monkeypatch.setattr(catalog_publication, "prepare_planned_markdown_batch", change_after_prepare)
     # Only a server-planned auxiliary moved, so the refusal is a retryable busy that re-plans it.
     from exomem.cli_ops import OpError
 
-    with pytest.raises(OpError) as refused:
-        create_file_module.create_file(
-            vault,
-            draft_id=draft.draft_id,
-            draft_hash=draft.draft_hash,
-            draft_token=draft.draft_token,
-            **kwargs,
-        )
+    with library_scope():
+        with pytest.raises(OpError) as refused:
+            create_file_module.create_file(
+                vault,
+                draft_id=draft.draft_id,
+                draft_hash=draft.draft_hash,
+                draft_token=draft.draft_token,
+                **kwargs,
+            )
     assert (refused.value.code, refused.value.details["cause"]) == ("MUTATION_BUSY", "auxiliary_changed")
     assert refused.value.details["committed"] is False
     assert "Knowledge Base/index.md" in prepared_paths

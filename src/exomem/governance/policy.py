@@ -63,6 +63,23 @@ def is_governance_path(rel_path: str) -> bool:
         return False
     folded = GOVERNANCE_DIRNAME.casefold()
     return any(part.casefold() == folded for part in clean.split("/"))
+
+
+def is_workflow_state_path(rel_path: str) -> bool:
+    """True for a record that a door keeps about its own work: a curation run, an episode journal or a relation review.
+
+    Doors write these records for every caller, and no audience is served them. Nothing compiles
+    them as policy. The match is exact, so a variant spelling stays a policy path.
+    """
+    from .. import relation_review  # the review folder is its owner's constant; a top-level import would cycle
+
+    parts = tuple(str(rel_path or "").split("/"))
+    # These are canonical path components and fixed storage folders, not a vocabulary or a meaning classifier.
+    return len(parts) > 3 and not any(part in ("", ".", "..") for part in parts) and parts[0] == kb_dirname() and parts[1:3] in (
+        (GOVERNANCE_DIRNAME, _CURATION_DIRECTORY), relation_review.REVIEW_FOLDER,
+    )
+
+
 GOVERNANCE_VERSION = 1
 DISCLOSURE_MIN = 0
 DISCLOSURE_MAX = 6  # L0 (nothing) .. L6 (full disclosure)
@@ -121,6 +138,7 @@ _SCOPE_ALLOWED_FIELDS = frozenset(
         "exclude",
         "constraint",
         "default_deny",
+        "residual",
         *_SCOPE_SELECTOR_FIELDS,
     }
 )
@@ -248,6 +266,10 @@ class Scope:
     #: it is not a rule and never lowers an authored ceiling (see
     #: `decisions._decide_at`). The owner is never subject to it.
     default_deny: bool = False
+    #: When true, membership assigns this scope to every page and file that no
+    #: other scope selects. A residual scope carries no selector or exclude
+    #: fields, and a policy holds at most one (see `Policy.residual_scope_id`).
+    residual: bool = False
     paths: tuple[str, ...] = ()
     projects: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
@@ -330,6 +352,11 @@ class Policy:
     def empty(self) -> bool:
         """True for the no-`_Governance/` (or file-less) singleton — the fast path."""
         return self.fingerprint == "missing"
+
+    @functools.cached_property
+    def residual_scope_id(self) -> str | None:
+        """The one scope that selects what no other scope selects, if declared."""
+        return next((key for key, scope in self.scopes.items() if scope.residual), None)
 
     @property
     def blocked(self) -> bool:
@@ -762,8 +789,11 @@ def canonical_compiled_bytes(policy: Policy) -> bytes:
     value = {
         "schema": "exomem.compiled-policy/v1",
         "fingerprint": policy.fingerprint,
+        # `residual` joins the bytes only when set, so a policy authored before the
+        # field existed keeps the authority bytes its stored digest was taken over.
         "scopes": [
-            dataclasses.asdict(scope)
+            {key: value for key, value in dataclasses.asdict(scope).items()
+             if key != "residual" or value}
             for _scope_id, scope in sorted(policy.scopes.items())
         ],
         "rules": [dataclasses.asdict(rule) for rule in policy.rules],
@@ -1492,6 +1522,7 @@ def _compile_document_bytes(
     release_grants: list[ReleaseGrant] = []
     rule_ids: set[str] = set()
     grant_ids: set[str] = set()
+    residual_source: str | None = None
 
     recognized: list[tuple[str, str, bytes]] = []
     for relative, raw in sorted(documents.items()):
@@ -1537,6 +1568,16 @@ def _compile_document_bytes(
                     )
                 else:
                     scopes[scope.id] = scope
+                    if scope.residual and residual_source is not None:
+                        findings.append(
+                            _finding(
+                                "duplicate_residual",
+                                rel,
+                                f"a policy declares one residual scope; {residual_source} already does",
+                            )
+                        )
+                    elif scope.residual:
+                        residual_source = rel
         elif kind == "rules":
             rule, doc_findings = _parse_rule(data, rel)
             findings.extend(doc_findings)
@@ -1616,6 +1657,12 @@ def protective_scope_documents(compiled: Policy, scope_ids: frozenset[str]) -> d
     documents = {}
     for scope_id in sorted(scope_ids):
         scope = compiled.scopes[scope_id]
+        if scope.residual:
+            # A residual scope has no selector, so its pinned document is only its marker.
+            documents[scope_id] = {
+                "governance_version": GOVERNANCE_VERSION, "id": scope_id, "residual": True,
+            }
+            continue
         # Selector names belong to the canonical Scope schema, not host configuration.
         documents[scope_id] = {
             "governance_version": GOVERNANCE_VERSION,
@@ -1861,6 +1908,27 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
                 )
             )
 
+    # Presence-checked for the reason `default_deny` is: a mistyped marker must
+    # refuse the compile, never leave the scope reading as an ordinary one.
+    residual = False
+    if "residual" in data:
+        if data["residual"] is True:
+            residual = True
+            selectors = [field for field in (*_SCOPE_SELECTOR_FIELDS, "exclude") if field in data]
+            if selectors:
+                findings.append(
+                    _finding(
+                        "invalid_field",
+                        f"{rel}:residual",
+                        "a residual scope selects what no other scope selects; "
+                        f"remove {', '.join(selectors)}",
+                    )
+                )
+        elif data["residual"] is not False:
+            findings.append(
+                _finding("invalid_field", f"{rel}:residual", "residual must be a boolean")
+            )
+
     if doc_id is None:
         return None, findings
 
@@ -1870,6 +1938,7 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         name=name,
         constraint=constraint,
         default_deny=default_deny,
+        residual=residual,
         paths=_as_str_tuple(data.get("paths"), rel, "paths", findings),
         projects=_as_str_tuple(data.get("projects"), rel, "projects", findings),
         tags=_as_str_tuple(data.get("tags"), rel, "tags", findings),

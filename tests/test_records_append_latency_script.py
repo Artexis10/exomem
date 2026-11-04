@@ -116,6 +116,11 @@ def test_phase_probes_prove_release_refusal_and_bulk_storage(tmp_path):
     assert completed.returncode == 0, completed.stderr[-3000:]
     line = next(row for row in completed.stdout.splitlines() if row.startswith("RESULT-JSON:"))
     result = json.loads(line.removeprefix("RESULT-JSON:"))
+    assert result["command_path"]["guard_source"] == "previous committed acknowledgement"
+    assert result["public_inspect_ms"]["p95"] > 0
+    assert result["inspect_then_guarded_append_ms"]["p95"] > 0
+    assert "guard_refresh_read_ms" not in result and "guard_round_trip_ms" not in result
+    assert "profile_inspect_cumulative" in result and "profile_refresh_cumulative" not in result
     probes = result["phase_probes"]
     assert probes["fixture"] == {
         "seeded_rows": 10, "selected_refs": 1,
