@@ -23,6 +23,6 @@ A 2026-11-01 adversarial audit tested one vault that holds client matters beside
 ## Impact
 
 - Code: `src/exomem/governance/{policy,membership,connector_boundary}.py`, `src/exomem/vocabulary/instances.py`, `src/exomem/{add,move_file,delete_file,episode_memory,working_set,working_set_heat,context_catalogue,dreamer_families}.py`, and the scaffold skill.
-- Behaviour on upgrade: nothing changes until a vault declares a residual scope or a connector config carries `writable_scope_ids`. Under a connector config, fenced connectors lose write-down into open pages and creation in an inbox that no writable scope selects. Non-owner audiences without a client entry become read-only.
+- Behaviour on upgrade: every non-owner under a non-empty policy becomes read-only unless a matched client entry grants writable scopes. This applies without a residual scope or connector configuration, including when identity does not resolve. Fenced connectors lose write-down into open pages and creation in an inbox that no writable scope selects. Writable scopes require a residual scope.
 - Downgrade: an older binary refuses the `residual` field and blocks the policy, which fails closed.
 - Undo: remove the residual scope document and the `writable_scope_ids` entries.

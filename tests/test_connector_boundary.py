@@ -17,6 +17,8 @@ ISSUER = "https://memory.example.test"
 SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 INBOX = "01ARZ3NDEKTSV4RRFFQ69G5FB7"
 OPEN_MATTER = "01ARZ3NDEKTSV4RRFFQ69G5FB8"
+RESIDUAL = "01ARZ3NDEKTSV4RRFFQ69G5FB9"
+PUBLIC_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FBG"
 PUBLIC = "Knowledge Base/Notes/public.md"
 PRIVATE = "Knowledge Base/Notes/private.md"
 
@@ -27,6 +29,16 @@ def configured_boundary(vault, tmp_path, monkeypatch):
     scopes.mkdir(parents=True, exist_ok=True)
     (scopes / "private.yaml").write_text(
         f'governance_version: 1\nid: {SCOPE}\nprojects: [private-project]\n', encoding="utf-8",
+    )
+    # The host refuses writable scopes in a vault with no residual scope. The default context is
+    # denied the residual scope, so the Notes tree that its tests read has a scope of its own. It
+    # selects by path: a semantic selector leaves a path-only release of registry storage
+    # undecided, and a capture page that names the public project keeps its path membership.
+    (scopes / "residual.yaml").write_text(
+        f"governance_version: 1\nid: {RESIDUAL}\nresidual: true\n", encoding="utf-8",
+    )
+    (scopes / "public.yaml").write_text(
+        f'governance_version: 1\nid: {PUBLIC_SCOPE}\npaths: ["Notes/**"]\n', encoding="utf-8",
     )
     # The inbox scope selects the capture path; only the limited client may write it.
     (scopes / "inbox.yaml").write_text(
@@ -45,7 +57,7 @@ def configured_boundary(vault, tmp_path, monkeypatch):
         ensure_manifest(vault)
     config = tmp_path / "host-boundary.json"
     config.write_text(json.dumps({
-        "version": 1, "default_denied_scope_ids": [SCOPE, INBOX],
+        "version": 1, "default_denied_scope_ids": [SCOPE, INBOX, RESIDUAL],
         "capture_paths": ["Knowledge Base/Capture"],
         "clients": [{"issuer": ISSUER, "client_id": client, "denied_scope_ids": denied,
                      "writable_scope_ids": writable}
@@ -99,6 +111,8 @@ def public_matter_writer(configured_boundary, vault):
     edits a public page as `limited` needs the public matter as one of them.
     """
     config, authenticate = configured_boundary
+    # The matter takes the Notes scope's place, because a writable scope must be the page's only scope.
+    (vault / "Knowledge Base/_Governance/scopes/public.yaml").unlink()
     (vault / "Knowledge Base/_Governance/scopes/open-matter.yaml").write_text(
         f"governance_version: 1\nid: {OPEN_MATTER}\nprojects: [public-project]\n", encoding="utf-8",
     )

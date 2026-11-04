@@ -35,6 +35,7 @@ RESIDUAL = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
 OWN = "01ARZ3NDEKTSV4RRFFQ69G5FAZ"
 SHARED = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
 OWN_PAGE = "Knowledge Base/Notes/own.md"
+OWN_NOTE = "Knowledge Base/Notes/Insights/own-note.md"
 SHARED_PAGE = "Knowledge Base/Notes/shared.md"
 NEW_INBOX_PAGE = "Knowledge Base/Capture/new.md"
 SHARED_SOURCES = "01ARZ3NDEKTSV4RRFFQ69G5FB5"
@@ -58,12 +59,21 @@ def unarmed(configured_boundary, vault):
     """
     config, authenticate = configured_boundary
     scopes = vault / "Knowledge Base/_Governance/scopes"
+    (scopes / "public.yaml").unlink()  # the public page is unclassified here, so the residual scope holds it
     for name, document in {
         "residual.yaml": f"governance_version: 1\nid: {RESIDUAL}\nresidual: true\ndefault_deny: true\n",
-        "own.yaml": f"governance_version: 1\nid: {OWN}\nprojects: [own-matter]\n",
+        "own.yaml": f'governance_version: 1\nid: {OWN}\nprojects: [own-matter]\npaths: ["Notes/Insights/own-*"]\n',
         "shared.yaml": f"governance_version: 1\nid: {SHARED}\nprojects: [shared-project]\n",
     }.items():
         (scopes / name).write_text(document, encoding="utf-8")
+    # A page with a stable identity is edited through the semantic writer, which keeps a review and a history
+    # entry beside it. The matter selects the note by path, so those entries lie outside the matter's scope.
+    (vault / OWN_NOTE).parent.mkdir(parents=True, exist_ok=True)
+    (vault / OWN_NOTE).write_text(
+        "---\ntitle: Own note\ntype: insight\nexomem_id: 5a1e0000-0000-4000-8000-0000000000a1\nstatus: active\n---\n"
+        "# Own note\n\n- [decision] Keep own text bounded.\n\n## Relations\n- relates_to [[own-peer]]\n", encoding="utf-8")
+    (vault / OWN_NOTE).with_name("own-peer.md").write_text(
+        "---\ntype: insight\nstatus: active\n---\n# Own peer\n\n- [decision] Keep peer text short.\n", encoding="utf-8")
     for path, project, text in ((OWN_PAGE, "own-matter", "own text"), (SHARED_PAGE, "shared-project", "shared text"),
                                 (PUBLIC, "public-project", "public information text"),
                                 (PRIVATE, "private-project", "protected canary text")):
@@ -99,7 +109,11 @@ def confined(unarmed, vault):
 
 
 def _writers(authenticate):
-    """Each writer kind, as the principal that a real client binding resolves to."""
+    """Each writer kind, as the principal that a real client binding resolves to.
+
+    `fenced-connector` is the owner signed in through a fenced connector: audience `owner`, a client
+    binding, a denied set and writable scopes. `bound-non-owner` has the same binding under another audience.
+    """
     writer = authenticate("writer")
     return {
         "fenced-connector": writer,
@@ -135,6 +149,7 @@ def _create(path: str) -> tuple[str, dict[str, Any]]:
 # (target label, door request, whether each writer kind may write it)
 _MATRIX = {
     "own matter page": (OWN_PAGE, _edit, dict(fenced=True, bound=True, unbound=False, unfenced=True, admin=True)),
+    "own matter note with an identity": (OWN_NOTE, _edit, dict(fenced=True, bound=True, unbound=False, unfenced=True, admin=True)),
     "new inbox page": (NEW_INBOX_PAGE, _create, dict(fenced=True, bound=True, unbound=False, unfenced=True, admin=True)),
     "shared page it reads": (SHARED_PAGE, _edit, dict(fenced=False, bound=False, unbound=False, unfenced=True, admin=True)),
     "other matter page": (PRIVATE, _edit, dict(fenced=False, bound=False, unbound=False, unfenced=True, admin=True)),
@@ -161,10 +176,118 @@ def test_a_writer_writes_only_the_targets_its_kind_may(confined, vault, kind, ta
     after = (vault / path).read_bytes() if (vault / path).exists() else None
     if expected[_KINDS[kind]]:
         assert not _refused(answer), answer
-        assert after is not None and after != before
+        assert after is not None and after != before, answer
     else:
         assert _refused(answer), answer
         assert after == before
+
+
+@pytest.mark.parametrize("path", [OWN_NOTE, NEW_INBOX_PAGE])
+def test_a_fenced_writer_edits_and_appends_to_its_path_selected_page(confined, vault, path):
+    """An auxiliary outside the page's path scope must not make its residual membership deny the edit."""
+    _, authenticate = confined
+    writer = authenticate("writer")
+    if path == NEW_INBOX_PAGE:
+        created = _call(vault, writer, *_create(path)[:1], **_create(path)[1])
+        assert not _refused(created), created
+    edited = _call(vault, writer, "edit_memory", path=path, why="Clarify the note.", operation={
+        "kind": "replace_string", "old_string": "text" if path == OWN_NOTE else "New text.",
+        "new_string": "Changed text.",
+    })
+    appended = _call(vault, writer, "manage_memory_file", operation="append", path=path, content="More text.")
+
+    assert not _refused(edited), edited
+    assert not _refused(appended), appended
+    assert "Changed text." in (vault / path).read_text()
+    assert "More text." in (vault / path).read_text()
+
+
+@pytest.mark.parametrize("resolved", [True, False])
+def test_a_non_owner_is_read_only_with_any_policy_and_no_host_config(vault, resolved):
+    """Missing identity cannot turn a governed vault's read-only audience into an unrestricted writer."""
+    scopes = vault / "Knowledge Base/_Governance/scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "matter.yaml").write_text(
+        f'governance_version: 1\nid: {OWN}\npaths: ["Notes/**"]\n', encoding="utf-8")
+    who = principal.RequestPrincipal(audience_id=NON_OWNER, surface="mcp", resolved=resolved)
+
+    answer = _call(vault, who, *_create(NEW_OUTSIDE_PAGE)[:1], **_create(NEW_OUTSIDE_PAGE)[1])
+
+    assert _refused(answer), answer
+    assert not (vault / NEW_OUTSIDE_PAGE).exists()
+
+
+@pytest.mark.parametrize("path", [
+    "Knowledge Base/_Governance/scopes/evil.yaml",
+    "Knowledge Base/.exomem-activation.json",
+    "Knowledge Base/_Governance/curation/../scopes/evil.yaml",
+])
+def test_a_vocabulary_grant_never_authorizes_policy_or_manifest_writes(confined, vault, monkeypatch, path):
+    from exomem import activation_manifest
+
+    _, authenticate = confined
+    if path.endswith(".exomem-activation.json"):
+        path = activation_manifest.manifest_path(vault).relative_to(vault).as_posix()
+    # Even a registry-classified subject cannot turn a grant into policy or manifest authority.
+    monkeypatch.setattr(connector_boundary, "_membership_sets", lambda *args, **kwargs: (frozenset(),))
+    with principal.request_scope(authenticate("writer")):
+        with pytest.raises(ValueError, match=REFUSED):
+            connector_boundary.require_write(vault, path, content=b"{}", granted=True)
+
+
+@pytest.mark.parametrize("component", ["", ".", ".."])
+@pytest.mark.parametrize("folder", ["_Governance/curation", "_Schema/relation-reviews"])
+def test_workflow_state_paths_reject_noncanonical_components(folder, component):
+    assert not policy.is_workflow_state_path(f"Knowledge Base/{folder}/{component}/record.json")
+
+
+def test_a_noncanonical_review_path_does_not_inherit_workflow_write_authority(confined, vault):
+    _, authenticate = confined
+    with principal.request_scope(authenticate("writer")):
+        with pytest.raises(ValueError, match=REFUSED):
+            connector_boundary.require_write(
+                vault, "Knowledge Base/_Schema/relation-reviews/../SKILL.md", content=b"# Changed\n",
+            )
+
+
+def test_a_registry_history_seal_does_not_extend_a_grant_to_an_arbitrary_page(confined, vault):
+    from exomem import vocabulary_auxiliaries
+    from exomem import vault as vault_module
+
+    _, authenticate = confined
+    registry_path = "Knowledge Base/_Schema/entity-types.yaml"
+    primary = vault_module.PlannedWrite(vault / registry_path, "schema_version: 1\n")
+    forged = vault_module.PlannedWrite(
+        vault / SHARED_PAGE, "# Changed\n",
+        guard=vault_module.PathGuard.capture(
+            vault, SHARED_PAGE, leaf_policy="content",
+            expected_content_hash=vault_module.content_hash((vault / SHARED_PAGE).read_text()),
+        ),
+    )
+    manifest = vocabulary_auxiliaries.seal(vault, primary=primary, derived=(("registry-history", forged),))
+    with principal.request_scope(authenticate("writer")):
+        with pytest.raises(ValueError, match="VOCABULARY_AUXILIARY"):
+            vault_module._validate_batch_write_access(
+                vault, (primary, forged), auxiliary_manifest=manifest, granted_paths=frozenset({registry_path}),
+            )
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+@pytest.mark.parametrize("inbox", [False, True])
+def test_folder_delete_refusal_matches_write_admission(confined, vault, inbox, recursive):
+    """A nonrecursive folder outside the inbox fails write admission; admitted and recursive folders stay protected."""
+    _, authenticate = confined
+    folder = "Knowledge Base/Capture/folder" if inbox else "Knowledge Base/Notes/folder"
+    child = vault / folder / "page.md"
+    child.parent.mkdir(parents=True)
+    child.write_text("# Page\n\nVisible text.\n", encoding="utf-8")
+
+    answer = _call(vault, authenticate("writer"), "manage_memory_file", operation="delete", path=folder,
+                   confirm=True, recursive=recursive)
+
+    expected = "AUDIENCE_RESTRICTED" if inbox or recursive else REFUSED
+    assert expected in answer.get("message", ""), answer
+    assert child.is_file()
 
 
 @pytest.mark.parametrize("door", ["edit", "append", "observe", "replace", "move-source", "move-destination",
@@ -356,6 +479,34 @@ def test_the_host_refuses_a_configuration_that_breaks_a_writers_exclusivity(unar
 
     assert not _ready(vault, config, breach)
 
+    config.write_text(valid)
+    assert _ready(vault, config, lambda data: None)
+
+
+def test_the_host_refuses_writable_scopes_in_a_vault_that_declares_no_residual_scope(unarmed, vault):
+    """A writer's relation reviews name its inbox pages, so an open vault would serve them to everyone."""
+    config, _ = unarmed
+    scopes = vault / "Knowledge Base/_Governance/scopes"
+    valid = config.read_text()
+    residual_document = (scopes / "residual.yaml").read_text()
+
+    def without_the_residual_scope(data: dict) -> None:
+        data["default_denied_scope_ids"].remove(RESIDUAL)
+        for item in data["clients"]:
+            if RESIDUAL in item["denied_scope_ids"]:
+                item["denied_scope_ids"].remove(RESIDUAL)
+
+    def and_without_writable_scopes(data: dict) -> None:
+        without_the_residual_scope(data)
+        for item in data["clients"]:
+            item["writable_scope_ids"] = []
+
+    (scopes / "residual.yaml").unlink()
+    assert not _ready(vault, config, without_the_residual_scope)
+    config.write_text(valid)
+    assert _ready(vault, config, and_without_writable_scopes), "only the writable scopes were refused"
+
+    (scopes / "residual.yaml").write_text(residual_document)
     config.write_text(valid)
     assert _ready(vault, config, lambda data: None)
 
@@ -586,7 +737,7 @@ def _remember(vault: Path, who, title: str, **kwargs: Any) -> Any:
     anchor = vault / ANCHOR
     if not anchor.exists():
         anchor.parent.mkdir(parents=True, exist_ok=True)
-        anchor.write_text("---\ntype: insight\nstatus: active\n---\n# Anchor\n\nShared anchor text.\n", encoding="utf-8")
+        anchor.write_text("---\ntype: insight\nstatus: active\nproject: shared-project\n---\n# Anchor\n\nShared anchor text.\n", encoding="utf-8")
     content = ("## Finding\n\nA durable conclusion.\n\n## Observations\n\n- [finding] One bath runs every stage. ^bath\n\n"
                f"## Relations\n\n- relates_to [[{ANCHOR.removesuffix('.md')}]]\n")
     return _call(vault, who, "remember", content=content, title=title, note_type="insight", **kwargs)
@@ -652,7 +803,7 @@ def test_inbox_creation_leaves_the_activity_log_and_the_top_index_unchanged(conf
     remembered = _remember(vault, writer, "A note from the inbox")
     captured = _capture_source(vault, writer, "A capture from the inbox")
 
-    assert not _refused(created) and not _refused(remembered), (created, remembered)
+    assert "__error__" not in created and "__error__" not in remembered, (created, remembered)
     assert captured["path"].startswith(SOURCES_INBOX)
     assert {path: (vault / path).read_bytes() for path in watched} == watched
     owner_created = _call(vault, principal.owner_principal(surface="cli"), "manage_memory_file", operation="create",
@@ -669,6 +820,36 @@ def test_a_fenced_remember_lands_in_the_notes_inbox_and_an_owners_stays_in_its_f
 
     assert fenced["path"].startswith(f"{NOTES_INBOX}/Insights/"), fenced
     assert unfenced["path"].startswith("Knowledge Base/Notes/Insights/"), unfenced
+
+
+def test_a_fenced_client_completes_a_note_that_has_no_typed_relation_in_its_inbox(confined, vault):
+    """The draft comes back intact for a creation in the writer's own inbox, so `reviewed_none` can be issued on it.
+
+    A free slot in another client's inbox, or outside every inbox, stays unavailable to the writer.
+    """
+    _, authenticate = confined
+    writer, sibling = authenticate("writer"), authenticate("sibling")
+    creation = dict(
+        content="## Finding\n\nA durable conclusion.\n\n## Observations\n\n- [finding] One bath runs every stage. ^bath\n",
+        title="A note with no typed relation", note_type="insight")
+
+    blocked = _call(vault, writer, "remember", **creation)
+    draft = _call(vault, writer, "remember", **creation, validate_only=True)
+    written = _call(vault, writer, "remember", **creation, draft_id=draft.get("draft_id"), draft_hash=draft.get("draft_hash"),
+                    draft_token=draft.get("draft_token"), relation_disposition="reviewed_none",
+                    relation_review_hash=draft.get("draft_hash"),
+                    relation_review_reason="A free-standing conclusion; no other page relates to it.")
+
+    assert "RELATION_DISPOSITION_MISSING" in blocked["message"], blocked
+    assert draft.get("destination", "").startswith(f"{NOTES_INBOX}/Insights/"), draft
+    assert written.get("path") == draft["destination"], written
+    assert (vault / written["path"]).is_file()
+    free_slot = NEW_INBOX_PAGE
+    with principal.request_scope(writer):
+        assert egress.content_permits(vault, free_slot, writer)
+        assert not egress.content_permits(vault, NEW_OUTSIDE_PAGE, writer)
+    with principal.request_scope(sibling):
+        assert not egress.content_permits(vault, free_slot, sibling)
 
 
 def test_a_fenced_source_capture_under_the_sources_inbox_can_be_cited(citing, vault):
@@ -696,7 +877,9 @@ def test_a_fenced_episode_records_prepares_and_resumes_without_touching_policy(c
     policy_before = {path: path.read_bytes() for path in governance.rglob("*")
                      if path.is_file() and curation not in path.parents}
     leaf = {"leaf_key": "write", "effect_revision": 1, "kind": "create-note", "args": {
-        "title": "Steady bath model", "slug": "steady-bath-model", "content": "## Observations\n\n- [finding] One bath. ^bath\n"}}
+        "title": "Steady bath model", "slug": "steady-bath-model", "content": (
+            "## Observations\n\n- [finding] One bath. ^bath\n\n"
+            f"## Relations\n\n- relates_to [[{OWN_NOTE.removesuffix('.md')}]]\n")}}
     proposal = {"route": "focused_note", "alternatives": [], "evidence": "complete", "title": "Steady bath model",
                 "reason": "A named model none of the existing pages own.", "leaves": [leaf]}
 

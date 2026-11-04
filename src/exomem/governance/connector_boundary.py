@@ -242,8 +242,11 @@ def _read_snapshot(
             if binding in seen or not denied <= default:
                 raise BoundaryUnavailable()
             # A writable scope is exclusive to its client: it is outside the client's own denied set,
-            # on a fenced client, never the residual scope, and denied to the default context.
-            if writable and (not denied or writable & denied or residual in writable or not writable <= default):
+            # on a fenced client, never the residual scope, and denied to the default context. A writer
+            # needs a default-closed vault: with no residual scope an unclassified page is open, and a
+            # workflow record that names the writer's inbox pages would land in it.
+            if writable and (residual is None or not denied or writable & denied or residual in writable
+                             or not writable <= default):
                 raise BoundaryUnavailable()
             seen.add(binding)
             clients.append((binding, denied))
@@ -390,6 +393,9 @@ def _membership_sets(root: Path, path: str, compiled: policy.Policy,
             if targets is not None:
                 return tuple(membership.evaluate_metadata(target.basis.subject, compiled) for target in targets)
     if path.lower().endswith(".md") and artifact_copy is None:
+        if content is None and _unwritten_capture_slot(root, path, who):
+            # The capture invariant gives every page there the membership of its path, so a name no page holds yet has it too.
+            return (membership.evaluate_path_selectors(root, path, compiled),)
         raw = content if content is not None else reserved_paths.read_generic_bytes(root, path).data
         page = find_corpus.parse_page(root / path, 0, root, content=raw)
         if page is None:
@@ -409,6 +415,15 @@ def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled:
     except _ADMISSION_REFUSALS:
         return False
     return bool(sets) and all(not denied.intersection(scopes) for scopes in sets)
+
+
+def _unwritten_capture_slot(root: Path, path: str, who: RequestPrincipal | None) -> bool:
+    """Whether `path` is a free slot in this restricted writer's own inbox."""
+    if who is None:
+        return False
+    ceiling = write_ceiling(root, who)
+    return (ceiling is not None and _in_inbox(root, path, ceiling)
+            and not os.path.lexists(Path(root) / path))
 
 
 def _capture_destination(current: Snapshot, path: str) -> str | None:
@@ -433,7 +448,7 @@ class WriteCeiling:
 def write_ceiling(root: Path, who: RequestPrincipal) -> WriteCeiling | None:
     """The one definition of a restricted writer: `None` when the boundary does not confine `who`.
 
-    A restricted writer is a resolved non-owner under a non-empty policy, or any caller,
+    A restricted writer is a non-owner under a non-empty policy, or any caller,
     the owner included, whose connector entry denies a scope. Administrative ingress, an
     unfenced client and every caller on a vault with an empty policy and no connector
     configuration are not. Writable scopes come only from the host configuration.
@@ -441,7 +456,7 @@ def write_ceiling(root: Path, who: RequestPrincipal) -> WriteCeiling | None:
     if who.administrative_ingress:
         return None
     current = snapshot(root)
-    non_owner = who.resolved and who.audience_id != OWNER_AUDIENCE
+    non_owner = who.audience_id != OWNER_AUDIENCE
     if current is None and not non_owner:
         return None
     compiled = policy.load(root)
@@ -690,6 +705,9 @@ def require_write(
         raise refused
     if ceiling is not None and policy.is_workflow_state_path(path):
         return
+    if ceiling is not None and (policy.is_governance_path(path)
+                                or Path(root) / path == activation_manifest.manifest_path(root)):
+        raise refused
     scope_exempt = ceiling is not None and granted
     if ceiling is not None and not scope_exempt and not _target_admitted(root, path, ceiling, existing=True):
         raise refused

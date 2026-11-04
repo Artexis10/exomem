@@ -1185,6 +1185,15 @@ def test_the_residual_scope_takes_exactly_the_pages_no_other_scope_selects(vault
     assert membership.evaluate(_parse(vault, "Knowledge Base/Notes/unclassified.md"), compiled) == {_RESIDUAL}
 
 
+def test_metadata_projection_keeps_residual_completion(vault: Path) -> None:
+    """A stored projection of an unclassified page must stay withheld when no selector matches it."""
+    compiled = _residual_vault(vault)
+    subject = membership.MetadataSubject(path="Knowledge Base/Notes/unclassified.md")
+
+    assert membership.evaluate_metadata(subject, compiled) == {_RESIDUAL}
+    assert membership.evaluate_metadata_selectors(subject, compiled) == frozenset()
+
+
 def test_a_page_leaves_the_residual_scope_once_another_scope_selects_it(vault: Path) -> None:
     compiled = _residual_vault(vault)
     page = _write_page(vault, "Knowledge Base/Notes/moving.md", "project: elsewhere")

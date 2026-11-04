@@ -162,7 +162,7 @@ def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
     return not excluded
 
 
-def _metadata_scopes(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
+def evaluate_metadata_selectors(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
     """The scopes whose selectors match `subject`; the residual scope selects nothing here."""
     return frozenset(key for key, scope in policy.scopes.items() if _scope_matches(scope, subject))
 
@@ -184,8 +184,8 @@ def _complete(
 
 
 def evaluate_metadata(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
-    """The shared selector kernel over already established identity metadata."""
-    return _complete(policy, _metadata_scopes(subject, policy))
+    """An item's membership from established identity metadata, including residual completion."""
+    return _complete(policy, evaluate_metadata_selectors(subject, policy))
 
 
 def _path_ref_excludes(scope: Scope, rel_path: str) -> bool:
@@ -256,7 +256,7 @@ def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str
             # Only identity selectors require valid identity; legacy IDs must
             # not block unrelated path or metadata membership.
             raise MembershipUnresolved("malformed governed identity leaves membership unresolved")
-        return _metadata_scopes(
+        return evaluate_metadata_selectors(
             MetadataSubject(
                 path=page.rel_path,
                 refs=(memory_refs.memory_ref(identity),) if identity is not None else (),

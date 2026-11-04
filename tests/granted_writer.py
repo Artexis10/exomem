@@ -31,6 +31,8 @@ ISSUER = "https://memory.example.test"
 GRANT_ID = "01ARZ3NDEKTSV4RRFFQ69G5GW1"
 FENCE_ID = "01ARZ3NDEKTSV4RRFFQ69G5GW3"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5GW2"
+RESIDUAL_ID = "01ARZ3NDEKTSV4RRFFQ69G5GW4"
+RESIDUAL_RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5GW5"
 CLIENT = "writer"
 
 
@@ -57,7 +59,9 @@ def grant_writer(
     goes in `config_dir`, which defaults to `tmp_path` and must lie outside the vault. A page in a
     scope that no rule covers is withheld, so the `external` audience gets a full-release rule for
     the granted scope, or `audience` when the test's writer is another audience; a stricter rule
-    of the test's own scopes still lowers the ceiling.
+    of the test's own scopes still lowers the ceiling. The host refuses writable scopes in a
+    vault with no residual scope, so the vault declares one when the test has not; the writer
+    and `audience` read the pages that it holds, so a test's unclassified pages stay readable.
     """
     governance = vault / "Knowledge Base" / "_Governance"
     (governance / "scopes").mkdir(parents=True, exist_ok=True)
@@ -75,6 +79,18 @@ def grant_writer(
         f'governance_version: 1\nid: {FENCE_ID}\nname: Fence\npaths: ["_nothing-is-filed-here/**"]\n',
         encoding="utf-8",
     )
+    policy._CACHE.clear()
+    residual = policy.load(vault).residual_scope_id
+    if residual is None:
+        residual = RESIDUAL_ID
+        (governance / "scopes" / "residual.yaml").write_text(
+            f"governance_version: 1\nid: {RESIDUAL_ID}\nresidual: true\n", encoding="utf-8",
+        )
+        (governance / "rules" / "residual.yaml").write_text(
+            f"governance_version: 1\nid: {RESIDUAL_RULE_ID}\nscope_ids: [\"{RESIDUAL_ID}\"]\n"
+            f"audience: {audience}\nceiling: {egress.LEVEL_FULL}\n",
+            encoding="utf-8",
+        )
     monkeypatch.delenv(connector_boundary.CONFIG_ENV, raising=False)
     try:
         state_migration.require_vault_state_ready(vault)
@@ -85,7 +101,7 @@ def grant_writer(
     config = (config_dir or tmp_path) / "host-boundary.json"
     writable = [GRANT_ID, *writable_scopes]
     config.write_text(json.dumps({
-        "version": 1, "default_denied_scope_ids": [*protected, FENCE_ID, *writable], "capture_paths": list(capture_paths),
+        "version": 1, "default_denied_scope_ids": [*protected, FENCE_ID, *writable, residual], "capture_paths": list(capture_paths),
         "clients": [{"issuer": ISSUER, "client_id": CLIENT, "denied_scope_ids": [*protected, FENCE_ID],
                      "writable_scope_ids": writable}],
     }), encoding="utf-8")

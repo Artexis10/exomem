@@ -29,7 +29,7 @@
 - [x] 4.2 Add a twin-world test: a withheld page (residual and another matter) against an absent one, for a fenced connector and a client-bound non-owner, across search, recent context, read, root browse and every write door; responses are byte-identical; the connector sees its own matter page and its own inbox recap.
 - [x] 4.3 Add a write-door matrix parametrised on writer kind and target class, with one representative door per write kind.
 - [x] 4.4 Add the episode case: an unfenced recap is never served to a fenced connector; a fenced connector's recap lands in its inbox and only it and the owner receive it.
-- [x] 4.5 Add one configuration refusal case: an exclusivity breach and a residual scope missing from the default denied set.
+- [x] 4.5 Add one configuration refusal case: an exclusivity breach, a residual scope missing from the default denied set, and writable scopes granted with no residual scope declared.
 - [x] 4.6 Document the residual scope, inbox scopes and `writable_scope_ids` in the scaffold skill, in generic wording.
 - [x] 4.9 Prove 2.6 to 2.9: a fenced client cites a readable Source it may not write; inbox creation leaves the log and top index unchanged; a fenced episode prepares, records and resumes; a session's vocabulary change is refused with a request id, then admitted after the owner's grant; a fenced `remember` lands in the Notes-tree inbox; a fenced Source capture under the Sources-tree inbox can be cited in `sources:`.
 - [ ] 4.7 Run the scoped governance suites, the governance overhead gate, `openspec validate --all --strict`, the privacy gate and the full suite.
