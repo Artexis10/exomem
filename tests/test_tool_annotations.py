@@ -103,6 +103,22 @@ def test_destructive_hint_only_for_overwrite_ops(
         )
 
 
+def test_the_tools_that_carry_a_revert_are_destructive_and_the_ones_that_only_dismiss_or_connect_are_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A promotion revert trashes pages and removes bullets, so its two doors must say so.
+
+    `DESTRUCTIVE_OPS` feeds the generic test above; this pins the four names so a registry edit cannot
+    quietly drop the hint from a revert door, or add it to the doors that only dismiss or create.
+    """
+    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
+    assert {name: ann[name]["destructiveHint"] for name in (
+        "repair_memory", "change_schema", "triage_memory", "change_connections",
+    )} == {
+        "repair_memory": True, "change_schema": True, "triage_memory": False, "change_connections": False,
+    }
+
+
 def test_ask_memory_is_a_safe_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The public recall command remains a safe read.
     a = _live_annotations(_build_server(monkeypatch, tmp_path))["search_memory"]

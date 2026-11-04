@@ -39,9 +39,10 @@ from exomem import (
 
 _KB = "Knowledge Base/Notes/Insights"
 # Statements per available queue request: one streaming read of file metadata,
-# then six bounded candidate-family queries. The statement count is fixed; the
-# rows the streaming read examines grow with the corpus.
-_FIXED_INDEXED_QUERIES = 7
+# then seven bounded candidate-family queries (the seventh finds the specific
+# relations that already join the selected pages). The statement count is
+# fixed; the rows the streaming read examines grow with the corpus.
+_FIXED_INDEXED_QUERIES = 8
 _POST_RECOVERY_READS = 1
 _QUEUE_STATUSES = frozenset({"available", "warming", "pending", "unavailable"})
 _SUBSTITUTE_KINDS = (

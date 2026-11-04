@@ -649,9 +649,9 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
 
     block = {
         "total": 1,
-        "categories": {"prediction": 1},
+        "categories": {"prediction_window": 1},
         "outstanding_total": 2,
-        "outstanding": {"prediction": 2},
+        "outstanding": {"prediction_window": 2},
         "items": [],
     }
     served: list[Path] = []
@@ -669,8 +669,8 @@ def test_session_bootstrap_unattested_contract_returns_compact_once(
     # The fallback is the core, which carries a counts summary and points at the list.
     assert fallback["due_state"] == {
         "total": 1,
-        "visible_outstanding": {"prediction": [1, 2]},
-        "next": "review_memory(mode='attention', categories=['prediction'], limit=10)",
+        "visible_outstanding": {"prediction_window": [1, 2]},
+        "next": "review_memory(mode='attention', categories=['prediction_window'], limit=10)",
         "list": "section=epistemics",
     }
     assert served == [vault]
