@@ -9,7 +9,13 @@
 - [ ] 2.1 Add a failing test: a process starting with a path-scoped external mark and queued receipts under it, with no watcher event, converges the checkpoint through the drain within the drain's own backoff and readers requiring a current projection are served; an unscoped mark still keeps the drain refusing.
 - [ ] 2.2 Implement in `epistemic_graph.drain_paths`, `index_sync` and `freshness` (retire inside the drain's hold, path-scoped, compare-and-swap); pass the graph deferred-queue, drain, freshness and product E2E suites.
 
-## 3. Closure
+## 3. Re-prove a moved snapshot at promotion
 
-- [ ] 3.1 Author-independent review of the diff covering the carried validation, the contention branch and the drain's mark retirement; resolve findings and recheck; open a ready pull request and merge under the standing authority.
-- [ ] 3.2 Release, deploy through the managed upgrade with a governed write issued during the promoted worker's start-up window, and record promotion-to-admitted-graph and the absence of a whole-vault rebuild; run the product E2E restart step ten times; then synchronize and archive this change.
+- [x] 3.1 Add failing tests: a snapshot published after the standby's proof promotes as current with the graph handoff carried, re-reading only the moved page; the promoted worker's first ten writes are admitted and served incrementally, and the drained graph matches a fresh rebuild; a re-proof that runs out of time promotes as advanced and the full handoff converges.
+- [x] 3.2 Implement in `epistemic_graph.py` (seeded and deadline-bound proof), `service_standby.py` (the promotion re-proof) and `service_manager.py` (the shared promotion request bound); document the record fields in `docs/managed-service-upgrades.md`.
+- [x] 3.3 Fit the re-proof to the production vault: walk the vault once per round for both memberships, have the supervisor send its promotion request budget and the standby bound its re-proof by a share of it, size that budget from a re-proof measured at 13,000 pages, and stop a background proof when promotion starts.
+
+## 4. Closure
+
+- [ ] 4.1 Author-independent review of the diff covering the carried validation, the contention branch and the drain's mark retirement; resolve findings and recheck; open a ready pull request and merge under the standing authority.
+- [ ] 4.2 Release, deploy through the managed upgrade with a governed write issued during the promoted worker's start-up window, and record promotion-to-admitted-graph and the absence of a whole-vault rebuild; run the product E2E restart step ten times; then synchronize and archive this change.

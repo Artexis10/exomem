@@ -503,7 +503,7 @@ def _keyword_cache_delta_is_safe(
             return False, ()
         if page is None:
             continue
-        if page.parent_media or _make_excerpt(page, query_norm) is not None:
+        if page.emitted_parent or _make_excerpt(page, query_norm) is not None:
             return False, ()
     if freshness.external_pending(vault_root):
         return False, ()
@@ -713,7 +713,7 @@ class FreshnessSnapshot:
             # managed readers never substitute file reads for unavailable metadata.
             resolve = page_of or (lambda path: _resolve_page(self._root, path, self._pending))
             parents = {
-                path: page.parent_media + ".md" if page.parent_media else None
+                path: page.emitted_parent
                 for path in paths if (page := resolve(path)) is not None
             }
         # Parent authority does not depend on existence: an ordinary orphan stays
@@ -1354,7 +1354,9 @@ def _with_catalog_scope(function):
             )
             if values["catalog_proof_out"] is not None:
                 values["catalog_proof_out"].clear()
-            # Initial warm admission precedes catalogue access and repair.
+            # Initial warm admission precedes catalogue access and repair. A
+            # warm that already proved its catalogue reads `unavailable`, not
+            # `warming`, and serves the published catalogue below.
             if (
                 readiness.retrieval_admission()["state"] == "warming"
                 and not readiness.required_warm_finished()
@@ -4412,7 +4414,10 @@ def _eligible_filter_paths(
         # scene-frame child whose match is emitted as its parent video.
         if not _indexable(page):
             continue
-        emitted = pages.get(page.parent_media + ".md", page) if page.parent_media else page
+        emitted = pages.get(page.emitted_parent, page) if page.emitted_parent else page
+        if page.part_of and emitted is page:
+            # A part is its Source's text, never a memory of its own.
+            continue
         if not _indexable(emitted):
             continue
         matches = eligibility_by_emitted_path.get(emitted.rel_path)
@@ -4912,8 +4917,8 @@ def _managed_page_metadata(
     requested = set(paths)
     if pending is not None:
         for row in pending.current_pages():
-            if row.rel_path in paths and row.page.parent_media:
-                requested.add(row.page.parent_media + ".md")
+            if row.rel_path in paths and row.page.emitted_parent:
+                requested.add(row.page.emitted_parent)
     catalogue_paths = set(pending.shadow(requested)) if pending is not None else requested
     metadata = {}
     if catalogue_paths:
@@ -5006,7 +5011,7 @@ def _managed_page_metadata(
                     # An optional bound stays unknown when its held proof is unavailable.
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
-                page.parent_media + ".md" if page.parent_media else None,
+                page.emitted_parent,
                 page.updated,
                 page.media_file,
                 page.frame_ts,
@@ -5210,10 +5215,12 @@ def _indexed_eligible_filter_paths(
         # scene-frame child whose match is emitted as its parent video.
         if page is None or not _indexable(page):
             continue
-        if page.parent_media:
-            emitted = _resolve_page(vault_root, page.parent_media + ".md", pending) or page
-        else:
-            emitted = page
+        emitted = (
+            _resolve_page(vault_root, page.emitted_parent, pending) if page.emitted_parent else None
+        ) or page
+        if page.part_of and emitted is page:
+            # A part is its Source's text, never a memory of its own.
+            continue
         if not _indexable(emitted):
             continue
         matches = eligibility_by_emitted_path.get(emitted.rel_path)
@@ -5465,8 +5472,7 @@ def _find_managed_browse(
             if (
                 _browse_order_key(current.rel_path, current.updated)
                 != _browse_order_key(current.rel_path, expected.updated)
-                or (current.parent_media + ".md" if current.parent_media else None)
-                != expected.parent
+                or current.emitted_parent != expected.parent
             ):
                 raise RetrievalIndexWarming(site="browse_ordering_stale")
         if not _passes_filters(
@@ -5507,9 +5513,40 @@ def _find_managed_browse(
     return hits
 
 
+def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
+    from . import extraction_parts
+
+    return extraction_parts.listed(vault_root / page.rel_path)
+
+
+def _part_match(
+    vault_root: Path, page: ParsedPage, matched: ParsedPage, query_norm: str, *, chunk: str | None = None
+) -> dict[str, object] | None:
+    """The part and passage that a hit on `page` matched, when its extracted text has parts.
+
+    `matched` is the page whose text matched: a part page, or `page` itself for part 1.
+    """
+    from . import extraction_parts, find_parts, preserve
+
+    number = extraction_parts.part_number(Path(matched.rel_path)) if matched.part_of else 1
+    if number is None or not 1 <= number <= extraction_parts.count_of(page.frontmatter):
+        return None
+    try:
+        base = extraction_parts.part_start(
+            vault_root, vault_root / page.rel_path, preserve.extracted_text(page.body), number
+        )
+    except (OSError, UnicodeError):
+        return None
+    return find_parts.matched_passage(
+        vault_root, matched.rel_path, source=page.rel_path, number=number, base=base, chunk=chunk,
+        query_norm=query_norm,
+    )
+
+
 def _keyword_hit(
     vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
     *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
+    part_match: dict[str, object] | None = None,
 ) -> Hit:
     """The keyword result projection, including its parent-first frame fallback."""
     hit = Hit(
@@ -5517,7 +5554,7 @@ def _keyword_hit(
         updated=page.updated, excerpt=excerpt, media_type=page.media_type, media_file=page.media_file,
         status=page.status, superseded_by=page.superseded_by,
         scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
-        snapshot_hash=page.snapshot_hash,
+        snapshot_hash=page.snapshot_hash, **(part_match or {}),
     )
     hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
     # The persisted video handler defines this media family and its frame fallback.
@@ -5551,7 +5588,7 @@ def _find_managed_keyword(
             # These keys transport held parser facts, not caller-configured vocabulary.
             pending_rows.append({
                 "path": path,
-                "parent": page.parent_media + ".md" if page is not None and page.parent_media else None,
+                "parent": page.emitted_parent if page is not None else None,
                 "updated": page.updated if page is not None else None,
                 "hash": page.snapshot_hash if page is not None else None,
                 "media_file": page.media_file if page is not None else None,
@@ -5599,7 +5636,7 @@ def _find_managed_keyword(
         if page is None:
             continue
         source = resolve(group.source_path, group.hashes[group.source_path])
-        if source is None:
+        if source is None or (source.part_of and not _listed_part(vault_root, source)):
             continue
         excerpt = _make_excerpt(source, query_norm)
         if excerpt is None or not _passes_filters(
@@ -5614,6 +5651,7 @@ def _find_managed_keyword(
             vault_root, page, query_norm, excerpt,
             scene_frame=source.media_file if child else None,
             scene_frame_ts=source.frame_ts if child else None,
+            part_match=_part_match(vault_root, page, source, query_norm),
         )
         sources = {page.rel_path: group.hashes[page.rel_path], source.rel_path: group.hashes[source.rel_path]}
         if hit.scene_frame is None and group.frame_path is not None:
@@ -5769,20 +5807,27 @@ def _find_keyword(
         # (parent gone) surfaces standalone. Filters apply to the EMITTED page.
         scene_frame: str | None = None
         scene_frame_ts: float | None = None
-        if page.parent_media:
-            parent_page = _resolve_page(
-                vault_root, page.parent_media + ".md", pending
-            )
+        part_match: dict[str, object] | None = None
+        if page.emitted_parent:
+            parent_page = _resolve_page(vault_root, page.emitted_parent, pending)
             if page_memo is not None:
-                page_memo[page.parent_media + ".md"] = parent_page
+                page_memo[page.emitted_parent] = parent_page
+            if page.part_of and (parent_page is None or not _listed_part(vault_root, page)):
+                # A part is its Source's text, never a memory of its own; a leftover is no text of it.
+                continue
             if parent_page is not None:
                 existing = by_path.get(parent_page.rel_path)
-                if existing is not None:
-                    if existing.scene_frame is None:
-                        existing.scene_frame = page.media_file
-                        existing.scene_frame_ts = page.frame_ts
-                    continue
-                scene_frame, scene_frame_ts = page.media_file, page.frame_ts
+                if page.part_of:
+                    if existing is not None:
+                        continue
+                    part_match = _part_match(vault_root, parent_page, page, query_norm)
+                else:
+                    if existing is not None:
+                        if existing.scene_frame is None:
+                            existing.scene_frame = page.media_file
+                            existing.scene_frame_ts = page.frame_ts
+                        continue
+                    scene_frame, scene_frame_ts = page.media_file, page.frame_ts
                 page = parent_page
         if page.rel_path in by_path:
             continue
@@ -5800,6 +5845,7 @@ def _find_keyword(
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt or "",
             scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
+            part_match=part_match or _part_match(vault_root, page, page, query_norm),
         )
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
@@ -6249,9 +6295,9 @@ def _find_semantic(
                 # connectivity / visual similarity / a child frame's text, not this
                 # page's lexical overlap). Prefer the matched frame's OCR text as the
                 # "why", else the sidecar's leading body.
-                attr = frame_attribution.get(rel_path)
-                if attr is not None:
-                    fpage = _page_of(attr[0] + ".md")
+                child_path = bundle.frame_sources.get(rel_path)
+                if child_path is not None:
+                    fpage = _page_of(child_path)
                     if fpage is not None:
                         keyword_excerpt = _make_excerpt(fpage, query_norm)
                 if keyword_excerpt is None:
@@ -6291,6 +6337,7 @@ def _find_semantic(
                     continue
                 sources[chunk_page.rel_path] = chunk_page.snapshot_hash
             frame_path = bundle.frame_sources.get(rel_path)
+            frame_page = None
             if frame_path is not None:
                 frame_page = _page_of(frame_path)
                 if frame_page is None:
@@ -6313,6 +6360,12 @@ def _find_semantic(
                 if hit_activation is not None:
                     hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
             attr = frame_attribution.get(rel_path)
+            if frame_page is not None and frame_page.part_of is not None:
+                attr = None  # a part is text of the Source, not a scene frame
+            # The page whose text matched: where the semantic chunk came from, else the part
+            # that collapsed into this Source, else the Source itself.
+            matched_page = (chunk_page if ref is not None else frame_page) or page
+            part_match = _part_match(vault_root, page, matched_page, query_norm, chunk=chunk)
             hit = Hit(
                 path=page.rel_path,
                 type=page.page_type,
@@ -6339,6 +6392,7 @@ def _find_semantic(
                 scene_frame=attr[0] if attr else None,
                 scene_frame_ts=attr[1] if attr else None,
                 snapshot_hash=page.snapshot_hash,
+                **(part_match or {}),
             )
             hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
             if hit.scene_frame is None and page.media_type == "video" and page.media_file:
@@ -7710,7 +7764,11 @@ def recall_resolver_snapshot(
     candidate = expected_checkpoint
     if candidate is not None and not allow_fallback:
         if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
-            lexstore.request_repair(root)
+            # The registry moved past the request's admission, so the catalogue
+            # may trail it. The lag repair replays that delta and falls back to
+            # the full pass on any refusal. Admission stays: the registry moving
+            # does not prove the catalogue trails it.
+            lexstore.request_repair(root, lag_only=True, cause=lexstore.RepairCause.CATALOGUE_LAG)
             raise RetrievalIndexWarming(
                 site="resolver_checkpoint_stale",
                 status="temporarily_unavailable",
@@ -7722,7 +7780,7 @@ def recall_resolver_snapshot(
     if candidate is not None and identity == _recall_checkpoint_identity(candidate):
         checkpoint = candidate
     if not allow_fallback and checkpoint is None:
-        lexstore.request_repair(root)
+        lexstore.request_repair(root, cause=lexstore.RepairCause.RESOLVER_CHECKPOINT_ABSENT)
         raise RetrievalIndexWarming(
             site="resolver_checkpoint_absent",
             status="temporarily_unavailable",
@@ -7766,8 +7824,8 @@ def recall_resolver_snapshot(
             if not allow_fallback:
                 # Declining beats both alternatives: blocking past the client's
                 # deadline answers nobody, and building our own here would pay
-                # the same whole-vault walk the leader is already paying.
-                lexstore.request_repair(root)
+                # the same whole-vault walk the leader is already paying. The
+                # catalogue is not at fault, so no repair is asked for.
                 raise RetrievalIndexWarming(
                     site="resolver_build_wait",
                     status="temporarily_unavailable",
@@ -7793,7 +7851,9 @@ def recall_resolver_snapshot(
         entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
             if not allow_fallback:
-                lexstore.request_repair(root)
+                lexstore.request_repair(
+                    root, cause=lexstore.RepairCause.RESOLVER_ENTRIES_UNAVAILABLE
+                )
                 raise RetrievalIndexWarming(
                     site="resolver_entries_unavailable",
                     status="temporarily_unavailable",

@@ -138,10 +138,13 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
             )
         if _prove_and_admit():
             return True
-        # ``catalog_readiness`` above may already have scheduled this repair.
-        # Request it explicitly as well so every incomplete outcome records the
-        # full-rebuild requirement; the repair scheduler is single-flight.
-        lexstore.request_repair(vault_root)
+        # The failed proof scheduled the repair its evidence implies: a full one
+        # for a structural defect, a lag-only one for a checkpoint behind the
+        # registry. A read that proved nothing (a passing lock, a projection
+        # that moved) scheduled none, so ask for the lag repair: its catch-up
+        # escalates itself to the full pass on any refusal. Never ask for the
+        # full pass here; it would turn one missed save into a whole rebuild.
+        lexstore.request_lag_repair(vault_root)
         log.info("managed retrieval catalog delegated to background repair")
         if os.environ.get("EXOMEM_EAGER_BOOT"):
             if not lexstore.await_repairs_idle(vault_root):

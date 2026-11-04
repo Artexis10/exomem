@@ -42,6 +42,7 @@ import numpy as np
 
 from . import accel, compact_tokenizer, model_cache, process_memory, runtime_resources
 from .log_events import log_event
+from .runtime_resources import available_memory as _available_memory
 
 log = logging.getLogger(__name__)
 
@@ -92,7 +93,6 @@ _ACQUIRE_FAILED: dict[tuple[str, str], tuple[float, str]] = {}
 #: peaks at about 8.7 GB for bge-m3. Below it the kernel kills the child, after
 #: the 2.2 GB export was downloaded and copied for nothing.
 BUILD_MIN_AVAILABLE_BYTES = 10 << 30
-_MEMINFO = Path("/proc/meminfo")
 #: Intra-op threads a served model's session uses while `EXOMEM_CPU_THREADS` is
 #: unset: the 40-token turn's p95 was 132 ms at two against 304 at one.
 SERVED_DEFAULT_THREADS = 2
@@ -917,25 +917,6 @@ def _sweep_stages(target: Path) -> None:
             if stage.is_dir():
                 log.info("removing the stale stage %s a killed acquisition left", stage)
                 shutil.rmtree(stage, ignore_errors=True)
-
-
-def _available_memory() -> int | None:
-    """Bytes of memory a new process can have, or None when the host does not say.
-
-    `MemAvailable` where the kernel reports it (Linux); elsewhere the free
-    physical pages, which leave out reclaimable cache and so read low.
-    """
-    try:
-        with open(_MEMINFO, encoding="ascii") as fh:
-            for line in fh:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    try:
-        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (AttributeError, ValueError, OSError):
-        return None
 
 
 def ensure_served_artifact(model_name: str) -> None:

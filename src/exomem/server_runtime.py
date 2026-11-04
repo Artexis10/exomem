@@ -967,6 +967,11 @@ def _start_media_worker(vault_root: Path) -> Any | None:
         media_store.clear_dead_reservations(vault_root)
     except Exception:  # noqa: BLE001 - media must never deny the core service
         log.warning("media reservations not cleared at start; the next reservation clears them", exc_info=True)
+    try:
+        # A zero from an earlier turn-off must not outlive the turn-on (D12).
+        media_store.clear_served_drain(vault_root)
+    except Exception:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media drain record not cleared at start; the next drain tick clears it", exc_info=True)
     worker = _create_media_worker(vault_root)
     unavailable_reason: str | None = None
     unavailable_action: str | None = None
@@ -1091,14 +1096,12 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
 def _start_dreamer(vault_root: Path) -> Any | None:
     """Start the default-off upkeep worker, or nothing.
 
-    Local service only. A hosted cell never reaches this starter, and a cloud
-    cell declines here: both would need their own worker registration and
-    review before a background proposal worker runs for a tenant.
+    The local service and a cloud cell start it the same way, when the setting
+    (`EXOMEM_DREAMER`) is on. The worker writes only its own sidecar under the
+    process's state root, so a cell's worker stays inside that cell.
     """
-    from . import cloud_cell, dreamer
+    from . import dreamer
 
-    if cloud_cell.cloud_mode_enabled():
-        return None
     try:
         return dreamer.start(vault_root)
     except Exception as exc:  # noqa: BLE001 - upkeep must never break startup

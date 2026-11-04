@@ -33,7 +33,7 @@
 
 - [ ] 7.1 Verify each supported client's documented file-output interface and actual consumption; distinguish native files, resource references and HTTPS fallback.
 - [ ] 7.2 Extend existing transfer owners to retrieve an exact stored artifact version through existing identity, session and full-byte disclosure checks.
-- [ ] 7.2a Reuse retained copying into private disk storage and thread computed identity through all disclosure owners; prove bounded original reads and unchanged scope decisions.
+- [ ] 7.2a Thread the computed identity through all disclosure owners; prove bounded original reads and unchanged scope decisions. Downloads hold the original open instead of copying it (D11, amended 2026-11-01).
 - [ ] 7.3 Bind new short-lived download grants to one artifact version; verify absent, expired, revoked, foreign and changed-version authority without content or existence leakage.
 - [ ] 7.3a Match native caller bindings, recheck authority after staging, preserve header-only legacy tokens, and verify interruption cleanup plus capability-free logs.
 - [ ] 7.4 Prove isolated preservation, external-source removal, original retrieval, client consumption, derivative provenance and re-preservation with matching original hashes.

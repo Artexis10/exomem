@@ -246,11 +246,18 @@ def text_under_test(scenario: Scenario, root: Path = REPO_ROOT) -> dict[str, str
 
 
 def repo_sha() -> str:
-    """The checkout's commit, or `unknown` when git cannot say."""
+    """The checkout's commit, `-dirty` when tracked files differ from it, or `unknown` when git cannot say."""
     done = subprocess.run(  # noqa: S603,S607
         ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
     )
-    return done.stdout.strip() if done.returncode == 0 and done.stdout.strip() else "unknown"
+    if done.returncode != 0 or not done.stdout.strip():
+        return "unknown"
+    changed = subprocess.run(  # noqa: S603,S607
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True
+    )
+    if changed.returncode != 0:
+        return "unknown"
+    return done.stdout.strip() + ("-dirty" if changed.stdout.strip() else "")
 
 
 def init_field(stdout: str, name: str) -> object:
@@ -365,7 +372,9 @@ def run_once(
         answer_view = scenario.judge_view == "answer"
         rendered = (
             judge.render_answer_view(
-                scenario.prompt, fill_reference(scenario.reference, shapes), transcript.result_text
+                scenario.prompt,
+                judged_reference(scenario, shapes, evidence.calls),
+                transcript.result_text,
             )
             if answer_view
             else judge.render_transcript(scenario.prompt, proc.stdout.splitlines())
@@ -403,6 +412,17 @@ def run_once(
         said = judge.assistant_texts(proc.stdout.splitlines())
         row["said"] = said
     return row
+
+
+def judged_reference(scenario: Scenario, shapes: Mapping[str, object] | None, calls: tuple[dict, ...]) -> str:
+    """The scenario's reference, plus the one fact that only the call log holds: whether the agent's write landed.
+    The line comes from the log in the same words for every arm, so the judge learns the outcome, not the arm."""
+    reference = fill_reference(scenario.reference, shapes)
+    facts = scenario.outcome_facts
+    if facts:
+        landed = bool(checks.committed_writes(calls, facts["tool"]))
+        reference += " " + facts["saved" if landed else "not_saved"]
+    return reference
 
 
 def fill_reference(reference: str, shapes: Mapping[str, object] | None) -> str:

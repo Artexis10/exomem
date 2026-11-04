@@ -1389,9 +1389,10 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
                 held_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
                 resume.set()
                 _until(lambda: bool(refusals()))
-                with pytest.raises(OpError) as busy:
-                    imported(root, mode="status", continuation=job["continuation"])
-                assert busy.value.code == "MUTATION_BUSY"
+                # A status poll is a read: its ownership proof is a reader snapshot that `finish` compares,
+                # so it answers past an unrelated boundary holder instead of waiting on the busy vault.
+                held = imported(root, mode="status", continuation=job["continuation"])
+                assert held["state"] == "complete" and held["rows"] == initial["rows"]
                 assert len(refusals()) == 1
         for _ in range(3):
             status = imported(root, mode="status", continuation=job["continuation"])

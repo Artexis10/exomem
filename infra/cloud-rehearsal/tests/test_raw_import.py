@@ -207,3 +207,71 @@ def test_the_staged_folder_in_front_of_each_original_is_read_from_the_pages_even
     values = [f"_Imports/abc/notes/{nfd_name}", "_Imports/abc/ideas/x.md", "unrelated/other.md"]
     assert raw_import.imported_from_prefix(values, ["notes/résumé.md", "ideas/x.md"]) == "_Imports/abc"
     assert raw_import.imported_from_prefix(["other.md"], ["ideas/x.md"]) is None
+
+
+# --- raw items: kept means filed, or refused where the key allows it ---------------------------
+
+
+def test_a_raw_item_that_local_kept_and_cloud_lost_is_a_loss():
+    key = {"items": [{"kind": "raw", "path": "dump/scan-0042.bin"}]}
+    groups = raw_import.compare_arms(key, {"raw_meets_key": {"dump/scan-0042.bin": False}},
+                                     {"raw_meets_key": {"dump/scan-0042.bin": True}})
+    assert groups["raw_meets_key"]["loss"]["listed"] == ["dump/scan-0042.bin"]
+    assert raw_import.target_verdict(groups) == FAIL
+
+
+# --- the earlier collection must stand as a baseline -------------------------------------------
+
+
+def test_an_earlier_collection_that_stopped_kept_media_busy_or_landed_nothing_is_no_baseline():
+    assert raw_import.baseline_gaps({"stopped_at": None, "jobs_idle": True}, earlier_landed=12) == []
+    assert raw_import.baseline_gaps({"stopped_at": "finish", "jobs_idle": None}, earlier_landed=0) == [
+        "earlier collection: the journey stopped at finish",
+        "earlier collection: media jobs were not idle before the snapshot",
+        "earlier collection: none of its key notes landed, so no page is protected",
+    ]
+
+
+# --- the local media wait --------------------------------------------------------------------
+
+
+class _IdleQueueUndrainedIndex:
+    """A stdio server whose job queue is idle while its deferred index upserts never drain."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def call(self, tool, request, **_):
+        self.calls += 1
+        return "ok", {"counts": {"pending": 0, "running": 0}, "index_refresh": {"count": 7}}, None
+
+
+def test_a_jobs_only_wait_stops_on_an_idle_queue_instead_of_waiting_out_the_deadline(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(raw_import.drive, "MEDIA_POLL_S", 0)
+    session = _IdleQueueUndrainedIndex()
+    waited = asyncio.run(raw_import.drive.wait_for_media(session, "first", 3600, jobs_only=True))
+    assert (waited["converged"], waited["idle_means"], session.calls) == (True, "jobs", 2)
+    full = asyncio.run(raw_import.drive.wait_for_media(_IdleQueueUndrainedIndex(), "first", 0))
+    assert (full["converged"], full["idle_means"]) == (False, "jobs-and-index")
+
+
+# --- raw originals: the Cloud copy holds no placed copy of the collection ----------------------
+
+
+def test_a_text_original_is_compared_with_the_generated_collection_when_the_vault_holds_no_copy(tmp_path):
+    import hashlib
+
+    body = b"field log 0042: tide at 3.1 m\n"
+    item = {"path": "dump/log-0042.txt", "sha256": hashlib.sha256(body).hexdigest(), "form": "text", "bytes": len(body)}
+    vault, originals = tmp_path / "vault", tmp_path / "collection"
+    page = "Knowledge Base/Sources/Imported/log-0042.md"
+    (vault / page).parent.mkdir(parents=True)
+    (vault / page).write_bytes(b"# log-0042\n\n" + body)
+    (originals / "dump").mkdir(parents=True)
+    (originals / item["path"]).write_bytes(body)
+    scan = {"media_files": {}}
+    held = raw_import.score.original_bytes_held
+    assert held(item, [page], scan, vault, "_Imports/abc", 4096) == "unknown"
+    assert held(item, [page], scan, vault, "_Imports/abc", 4096, originals) == "text"

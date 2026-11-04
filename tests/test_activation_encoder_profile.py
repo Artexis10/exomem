@@ -44,8 +44,6 @@ from exomem import (
 
 E5 = "intfloat/multilingual-e5-small"
 M3 = "BAAI/bge-m3"
-#: The real memory reading, before `_clean` stands a large host in for it.
-_REAL_AVAILABLE_MEMORY = getattr(embedding_backend, "_available_memory", None)
 
 
 @pytest.fixture(autouse=True)
@@ -1299,29 +1297,6 @@ def test_a_hub_failure_is_remembered_like_a_failed_build(
     with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
         embedding_backend.ensure_artifact(M3, served)
     assert len(asked) == 1
-
-
-def test_available_memory_reads_memavailable_or_else_the_free_pages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assert _REAL_AVAILABLE_MEMORY is not None
-    meminfo = tmp_path / "meminfo"
-    meminfo.write_text(
-        "MemTotal:       16384000 kB\nMemFree:         1024000 kB\nMemAvailable:    7340032 kB\n", encoding="ascii"
-    )
-    monkeypatch.setattr(embedding_backend, "_MEMINFO", meminfo)
-    assert _REAL_AVAILABLE_MEMORY() == 7 << 30
-
-    monkeypatch.setattr(embedding_backend, "_MEMINFO", tmp_path / "absent")
-    pages = {"SC_AVPHYS_PAGES": 1000, "SC_PAGE_SIZE": 4096}
-    monkeypatch.setattr(embedding_backend.os, "sysconf", lambda name: pages[name], raising=False)
-    assert _REAL_AVAILABLE_MEMORY() == 4096 * 1000
-
-    def unknown(name: str) -> int:
-        raise ValueError(name)
-
-    monkeypatch.setattr(embedding_backend.os, "sysconf", unknown, raising=False)
-    assert _REAL_AVAILABLE_MEMORY() is None
 
 
 @pytest.mark.parametrize("lane", ["recall", "activation"])

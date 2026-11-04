@@ -5,10 +5,17 @@
 Successful product mutations return a compact decisive terminal by default. Its
 first key, `user_summary`, is one plain sentence for the user: `Saved -> <path>`,
 `Updated -> <path>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
-`Replaced -> <new path> (was <old path>)`, `Discarded -> <path>` or `Restored -> <path>`.
-Several files read `Saved 3 files -> first.md and 2 more`. A result whose status is
-`replayed` reads `Already saved -> <path>`. A repeat of a request with the same
-idempotency key returns the first reply, so it reads as the first call did.
+`Replaced -> <new path>, was <old path>`, `Discarded -> <path>` or `Restored -> <path>`.
+Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
+failed or was already stored counts each state, and `Saved` covers only the files that
+this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,
+`Already saved -> <path>`, or `Nothing saved; 2 files could not be saved`. A single file
+whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
+carry the codes and reasons. A result whose status is
+`replayed` reads `Already saved -> <path>`. Each sentence ends with the name of the store
+that took the write, such as `Saved -> <path> (personal Exomem)`; the bootstrap's `store`
+names the same store. A repeat of a request with the same idempotency key returns the
+first reply, so it reads as the first call did.
 A refusal carries no `user_summary`; its `message` names the fix. The other fields
 are diagnostics for the agent: `ok: true`, `status: committed`, `mutated: true`,
 `path` or `paths`, `request_id`, `receipt_id`, and `warnings_count` (plus a caller-supplied
@@ -75,6 +82,14 @@ back as `already_stored` rather than being stored a second time. `scope` and
 `category` are each one path segment: a separator, reserved character, control
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
+
+A file of a multi-file batch can end `failed` with `MUTATION_BUSY` when the
+boundary stayed busy past the wait before that file began; files stored before
+it keep their outcome. Once any file in a batch commits, the batch's identity is
+settled, so repeating the identical call replays the batch and never retries the
+failed file. Retry the failed files in a new call that names only them, under a
+new identity. This differs from a call-level `MUTATION_BUSY` error, where nothing
+committed and the same identity and payload are retried.
 
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful

@@ -57,6 +57,8 @@ class Scenario:
     reference: str = ""
     # Real tool calls, made on each arm's own code to record the shapes the scripted replies name with `$shape`.
     record: dict = field(default_factory=dict)
+    # What the judge is told about a write that only the call log can show: `{"tool", "saved", "not_saved"}`.
+    outcome_facts: dict = field(default_factory=dict)
 
 
 def resolve_shapes(reply: Any, shapes: Mapping[str, Any] | None) -> Any:
@@ -102,6 +104,7 @@ def load_scenario(path: Path, shapes: Mapping[str, Any] | None = None) -> Scenar
         judge_view=raw.get("judge_view", "transcript"),
         reference=raw.get("reference", ""),
         record=dict(raw.get("record", {})),
+        outcome_facts=dict(raw.get("outcome_facts", {})),
     )
 
 

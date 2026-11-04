@@ -42,9 +42,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # remote clients keep the maintenance that local clients have.
 # The windows status adds `series_id`, `next_window_bytes` and the `after` cursor to read_import, and the
 # acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
-# The generic-relation wording on the write tools needs 50 B more once both changes are in, so the budget
-# rises 50 B.
-TOTAL_BUDGET = 165_300
+# The generic-relation wording on the write tools adds 50 B; the `offset` cursor on
+# read_memory adds 150 B for windows over long Source text. Keep both integration costs.
+TOTAL_BUDGET = 165_450
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -88,7 +88,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_episode": 1500,
     "read_governance": 2250,
     "read_media": 1250,
-    "read_memory": 3300,
+    "read_memory": 3450,
     "read_plans": 2700,
     "read_records": 3300,
     "read_review": 7550,

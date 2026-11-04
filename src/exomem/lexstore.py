@@ -852,8 +852,9 @@ _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
 _PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
 # A promoted standby adopts its detached catalogue inside the promotion request,
-# which the supervisor caps at ten seconds; a busier barrier leaves the live
-# catalogue to the ordinary repair instead of timing that request out.
+# which the supervisor caps (`service_manager.PROMOTE_REQUEST_SECONDS`, ten
+# seconds on an older supervisor); a busier barrier leaves the live catalogue to
+# the ordinary repair instead of timing that request out.
 _PUBLICATION_TIMEOUT_ADOPT = 5.0
 
 
@@ -1024,6 +1025,10 @@ class RepairCause(enum.StrEnum):
     # registry, or a bounded apply met a source that moved before its commit.
     CATALOGUE_LAG = "catalogue_lag"
     SOURCE_MOVED = "source_moved"
+    # A strict recall resolver refused: no admitted checkpoint names its
+    # request, or the catalogue holds no rows for the checkpoint it names.
+    RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
+    RESOLVER_ENTRIES_UNAVAILABLE = "resolver_entries_unavailable"
 
 
 class DeclineCause(enum.StrEnum):
@@ -2188,6 +2193,11 @@ def live_catalog_compatible(vault_root: Path) -> bool:
     return get_store(vault_root).live_catalog_compatible()
 
 
+def live_catalog_release_current(vault_root: Path) -> bool | None:
+    """Whether the running release built the live catalogue, or None when unknown."""
+    return get_store(vault_root).live_catalog_release_current()
+
+
 def assess_live_catalog(
     vault_root: Path, *, require_live_projection: bool = True
 ) -> CatalogAssessment:
@@ -2210,9 +2220,14 @@ def build_detached_catalog(
     return get_store(vault_root).build_detached_catalog(cancel=cancel)
 
 
-def adopt_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> bool:
-    """Publish a catalogue this process built detached over the live one."""
-    return get_store(vault_root).adopt_detached_catalog(detached)
+def adopt_detached_catalog(
+    vault_root: Path, detached: DetachedCatalog, *, timeout: float | None = None
+) -> bool:
+    """Publish a catalogue this process built detached over the live one.
+
+    `timeout` caps the publication barrier wait below its usual bound.
+    """
+    return get_store(vault_root).adopt_detached_catalog(detached, timeout=timeout)
 
 
 def discard_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> None:
@@ -2293,14 +2308,18 @@ def request_repair(
     vault_root: Path,
     *,
     deferred_paths: list[Path] | None = None,
+    lag_only: bool = False,
     cause: RepairCause | None = None,
 ) -> None:
     """Non-walking retry seam for a request refused by runtime admission.
 
     `deferred_paths` narrows the repair to a targeted retry of those paths (see
-    `_schedule_repair`); `cause` is the token the worker logs. A narrow
-    request that names nothing the catalogue indexes is dropped, never widened
-    into the whole-catalogue pass that an empty path list would request.
+    `_schedule_repair`); `lag_only` asks for the catch-up of the registry delta,
+    which moves up to the full pass on any decline; `cause` is the token the
+    worker logs. A narrow request that names nothing the catalogue indexes is
+    dropped, never widened into the whole-catalogue pass that an empty path
+    list would request. Unlike `request_lag_repair`, this seam leaves runtime
+    admission as it is: a refused request proves nothing about the catalogue.
     """
     if not maintained_content_index_enabled():
         return
@@ -2308,7 +2327,7 @@ def request_repair(
         deferred_paths = _lexical_markdown(deferred_paths)
         if not deferred_paths:
             return
-    _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
+    _schedule_repair(vault_root, deferred_paths=deferred_paths, lag_only=lag_only, cause=cause)
 
 
 def request_lag_repair(vault_root: Path) -> None:
@@ -5019,13 +5038,32 @@ class LexicalStore:
         # identity work; a catalogue read opens two of these.
         with call_spans.span("lexical.connect"):
             with reserved_paths._subsystem_authority_scope("lexstore"):
-                with call_spans.entered(
-                    "lexical.connect.guard",
-                    reserved_paths._identity_coordination_scope(
-                        self.vault_root,
-                        descriptor_ids=descriptor_ids,
-                    ),
-                ):
+                if descriptor_id == "lexical-store":
+                    # An open of the live store that is already there changes no identity, so
+                    # it skips the identity gate and the generation bump: a read must not
+                    # queue behind a writer. A missing store is created under the full guard.
+                    try:
+                        with call_spans.entered(
+                            "lexical.connect.guard",
+                            reserved_paths._identity_coordination_scope(
+                                self.vault_root,
+                                descriptor_ids=descriptor_ids,
+                                identity_may_change=False,
+                            ),
+                        ):
+                            return self._connect_owned(path, create=False)
+                    except FileNotFoundError:
+                        pass
+                # The guard span above already covered a missing live store's connect; only a
+                # connect that has not been spanned yet gets one here.
+                fallback = reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=descriptor_ids,
+                )
+                if descriptor_id == "lexical-store":
+                    with fallback:
+                        return self._connect_owned(path)
+                with call_spans.entered("lexical.connect.guard", fallback):
                     return self._connect_owned(path)
 
     def _connect_owned(
@@ -5033,6 +5071,7 @@ class LexicalStore:
         path: Path | None = None,
         *,
         publish: bool = True,
+        create: bool = True,
     ) -> sqlite3.Connection:
         target = path if path is not None else self.path
         descriptor_id = reserved_paths.state_target_descriptor_id(
@@ -5047,7 +5086,7 @@ class LexicalStore:
                 self.vault_root,
                 target,
                 descriptor_id,
-                create=True,
+                create=create,
             ) as retained_target:
                 return self._connect_retained(
                     retained_target,
@@ -6051,6 +6090,11 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _catalog_release_current(self, conn: sqlite3.Connection) -> bool:
+        """Whether the running release built the rows behind `conn` (see `_stamp_whole_build`)."""
+        row = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        return row is not None and row[0] == __version__
+
     def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
         """Record the schema and the release that derived every page row (caller owns the txn).
 
@@ -6604,7 +6648,7 @@ class LexicalStore:
             updated = page.updated or "0000-00-00"
             # Scene-frame children carry the parent video they collapse into;
             # unparseable rows (page is None) stay NULL like ordinary pages.
-            emitted_parent_path = page.parent_media + ".md" if page.parent_media else None
+            emitted_parent_path = page.emitted_parent
             eligibility = _eligibility_columns(page)
             eligibility_view = _eligibility_view_json(page)
             content_hash = getattr(page, "snapshot_hash", None)
@@ -8346,8 +8390,7 @@ class LexicalStore:
             return "schema"
         if self._meta_catalog_identity(conn) != identity:
             return "identity"
-        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
-        if release is None or release[0] != __version__:
+        if not self._catalog_release_current(conn):
             return "release"
         # A whole-corpus build reads nothing from the live file; a copy would
         # carry its damage into every later repair, so check the copy once.
@@ -8578,6 +8621,26 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
+    def live_catalog_release_current(self) -> bool | None:
+        """Whether the running release built the live catalogue, or None when unknown.
+
+        Read-only and O(1), like `live_catalog_compatible`. False means another
+        release's whole build derived every row, so `_seed_from_live` would not
+        reuse them; None (no maintained store, no file, a failed read) decides
+        nothing.
+        """
+        if backend() == "python" or self._failed or not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            return self._catalog_release_current(conn)
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
     def assess_live_catalog(
         self, *, require_live_projection: bool = True
     ) -> CatalogAssessment:
@@ -8755,7 +8818,9 @@ class LexicalStore:
             finally:
                 detached.finished.set()
 
-    def adopt_detached_catalog(self, detached: DetachedCatalog) -> bool:
+    def adopt_detached_catalog(
+        self, detached: DetachedCatalog, *, timeout: float | None = None
+    ) -> bool:
         """Publish a catalogue this process built detached, replacing the live one.
 
         Called by a promoted standby that now owns the vault. Under the
@@ -8768,7 +8833,12 @@ class LexicalStore:
 
         published = False
         try:
-            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_ADOPT):
+            wait = (
+                _PUBLICATION_TIMEOUT_ADOPT
+                if timeout is None
+                else max(0.0, min(_PUBLICATION_TIMEOUT_ADOPT, timeout))
+            )
+            with self._publication_lock(timeout=wait):
                 if self._detached_catalog_current(detached.path):
                     published = self._replace_live_catalog(detached.path)
                 else:
@@ -10726,7 +10796,7 @@ class LexicalStore:
                 if page is None:
                     continue
                 expected_title = page.title
-                expected_parent = page.parent_media + ".md" if page.parent_media else None
+                expected_parent = page.emitted_parent
                 stored_eligibility = tuple(None if value is None else str(value) for value in row[4:])
                 if (
                     row[1] != expected_title

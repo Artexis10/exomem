@@ -369,8 +369,11 @@ def counts_by_status(outcomes: dict[str, Any]) -> dict[str, int]:
 
 
 async def wait_for_media(session: LedgerSession, journey: str, deadline_s: float,
-                         status_request: Any = local_media_status) -> dict[str, Any]:
-    """Poll ``process_media status`` until the job queue and index refresh drain, or time runs out."""
+                         status_request: Any = local_media_status, *, jobs_only: bool = False) -> dict[str, Any]:
+    """Poll ``process_media status`` until the job queue and index refresh drain, or time runs out.
+
+    With ``jobs_only``, an idle job queue is enough: deferred index upserts can take longer than the deadline
+    to drain, and a caller that judges only the queue would otherwise wait for them."""
     started = time.perf_counter()
     polls: list[dict[str, Any]] = []
     quiet = 0
@@ -383,12 +386,13 @@ async def wait_for_media(session: LedgerSession, journey: str, deadline_s: float
         polls.append({"t_s": round(time.perf_counter() - started, 1), "outcome": outcome,
                       "counts": counts, "index_refresh": refresh})
         busy = bool(counts) and (counts.get("pending", 0) or counts.get("running", 0))
-        quiet = quiet + 1 if outcome == "ok" and not busy and not refresh else 0
+        quiet = quiet + 1 if outcome == "ok" and not busy and (jobs_only or not refresh) else 0
         if quiet >= 2 or (time.perf_counter() - started) > deadline_s:
             break
         await asyncio.sleep(MEDIA_POLL_S)
     waited = round(time.perf_counter() - started, 1)
-    return {"converged": quiet >= 2, "waited_s": waited, "deadline_s": deadline_s,
+    return {"converged": quiet >= 2, "idle_means": "jobs" if jobs_only else "jobs-and-index",
+            "waited_s": waited, "deadline_s": deadline_s,
             "poll_count": len(polls), "polls_head": polls[:3], "polls_tail": polls[-3:],
             "final_status": data}
 
@@ -453,7 +457,7 @@ async def drive(args: argparse.Namespace) -> dict[str, Any]:
         journeys.append(await first.run(collection_label="try", rules_state=rules_state,
                                         probe_rules=not args.no_rule_probe,
                                         include_rules=args.include_rule))
-        media_first = await wait_for_media(session, "first", args.media_deadline)
+        media_first = await wait_for_media(session, "first", args.media_deadline, jobs_only=args.media_wait == "jobs")
         log["snapshot_after_first_run"] = kb_pages(vault)
         second = Journey(session, "rerun", args.collection_name, args.collection, overrides)
         journeys.append(await second.run(
@@ -461,7 +465,7 @@ async def drive(args: argparse.Namespace) -> dict[str, Any]:
             rules_state=rules_state,
             probe_rules=rules_state.get("folder_kind_rules") == "accepted",
             include_rules=args.include_rule))
-        media_rerun = await wait_for_media(session, "rerun", args.media_deadline)
+        media_rerun = await wait_for_media(session, "rerun", args.media_deadline, jobs_only=args.media_wait == "jobs")
         log["tool_calls_total"] = len(session.calls)
         log["calls"] = session.calls
     log["total_wall_s"] = round(time.perf_counter() - total_started, 1)
@@ -500,6 +504,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collection-name", default="Collection",
                         help="folder name the collection takes inside the vault, also the collection label")
     parser.add_argument("--media-deadline", type=float, default=300.0, help="seconds to wait for extraction")
+    parser.add_argument("--media-wait", choices=("jobs-and-index", "jobs"), default="jobs-and-index",
+                        help="what must be idle to stop waiting before the deadline")
     parser.add_argument("--timeout", type=float, default=900.0, help="per-call transport timeout, seconds")
     parser.add_argument("--no-rule-probe", action="store_true", help="skip the folder source_kind/domain probe")
     parser.add_argument("--include-rule", action="append", type=include_rule, default=[],

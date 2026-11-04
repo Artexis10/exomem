@@ -33,5 +33,13 @@
 - [x] 6.1 Prove preview, start, poll, cancel and receipt for `fix`, `backfill-ids`, `reconcile` and adopt-local through an in-process MCP client over a temporary vault, plus one test per boundary refusal.
 - [ ] 6.2 Measure run time and boundary hold time of `fix`, `backfill-ids` and `reconcile` on a disposable copy of a real-sized vault and record them on the PR.
 - [ ] 6.3 Run Ruff, the privacy gate, the semgrep gate, the scaffold leak test, `scripts/cloud-plugin.py check`, `openspec validate --all --strict` and the full suite.
-- [ ] 6.4 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
+- [x] 6.4 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
 - [ ] 6.5 After the release and the personal service upgrade, preview and run `backfill-ids` remotely on the personal vault, retry the `edit_note` that needed it, and preview `reconcile` remotely.
+
+## 7. Remote previews as jobs
+
+- [x] 7.1 Start a read-only job for an owner's remote preview of `fix`, `backfill-ids` or `reconcile`, and return its handle.
+- [x] 7.2 Keep the preview report and its `plan_id` in the receipt, and page the planned pages by cursor.
+- [x] 7.3 Prove preview, poll, receipt and start with the receipt's `plan_id` for each mode through the in-process MCP client.
+- [x] 7.4 Teach the preview job in the guidance, then regenerate the tool surfaces.
+- [ ] 7.5 Repeat task 6.5 on the personal vault after the release.

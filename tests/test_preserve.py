@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from memory_measurement import run_in_fresh_process
 
-from exomem import file_watcher
+from exomem import extraction_parts, file_watcher
 from exomem import preserve as preserve_module
 from exomem import vault as vault_module
 from exomem.governance import catalog_publication, companions
@@ -199,20 +199,10 @@ def test_raw_markdown_original_is_not_rewritten_as_a_managed_page(vault: Path) -
     assert saved.sidecar_path == saved.path + ".md"
 
 
-def test_cap_extracted_text_passthrough_under_limit() -> None:
-    assert preserve_module._cap_extracted_text("short content") == "short content"
-
-
-def test_cap_extracted_text_truncates_over_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(preserve_module, "_MAX_EXTRACT_BYTES", 1000)
-    out = preserve_module._cap_extracted_text("A" * 5000)
-    assert len(out.encode("utf-8")) < 5000           # genuinely shrunk
-    assert out.startswith("A" * 200)                 # kept the (most-relevant) start
-    assert "truncated" in out and "/download" in out  # marker + pointer to the binary
-
-
-def test_capped_sidecar_keeps_corpus_small(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The worker/backfill write path must cap, so one oversized doc can't poison find.
+def test_long_extracted_text_continues_on_part_pages_that_each_fit_one_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One oversized page would make every search re-tokenize it; so text is split, never cut.
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     monkeypatch.setattr(preserve_module, "_MAX_EXTRACT_BYTES", 500)
     res = preserve_module.preserve_bytes(
@@ -222,14 +212,17 @@ def test_capped_sidecar_keeps_corpus_small(vault: Path, monkeypatch: pytest.Monk
     descriptor_before = vault_module.parse_frontmatter(
         sidecar.read_text(encoding="utf-8"), strict=True
     )[0]["governance_companion"]
-    preserve_module.update_sidecar_extraction(vault, sidecar, text="Z" * 20000, engine="markitdown")
+    text = "\n\n".join(f"paragraph {number} " + "Z" * 40 for number in range(80))
+
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=text, engine="markitdown")
+
     body = _read(sidecar)
-    assert "truncated" in body
-    assert body.count("Z") < 20000           # capped, not the full 20k chars
-    assert len(body.encode("utf-8")) < 5000  # sidecar stays small → corpus protected
-    assert vault_module.parse_frontmatter(body, strict=True)[0][
-        "governance_companion"
-    ] == descriptor_before
+    assert len(body.encode("utf-8")) < 5000  # the sidecar stays small → corpus protected
+    frontmatter = vault_module.parse_frontmatter(body, strict=True)[0]
+    assert frontmatter["governance_companion"] == descriptor_before
+    parts = sorted(extraction_parts.folder_for(sidecar).glob("part-*.md"))
+    assert len(parts) + 1 == frontmatter["extraction_parts"] > 2
+    assert all(len(_read(part).encode("utf-8")) < 2500 for part in parts)
 
 
 def test_media_sidecar_commit_passes_explicit_publication_intent_collector(

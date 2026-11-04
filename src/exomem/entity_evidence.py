@@ -64,9 +64,7 @@ SCHEMA_VERSION = "1"
 STORE_NAME = ".entity-evidence.sqlite"
 #: A file whose timestamps fall this close to the moment a row was verified may be
 #: rewritten later without moving them (coarse timestamps), so its row is re-hashed.
-#: The same 2 s window as `record_item_cache`, `working_set_index`, `adoption_plan` and
-#: `artifact_census`; none of them exports it.
-RACY_WINDOW_NS = 2_000_000_000
+RACY_WINDOW_NS = vault.GENERATION_RACY_WINDOW_NS
 BUSY_TIMEOUT_SECONDS = 1.0
 
 #: What a stored row that does not decode raises: JSON text that is not JSON

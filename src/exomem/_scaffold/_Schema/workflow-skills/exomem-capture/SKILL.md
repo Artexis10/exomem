@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: b24b077e56d4ebd0ca400a3287d635b40d3bd90ce17f0929c8decd6837dbcc1a
+  skill_contract: c3a92eb322f0b66c2c2f3a4d232a035a4a665f7b451d760d3c127328f69f9cbd
   version: "0.1.0"
 ---
 
@@ -41,6 +41,11 @@ identity after an uncertain commit.
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
 only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
+
+Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
+different Exomem, use the connector they named; if it is unavailable, say so plainly and
+write nothing elsewhere. Never tell the user a write landed in a store other than the
+one `user_summary` names.
 
 ## Durable personal baselines
 A stable preference, recurring routine, historical baseline, or durable affiliation
@@ -149,7 +154,7 @@ meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-After writing, report exactly `Saved -> <path>` plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
+After writing, report the `user_summary` (`Saved -> <path> (<store>)`) plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
 
 ## Save rules
 Keep raw source verbatim when it matters. Keep compiled notes concise, attributed, linked, and written as conclusions, not transcripts.

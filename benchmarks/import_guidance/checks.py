@@ -86,6 +86,23 @@ def called_with(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
     return Outcome("called_with", PASS, f"{len(hits)} matching call(s)")
 
 
+def committed_writes(calls: tuple[dict, ...], tool: str) -> list[dict]:
+    """Calls to `tool` that wrote: a `validate_only` call is a dry run that changes nothing."""
+    return [
+        c for c in calls if c["tool"] == tool and c["arguments"].get("validate_only") is not True
+    ]
+
+
+def write_committed(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
+    """The agent did (`expect` true) or did not (`expect` false) call the write tool outside validate-only."""
+    hits = committed_writes(evidence.calls, spec["tool"])
+    return Outcome(
+        "write_committed",
+        PASS if bool(hits) == spec["expect"] else FAIL,
+        f"{len(hits)} committed call(s) to {spec['tool']}, expected {'some' if spec['expect'] else 'none'}",
+    )
+
+
 def only_scripted_tools(
     spec: dict, evidence: Evidence, served: tuple[str, ...], builtin: tuple[str, ...], **_: Any
 ) -> Outcome:
@@ -107,6 +124,8 @@ def filed_before_shell_exit(spec: dict, evidence: Evidence, **_: Any) -> Outcome
     ]
     if not filings:
         return Outcome("filed_before_shell_exit", FAIL, "no window was filed")
+    if "start" not in evidence.shell_events:
+        return Outcome("filed_before_shell_exit", FAIL, "filed, but the import command never ran")
     exit_at = evidence.shell_events.get("exit")
     if exit_at is None:
         return Outcome("filed_before_shell_exit", PASS, "filed; the command had not exited")
@@ -202,6 +221,7 @@ CHECKS = {
         never_called,
         max_calls,
         called_with,
+        write_committed,
         only_scripted_tools,
         filed_before_shell_exit,
         answer_lacks_scripted_strings,

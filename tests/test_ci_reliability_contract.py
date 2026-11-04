@@ -953,6 +953,20 @@ def test_the_cross_platform_split_count_matches_its_shard_matrix() -> None:
     assert job["name"].endswith(f"shard ${{{{ matrix.shard }}}}/{len(shards)})")
 
 
+@pytest.mark.parametrize(
+    "pin",
+    [
+        "EXOMEM_TEST_OLDER_READER_VERSION",
+        "EXOMEM_TEST_OLDER_READER_SHA256",
+        "EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION",
+        "EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256",
+    ],
+)
+def test_cross_platform_installs_the_same_older_readers_as_ci(pin: str) -> None:
+    """A pin bump that edits only ci.yml leaves the nightly lane testing another release."""
+    assert _cross_platform_workflow()["env"][pin] == _workflow()["env"][pin]
+
+
 def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
     workflow = _cross_platform_workflow()
     triggers = _triggers(workflow)

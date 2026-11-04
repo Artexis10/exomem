@@ -22,8 +22,9 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
   - A label-map change re-derives verdicts from the stored vectors, with no sensing.
   - A new pin keeps old readings but consumes only the active pin's. It reports incomplete evidence until a lazy re-sense drains, open work first.
 - Run inference in a **supervised, disposable sensor-worker child process**. The dreamer thread and request threads never load a model.
-  - The worker inherits the dreamer's gates and adds its own CPU-seconds and judgements budgets per hour, at low OS priority.
-  - Quiet mode and auto-quiet kill it, so its memory returns to the host.
+  - The worker has its own gate (the setting and standby) and its own CPU-seconds and judgements budgets per hour, at low OS priority.
+  - Standby, a pause or the setting off kill it, so its memory returns to the host. Quiet mode does not.
+  - A Cloud cell does not launch it until the Cloud placement exists.
   - Local sensing runs on CPU until co-tenant GPU pressure detection ships.
 - Add **deterministic pair proposers** that read stored data only: unit vectors at a fixed cosine threshold per pair (never top-k), structural co-occurrence, and temporal same-subject pairs.
 - Add **deterministic epistemic projections** that are pure functions of (ledger, graph, pages):
@@ -49,7 +50,7 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
   - Generative instruments are admitted under a delimited-slot template with closed-label probability output, never sampled text.
   - Readings may originate sensed families, but never enter canon except through an agent-authored write that cites the reading.
 - Rewrite `docs/hosted-inference-boundary.md`'s thresholds as acceptance measures rather than permission gates.
-- Re-lane `close-memory-loop` task 8.4 here, together with its verifier non-use condition, and reverse its "hosted cells do not run the dreamer" clause. That clause's reversal is specified here and built in a later slice.
+- Re-lane `close-memory-loop` task 8.4 here, together with its verifier non-use condition, and reverse its "hosted cells do not run the dreamer" clause. That clause's reversal is specified here. Cells now start the Dreamer (`run-upkeep-on-a-busy-vault`); the Cloud sensing placement is built in a later slice.
 
 ## Capabilities
 
@@ -71,5 +72,5 @@ The owner's rulings of 2026-09-28 settle the direction. The dreamer stays Exomem
 - **Runtime:**
   - Sensing is default-off, and gated by `EXOMEM_SENSING` or the config key `sensing` (only with the dreamer on).
   - It soft-fails to byte-identical silence when the `nli` extra, the pin or its fixtures are unavailable.
-  - The instrument's cost is bounded per hour, and quiet mode kills the worker.
+  - The instrument's cost is bounded per hour, and the worker's own gate stops it for the setting and standby.
 - **Pure substrate:** instruments measure and never decide. Their readings are measurement records. The dreamer's projections are deterministic. Only the agent authors canon, through existing governed writers.

@@ -1200,6 +1200,11 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
     """Pin a standard sidecar through no-follow vault-root and KB dirfds."""
     vault_root = path.parent.parent
     flags = os.O_CLOEXEC | os.O_NOFOLLOW
+    # Closing an ordinary descriptor drops every POSIX lock that this process
+    # holds on the file, such as its own SQLite connections' locks; closing a
+    # Linux O_PATH descriptor does not. SQLite reopens the leaf through its
+    # /proc/self/fd name, so these descriptors need no read or write access.
+    identity_only = getattr(os, "O_PATH", 0)
     fds: list[int] = []
     checks: list[tuple[int, str, tuple[int, int], bool]] = []
     signatures: list[tuple[str, tuple[int, ...]]] = []
@@ -1217,7 +1222,7 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
         if not stat.S_ISDIR(kb_info.st_mode) or _is_reparse_point(kb_info):
             return "invalid", None
         checks.append((root_fd, kb_name, (kb_info.st_dev, kb_info.st_ino), True))
-        leaf_flags = (os.O_RDWR if writable else os.O_RDONLY) | flags
+        leaf_flags = (identity_only or (os.O_RDWR if writable else os.O_RDONLY)) | flags
         leaf_fd = os.open(path.name, leaf_flags, dir_fd=kb_fd)
         fds.append(leaf_fd)
         leaf_info = os.fstat(leaf_fd)
@@ -1233,7 +1238,7 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
         for suffix in ("-wal", "-shm", "-journal"):
             name = path.name + suffix
             try:
-                companion_fd = os.open(name, os.O_RDONLY | flags, dir_fd=kb_fd)
+                companion_fd = os.open(name, (identity_only or os.O_RDONLY) | flags, dir_fd=kb_fd)
             except FileNotFoundError:
                 continue
             fds.append(companion_fd)
@@ -2117,7 +2122,8 @@ def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
         except OSError:
             continue
         page = find_module._parse_page(path, mtime, vault_root)
-        if page is not None:
+        # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
+        if page is not None and page.part_of is None:
             pages.append(page)
     return pages
 

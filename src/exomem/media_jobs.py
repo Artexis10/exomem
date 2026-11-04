@@ -86,8 +86,14 @@ _COMPUTE_RUNTIME_ACTION = (
     "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
 )
 _RESULT_SCHEMA_VERSION = 1
-_MAX_RESULT_PAYLOAD_BYTES = 768 * 1024
-_MAX_RESULT_TEXT_BYTES = 752 * 1024
+#: The most extracted text one result carries; the worker keeps the start of a longer text with
+#: a truncation line. The parent splits a result into pages (`extraction_parts`). No upload limit
+#: bounds this: a compressed document or an adopted original can expand to more text than its
+#: size. It is below what one result row can hold without strain.
+MAX_EXTRACTED_TEXT_BYTES = 128 * 1024 * 1024
+#: JSON escaping can double the text, and the rest of the payload (speakers, ASR facts) is small.
+_MAX_RESULT_PAYLOAD_BYTES = 2 * MAX_EXTRACTED_TEXT_BYTES + 256 * 1024
+_MAX_RESULT_TEXT_BYTES = MAX_EXTRACTED_TEXT_BYTES
 _MAX_RESULT_ERROR_BYTES = 4096
 _RESULT_KINDS = frozenset({"extraction", "failure", "pending"})
 # Typed blocked reasons (the `blocked_reason` column), a closed set this module
@@ -782,6 +788,16 @@ class MediaJobStore:
                 conn.execute("CREATE TABLE IF NOT EXISTS media_owner_census ("
                              "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
                              "used_bytes INTEGER, observed_at TEXT NOT NULL)")
+                # The last complete census of a draining cell's evicted originals, and whether that census found
+                # none (D12): one row. The evicted, bytes and captured_at columns are NULL until a census completes.
+                # `attempt_failed` marks a latest attempt that could not count, and `blocked_by` (a JSON list of
+                # vault-relative paths) the originals whose companion stopped it; `waiting` is what the last drain
+                # pass yielded to, or NULL when it did not yield.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_drain ("
+                             "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+                             "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
+                             "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL, "
+                             "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT, blocked_by TEXT)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
                              "ON media_access(hydrating) WHERE hydrating = 1")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
@@ -2148,6 +2164,14 @@ class MediaJobStore:
     def clear_gpu_wait(self) -> None:
         """End the record of a GPU wait; a no-op that writes nothing when none is recorded."""
         self._clear_meta(GPU_WAIT_KEY)
+
+    def gpu_waiting(self) -> bool:
+        """Whether speech work waits for a busy GPU now, so that the worker claims no speech job."""
+        conn = self._connect(readonly=True)
+        try:
+            return _read_meta_json(conn, GPU_WAIT_KEY) is not None
+        finally:
+            conn.close()
 
     def record_gpu_preflight(self, result: str, reason: str | None, *, serving_worker_cuda_hidden: bool) -> None:
         """Record the preflight verdict ("passed", "failed" or "not tested", and why) and how CUDA is split.

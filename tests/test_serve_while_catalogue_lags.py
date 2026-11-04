@@ -18,7 +18,7 @@ import pytest
 from conftest import initialize_vault_state_offline
 from fastmcp import FastMCP
 
-from exomem import freshness, lexstore, readiness, server_assets, warmup
+from exomem import find, freshness, lexstore, readiness, server_assets, warmup
 
 
 @pytest.fixture(autouse=True)
@@ -30,9 +30,10 @@ def _clean_process_state() -> Iterator[None]:
 
 
 class _Runtime:
-    def __init__(self, vault: Path, page: Path) -> None:
+    def __init__(self, vault: Path, page: Path, steady: Path) -> None:
         self.vault = vault
         self.page = page
+        self.steady = steady
         self.edits = 0
 
     def advance_projection(self) -> None:
@@ -43,9 +44,9 @@ class _Runtime:
 
     def reseed_projection(self) -> None:
         """The live projection comes back from the vault as it is now."""
-        entry = (str(self.page), freshness.stat_signature(self.page))
+        entries = [(str(page), freshness.stat_signature(page)) for page in (self.page, self.steady)]
         for scope in freshness.SCOPES:
-            freshness.seed(self.vault, scope, [entry])
+            freshness.seed(self.vault, scope, entries)
 
     def probe(self, *, times: int = 1, gap: float = 0.0) -> list[httpx.Response]:
         async def scenario() -> list[httpx.Response]:
@@ -63,6 +64,12 @@ class _Runtime:
 
         return asyncio.run(scenario())
 
+    def recall(self) -> tuple[list[str], list[str]]:
+        """Keyword recall for the page no write touches: hit names and disclosed components."""
+        degraded: list[str] = []
+        hits = find.find(self.vault, query="steady", mode="keyword", limit=5, degraded_out=degraded)
+        return [Path(hit.path).name for hit in hits], degraded
+
 
 @pytest.fixture
 def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Runtime:
@@ -73,16 +80,19 @@ def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Runtime:
     page = vault / "Knowledge Base" / "probe.md"
     page.parent.mkdir(parents=True)
     page.write_text("# Probe\n\ninitial\n", encoding="utf-8")
+    steady = vault / "Knowledge Base" / "steady.md"
+    steady.write_text("# Steady\n\nunchanged\n", encoding="utf-8")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     initialize_vault_state_offline(vault, source="serve while lagging fixture")
+    entries = [(str(page), freshness.stat_signature(page)) for page in (page, steady)]
     for scope in freshness.SCOPES:
-        freshness.seed(vault, scope, [(str(page), freshness.stat_signature(page))])
+        freshness.seed(vault, scope, entries)
     lexstore.ensure_fresh(vault)
     readiness.manage_runtime()
     readiness.begin_warm()
     assert warmup.warm_retrieval_catalog(vault)
     readiness.finish_warm()
-    served = _Runtime(vault, page)
+    served = _Runtime(vault, page, steady)
     [ready] = served.probe()
     assert ready.status_code == 200 and ready.json()["retrieval"]["state"] == "ready"
     return served
@@ -157,7 +167,14 @@ def test_a_new_warm_waits_for_a_strict_proof_however_servable_the_lag(
     runtime.advance_projection()
     assert runtime.probe()[0].json()["retrieval"]["state"] == "lagging"
 
-    readiness.begin_warm()
+    readiness.begin_warm()  # the graph handoff and corpus run before any new proof
+    [handoff] = runtime.probe()
+    assert handoff.status_code == 503, handoff.json()
+    assert handoff.json()["retrieval"]["state"] == "warming"
+    with pytest.raises(find.RetrievalIndexWarming) as refused:
+        runtime.recall()
+    assert refused.value.status == "warming"
+
     readiness.finish_required_warm()  # the warm's optional preloads still run
     [warming] = runtime.probe()
     assert warming.status_code == 503, warming.json()
@@ -174,21 +191,35 @@ def test_a_new_warm_waits_for_a_strict_proof_however_servable_the_lag(
     assert proven.status_code == 200 and proven.json()["retrieval"]["state"] == "ready"
 
 
-def test_the_lag_is_served_only_once_the_whole_warm_has_finished(runtime: _Runtime) -> None:
-    """Catches health saying ready while `find` refuses with the warm still running."""
-    readiness.begin_warm()  # a promoted worker re-warms; its optional preloads outlast the rest
+def test_a_warm_that_proved_its_catalogue_serves_a_later_lag_before_it_finishes(
+    runtime: _Runtime,
+) -> None:
+    """Catches the 503s and refused recall that followed a promoted worker's first ready.
+
+    The promoted worker proves its catalogue early in its warm; the graph
+    handoff, corpus and preloads follow while writes keep landing.
+    """
+    readiness.begin_warm()
     assert warmup.warm_retrieval_catalog(runtime.vault)
-    readiness.finish_required_warm()
-    runtime.advance_projection()
+    runtime.advance_projection()  # a write lands while the rest of the warm runs
 
-    [during_preloads] = runtime.probe()
-    readiness.finish_warm()
-    [after_warm] = runtime.probe()
+    [lagging] = runtime.probe()
+    paths, disclosed = runtime.recall()
 
-    assert during_preloads.status_code == 503
-    assert during_preloads.json()["retrieval"]["state"] == "warming"
-    assert after_warm.status_code == 200
-    assert after_warm.json()["retrieval"]["state"] == "lagging"
+    body = lagging.json()
+    assert lagging.status_code == 200, body
+    assert body["reasons"] == []
+    assert body["retrieval"]["state"] == "lagging"
+    assert body["retrieval"]["admitted"] is False
+    assert paths == ["steady.md"]
+    assert "recall_projection" in disclosed
+
+    assert lexstore.await_repairs_idle(runtime.vault)  # the lag repair recall scheduled
+    [caught_up] = runtime.probe()
+    assert readiness.is_warming()
+    assert caught_up.status_code == 200, caught_up.json()
+    assert caught_up.json()["retrieval"]["state"] == "ready"
+    assert caught_up.json()["retrieval"]["admitted"] is True
 
 
 def test_an_unmanaged_proof_does_not_make_a_later_lag_ready(runtime: _Runtime) -> None:

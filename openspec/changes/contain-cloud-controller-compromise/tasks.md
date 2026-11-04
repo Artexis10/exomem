@@ -15,18 +15,18 @@
 ## 3. Cell checks in report mode
 
 - [ ] 3.1 Make the gateway proof mandatory behind a report-mode switch, and log the credential that each request used.
-- [ ] 3.2 Add the grant verifier and the URL destination check to `cell-export`, `cell-import` and `cell-restore`, in report mode.
+- [x] 3.2 Add the grant verifier and the URL destination check to `cell-export` and `cell-import` in report mode, and relay the signed grant from the request rows to their Jobs. `cell-restore` takes the same check when task 4.1 adds it, and restore grants wait for a Substrate restore request flow.
 - [ ] 3.3 Substrate (separate repository): add the grant key and sign export, import and restore grants on the request rows.
 
 ## 4. Command pin
 
-- [ ] 4.1 Add `exomem cell-backup` and `exomem cell-restore`, run restic with argument vectors, and render backup and restore Jobs through them.
+- [ ] 4.1 Add `exomem cell-backup` and `exomem cell-restore`, run restic with argument vectors, and render backup and restore Jobs through them. Give `cell-restore` the grant verifier and destination check of 3.2 in report mode, and relay the restore grant from its request row once Substrate has a restore request flow.
 - [ ] 4.2 Add the admission rules for the closed pod template, the trust anchors, the cell ID and the minimum release. Add forged-write cases in the K3s Live job for each field that D3 names. Evidence: each forged write is denied, and every rendered kind is admitted.
 - [ ] 4.3 Encrypt owner exports to the grant's recipient, and serve the cell's import recipient on a gateway-authenticated route. Substrate (separate repository): the browser-side key pair, decryption after download, and recipients in the grants.
 
 ## 5. Enforcement
 
-- [ ] 5.1 Switch the proof, grant and destination checks to refuse, after a release with no would-be refusals from legitimate traffic.
+- [ ] 5.1 Switch the proof, grant and destination checks to refuse, after a release with no would-be refusals from legitimate traffic. Before the switch, give the cell a current-plus-next verifying key set (or dual signing at the gateway), so that a key rotation does not refuse legitimate traffic.
 
 ## 6. Backup custody
 
@@ -37,7 +37,7 @@
 
 ## 7. Retirements and alerts
 
-- [ ] 7.1 Retire the bearer key from the gateway, `cellctl` and the chart.
+- [ ] 7.1 Retire the bearer key from the gateway, `cellctl` and the chart, and remove the cell's fallback from the proof key to the upload key.
 - [ ] 7.2 Add the attack-signal evaluator to the access record pipeline, once `make-cloud-cells-operator-resistant` task 2 is in force.
 
 ## 8. Egress (later phase)

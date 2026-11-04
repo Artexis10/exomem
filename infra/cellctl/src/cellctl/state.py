@@ -45,8 +45,9 @@ GROWTH_NOT_NEEDED = "fits"
 class MediaCensus:
     """add-cloud-media-store D12: a backup Job's count of evicted originals.
 
-    A count is None when the census of sidecars was incomplete: unknown, never 0.
-    `captured_at` is the hold start, which the volume the Job read cannot predate."""
+    A count is None when the census was incomplete or the Job could not read the cell's record: unknown, never 0.
+    `captured_at` is the cell's census time, as the cell wrote it into its record. For an unknown count the Job
+    could not read, it is the hold start."""
 
     evicted: int | None
     evicted_bytes: int | None

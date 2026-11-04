@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -140,6 +141,59 @@ def _binding(
     raise ValueError("stored Trash reference has no trustworthy placement")
 
 
+def bound_references(
+    vault: Path, store: originals.StoreBinding,
+) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject]]:
+    """Every reference to `store` under the Knowledge Base, as the companion's path and what it binds.
+
+    The caller holds the consistency guard around the whole iteration, and takes any read failure as an
+    unknown census: a failed read never ends the walk early and reads as complete.
+    """
+    metadata: dict[str, str] = {}
+    placements: dict[str, dict[str, object]] = {}
+    placement_versions: dict[str, held_fs.FileVersion] = {}
+
+    def select(candidates: list[tuple[str, str]]):
+        for relative, kind in candidates:
+            if kind != "file":
+                continue
+            # Markdown and Trash metadata extensions belong to the fixed vault format.
+            if (PurePosixPath(relative).is_relative_to(trash_metadata.TRASH_SUBPATH)
+                    and relative.endswith(trash_metadata.METADATA_SUFFIX)):
+                metadata[f"{kb_dirname()}/{relative[:-len(trash_metadata.METADATA_SUFFIX)]}"] = f"{kb_dirname()}/{relative}"
+            if relative.lower().endswith(".md"):
+                yield relative
+
+    with reserved_paths.open_generic_tree(
+        vault, kb_dirname(), select=select, require_complete=True,
+        markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
+    ) as entries:
+        for entry in entries:
+            if entry.markdown is None:
+                raise ValueError("companion header was not read")
+            path = f"{kb_dirname()}/{entry.relative_path}"
+            bound = _binding(
+                parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
+                path, store, metadata, vault, placements, placement_versions,
+            )
+            del entry
+            if bound is not None:
+                yield path, bound[0], bound[1]
+    for metadata_path, version in placement_versions.items():
+        with reserved_paths.open_generic_binary(vault, metadata_path) as source:
+            if source.version != version:
+                raise ValueError("Trash placement changed during the census")
+            source.require_current()
+
+
+# What a failed read of the Knowledge Base tree can raise; the census that hit one is unknown.
+UNREADABLE = (
+    OSError, ValueError, MemoryError, RecursionError, held_fs.HeldFsError,
+    reserved_paths.ReservedPathLeafError, runtime_resources.PreparationBudgetExceeded,
+    runtime_resources.PreparationCapacityBusy,
+)
+
+
 def reference_usage(vault_root: Path) -> ReferenceUsage:
     """Read complete current custody; a failed read never becomes an empty total."""
     from .writer_lease import get_manager
@@ -152,52 +206,13 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
         if store is None:
             raise ValueError("no selected media store")
         with get_manager().consistency_guard(vault, operation="media_reference_usage", holder_kind="background"):
-            metadata: dict[str, str] = {}
-            placements: dict[str, dict[str, object]] = {}
-            placement_versions: dict[str, held_fs.FileVersion] = {}
-
-            def select(candidates: list[tuple[str, str]]):
-                for relative, kind in candidates:
-                    if kind != "file":
-                        continue
-                    # Markdown and Trash metadata extensions belong to the fixed vault format.
-                    if (PurePosixPath(relative).is_relative_to(trash_metadata.TRASH_SUBPATH)
-                            and relative.endswith(trash_metadata.METADATA_SUFFIX)):
-                        metadata[f"{kb_dirname()}/{relative[:-len(trash_metadata.METADATA_SUFFIX)]}"] = f"{kb_dirname()}/{relative}"
-                    if relative.lower().endswith(".md"):
-                        yield relative
-
-            with reserved_paths.open_generic_tree(
-                vault, kb_dirname(), select=select, require_complete=True,
-                markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
-            ) as entries:
-                for entry in entries:
-                    if entry.markdown is None:
-                        raise ValueError("companion header was not read")
-                    path = f"{kb_dirname()}/{entry.relative_path}"
-                    bound = _binding(
-                        parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
-                        path, store, metadata, vault, placements, placement_versions,
-                    )
-                    del entry
-                    if bound is None:
-                        continue
-                    binary, reference = bound
-                    key = _key(reference)
-                    if key in versions:
-                        _consistent(versions[key], bound)
-                    versions[key] = (binary, reference)
-                    if not trash_metadata.is_trash_path(path):
-                        live_paths.setdefault(key, binary.path)
-            for metadata_path, version in placement_versions.items():
-                with reserved_paths.open_generic_binary(vault, metadata_path) as source:
-                    if source.version != version:
-                        raise ValueError("Trash placement changed during the census")
-                    source.require_current()
-    except (
-        OSError, ValueError, MemoryError, RecursionError, held_fs.HeldFsError,
-        reserved_paths.ReservedPathLeafError, runtime_resources.PreparationBudgetExceeded,
-        runtime_resources.PreparationCapacityBusy,
-    ):
+            for path, binary, reference in bound_references(vault, store):
+                key = _key(reference)
+                if key in versions:
+                    _consistent(versions[key], (binary, reference))
+                versions[key] = (binary, reference)
+                if not trash_metadata.is_trash_path(path):
+                    live_paths.setdefault(key, binary.path)
+    except UNREADABLE:
         return ReferenceUsage(None, datetime.now(UTC).isoformat())
     return ReferenceUsage(versions, datetime.now(UTC).isoformat(), live_paths)

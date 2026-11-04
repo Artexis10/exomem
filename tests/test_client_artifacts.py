@@ -431,7 +431,7 @@ def test_mixed_batch_keeps_truth_when_one_content_type_is_oversized(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
 
     result = commands.op_preserve_artifacts(
@@ -517,7 +517,7 @@ def test_mixed_long_collision_reason_stays_in_compact_artifact_receipt(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
 
     result = commands.op_preserve_artifacts(
@@ -706,7 +706,7 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
@@ -784,7 +784,7 @@ def test_a_busy_boundary_never_fetches_a_handle_twice_in_one_call(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *a, **k: guard(*a, **k)})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *a, **k: guard(*a, **k)), "absorbing_mutation_guard": g})(),
     )
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
@@ -838,7 +838,7 @@ def test_unexpected_commit_failure_removes_every_staged_file(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
 
     with pytest.raises(RuntimeError, match="broken result"):
@@ -912,7 +912,7 @@ def test_preserve_artifacts_reports_each_file_and_marks_committed(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
 
     result = commands.op_preserve_artifacts(
@@ -963,7 +963,7 @@ def test_preserve_artifacts_keeps_append_only_collision_as_one_failed_outcome(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
 
     result = commands.op_preserve_artifacts(
@@ -1006,7 +1006,7 @@ def test_preserve_artifacts_marks_commit_before_media_reconciliation(
     monkeypatch.setattr(
         client_artifacts,
         "active_manager",
-        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+        lambda: type("Manager", (), {"mutation_guard": (g := lambda self, *_args, **_kwargs: nullcontext()), "absorbing_mutation_guard": g})(),
     )
 
     def reconcile_media(*_args, **_kwargs) -> None:
@@ -1032,6 +1032,8 @@ def test_preserve_artifacts_marks_commit_before_media_reconciliation(
 class _NullBoundaryManager:
     def mutation_guard(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
         return nullcontext()
+
+    absorbing_mutation_guard = mutation_guard
 
 
 def _staged(tmp_path: Path, file_id: str, filename: str, payload: bytes):  # noqa: ANN202

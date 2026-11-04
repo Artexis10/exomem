@@ -6,8 +6,9 @@ read-only proof of the current graph snapshot — while the previous worker keep
 serving.  Until the supervisor promotes it, the standby owns nothing: it takes
 no writer lease, publishes no index or graph state, schedules no drain, media or
 watcher work, and starts no descendants. Where the live lexical catalogue is
-proven incompatible or compatible but stale, the standby builds a private temp.
-Only promotion publishes it; runtime admission still needs the subsequent proof.
+proven incompatible, compatible but stale, or built by another release, the
+standby builds a private temp. Only promotion publishes it; runtime admission
+still needs the subsequent heal and proof.
 
 Promotion is the only place ownership changes hands.  It runs after the previous
 worker and its descendants have provably exited, re-validates the checkpoint the
@@ -20,6 +21,7 @@ Pure process state.  Nothing here reasons over notes.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import threading
@@ -69,6 +71,10 @@ COLLECTIONS_PREIMPORT_MARGIN_SECONDS = 10.0
 _detached_catalog: Any = None
 #: Preparation only; the promoted worker still proves runtime retrieval.
 _detached_built = False
+#: Whether a detached build RAN, however it ended. Until it has, a live
+#: catalogue that another release built is not proven current; see
+#: `prove_retrieval_catalog`.
+_detached_attempted = False
 #: Set once an unpromoted standby is being stopped; a build that finishes
 #: afterwards discards what it built instead of holding it.
 _discarded = False
@@ -98,6 +104,22 @@ REPROVE_INTERVAL_SECONDS = 30.0
 #: How often the standby looks at the graph for movement: a stat of the durable
 #: checkpoint and of the sidecar, and a sidecar read only when one moved.
 REPROVE_POLL_SECONDS = 1.0
+#: The share of the supervisor's promotion request that promotion may spend
+#: re-proving a snapshot published after the held proof. The supervisor sends
+#: the request's budget as `request_seconds`. Ownership, the catalogue and the
+#: residue still run inside the same request, and a request that times out
+#: discards this standby after the old worker has stopped. A re-proof that runs
+#: out of time records `advanced`, as before it existed.
+PROMOTION_REPROOF_SHARE = 0.4
+#: The promotion request cap of a supervisor whose promote request carries no
+#: `request_seconds`. A seamless upgrade replaces only the worker, so a new
+#: worker meets such a supervisor until the launcher's next offline update.
+LEGACY_PROMOTE_REQUEST_SECONDS = 10.0
+#: What promotion keeps of its request after the catalogue barrier wait, for
+#: the identity catalogue, the residue and the response. The barrier wait is
+#: capped at the time left before this reserve, so a busy barrier hands the
+#: catalogue to the ordinary repair instead of running the request past its cap.
+PROMOTION_REQUEST_RESERVE_SECONDS = 2.0
 #: The re-proof clock; a seam for tests.
 _clock = time.monotonic
 
@@ -305,7 +327,16 @@ def _read_snapshot_token(vault_root: Path, *, quiet: bool) -> str | None:
         conn.close()
 
 
-def prove_graph_snapshot(vault_root: Path) -> bool:
+def _proof_stopped() -> bool:
+    """Whether promotion or discard began, so a background proof should stop.
+
+    Read without `_lock`: the proof calls this for every page, and a stale
+    answer costs only one more page before the next check sees the flag.
+    """
+    return _promoting or _promoted or _discarded
+
+
+def prove_graph_snapshot(vault_root: Path, *, prior_reads: Any = None) -> bool:
     """Prove and adopt the inherited snapshot, retaining what it established.
 
     Adoption is what makes the promoted worker's first governed write
@@ -324,6 +355,10 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     the worker still serving owns both until this one is promoted. Making the
     checkpoint the delta origin is process-local, so the adoption still does
     everything that removes the promoted worker's whole-vault pass.
+
+    `prior_reads` starts the proof from an earlier adoption's page reads. The
+    proof stops with `proof_cancelled` as soon as promotion or discard begins:
+    its result would be dropped, and promotion re-proves on its own.
     """
     global _proved_token, _adoption, _proof_signal, _proof_marker
     global _attempt_signal, _attempt_stat, _attempt_ended_at
@@ -343,14 +378,16 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     try:
         adoption = epistemic_graph.EpistemicGraphIndex(
             vault_root
-        ).adopt_published_snapshot(apply_residue=False)
+        ).adopt_published_snapshot(
+            apply_residue=False, prior_reads=prior_reads, cancelled=_proof_stopped
+        )
     except Exception:  # noqa: BLE001 - an unadopted snapshot is a waiting component
         log.warning("standby graph snapshot adoption failed", exc_info=True)
         adoption = epistemic_graph.SnapshotAdoption(False, reason="adoption_raised")
     # The token the proof read in its own transaction names the snapshot it
     # proved. A snapshot the serving worker publishes during or after the
     # proof is never named as proved: promotion finds the token moved and
-    # records `advanced`, and the promoted worker runs the handoff in full.
+    # re-proves the snapshot on disk from this proof's page reads.
     token = adoption.proved_token if adoption.adopted else None
     with _lock:
         _attempt_ended_at = _clock()
@@ -473,7 +510,14 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     again, so the cutover waited out its whole budget on a proof that could not
     change. After a proof succeeds it re-proves only for a generation that
     landed without a publication: a publication since the held proof is left
-    to promotion, which records it as `advanced`.
+    to promotion, which finds it `advanced` and re-proves it from the held
+    proof's page reads.
+
+    A held proof stays held while it is re-proved, and the re-proof replaces
+    it only when it succeeds. Withdrawing it first, as this did through
+    0.157.1, left a window of the proof's whole length in which a promotion
+    read no proof and recorded `unproven`; a rehearsal of that upgrade hit it
+    under steady writes, and the promoted worker paid the whole handoff again.
     """
     global _attempt_stat
     from . import freshness
@@ -499,13 +543,29 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         return False
     with _lock:
         held = _proved_token
-    if held is not None and signal[1] != held:
-        # A snapshot published since the one the held proof names. Promotion
-        # records it as `advanced` and the promoted worker runs the handoff in
-        # full, so a re-proof here would only withdraw the held proof for its
-        # whole length. A generation that lands without a publication is the
-        # movement a re-proof is for.
-        return False
+        held_reads = getattr(_adoption, "proof_reads", None)
+    if held is not None:
+        if signal[1] != held:
+            # A snapshot published since the one the held proof names.
+            # Promotion re-proves it from the held proof's page reads once the
+            # serving worker has exited and can publish no later one, so a
+            # re-proof here would buy nothing. A generation that lands without
+            # a publication is the movement a re-proof is for.
+            return False
+        # Re-prove over the held lineage: no reseed, no resolver eviction.
+        # Reseeding pops the adopted origin the held proof relies on, which is
+        # why the reseeding paths withdraw the proof first. Kept, that origin
+        # stays a valid delta origin: this process has no watcher and every
+        # reseed in it withdraws the proof, so its registry has not moved since
+        # the held proof sampled it, and `adopt_recall_origin` can only lower an
+        # origin, which only widens the first delta. The proof itself reads
+        # disk, so the residue it returns covers the generation that landed. A
+        # decline keeps the held proof, and a result that lands after promotion
+        # is dropped in `prove_graph_snapshot`. The held proof's page reads
+        # seed it, so only pages that moved since are read again.
+        proved = prove_graph_snapshot(vault_root, prior_reads=held_reads)
+        log.info("standby graph snapshot re-proof over the held proof adopted=%s", proved)
+        return proved
     if not _invalidate_graph_proof():
         return False
     # This process has no watcher, so its recall registry is as old as the
@@ -602,6 +662,12 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     for this vault. The standby therefore only asks whether the catalog is
     already current, with repair scheduling explicitly off. A failed proof may
     permit isolated preparation, but never a publication by the standby.
+
+    A catalogue that another release built is not proven until a detached build
+    has run. Promoted over it, this process would inherit the serving worker's
+    registry stamp, which no lag repair can bridge, so its first repair would
+    rebuild the whole catalogue while ingress waits. A build that ran and
+    failed falls back to this proof, which is as good as this standby can do.
     """
     from . import freshness, lexstore
 
@@ -609,6 +675,10 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
         if not lexstore.maintained_content_index_enabled():
             # No maintained content index to prove; nothing gates retrieval.
             return True
+        with _lock:
+            attempted = _detached_attempted
+        if not attempted and lexstore.live_catalog_release_current(Path(vault_root)) is False:
+            return False
         return lexstore.runtime_retrieval_catalog_current(
             Path(vault_root),
             require_live_projection=freshness.event_indexes_enabled(),
@@ -636,14 +706,15 @@ def _warm_proven_catalogue(vault_root: Path) -> None:
 
 
 def prepare_detached_catalog(vault_root: Path) -> bool:
-    """Prepare beside a proven incompatible or compatible stale live catalogue.
+    """Prepare beside a proven incompatible, stale or other-release live catalogue.
 
-    A failed readiness proof alone establishes neither case. Missing, busy and
-    unknown observations leave the standby waiting. A complete private build
-    survives ordinary source edits; promotion owns adoption and the subsequent
-    watcher seed, heal and strict runtime proof. Preparation never publishes.
+    A failed readiness proof alone establishes none of these cases. Missing,
+    busy and unknown observations leave the standby waiting. A complete private
+    build survives ordinary source edits; promotion owns adoption and the
+    subsequent watcher seed, heal and strict runtime proof. Preparation never
+    publishes.
     """
-    global _detached_catalog, _detached_built
+    global _detached_catalog, _detached_built, _detached_attempted
     from . import freshness, lexstore
 
     try:
@@ -653,19 +724,23 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
         assessment = lexstore.assess_live_catalog(
             vault_root, require_live_projection=freshness.event_indexes_enabled()
         )
-        if not (
-            assessment.compatibility == "incompatible"
-            or (
-                assessment.compatibility == "compatible"
-                and any(not scope.complete for scope in assessment.scopes.values())
-            )
-        ):
+        if assessment.compatibility == "compatible":
+            owed = any(
+                not scope.complete for scope in assessment.scopes.values()
+            ) or lexstore.live_catalog_release_current(vault_root) is False
+        else:
+            owed = assessment.compatibility == "incompatible"
+        if not owed:
             return False
         with _lock:
             if _discarded or _promoted or _detached_built:
                 return False
         started = time.monotonic()
-        detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
+        try:
+            detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
+        finally:
+            with _lock:
+                _detached_attempted = True
     except Exception:  # noqa: BLE001 - an unbuilt catalogue is a waiting component
         log.warning("standby detached catalogue build failed", exc_info=True)
         return False
@@ -686,7 +761,7 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
     return True
 
 
-def _adopt_detached_catalog(vault_root: Path) -> str | None:
+def _adopt_detached_catalog(vault_root: Path, *, deadline: float | None = None) -> str | None:
     """Publish the catalogue this standby built, now that it owns the vault.
 
     Returns the handoff record's verdict, or None when nothing was built. A
@@ -703,8 +778,9 @@ def _adopt_detached_catalog(vault_root: Path) -> str | None:
         _detached_built = False
     if detached is None:
         return None
+    timeout = None if deadline is None else deadline - time.monotonic()
     try:
-        adopted = lexstore.adopt_detached_catalog(vault_root, detached)
+        adopted = lexstore.adopt_detached_catalog(vault_root, detached, timeout=timeout)
     except Exception:  # noqa: BLE001 - the coalesced repair owns an unadopted catalogue
         log.warning("promoted worker could not adopt its detached catalogue", exc_info=True)
         adopted = False
@@ -819,12 +895,15 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     one fact, one place to read it.
 
     `graph_snapshot` is carried only on a `current` verdict. That is the one
-    where promotion re-proved that the checkpoint the standby adopted is still
-    the checkpoint on disk, so re-adopting would buy nothing -- 19.5 s of it on
-    the 0.85.0 cutover. `advanced`, `unproven` and `rebuild-after-promotion` all
-    mean the opposite, and each leaves the component out so `warm_all` runs the
-    handoff in full. (A residue failure rewrites the verdict to
-    `rebuild-after-promotion`, so it is covered by the same test.)
+    where the checkpoint this process adopted is the checkpoint on disk: the
+    held proof's, or the one promotion re-proved after the serving worker
+    published past it. Re-adopting would buy nothing -- 19.5 s of it on the
+    0.85.0 cutover, and every write refused for the length of the handoff.
+    `advanced` (a moved snapshot whose re-proof declined), `unproven` and
+    `rebuild-after-promotion` all mean the opposite, and each leaves the
+    component out so `warm_all` runs the handoff in full. (A residue failure
+    rewrites the verdict to `rebuild-after-promotion`, so it is covered by the
+    same test.)
     """
     from . import readiness
 
@@ -854,8 +933,9 @@ def warm(vault_root: Path) -> None:
     make while another worker owns the vault. Everything here reads: the catalog
     is proved, the rebuildable caches are populated in memory, the models are
     loaded, and the graph snapshot is proved against disk. The one write is a
-    catalogue built detached, beside the serving worker's live one,
-    which nothing reads until promotion adopts it. Never raises; an unready
+    catalogue built detached, beside the serving worker's live one, when the
+    live one is incompatible, stale or another release's; nothing reads it
+    until promotion adopts it. Never raises; an unready
     component stays ``waiting`` and the supervisor's warm budget decides what
     happens next.
     """
@@ -885,6 +965,10 @@ def warm(vault_root: Path) -> None:
                 freshness.rebaseline(vault_root)
             except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
                 log.warning("standby recall registry reseed failed", exc_info=True)
+        elif prove_retrieval_catalog(vault_root):
+            # A release-change build that ran and failed falls back to the
+            # ordinary proof now, not at the next re-proof poll.
+            _warm_proven_catalogue(vault_root)
         else:
             log.info(
                 "standby retrieval catalog is not current; awaiting a current "
@@ -935,13 +1019,15 @@ def _warm_then_reprove(vault_root: Path) -> None:
         log.warning("standby graph snapshot re-proof loop crashed", exc_info=True)
 
 
-def _reprove(vault_root: Path) -> Any:
-    """Re-run the source proof after the migrator wrote state."""
+def _reprove(
+    vault_root: Path, *, prior_reads: Any = None, deadline: float | None = None
+) -> Any:
+    """Re-run the source proof at promotion, from the held proof's reads when given."""
     from . import epistemic_graph
 
     try:
         return epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot(
-            apply_residue=False
+            apply_residue=False, prior_reads=prior_reads, deadline=deadline
         )
     except Exception:  # noqa: BLE001 - a failed re-proof rebuilds after promotion
         log.warning("standby snapshot re-proof failed", exc_info=True)
@@ -1029,12 +1115,18 @@ def _acquire_ownership() -> None:
     start_server_lifecycle()
 
 
-def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
+def promote(
+    vault_root: Path, *, migrated: bool, request_seconds: float | None = None
+) -> dict[str, Any]:
     """Take ownership after the previous worker and its descendants have exited.
 
     Re-validates the proved checkpoint against disk first.  A checkpoint that
-    advanced is recorded as such; a proof that now fails is recorded and
-    promotion proceeds anyway, leaving the repair to the coalesced rebuild path.
+    advanced is re-proved from the held proof's page reads, within
+    `PROMOTION_REPROOF_SHARE` of `request_seconds`, the budget of the
+    supervisor's promotion request (`LEGACY_PROMOTE_REQUEST_SECONDS` when the
+    supervisor sent none). One whose re-proof declines is recorded as
+    `advanced`. A proof that now fails is recorded and promotion proceeds
+    anyway, leaving the repair to the coalesced rebuild path.
     """
     global _promoting
     with _lock:
@@ -1050,6 +1142,9 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         return _promote_owned(
             Path(vault_root),
             migrated=migrated,
+            request_seconds=(
+                LEGACY_PROMOTE_REQUEST_SECONDS if request_seconds is None else request_seconds
+            ),
             proved=proved,
             proof_marker=proof_marker,
             proof_generation=proof_generation,
@@ -1066,17 +1161,19 @@ def _promote_owned(
     vault_root: Path,
     *,
     migrated: bool,
+    request_seconds: float,
     proved: str | None,
     proof_marker: tuple[int, int] | None,
     proof_generation: Any,
 ) -> dict[str, Any]:
     """`promote` once it has claimed the standby; see there."""
-    global _promoted, _standby, _adoption, _carried
+    global _promoted, _standby, _adoption, _carried, _proved_token
     # `revalidated` says promotion re-checked the snapshot at all; `reproved`
-    # says it re-ran the whole SOURCE proof, which only the migrated branch
-    # does. The other branch compares the checkpoint pair -- a real
-    # re-validation, and deliberately cheaper, but not a proof, and calling it
-    # one overstated what the handoff record was attesting to.
+    # says it re-ran the SOURCE proof: the migrated branch always does, and the
+    # other branch only when the checkpoint pair moved under the held proof.
+    # Comparing the pair is a real re-validation, and deliberately cheaper, but
+    # not a proof, and calling it one overstated what the handoff record was
+    # attesting to.
     record: dict[str, Any] = {
         "ok": True,
         "migrated": bool(migrated),
@@ -1114,6 +1211,36 @@ def _promote_owned(
             record["snapshot"] = "rebuild-after-promotion"
         elif current != proved:
             record["snapshot"] = "advanced"
+            reads = getattr(adoption, "proof_reads", None)
+            if reads is not None:
+                # The serving worker published after the held proof, which under
+                # live writes is the usual case. Prove the snapshot on disk now,
+                # from the pages the held proof read: only the pages that moved
+                # since are read again, and the old worker has exited, so
+                # nothing publishes during it. The promoted worker then holds an
+                # adoption of the snapshot it inherits, and its warm need not
+                # run the handoff in full with every write refused meanwhile.
+                # A decline keeps `advanced` and the held adoption, and the
+                # promoted worker's warm runs the handoff in full as before.
+                # Generation before marker, the order the warm-time proof samples in.
+                generation = _durable_generation(Path(vault_root))
+                marker = _observe_full_marker(Path(vault_root))
+                reproof = _reprove(
+                    Path(vault_root),
+                    prior_reads=reads,
+                    deadline=started + request_seconds * PROMOTION_REPROOF_SHARE,
+                )
+                record["reproved"] = True
+                if reproof.adopted:
+                    adoption = reproof
+                    with _lock:
+                        _adoption = adoption
+                        _proved_token = reproof.proved_token
+                    record["snapshot"] = "current"
+                    covered_marker = marker
+                    covered_generation = generation
+                else:
+                    record["reproof_declined"] = reproof.reason
         else:
             record["snapshot"] = "current"
             covered_marker = proof_marker
@@ -1124,7 +1251,10 @@ def _promote_owned(
     _acquire_ownership()
     # Owned now, and the worker that kept an earlier release's catalogue current
     # has exited, so the catalogue this standby built may replace it.
-    catalogue = _adopt_detached_catalog(Path(vault_root))
+    catalogue = _adopt_detached_catalog(
+        Path(vault_root),
+        deadline=started + request_seconds - PROMOTION_REQUEST_RESERVE_SECONDS,
+    )
     if catalogue is not None:
         record["lexical_catalogue"] = catalogue
     # The private-identity inventory this process built while warming was proved
@@ -1164,6 +1294,10 @@ def _promote_owned(
         _standby = False
         _carried = carried
         activation = _activation
+        if getattr(_adoption, "proof_reads", None) is not None:
+            # Only a standby's next proof starts from the page reads; a
+            # promoted worker would hold one entry per page for nothing.
+            _adoption = dataclasses.replace(_adoption, proof_reads=None)
         # Under the same lock as the flip: a readiness proof that reads
         # `standby: false` measured part of its state as a standby, and the
         # supervisor reads readiness as soon as this POST returns.
@@ -1183,7 +1317,8 @@ def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
     global _carried, _corpus_built, _corpus_attempted, _collections_settled
-    global _detached_catalog, _detached_built, _discarded, _discard_requested
+    global _detached_catalog, _detached_built, _detached_attempted
+    global _discarded, _discard_requested
     global _promoting, _proof_signal, _proof_marker
     global _attempt_signal, _attempt_stat, _attempt_ended_at
     with _lock:
@@ -1195,6 +1330,7 @@ def reset_for_tests() -> None:
         _attempt_ended_at = None
         _detached_catalog = None
         _detached_built = False
+        _detached_attempted = False
         _discarded = False
         _discard_requested = threading.Event()
         _standby = False

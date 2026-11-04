@@ -3378,6 +3378,8 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
     ):
         assert reserved_paths.owner_authorized(descriptor_id)
         assert reserved_paths._identity_coordination_active(vault_root)
+        if not create and not Path(database).exists():
+            raise FileNotFoundError(database)  # as the real scope does
         observed.append((descriptor_id, Path(database).name, create))
         retained.add(descriptor_id)
         try:
@@ -3880,7 +3882,7 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
                 assert retained == database
 
     assert parent_accesses == [(database.parent.name, "read")]
-    assert accesses == ["read", "read"]
+    assert accesses == ["identity", "identity"]
 
 
 def test_external_sqlite_owner_publication_never_acquires_a_vault_catalogue(

@@ -355,7 +355,7 @@ def test_non_audit_posthoc_keeps_legacy_bounded_projection_contract() -> None:
     assert "findings_complete" not in payload["truncation"]
 
 
-def test_watcher_reports_posthoc_before_one_index_fanout_and_preserves_bytes(
+def test_watcher_reports_posthoc_after_one_index_fanout_and_preserves_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -390,7 +390,7 @@ def test_watcher_reports_posthoc_before_one_index_fanout_and_preserves_bytes(
         watcher._record(page, deleted=False)
         watcher._flush()
 
-    assert order == ["posthoc", "index"]
+    assert order == ["index", "posthoc"]
     assert calls == [[page]]
     assert page.read_bytes() == original
     assert "invalid_compact_category" in caplog.text

@@ -84,6 +84,7 @@ def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
     _PATH_MEMO.clear()
+    _PARENT_MEMO.clear()
     _normalized_refs.cache_clear()
 
 
@@ -386,10 +387,72 @@ def evaluate_path_only(
     return MembershipOutcome("classified", frozenset(matched))
 
 
+# Parsed parent pages keyed on path, mtime and size, so the frames of one video parse it once.
+_PARENT_MEMO: OrderedDict[tuple[str, int, int], ParsedPage] = OrderedDict()
+_PARENT_MEMO_MAX = 256
+
+
+def _read_parent(page: ParsedPage, parent: str) -> ParsedPage:
+    """The parsed page at vault-relative `parent`; an unreadable parent leaves `page` unresolved."""
+    if page.vault_root is None:
+        raise MembershipUnresolved(f"the parent page of {page.rel_path!r} has no vault root")
+    path = page.vault_root / parent
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _PARENT_MEMO.get(key)
+    if cached is not None:
+        _PARENT_MEMO.move_to_end(key)
+        return cached
+    try:
+        parsed = find_corpus.parse_page(path, stat.st_mtime, page.vault_root)
+    except OSError as exc:
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
+    if parsed is None:
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}")
+    _PARENT_MEMO[key] = parsed
+    while len(_PARENT_MEMO) > _PARENT_MEMO_MAX:
+        _PARENT_MEMO.popitem(last=False)
+    return parsed
+
+
+def _part_source(page: ParsedPage) -> ParsedPage | None:
+    """The Source page of an extracted-text part, else None.
+
+    A part is hidden text of its Source and never an item of its own, so its scope membership,
+    and with it the audience that may read it, is exactly the Source's.
+    """
+    return None if page.part_of is None else _read_parent(page, page.part_of)
+
+
+def _frame_video(page: ParsedPage) -> ParsedPage | None:
+    """The video page of a scene frame, else None.
+
+    A frame is an item of its own with its own id and tags, and holds text taken from its video,
+    so it belongs to its own scopes and to the video's. Because a decision takes the most
+    restrictive of an item's scopes, the added scopes can only narrow who reads the frame, and a
+    page that claims a parent it does not have gains nothing. A frame needs `parent_media` and
+    to sit in that video's own frames folder.
+    """
+    from .. import scene_frames
+
+    if page.parent_media is None:
+        return None
+    if Path(page.rel_path).parent != scene_frames.frames_dir_for(Path(page.parent_media)):
+        return None
+    return _read_parent(page, page.parent_media + ".md")
+
+
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     """Return the set of scope ids `page` belongs to under `policy`, memoized."""
     if policy.empty or not policy.scopes:
         return frozenset()
+    if (source := _part_source(page)) is not None:
+        return evaluate(source, policy)
+    video = _frame_video(page)
+    inherited = frozenset() if video is None else evaluate(video, policy)
     # `st_size` alongside `st_mtime_ns`, not `st_mtime_ns` alone. Two writes
     # in quick succession can share an identical `st_mtime_ns` — the platform
     # timestamp is not always as fine-grained as the field width suggests
@@ -421,13 +484,13 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     cached = _MEMO.get(key)
     if cached is not None:
         _MEMO.move_to_end(key)
-        return cached
+        return cached | inherited
     result = _evaluate_markdown_scopes(page, policy) | assigned
     _MEMO[key] = result
     _MEMO.move_to_end(key)
     while len(_MEMO) > _MEMO_MAX:
         _MEMO.popitem(last=False)
-    return result
+    return result | inherited
 
 
 def _snapshot_key(
@@ -456,11 +519,19 @@ def evaluate_snapshot(
     Direct reads cannot use :func:`evaluate`: its live ``stat`` intentionally
     proves a search candidate still names the on-disk page, but a direct-read
     response must instead bind to the exact representation captured by its
-    open file descriptor.  The content hash is that representation identity;
-    no later path lookup participates in this answer.
+    open file descriptor.  The content hash is that representation identity.
+    A part or a scene frame also takes membership from its parent page, read
+    live, so neither is memoized under its own bytes.
     """
     if policy.empty or not policy.scopes:
         return frozenset()
+    if (source := _part_source(page)) is not None:
+        return evaluate(source, policy)
+    if (video := _frame_video(page)) is not None:
+        own = _evaluate_markdown_scopes(page, policy) | _registry_scopes(
+            page.vault_root, page.rel_path, policy
+        )
+        return own | evaluate(video, policy)
     key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:
