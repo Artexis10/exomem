@@ -27,7 +27,7 @@ from exomem import (
     working_set_runtime,
     writer_lease,
 )
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import library_scope, request_scope
 from exomem.vault import content_hash, parse_frontmatter, render_frontmatter_document
 
 # This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
@@ -167,7 +167,8 @@ def test_guest_generation_omits_rejections_on_a_withheld_page(anchor_vault: Path
         absent = commands.op_activate_context(anchor_vault, turn="Cargo Sled")
     assert "learned_aliases_rejected" not in absent["generation"]
 
-    _learn(anchor_vault, LEDGER, ["the thing"])
+    with library_scope():
+        _learn(anchor_vault, LEDGER, ["the thing"])
     _update(anchor_vault)
     _reset_caches()
     with request_scope(_external()):

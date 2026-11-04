@@ -28,6 +28,7 @@ from typing import Any
 from . import (
     call_spans,
     originals,
+    recap_folder,
     reserved_paths,
     semantic_index,
     semantic_writes,
@@ -106,14 +107,16 @@ class MoveFileValidation:
     atomic_supported: bool
 
 
-def _in_episode_folder(rel: str) -> bool:
-    """Whether `rel` lies anywhere under `Sources/Episodes/`, case-insensitively.
+def _in_episode_folder(vault_root: Path, rel: str) -> bool:
+    """Whether `rel` lies anywhere under `Sources/Episodes/` or a capture path's `Episodes/`, case-insensitively.
 
     A recap's revisions are found by one listing of that one folder, by a
     filename token. A move into it plants a page that listing may take for a
     recap; a move out of it, into a subfolder or by a rename that strips the
     token hides a live revision from it, so the next record leaves two live.
     """
+    if recap_folder.in_inbox(vault_root, rel, casefold=True):
+        return True
     parts = rel.replace("\\", "/").split("/")
     if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
         parts = parts[1:]
@@ -575,7 +578,7 @@ def _move_file_local(
     _admit_destination(vault_root, new_rel)
     # Decided before any destination existence check, so it cannot tell a withheld view from none.
     collection_authority.refuse_view_paths(vault_root, (new_rel,), MoveFileError)
-    if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
+    if _in_episode_folder(vault_root, old_rel) or _in_episode_folder(vault_root, new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
             reason=(
@@ -823,11 +826,19 @@ def _move_file_local(
     writes: list[PlannedWrite] = []
     batch_index_reports: list[object] = []
     batch_fanout_paths: list[Path] = []
+    left_unchanged: list[str] = []
+    writable_page = connector_boundary.effect_admission(vault_root)
     if update_wikilinks and inbound:
         for item in plan_inbound_rewrites(vault_root, old_rel, new_rel, inbound):
             if not item.changes:
                 continue
             rel = item.path
+            if not writable_page(rel):
+                # A page the mover may not write keeps its link and the move commits. Only a page
+                # the mover may see is counted, so a withheld page leaves the answer as it is without it.
+                if visible is None or visible(rel):
+                    left_unchanged.append(rel)
+                continue
             if visible is not None and not visible(rel):
                 if item.append_only:
                     continue
@@ -850,6 +861,10 @@ def _move_file_local(
             if visible is None or visible(rel):
                 reported_touched.append(rel)
                 reported_updated += item.changes
+
+    if left_unchanged:
+        # No path in the sentence: a restricted caller's response drops a warning that embeds one.
+        warnings.append(f"{len(left_unchanged)} visible linking page(s) outside your write scope keep their link to the old path")
 
     def validation_result(
         *, source_hash: str, destination_hash: str

@@ -4613,6 +4613,7 @@ def _resolve_relation_filter(
     """Resolve the relation filter to a participant path set (None when inactive),
     plus per-path provenance and advisory findings. `keep` is a restricted
     caller's admission (`None` for the owner): its edges resolve in that view.
+    A withheld anchor yields an authoritative empty before registry selection.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -4630,7 +4631,12 @@ def _resolve_relation_filter(
             f"got {relation_direction!r}",
         )
     from . import epistemic_graph, traversal_profiles
+    from .governance import egress
 
+    if relation_of:
+        relation_of = epistemic_graph._page_rel(relation_of)
+        if not egress.quick_page_visible(vault_root, relation_of):
+            return frozenset(), {}, ()
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     # An anchored filter inherits its anchor page's instance; otherwise public.
     registry = graph_index.relation_query_registry(anchor=relation_of)

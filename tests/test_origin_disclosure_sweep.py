@@ -29,7 +29,7 @@ from exomem import (
     writer_lease,
 )
 from exomem import find as find_module
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 READER = RequestPrincipal(audience_id="client-a", surface="mcp")
 REASON = "PRIVATEREASON"
@@ -106,10 +106,10 @@ def _carrier(vault: Path, reason: str = f"{REASON}, see [[{REASON}]]") -> tuple[
 
 
 def _placed(vault: Path, placement: str) -> tuple[object, str]:
-    """A client-a page whose carrier a hand edit then moved, its input withheld."""
+    """A page the owner authored whose carrier a hand edit then moved, its input withheld."""
     block, reference = _carrier(vault)
     _write_source_rule(vault, ceiling=6)
-    with request_scope(READER):
+    with request_scope(owner_principal(surface="mcp")):
         created = note.note(
             vault,
             content=block + f"\n\n## Claim\n- id: claim\n\nPublic claim {WORD} retained.\n",
@@ -184,7 +184,7 @@ def test_a_carrier_is_never_an_inbound_link_a_restricted_reader_is_shown(vault: 
 
     block, reference = _carrier(vault, reason=f"{REASON} [[Linked page]]")
     _write_source_rule(vault, ceiling=6)
-    with request_scope(READER):
+    with request_scope(owner_principal(surface="mcp")):
         linked = note.note(
             vault, content="Linked claim.\n", note_type="insight", title="Linked page", status="draft"
         )

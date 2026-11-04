@@ -7,19 +7,23 @@ the block names. Fixtures are invented.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from granted_writer import CLIENT, ISSUER, grant_writer
 from test_recent_promotions import _as, _log_entry
 from test_vocabulary_registries import _served
 
-from exomem import capture_sweep, due_state, envelope, episode_workflow, epistemic_graph, prominence
+from exomem import capture_sweep, due_state, envelope, episode_workflow, epistemic_graph, graph_sync, prominence
 from exomem import vault as vault_module
 from exomem.governance import egress, membership, policy
 from exomem.governance import principal as principal_module
-from exomem.governance.principal import RequestPrincipal
+from exomem.governance.principal import OriginSessionBinding, RequestPrincipal
+from exomem.vocabulary.registry import PUBLIC_INSTANCE
 
 FAMILY_REF = "exomem://review/family/undeclared_referents"
 NO_RELATION = "No honest relation exists for this isolated fixture."
@@ -274,6 +278,47 @@ def _withhold_from_external(vault: Path, glob: str) -> None:
     egress.clear_decision_memo()
 
 
+def _restricted_writer(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, inbox: str) -> RequestPrincipal:
+    """Bind host write authority and a live origin to the existing restricted audience."""
+    from exomem import auth_sessions, registry_history, server_auth, state_migration
+    from exomem.vocabulary import registry_specs
+
+    granted = grant_writer(vault, tmp_path, monkeypatch, writable_paths=[f"{inbox}/**", "log.md"],
+                           capture_paths=[f"Knowledge Base/{inbox}"], protected=[SCOPE_ID])(EXTERNAL.audience_id)
+    config = tmp_path / "host-boundary.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    public = {"namespace": "Knowledge Base/_Schema/public", "history": "public", "overrides": {}}
+    for spec in registry_specs().values():
+        override = {}
+        if spec.overlay(vault).exists():
+            override["overlay"] = spec.overlay(vault).relative_to(vault).as_posix()
+        if registry_history.history_dir(vault, spec.stem).exists():
+            override["history"] = spec.stem
+        if override:
+            public["overrides"][spec.stem] = override
+    data["vocabulary"] = {"public": public, "private": {},
+                          "destinations": {path: None for path in data["capture_paths"]}, "selections": {}}
+    config.write_text(json.dumps(data), encoding="utf-8")
+    stop = state_migration.assert_offline_migration_authority(source="undeclared referent fixture")
+    state_migration.arm_connector_boundary_offline(vault, authority=stop)
+    with principal_module.library_scope():
+        assert graph_sync.drain_active_rebuilds(timeout=60)
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        assert graph_sync.drain_active_rebuilds(timeout=60)
+    authority = auth_sessions.SessionAuthority.local(
+        directory=tmp_path / "origin-sessions", signing_root="temporary-referent-signing-root",
+        issuer=ISSUER, audience=f"{ISSUER}/mcp",
+    )
+    _, origin = asyncio.run(authority.issue(
+        client_id=CLIENT, scopes=["exomem:read", "exomem:write"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="referent-reader"),
+    ))
+    monkeypatch.setenv("EXOMEM_BASE_URL", ISSUER)
+    monkeypatch.setattr(server_auth, "build_session_authority", lambda **kwargs: authority)
+    return replace(EXTERNAL, client_binding=granted.client_binding,
+                   origin_session=OriginSessionBinding(origin.session_id, origin.generation, origin.audience))
+
+
 def _same_bytes_but_for_ids(value: object) -> str:
     return VOLATILE.sub("<id>", json.dumps(value, sort_keys=True))
 
@@ -298,7 +343,8 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
         with monkeypatch.context() as restricted:
             _as(restricted, "restricted-session")  # a later session: it would see a promotion notice that leaked
             capture_sweep.reset_state()  # the sweep's quiet interval is per process and vault, not per session
-            restricted.setattr(principal_module, "resolve_mcp_principal", lambda: EXTERNAL)
+            writer = _restricted_writer(vault, tmp_path / variant, restricted, inbox="Notes/Inbox/restricted")
+            restricted.setattr(principal_module, "resolve_mcp_principal", lambda: writer)
             if entity_type is not None:
                 hidden = call("read_memory", {"path": made["path"]})
                 assert hidden.get("success") is False, "the entity is withheld from the restricted caller"
@@ -353,10 +399,12 @@ def test_a_withheld_origin_and_a_missing_one_give_a_restricted_caller_the_same_r
     _withhold_from_external(vault, "Notes/Insights/**")
     answers: dict[str, str] = {}
     with monkeypatch.context() as restricted:
-        restricted.setattr(principal_module, "resolve_mcp_principal", lambda: EXTERNAL)
+        writer = _restricted_writer(vault, tmp_path, restricted, inbox="Entities/Concepts")
+        restricted.setattr(principal_module, "resolve_mcp_principal", lambda: writer)
         for name, ref in (("Alpha Ledger", withheld), ("Beta Ledger", missing)):
             created = call("change_connections", {"operation": {
                 "kind": "create-entity", "name": name, "ref": ref, "entity_type": "concept",
+                "registry_scope": PUBLIC_INSTANCE,
                 "summary": "A synthetic concept used to compare origins.",
             }})
             assert created["status"] == "committed", created

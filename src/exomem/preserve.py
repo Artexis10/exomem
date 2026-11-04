@@ -857,8 +857,11 @@ def preserve(
                 desc_one_line = desc_one_line[:277] + "…"
             log_body += f" Description: {desc_one_line}"
 
+        from .governance import connector_boundary
+
+        effect_admitted = connector_boundary.effect_admission(vault_root)
         top_index = kb / "index.md"
-        if top_index.exists() and not raw_protection:
+        if top_index.exists() and not raw_protection and effect_admitted(top_index):
             current_top, _guard = read_guarded_text(vault_root, top_index)
             new_top, _trim_note = indexes._prepend_recent_activity(
                 with_newline(current_top, "\n"),
@@ -883,11 +886,11 @@ def preserve(
                 )
             )
             writes.extend(sub_writes)
-        elif not raw_protection:
+        elif not raw_protection and not top_index.exists():
             warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
-        if log_file.exists() and not raw_protection:
+        if log_file.exists() and not raw_protection and effect_admitted(log_file):
             current_log, _guard = read_guarded_text(vault_root, log_file)
             new_log = _prepend_log_entry(
                 current_log,
@@ -902,7 +905,7 @@ def preserve(
                     expected_hash=content_hash(current_log),
                 )
             )
-        elif not raw_protection:
+        elif not raw_protection and not log_file.exists():
             warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer

@@ -1045,7 +1045,9 @@ def link(
         project=project,
     )
     top_index = kb / "index.md"
-    if top_index.is_file():
+    if not top_index.is_file():
+        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+    elif connector_boundary.effect_admission(vault_root)(top_index):
         top_text, top_guard = read_guarded_text(vault_root, top_index)
         new_top, _ = indexes._prepend_recent_activity(
             top_text, date_iso=date_iso, summary=activity
@@ -1059,8 +1061,6 @@ def link(
         index_writes = [PlannedWrite(top_index, counted_top or new_top, guard=top_guard), *sub_writes]
         auxiliary.extend(index_writes)
         derived_auxiliaries.extend(("index", write) for write in index_writes)
-    else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     try:
         from .relation_census import operation_provenance
 

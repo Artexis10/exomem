@@ -4,9 +4,10 @@ import json
 import sqlite3
 
 import pytest
+from granted_writer import grant_writer
 from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text
 from test_collection_store_writer import store as store
-from test_governance_egress import _external, write_rule, write_scope
+from test_governance_egress import SCOPE_ID, _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
@@ -17,12 +18,14 @@ from exomem.governance.principal import request_scope
 from exomem.record_memory import record_memory
 
 
-def test_warm_nonuniform_writes_classify_only_the_changed_subject_across_bindings(store, monkeypatch):
+def test_warm_nonuniform_writes_classify_only_the_changed_subject_across_bindings(store, tmp_path, monkeypatch):
     create(store)
     for index in range(8):
         store.append_record(CID, item={"title": f"Row {index}"}, why="seed")
     write_scope(store.root, paths=f"Records/**/{KEY}.md")
     write_rule(store.root, ceiling=6)
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], writable_scopes=[SCOPE_ID])("external")
     classified = []
     evaluate = membership.evaluate_metadata
 
@@ -31,14 +34,14 @@ def test_warm_nonuniform_writes_classify_only_the_changed_subject_across_binding
         return evaluate(subject, candidate)
 
     monkeypatch.setattr(membership, "evaluate_metadata", counted)
-    with request_scope(_external()), preview_store(store.root, store.handle):
+    with request_scope(writer), preview_store(store.root, store.handle):
         first = record_memory(store.root, "append", collection=CID,
                               item={"title": "Warm"}, item_key=KEY, why="capture")
     classified.clear()
     statements = []
     store.connection.set_trace_callback(statements.append)
     try:
-        with request_scope(_external()), preview_store(store.root, store.handle):
+        with request_scope(writer), preview_store(store.root, store.handle):
             second = record_memory(store.root, "update", collection=CID, item_key=KEY,
                                    changes={"count": 2}, why="correct",
                                    expected_container_hash=first["after_container_hash"],
@@ -52,12 +55,14 @@ def test_warm_nonuniform_writes_classify_only_the_changed_subject_across_binding
     assert store.connection.execute("SELECT row_version FROM items WHERE item_key=?", (KEY,)).fetchone() == (2,)
 
 
-def test_warm_partial_refusal_does_not_rebuild_or_evaluate_the_collection(store, monkeypatch):
+def test_warm_partial_refusal_does_not_rebuild_or_evaluate_the_collection(store, tmp_path, monkeypatch):
     create(store)
     store.append_record(CID, item={"title": "Hidden"}, item_key=KEY, why="seed")
     write_scope(store.root, paths=f"Records/**/{KEY}.md")
     write_rule(store.root, ceiling=0)
-    with request_scope(_external()):
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
+    with request_scope(writer):
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item={"title": "New"}, item_key=OTHER, why="capture")
     evaluated = []
@@ -68,7 +73,7 @@ def test_warm_partial_refusal_does_not_rebuild_or_evaluate_the_collection(store,
         return decide(*args, **kwargs)
 
     monkeypatch.setattr(governance, "decide", counted)
-    with request_scope(_external()):
+    with request_scope(writer):
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item={"title": "New"}, item_key=OTHER, why="capture")
     assert evaluated == []
@@ -91,7 +96,7 @@ def test_manifest_bindings_return_fresh_heads_and_revised_contract(store):
     assert revised.manifest_version.hash != manifest.manifest_version.hash
 
 
-def test_failed_commit_cannot_authorize_different_content_at_the_reused_row_version(store, monkeypatch):
+def test_failed_commit_cannot_authorize_different_content_at_the_reused_row_version(store, tmp_path, monkeypatch):
     """A precommit-approved version must not outlive the failed durable boundary."""
     text = manifest_text().replace("    count:", "    tags: {type: array, items: {type: string}}\n    count:")
     store.create_collection(manifest_path(), text, why="create")
@@ -100,6 +105,8 @@ def test_failed_commit_cannot_authorize_different_content_at_the_reused_row_vers
     path = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     path.write_text(path.read_text() + "tags: [secret]\n")
     write_rule(store.root, ceiling=0)
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
     before = tuple(store.connection.iterdump())
     precommit = store._precommit
 
@@ -111,14 +118,14 @@ def test_failed_commit_cannot_authorize_different_content_at_the_reused_row_vers
     arguments = dict(item_key=KEY, expected_container_hash=first["after_container_hash"],
                      expected_item_version=first["after_item_hash"], why="correct")
     monkeypatch.setattr(store, "_precommit", fail_commit)
-    with request_scope(_external()), pytest.raises(sqlite3.IntegrityError):
+    with request_scope(writer), pytest.raises(sqlite3.IntegrityError):
         store.update_record(CID, changes={"count": 2}, **arguments)
     assert tuple(store.connection.iterdump()) == before
     monkeypatch.setattr(store, "_precommit", precommit)
-    with request_scope(_external()), pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+    with request_scope(writer), pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
         store.update_record(CID, changes={"tags": ["secret"]}, **arguments)
     assert tuple(store.connection.iterdump()) == before
-    with request_scope(_external()):
+    with request_scope(writer):
         store.update_record(CID, changes={"count": 3}, **arguments)
     stored = store.connection.execute("SELECT row_version,values_json FROM items WHERE item_key=?", (KEY,)).fetchone()
     assert stored[0] == 2 and json.loads(stored[1])["count"] == 3
@@ -144,7 +151,7 @@ def test_rebound_canonical_manifest_cannot_supply_another_collections_identity(s
 
 
 @pytest.mark.parametrize("before_authorization", [True, False])
-def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypatch, before_authorization):
+def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, tmp_path, monkeypatch, before_authorization):
     """A sibling change must invalidate both proposed and committed authority."""
     from test_due_state_bulk_carriers import _command
 
@@ -158,6 +165,8 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypat
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + "tags: [secret]\n")
     write_rule(store.root, ceiling=0)
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
     original = store._precommit if before_authorization else store.handle.release_cache.prepare
 
     def interleave(manifest=None):
@@ -168,7 +177,7 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypat
         else:
             original()
 
-    with request_scope(_external()), preview_store(store.root, store.handle):
+    with request_scope(writer), preview_store(store.root, store.handle):
         def query():
             return writer_lease.invoke_command(_command("record_memory"), store.root,
                        action="query", collection=CID, response_detail="full")
@@ -226,18 +235,20 @@ def test_unexplained_transaction_rollback_does_not_leave_released_subject_metada
         assert KEY not in rendered()
 
 
-def test_warm_complete_release_rechecks_lifecycle_even_without_a_row_change(store, monkeypatch):
+def test_warm_complete_release_rechecks_lifecycle_even_without_a_row_change(store, tmp_path, monkeypatch):
     """A fresh tombstone snapshot must invalidate a previously complete mutation release."""
     from exomem.governance import lifecycle
 
     create(store)
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
-    with request_scope(_external()):
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"])("external")
+    with request_scope(writer):
         assert store.inspect_collection(CID)["coverage"]["committed"] == 1
         store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({collections.record_ref(CID, KEY)}))
     before = tuple(store.connection.iterdump())
-    with request_scope(_external()):
+    with request_scope(writer):
         assert store.inspect_collection(CID)["coverage"]["committed"] == 0
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")

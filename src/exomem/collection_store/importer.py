@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Never
 
-from .. import __version__, archive_members, item_keys, records, vault
+from .. import __version__, archive_members, auth_sessions, item_keys, records, vault
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
@@ -2021,6 +2021,7 @@ class _Job:
     def principal(self) -> principal_module.RequestPrincipal:
         bound = self.binding["principal"]
         context = AuthorizationSessionContext(**bound["session"]) if bound["session"] else None
+        client, origin = bound.get("client_binding"), bound.get("origin_session")
         return principal_module.RequestPrincipal(
             audience_id=bound["audience_id"],
             surface=bound["surface"],
@@ -2030,6 +2031,9 @@ class _Job:
             local_owner=bound["local_owner"],
             authorization_session_id=context.session_id if context else None,
             verified_authorization_session=context,
+            client_binding=principal_module.ClientBinding(**client) if client is not None else None,
+            origin_session=principal_module.OriginSessionBinding(**origin) if origin is not None else None,
+            administrative_ingress=False,
         )
 
 
@@ -2067,6 +2071,8 @@ def _bound_principal(who: principal_module.RequestPrincipal) -> dict[str, Any]:
         "remote_owner": who.remote_owner,
         "local_owner": who.local_owner,
         "session": session,
+        "client_binding": dataclasses.asdict(who.client_binding) if who.client_binding is not None else None,
+        "origin_session": dataclasses.asdict(who.origin_session) if who.origin_session is not None else None,
     }
 
 
@@ -2228,6 +2234,8 @@ def _grant(writer, job: _Job, operation) -> None:
     exact bound source digest.
     """
     bound = job.binding
+    if not auth_sessions.origin_session_active_sync(job.principal()):
+        raise _Lost
     issuer = bound["principal"]["issuer_family"]
     if issuer and issuer.startswith("cloud-cell:"):
         if not principal_module.cloud_owner_binding_matches(issuer.removeprefix("cloud-cell:")):

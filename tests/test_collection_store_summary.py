@@ -546,8 +546,11 @@ def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(stor
 
 
 @pytest.mark.parametrize("population", ["empty", "uniform", "varying"])
-def test_summary_admission_preserves_held_refusal_and_row_limit(store, monkeypatch, population):
+def test_summary_admission_preserves_held_refusal_and_row_limit(store, tmp_path, monkeypatch, population):
     """Count-free admission must check held candidates without concealing the row-decision limit."""
+    from granted_writer import grant_writer
+    from test_governance_egress import SCOPE_ID
+
     create(store)
     if population != "empty":
         bulk(store, [{"title": f"Row {n}"} for n in range(3)])
@@ -563,8 +566,10 @@ def test_summary_admission_preserves_held_refusal_and_row_limit(store, monkeypat
         scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
         scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{key}]\n")
         expected = "COLLECTION_RELEASE_LIMIT"
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
     before = tuple(store.connection.iterdump())
-    with request_scope(_external()):
+    with request_scope(writer):
         with pytest.raises(collections.CollectionError, match=expected):
             store.append_record(CID, item={"title": "Refused mutation"}, why="capture")
     assert tuple(store.connection.iterdump()) == before

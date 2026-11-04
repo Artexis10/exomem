@@ -60,6 +60,7 @@ _TRANSITION_BC = "00000000-0000-4000-8000-0000000000bc"
 _TRANSITION_CB = "00000000-0000-4000-8000-0000000000cb"
 _PAGE = "Knowledge Base/Notes/Insights/lifecycle.md"
 _OTHER_PAGE = "Knowledge Base/Notes/Insights/lifecycle-moved.md"
+STATUSES_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
 
 
 def _source(
@@ -4407,12 +4408,15 @@ def test_prepared_currentness_is_pure_and_never_treats_pending_as_review() -> No
 
 
 def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_facts(
-    tmp_path: Path,
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+    from conftest import initialize_vault_state_offline
+    from granted_writer import grant_writer
+    from test_governance_egress import SCOPE_ID, _reset_caches, write_rule, write_scope
 
     from exomem.governance.principal import library_scope, request_scope
 
+    initialize_vault_state_offline(tmp_path, source="semantic lifecycle writers")  # arming needs ready state
     before = _source(_semantic_body("Keep retries bounded."))
     after = before.replace("Keep retries bounded.", "Keep retries bounded to five.")
     page = _write(tmp_path, _PAGE, before)
@@ -4420,36 +4424,18 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
     write_rule(tmp_path, ceiling=0)
     governance = tmp_path / "Knowledge Base/_Governance"
     (governance / "scopes/statuses.yaml").write_text(
-        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\npaths: ["_Schema/statuses.yaml"]\n'
+        f'governance_version: 1\nid: {STATUSES_SCOPE_ID}\npaths: ["_Schema/statuses.yaml"]\n'
     )
     (governance / "rules/statuses.yaml").write_text(
         "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
-        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
+        f'scope_ids: ["{STATUSES_SCOPE_ID}"]\naudience: external\nceiling: 0\n'
+    )
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/Withheld/private.md",
+        _source("Private prose.", page_id=_OTHER_ID, status="private-review"),
     )
     _reset_caches()
-    # Spec: a restricted first write uses the complete neutral census. Its outcome
-    # is the same with or without hidden pages, and the prepared manifest
-    # describes the complete corpus, not the writer's view.
-    outcomes = []
-    for hidden in (False, True):
-        if hidden:
-            _write(
-                tmp_path,
-                "Knowledge Base/Notes/Withheld/private.md",
-                _source("Private prose.", page_id=_OTHER_ID, status="private-review"),
-            )
-        with request_scope(_external()):
-            first = semantic_writes.preflight_existing(
-                tmp_path, path=_PAGE, after_source=after, operation="edit"
-            )
-        outcomes.append((first.grandfathered, first.contract_result.as_dict()))
-        assert first.manifest_install_required
-        assert not activation_manifest.manifest_path(tmp_path).exists()
-        assert page.read_text() == before
-    assert outcomes[0] == outcomes[1]
-    prepared = {item.path_at_activation: item for item in first.prospective_manifest.pages}
-    assert set(prepared) == {_PAGE, "Knowledge Base/Notes/Withheld/private.md"}
-    assert prepared["Knowledge Base/Notes/Withheld/private.md"].status == "private-review"
     with library_scope():
         inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
         commands.op_schema_memory(
@@ -4460,12 +4446,19 @@ def test_restricted_writes_use_stored_manifest_without_hidden_lifecycle_cache_fa
             expected_hash=inspected["content_hash"],
             why="define the private draft lifecycle",
         )
-        activation_manifest.ensure_manifest(tmp_path)
-        # Warm the shared corpus as the owner before a restricted caller writes.
+    # Arming installs the activation manifest from the complete corpus, so a restricted writer
+    # never prepares the first one. It writes the page only as a client whose writable scope selects it.
+    writer = grant_writer(
+        tmp_path, tmp_path, monkeypatch, protected=[SCOPE_ID, STATUSES_SCOPE_ID],
+        writable_paths=["Notes/Insights/lifecycle.md"], capture_paths=["Knowledge Base/Inbox"],
+        config_dir=tmp_path_factory.mktemp("host-config"),
+    )
+    # Warm the shared corpus as the owner before a restricted caller writes.
+    with library_scope():
         semantic_writes.preflight_existing(
             tmp_path, path=_PAGE, after_source=after, operation="edit"
         )
-    with request_scope(_external()):
+    with request_scope(writer("external")):
         allowed = semantic_writes.preflight_existing(
             tmp_path, path=_PAGE, after_source=after, operation="edit"
         )
@@ -4512,6 +4505,17 @@ def test_a_denied_writer_cannot_tell_how_the_owner_classed_a_recorded_label(
             sorted(finding.code for finding in preflight.contract_result.blocking_findings)
         )
 
+    # A restricted audience holds no write authority, so its view of the label is the classification
+    # a write would need, read directly.
+    def classify(root: Path, scope) -> str:
+        _reset_caches()
+        find_module.clear_cache()
+        try:
+            with scope:
+                return lifecycle_statuses.Basis(root).classify("in-review", path=_PAGE).require()
+        except lifecycle_statuses.ClassificationUnavailable as error:
+            return error.code
+
     denied = {}
     owner = {}
     for overlay in ("pending", None, "live"):
@@ -4521,11 +4525,11 @@ def test_a_denied_writer_cannot_tell_how_the_owner_classed_a_recorded_label(
         write_rule(root, ceiling=0)
         governance = root / "Knowledge Base/_Governance"
         (governance / "scopes/statuses.yaml").write_text(
-            'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\npaths: ["_Schema/statuses.yaml"]\n'
+            f'governance_version: 1\nid: {STATUSES_SCOPE_ID}\npaths: ["_Schema/statuses.yaml"]\n'
         )
         (governance / "rules/statuses.yaml").write_text(
             "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
-            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB1"]\naudience: external\nceiling: 0\n'
+            f'scope_ids: ["{STATUSES_SCOPE_ID}"]\naudience: external\nceiling: 0\n'
         )
         if overlay is not None:
             registry = lifecycle_statuses.registry_path(root)
@@ -4540,7 +4544,7 @@ def test_a_denied_writer_cannot_tell_how_the_owner_classed_a_recorded_label(
         active = _source("Ordinary prose, no unit.", status="active")
         _write(root, _PAGE, active)
         after = active.replace("no unit.", "still no unit.")
-        denied[overlay] = attempt(root, request_scope(_external()), after)
+        denied[overlay] = classify(root, request_scope(_external()))
         owner[overlay] = attempt(root, library_scope(), after)
 
     assert denied == dict.fromkeys(owner, "STATUS_CLASSIFICATION_UNAVAILABLE")
