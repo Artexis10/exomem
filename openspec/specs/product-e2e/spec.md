@@ -38,7 +38,7 @@ The system SHALL exercise the actual HTTP application lifecycle, REST authentica
 
 ### Requirement: Tiered model and media gates
 Lean product E2E SHALL run without optional models for every pull request that changes a path outside the docs-only set, except the release-please release pull request, and for every main, scheduled, or manual run. The docs-only set is `docs/`, `openspec/`, and Markdown files at the repository root other than `README.md`; none of these paths is a wheel or sdist input.
-CI SHALL omit this journey for a pull request only when its complete merge-tree comparison proves that every change is inside the docs-only set, or when the pull request is the release-please release pull request whose release evidence requires a green full run at its base revision and refuses any change that release-please did not make.
+CI SHALL omit this journey for a pull request only when its complete merge-tree comparison proves that every change is inside the docs-only set, or when the pull request is the release-please release pull request whose release evidence requires successful full evidence for its source tree and refuses any change that release-please did not make.
 CI SHALL report omission explicitly, as a job summary or a skipped job, and SHALL retain the journey when that comparison or decision is unavailable.
 Real embeddings/reranking SHALL run in the model job.
 Real OCR, PDF, ASR, CLIP, and video fixtures SHALL run scheduled or opt-in with explicit soft-fail reporting when their configured dependencies are unavailable.
@@ -68,12 +68,12 @@ Real OCR, PDF, ASR, CLIP, and video fixtures SHALL run scheduled or opt-in with 
 #### Scenario: Release pull request relies on full-run evidence
 - **WHEN** the pull request is the release-please release pull request
 - **THEN** the installed journey does not run on it
-- **AND** release evidence refuses the pull request unless a green full run exists at its base revision and every change is release-please's own work
+- **AND** release evidence refuses the pull request unless successful full evidence exists for its source tree and every change is release-please's own work
 
 #### Scenario: Main and full runs retain installed proof
 - **WHEN** CI runs for main, a schedule, or a manual dispatch
 - **THEN** it runs the installed journey regardless of changed paths
-- **AND** release acceptance still requires green full CI at the recorded main revision
+- **AND** release acceptance requires successful full evidence for the actual source tree, reusable across identical tested and merged trees
 
 ### Requirement: Installed-wheel Planning product journey
 The lean installed-wheel product E2E SHALL exercise first-class Planning through real installed stdio MCP mutation/query calls and an installed CLI inspect/query call, without source-tree imports or optional models. In a temporary human-owned vault it SHALL create a Planning collection, capture and triage software intent, build an outcome-to-initiative-to-work-item hierarchy, query week/quarter/year/multi-year views, round-trip one opaque Records saved-view pointer and one thin OpenSpec/repository execution pointer, perform a guarded targeted update, restart the server, observe a direct canonical-file edit with a positive audit gap, and prove persistence. It SHALL also exercise a materially different non-software outcome/initiative fixture and SHALL keep raw Planning items out of ordinary recall. The installed auth-required HTTP lane SHALL prove unauthenticated refusal only; authenticated HTTP behavior remains covered by generated-surface and governance tests rather than being claimed by this journey.
