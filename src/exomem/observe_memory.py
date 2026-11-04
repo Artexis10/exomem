@@ -261,10 +261,21 @@ def observe_memory(
         base_unit = current_unit if proposal_mode == "update" else None
         normalized_verdict = _resolve_verdict(verdict, base_unit)
         normalized_check_by = _resolve_check_by(check_by, base_unit)
-        normalized_as_of = _resolve_governed_value(as_of, base_unit, key="as_of", normalize=lambda value: _canonical_date(value, "as_of"))
-        normalized_until = _resolve_governed_value(until, base_unit, key="until", normalize=lambda value: _canonical_date(value, "until"))
-        if normalized_as_of and normalized_until and dt.date.fromisoformat(normalized_until) < dt.date.fromisoformat(normalized_as_of):
-            raise ObserveMemoryError("INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of")
+        normalized_as_of = _resolve_governed_value(
+            as_of, base_unit, key="as_of",
+            normalize=lambda value: _canonical_date(value, "as_of"),
+        )
+        normalized_until = _resolve_governed_value(
+            until, base_unit, key="until",
+            normalize=lambda value: _canonical_date(value, "until"),
+        )
+        if (
+            normalized_as_of and normalized_until
+            and dt.date.fromisoformat(normalized_until) < dt.date.fromisoformat(normalized_as_of)
+        ):
+            raise ObserveMemoryError(
+                "INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of",
+            )
         preserved_metadata = _preserved_metadata(base_unit)
         if selected_kind == _COMPACT_KIND and (
             normalized_verdict is not None

@@ -933,13 +933,13 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
     update = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "update")
     properties = {**update["properties"], **operation.get("properties", {})}
 
-    assert "omitted verdict/check_by/id persist" in description
+    assert "omitted governed metadata and id persist" in description
     assert "tags/context/relations clear unless resent" in description
     assert "never discards an authored metadata row" not in description
     for replaced in ("tags", "context", "relations"):
         assert "Replaces on update" in properties[replaced]["description"]
-    for preserved in ("verdict", "check_by"):
-        assert "Empty string clears it on update" in properties[preserved]["description"]
+    for preserved in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
+        assert "'' clears" in properties[preserved]["description"]
 
 
 # --------------------------------------------------------------------------
