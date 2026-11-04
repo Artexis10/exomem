@@ -3228,6 +3228,7 @@ class _AdmittedRecallRows:
 
     entries: tuple[tuple[str, str | None], ...]
     paths: frozenset[str]
+    emitted_parents: Mapping[str, str | None]
     carry_candidates: tuple[str, ...]
     outside_carry: tuple[str, ...]
 
@@ -11087,6 +11088,16 @@ class LexicalStore:
         rows = self._admitted_recall_rows_for(scope, checkpoint)
         return None if rows is None else rows.paths
 
+    def recall_emitted_parents(
+        self, scope: str, checkpoint: Any | None
+    ) -> Mapping[str, str | None] | None:
+        """Structural parent links from the same proven rows as recall paths.
+
+        These links carry no release verdict; callers still authorize parents.
+        """
+        rows = self._admitted_recall_rows_for(scope, checkpoint)
+        return None if rows is None else rows.emitted_parents
+
     def published_admitted_paths(
         self,
         scope: str,
@@ -11350,18 +11361,20 @@ class LexicalStore:
                     raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
                     with call_spans.span("lexical.resolver_entries", {}) as measured:
                         entries, candidates, outside = [], [], []
+                        parents = {}
                         # Cache the SQL partitions, then decide visibility anew for each request.
-                        for path, title, in_scope, carry in conn.execute(
-                            f"SELECT p.path, p.title, p.{col}, (p.{col} = 1{raw_clause}) "
+                        for path, title, parent, in_scope, carry in conn.execute(
+                            f"SELECT p.path, p.title, p.emitted_parent_path, p.{col}, (p.{col} = 1{raw_clause}) "
                             "FROM pages p ORDER BY p.path", raw_params,
                         ):
                             path = str(path)
                             if in_scope == 1:
                                 entries.append((path, title))
+                                parents[path] = parent
                             (candidates if carry else outside).append(path)
                         rows = _AdmittedRecallRows(
                             tuple(entries), frozenset(path for path, _title in entries),
-                            tuple(candidates), tuple(outside),
+                            MappingProxyType(parents), tuple(candidates), tuple(outside),
                         )
                         measured["rows"] = len(entries)
                     with self._term_frequency_cache_lock:
