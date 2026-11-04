@@ -114,8 +114,12 @@
             "result": {
               "enum": [
                 "meets target",
-                "misses target"
+                "misses target",
+                "unverified"
               ]
+            },
+            "reason": {
+              "const": "paused-worker-comparison"
             }
           }
         }

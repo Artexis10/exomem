@@ -47,6 +47,8 @@ A later CI gate will use neutral fixtures and configured allowances through the 
 
 The six collection-store groups carry a configured p95 target of 100 ms. It is the private-sandbox acceptance bar and never a shared-runner gate. The paired allowances are provisional until paired runs of identical code establish them, and list operations are reported without gating. Every optimization must preserve privacy, governance, source custody, and seal guarantees.
 
+Paired runs pause workers between calls, which changes lease and maintenance timing. Their per-arm percentiles remain descriptive and leave absolute acceptance unverified. Absolute acceptance needs a continuously runnable worker with CPU pressure observations throughout the measured interval.
+
 ## Risks / Trade-offs
 
 - Sparse cases produce unstable percentiles → Label them descriptive and preserve configured acceptance minimums.

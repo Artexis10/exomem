@@ -106,9 +106,11 @@ cases and the arm roots on the host.
   so the roots stay in place between runs.
 - `--embeddings` starts the arms with the real encoder settings. Without it embeddings are off.
 
-The summary adds, per store group, the head p95 against `p95_target_ms` from the contract
-(`meets target` or `misses target`). It records `/proc/pressure/cpu` avg60 at the start and at the end.
-An absolute verdict counts only on a quiet host.
+The summary reports each store group's head p95 and configured `p95_target_ms`.
+It marks absolute acceptance `unverified` with reason `paused-worker-comparison` because the paired runner pauses workers between calls.
+Those pauses change lease and maintenance timing, even on a quiet host.
+Absolute acceptance needs a continuously runnable worker and CPU pressure observations throughout the measured interval.
+The paired summary records `/proc/pressure/cpu` avg60 at the start and at the end.
 
 ## Fixture
 
