@@ -39,7 +39,7 @@ The backups therefore move to a new bucket with Object Lock enabled and default 
   - The guard does not trust the local clock alone. Before each run, the job compares local time with the provider's response time. It refuses and alerts when they differ by more than a few minutes, so a fast clock cannot set a lock far in the future.
   - Its key is admin-tier custody under `make-cloud-cells-operator-resistant` D6.
 - **30 days.** This margin covers the time to notice a mass deletion and recover from it.
-- **Cost.** One retention update per current version each time its lock nears expiry, across all cells, at the provider's per-call price. Task 1.2 measures it at fleet scale with the storage.
+- **Cost.** One retention update per current version each time its lock nears expiry, about 5 per version per month. Retention updates are Class A calls and list calls are Class C. The provider charges nothing for either on pay-as-you-go accounts (task 1.2), so the extender's cost is the storage it keeps, not its calls.
 
 ### D3. Deletes hide; the lifecycle removes after the lock
 
@@ -65,7 +65,11 @@ A runbook procedure lists a cell's file versions as of a point in time and resto
 
 ## Risks / Trade-offs
 
-- **Cost.** Hidden versions stay for 30 days, so storage grows by about 30 days of each repository's churn. Task 1.2 measures it on a real cell before the migration.
+- **Cost.** Hidden versions stay for 30 days, so storage grows by about 30 days of each repository's deletions. Task 1.2 measured this on the largest real cell on 2026-11-02, at the provider's published price of $6.95 per TB-month with no minimum storage duration:
+  - The repository held 9.67 GB in 733 files, and it received about 188 MB of uploads a day.
+  - At the ceiling, where each day's deletions equal its uploads, the lock keeps about 5.6 GB more per cell, or $0.04 a month.
+  - For 1,000 cells of that size, that is at most about $39 a month on top of about $67 a month of base storage.
+  - Calls add nothing, because the provider does not charge for the call classes the extender uses.
 - **A mistaken backup cannot be removed early.** That is the point of compliance mode. The same rule holds a deleted tenant's backups until retention ends, and the deletion record states that date.
 - **Enabling Object Lock.** Whether the provider allows Object Lock on an existing bucket does not matter, because D1 uses a new bucket.
 
