@@ -7901,7 +7901,7 @@
     }
   },
   "record_episode": {
-    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. The record response's compile block gives the ref to cite in a compiled note's sources. Select one operation.kind.",
+    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {

@@ -7,9 +7,10 @@ the episode's revisions: a Decided line of the live revision that no cited revis
 holds is open.
 
 Coverage counts recaps and lines. It never claims that a note states a decided item:
-it is "cited by a live page (citation only; items unassessed)". Known limit: entity,
-plan and record pages hold no `sources:` claim, so a compile into one of them leaves
-its line open.
+it is "cited by a live page (citation only; items unassessed)". A citation holds
+every Decided line in that revision. The compiler therefore cites only after it
+compiles or explicitly dismisses every item. Entity, plan and record pages hold
+no `sources:` claim, so an episode updated only through those pages stays open.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from . import (
     lifecycle_statuses,
     memory_refs,
     note_types,
-    review_state,
     source_coverage,
     source_taxonomy,
     vault,
@@ -199,32 +199,6 @@ def survey(
         for revisions in episodes(pages)
     )
     return [coverage for coverage in found if coverage is not None]
-
-
-def acted_ids(vault_root: Path) -> frozenset[str]:
-    """The review item ids of the live recaps whose every Decided line a cited revision now holds.
-
-    An item that was open and is now in this set was acted on: a live page cites a
-    recap that holds its lines. A recap that was superseded, deleted or lost a line
-    is not live or not fully held, so it is never in the set: that is `cleared`, not
-    `acted`. Owner-only: it reads every recap and every citing page unfiltered.
-    """
-    from . import find
-
-    base = folder(vault_root)
-    try:
-        names = sorted(entry.name for entry in os.scandir(base) if entry.is_file())
-    except FileNotFoundError:
-        return frozenset()
-    pages = [find._CACHE.get(base / name, vault_root) for name in names]
-    covered = survey(
-        vault_root,
-        [page for page in pages if page is not None],
-        lookup=lambda path: find._CACHE.get(vault_root / path, vault_root),
-    )
-    return frozenset(
-        review_state.item_id(coverage.ref) for coverage in covered if coverage.ref and coverage.decided and not coverage.open
-    )
 
 
 def revision_paths(vault_root: Path, paths: Iterable[str]) -> set[str]:

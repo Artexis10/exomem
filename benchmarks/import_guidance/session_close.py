@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -36,6 +37,7 @@ from epistemic.journeys.f27_replay import (
     fault_reason,
     refuse_unsafe_out_dir,
 )
+from epistemic.journeys.f33_referent_replay import tool_calls
 from membench.trackc.witness_join import parse_stream_json_transcript
 
 from exomem import memory_refs, note_types, prominence, source_closure
@@ -69,8 +71,8 @@ class Case:
     seed: Path
     engagement: str
     turns: tuple[str, ...]
-    answer_key: dict | None
     path: Path
+    recall_turn: str | None = None
 
 
 def suite_dir() -> Path:
@@ -97,12 +99,15 @@ def load_case(path: Path) -> Case:
     seed = suite_dir() / "seeds" / str(base.get("seed"))
     if not seed.is_dir():
         problems.append(f"seed {base.get('seed')!r} is not a folder under seeds/")
-    if "answer_key" not in raw:
-        problems.append("answer_key slot is missing (null until the key writer fills it)")
+    if "answer_key" in raw or "answer_key" in base:
+        problems.append("answer_key belongs in the scorer-only answer-keys folder")
+    recall_turn = raw.get("recall_turn")
+    if recall_turn is not None and not (isinstance(recall_turn, str) and recall_turn.strip()):
+        problems.append("recall_turn must be a non-empty string when supplied")
     if problems:
         raise SystemExit(f"{path.name}: " + "; ".join(problems))
     return Case(
-        raw["id"], raw["title"], seed, raw["engagement"], tuple(turns), raw["answer_key"], path
+        raw["id"], raw["title"], seed, raw["engagement"], tuple(turns), path, recall_turn
     )
 
 
@@ -381,6 +386,7 @@ def drive_session(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=os.name == "posix",
     )
 
     def read_stdout() -> None:
@@ -434,11 +440,34 @@ def drive_session(
         proc.stdin.close()
     except OSError:
         pass
-    try:
-        proc.wait(timeout=EXIT_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-        proc.wait(timeout=EXIT_GRACE_SECONDS)
+    if os.name == "posix":
+        def wait_without_reaping() -> None:
+            deadline = time.monotonic() + EXIT_GRACE_SECONDS
+            while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, EXIT_GRACE_SECONDS)
+                time.sleep(min(0.05, remaining))
+
+        try:
+            try:
+                wait_without_reaping()
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                wait_without_reaping()
+        finally:
+            # The unreaped leader reserves our group ID until the remaining stdio server is killed.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=EXIT_GRACE_SECONDS)
+    else:
+        try:
+            proc.wait(timeout=EXIT_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait(timeout=EXIT_GRACE_SECONDS)
     return SimpleNamespace(
         stdout="".join(stream),
         stderr="".join(stderr),
@@ -462,27 +491,13 @@ def hook_ask(arm: Arm, session_id: str) -> str:
 def tool_trail(stdout: str) -> dict:
     """The tool calls in order, each with its reply, read from the stream. `compile` holds the `compile` block of each
     `record_episode` reply, and `warming` counts the replies that said the index was still warming."""
-    names: dict[str, str] = {}
-    calls: list[dict] = []
+    calls = tool_calls(stdout)
     compile_blocks: list[object] = []
     warming = 0
-    for raw in stdout.splitlines():
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        content = (event.get("message") or {}).get("content") if isinstance(event, dict) else None
-        for block in content if isinstance(content, list) else []:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                names[block.get("id")] = block.get("name")
-                calls.append({"tool": block.get("name"), "input": block.get("input")})
-            elif block.get("type") == "tool_result":
-                reply = json.dumps(block.get("content"))
-                warming += WARMING_MARK in reply
-                if names.get(block.get("tool_use_id"), "").endswith("record_episode"):
-                    compile_blocks.append(compile_block_of(block.get("content")))
+    for call in calls:
+        warming += WARMING_MARK in json.dumps(call["result"])
+        if str(call["name"]).endswith("record_episode"):
+            compile_blocks.append(compile_block_of(call["result"]))
     return {"calls": calls, "compile": compile_blocks, "warming": warming}
 
 
@@ -524,6 +539,73 @@ def replies_by_turn(stdout: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+def session_result(done: SimpleNamespace, expected_turns: int) -> dict:
+    """Raw evidence from a finished process, without scoring its answer or its tool choices."""
+    transcript = parse_stream_json_transcript(done.stdout.splitlines())
+    trail = tool_trail(done.stdout)
+    connected = server_state(done.stdout)
+    error = (
+        done.stopped
+        or fault_reason(done, transcript)
+        or (None if done.finished == expected_turns else "a turn returned no result")
+        or (None if connected.get(checks.SERVER) == "connected" else "the MCP server did not connect")
+    )
+    return {
+        "error": error,
+        "session_id": init_field(done.stdout, "session_id"),
+        "replies": replies_by_turn(done.stdout),
+        "calls": trail["calls"],
+        "compile_blocks": trail["compile"],
+        "warming_replies": trail["warming"],
+        "usage": transcript.usage,
+        "cost_usd": transcript.total_cost_usd,
+        "api_key_source": init_field(done.stdout, "apiKeySource"),
+        "server_connected": connected,
+        "stderr": done.stderr,
+        "returncode": done.returncode,
+    }
+
+
+def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str]) -> dict:
+    """A new actor and server on capture's state, with only the independently supplied question."""
+    fresh = work / "fresh"
+    stream = fresh / "stream.jsonl"
+    row = {
+        "question": case.recall_turn,
+        "stream": str(stream),
+        "error": None,
+        "session_id": None,
+        "answer": None,
+        "calls": [],
+        "server_connected": None,
+        "usage": None,
+        "cost_usd": None,
+    }
+    try:
+        for name in ("cwd", "hook-home"):
+            (fresh / name).mkdir(parents=True)
+        row["before"] = snapshot(work / "vault")
+        files = stage_agent_files(arm, fresh, env)
+        done = drive_session(
+            agent_argv(executable, files, model),
+            fresh / "cwd",
+            agent_env(fresh, case) | {"EXOMEM_CONFIG_PATH": env["EXOMEM_CONFIG_PATH"]},
+            (case.recall_turn,),
+            stream,
+        )
+        row.update(session_result(done, 1))
+        row["answer"] = row["replies"][-1] if row["replies"] else None
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        row["error"] = f"{type(error).__name__}: {error}"
+    try:
+        row["after"] = snapshot(work / "vault")
+        if "before" in row:
+            row["observed"] = diff_vault(row["before"], row["after"])
+    except OSError as error:
+        row["error"] = f"{type(error).__name__}: {error}"
+    return row
+
+
 def run_session(
     case: Case,
     arm: Arm,
@@ -552,6 +634,8 @@ def run_session(
         "turns": list(case.turns),
         "hooked": hooked,
         "stream": str(work / "stream.jsonl"),
+        "recall_enabled": case.recall_turn is not None,
+        "fresh": None,
         "error": None,
         **{k: v for k, v in stamp.items() if k != "product_shas"},
     }
@@ -566,28 +650,21 @@ def run_session(
             work / "stream.jsonl",
             hook_turn=(lambda session_id: hook_ask(arm, session_id)) if hooked else None,
         )
-        time.sleep(2)  # the server exits with the agent; the vault is read after its last write
-        transcript = parse_stream_json_transcript(done.stdout.splitlines())
-        row["error"] = (
-            done.stopped
-            or fault_reason(done, transcript)
-            or (None if done.finished == len(case.turns) + hooked else "a turn returned no result")
-        )
-        trail = tool_trail(done.stdout)
+        after = snapshot(work / "vault")
+        row.update(session_result(done, len(case.turns) + hooked))
         invocations, firings = count_hook_activity(done.stdout)
         row.update(
             hook_turn=done.hook_turn,
-            observed=diff_vault(before, snapshot(work / "vault")),
-            replies=replies_by_turn(done.stdout),
-            calls=trail["calls"],
-            compile_blocks=trail["compile"],
-            warming_replies=trail["warming"],
+            capture_before=before,
+            capture_after=after,
+            observed=diff_vault(before, after),
             hook_invocations=invocations,
             capture_nudges=firings,
-            cost_usd=transcript.total_cost_usd,
-            api_key_source=init_field(done.stdout, "apiKeySource"),
-            server_connected=server_state(done.stdout),
         )
+        if case.recall_turn is not None:
+            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env)
+            if row["fresh"].get("session_id") == row.get("session_id") and row.get("session_id"):
+                row["fresh"]["error"] = "the fresh actor reused the capture session identity"
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         row["error"] = f"{type(error).__name__}: {error}"
     return row

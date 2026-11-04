@@ -10,16 +10,5 @@
     "Nice. Make the whole message three sentences.",
     "That's all for today, thanks."
   ],
-  "answer_key": {
-    "reference": "While drafting a thank-you message for the book swap volunteers, the person mentioned in passing that Ilse Marrow would love a hand-bound notebook for her birthday, which is in March. At maximal engagement the person has opted into the assistant capturing durable facts about recurring entities without being asked, so this lasting fact belongs on Ilse Marrow's person page (her page exists partly to help choose gifts), with her existing details kept. The thank-you message draft is not durable and needs no page. Joss Penhallow's page and the Saturday Book Swap page do not change.",
-    "must_change": [
-      "Entities/People/Ilse Marrow.md"
-    ],
-    "must_not_change": [
-      "Entities/People/Joss Penhallow.md",
-      "Entities/Organizations/Saturday Book Swap.md"
-    ],
-    "recap": "optional",
-    "new_pages": "none"
-  }
+  "recall_turn": "I would like to plan a birthday gift for Ilse Marrow. What do we know that would help me choose it and get the timing right?"
 }

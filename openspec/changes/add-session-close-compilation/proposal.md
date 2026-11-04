@@ -23,9 +23,9 @@ so a response change reaches Cloud.
   `source_coverage.evaluate` counts the recap as compiled. The new module
   `episode_coverage` reads that one signal over the revisions of an episode and
   names each Decided line that no cited revision holds.
-- The close step is record, then cite. The agent records the recap once. Then it
-  updates each page that a Decided item changes and cites the recap in the `sources:`
-  of each compiled note updated; an entity, plan or record page takes no citation.
+- The close step is record, then cite. The agent records the recap once, then
+  compiles or explicitly dismisses every Decided item before citing the recap from
+  updated compiled notes. An entity, plan or record page takes no citation.
   The shipped skill, the engagement reference, the Stop hook episode
   ask, the `episode_due` advisory and the `record_episode` tool description carry
   this order. No text asks the agent to record again.
@@ -35,9 +35,9 @@ so a response change reaches Cloud.
 - A new backlog family `uncompiled_episode` holds one item per episode with an
   open Decided line. It ships `off`, stays out of the attention queue, and keeps
   recaps out of `unprocessed_source`.
-- The dispositions view takes `window_days` (1 to 90, default 7) and reports
-  `acted` for the family that can tell a citation from a re-read. Every other
-  family reports `acted` as `unknown`. `surfaced` is stated as a lower bound.
+- The dispositions view takes `window_days` (1 to 90, default 7). Every family
+  reports `acted` as `unknown`: current citation state proves no action after
+  surfacing. `surfaced` is stated as a lower bound.
 
 ## Impact
 

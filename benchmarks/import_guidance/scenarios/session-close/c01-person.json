@@ -9,16 +9,5 @@
     "That's useful. Update from this week: Tavi told me she's moving her focus time to the early morning, so she no longer takes meetings before 10:00, and she wants the 1:1 agenda in her inbox by the evening before. I'll plan Thursday around that.",
     "That's all for today, thanks."
   ],
-  "answer_key": {
-    "reference": "The person reported a lasting change in how Tavi Brennock works: she now keeps the early morning for focus time, takes no meetings before 10:00, and wants the 1:1 agenda in her inbox by the evening before. This belongs on Tavi Brennock's person page (for example under Working preferences), alongside her existing preferences, which stay. The Thursday 1:1 itself is a one-off and needs no page. No other page should change.",
-    "must_change": [
-      "Entities/People/Tavi Brennock.md"
-    ],
-    "must_not_change": [
-      "Entities/People/Corin Haldane.md",
-      "Entities/Organizations/Harbourview Co-op.md"
-    ],
-    "recap": "optional",
-    "new_pages": "none"
-  }
+  "recall_turn": "I am arranging my next 1:1 with Tavi Brennock. What should I know about how she likes to work?"
 }

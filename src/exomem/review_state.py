@@ -1169,7 +1169,6 @@ def effect_counts(
     current: Mapping[str, frozenset[str] | set[str]],
     extra_surfaced: Iterable[tuple[str, str, str, dt.datetime]] = (),
     unknown: Mapping[str, str] | None = None,
-    acted: Mapping[str, frozenset[str] | set[str]] | None = None,
 ) -> dict[str, Any]:
     """What each family surfaced, and what became of it, over one window. Pure.
 
@@ -1181,11 +1180,10 @@ def effect_counts(
     - `dismissed`, `snoozed`: items with a manual decision of that action and
       family updated in the window.
     - `cleared`: surfaced in the window, no decision on the item, and the item
-      id is no longer in the family's current set, and not in its `acted` set.
+      id is no longer in the family's current set.
       Deleting or withholding a page clears an item without acting on it.
-    - `acted`: as `cleared`, and the id is in the family's `acted` set, which
-      only a family that can tell a change from a re-read supplies. Every other
-      family reports `unknown`, never 0.
+    - `acted`: `unknown`: these records prove current state, not a subsequent
+      action. A citation already present before surfacing can be discovered later.
     - `open`: surfaced in the window, no decision, still in the current set.
 
     `current` holds the item ids of each family whose current set can be read
@@ -1231,7 +1229,7 @@ def effect_counts(
                 "dismissed": 0,
                 "snoozed": 0,
                 "cleared": 0 if known else UNKNOWN,
-                "acted": 0 if known and family in (acted or {}) else UNKNOWN,
+                "acted": UNKNOWN,
                 "open": 0 if known else UNKNOWN,
             },
         )
@@ -1273,8 +1271,6 @@ def effect_counts(
             continue
         if item_id in current[family]:
             counts["open"] += 1
-        elif item_id in (acted or {}).get(family, ()):
-            counts["acted"] += 1
         else:
             counts["cleared"] += 1
 

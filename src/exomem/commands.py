@@ -8811,8 +8811,8 @@ def op_episode_memory(
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads recall_context recent_context. Same episode adds a revision,
     retiring the previous one; identical retry writes nothing. The response's
-    `compile` block gives the ref to cite in the `sources:` of each compiled note
-    you update, and counts the decided items no cited recap holds.
+    `compile` block gives the ref and uncited Decided count. Compile or explicitly
+    dismiss every Decided item before citing the recap from updated compiled notes.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.
@@ -10166,12 +10166,12 @@ def _effect_block(
     upkeep family is listed with the counts it holds as unknown, and the block
     says why: an absent family would read as one that surfaced nothing.
 
-    Only the uncompiled-episode family can tell a change from a re-read, because a
-    citation is a recorded act. No other family can, so each reports `acted` as unknown.
+    These records prove current state, not an action after surfacing, so every
+    family reports `acted` as unknown.
     """
     import datetime as dt
 
-    from . import dreamer_families, dreamer_store, due_state, episode_coverage
+    from . import dreamer_families, dreamer_store, due_state
 
     since, until, window = effect_window
     current: dict[str, set[str]] = {}
@@ -10205,16 +10205,14 @@ def _effect_block(
                 current.setdefault(family, set())
                 stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
                 extra.append((family, cid, fingerprint, stamp))
-    acted: dict[str, frozenset[str]] = {}
     episode_family = due_state.EPISODE_BACKLOG
     if projection is not None and any(
         isinstance(entry, dict) and entry.get("family") == episode_family
         for entry in (payload.get("surfaced") or {}).values()
     ):
-        # An empty category is absent from the projection, and an emptied family is
-        # the one that acted: read it as an empty current set, not as unknown.
+        # An empty category is absent from the projection; its recorded surfacing
+        # still needs a known empty current set for the cleared count.
         current.setdefault(episode_family, set())
-        acted[episode_family] = episode_coverage.acted_ids(vault_root)
     counts = review_state_module.effect_counts(
         payload,
         since=since,
@@ -10222,7 +10220,6 @@ def _effect_block(
         current={family: frozenset(ids) for family, ids in current.items()},
         extra_surfaced=extra,
         unknown=unknown,
-        acted=acted,
     )
     return {
         "dreamer_sidecar": sidecar,
@@ -10238,14 +10235,12 @@ def _effect_block(
             "cleared": (
                 "surfaced in the window, no decision recorded, and no longer in the "
                 "family's current set (the stored due-state projection, or the "
-                "dreamer's open candidates), and not acted; unknown where only an audit "
+                "dreamer's open candidates); unknown where only an audit "
                 "could list it"
             ),
             "acted": (
-                "only for uncompiled_episode, and unknown for every other family: as "
-                "cleared, with the recap still live and every one of its Decided lines "
-                "now held by a recap that a live page cites. A recap superseded or "
-                "deleted, or a line dropped, is cleared and never acted"
+                "unknown: current citation or queue state does not prove an action "
+                "after surfacing; no matching mutation receipt is recorded here"
             ),
             "open": "surfaced in the window, no decision recorded, still in the current set",
         },

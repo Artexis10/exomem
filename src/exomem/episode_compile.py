@@ -2,10 +2,11 @@
 
 A recap is a Source. A live compiled note that names it in `sources:` covers it
 (`episode_coverage`), so the close step is: record the recap, then update the note a
-decided item changes, and cite the recap from each compiled note updated. An entity,
-plan or record page holds no `sources:` claim, so it is updated without a citation and
-its line stays open. This block reports the recap's ref to cite, how many Decided items
-it holds and how many no recap cited by a live page holds.
+decided item changes, then cite only after every Decided item is compiled or
+explicitly dismissed. An entity, plan or record page takes no citation. A citation
+from one compiled note holds every line in that recap revision, so it is an agent
+completion convention, never proof that each item reached its home. This block
+reports the recap's ref to cite, its Decided count and its uncited-line count.
 
 It claims nothing about a note's content. Coverage counts recaps and lines, so
 the `outcome` states that result only; a next step rides separately and only
@@ -37,8 +38,9 @@ log = logging.getLogger(__name__)
 # condition for the agent to judge, because the server cannot tell which note
 # a decided item changes.
 _NEXT_STEP = (
-    "If a decided item changes a note, update that note. Cite this recap in the sources "
-    "of each compiled note you update; entity, plan and record pages take no citation."
+    "Compile or explicitly dismiss every Decided item before citing this recap. "
+    "Update each item's canonical page when it needs a change, then cite the recap "
+    "from the compiled notes you updated. Entity, plan and record pages take no citation."
 )
 
 

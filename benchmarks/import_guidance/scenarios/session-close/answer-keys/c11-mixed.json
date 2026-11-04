@@ -1,0 +1,10 @@
+{
+  "reference": "The user settles two independent durable changes, each with an existing canonical home. Update the monthly repair-table pattern so borrowed tools are tested on Thursday evening instead of Friday morning, because the earlier test leaves time to replace broken tools. Preserve every other routine step and its other knowledge. Update Elin Dacre's person page so supply requests now belong in one shared document by Tuesday noon, replacing the preference for separate messages. Preserve her other working preferences and the existing relations. Keep the routine change in the pattern and the coordination preference on the person page rather than substituting one combined write for the two required updates. At the balanced-engagement stopping point, record one bounded recap and cite it in the updated pattern sources. Update the person page without adding a sources list. Do not represent either future routine as an observed completed event, and do not create a parallel compiled page.",
+  "must_change": [
+    "Notes/Patterns/monthly-repair-table-routine.md",
+    "Entities/People/Elin Dacre.md"
+  ],
+  "must_not_change": [],
+  "recap": "required",
+  "new_pages": "none"
+}

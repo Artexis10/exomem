@@ -34,41 +34,63 @@ Limits:
 
 ## Session-close suite
 
-This suite asks whether a session that settled something durable about an existing page records its recap and cites that recap in the page's `sources:`, and whether the agent still writes nothing when nothing durable happened or the person or policy forbids a write. It compares two checkouts (arms) on the same turns in `scenarios/session-close/`.
+This suite tests whether a capture session saves durable facts in their existing canonical pages and preserves unrelated knowledge. It also tests restraint, recap production and citation adherence. Every enabled recall probe then asks a fresh actor what the canonical pages say. Capture success never selects which recall probes run.
 
-The scripted harness serves recorded replies to one prompt, so this suite adds two modules instead of using it:
-
-- `session_close.py` seeds a vault with the arm's own `init_vault` and the case's pages (`session_seed.py`, run in the arm's environment), starts the arm's real stdio server, and runs one `claude -p --input-format stream-json` process. It sends the case's user turns one after another, so the server's caches live across the session. A run ends with a snapshot diff of the knowledge base.
-- `session_score.py` reads the answer key, runs the deterministic checks and the blind judge.
-
-A run holds raw observations only. It never reads the key.
+`session_close.py` drives real actors against each arm's real stdio server. `session_seed.py` initializes an isolated vault with that arm's scaffold and the same invented seed pages. `session_score.py` reads independent keys only after generation. It exports blind views for a native Codex evaluator and imports structured judgments. Generation starts no judge.
 
 Layout:
 
-- `scenarios/session-close/c0N-*.json`: `id`, `title`, `suite`, `seed`, `engagement` (the `EXOMEM_PROMINENCE` level), `turns` and the `answer_key` slot. `session_of` takes the seed and turns of another case (c06 is c01 at `light`).
-- `scenarios/session-close/seeds/<seed>/`: the seeded pages, with paths relative to the knowledge base. They are invented data with fixed `exomem_id` values.
+- `scenarios/session-close/cNN-*.json` contains only inputs: `id`, `title`, `suite`, `seed`, `engagement`, `turns` and optional `recall_turn`.
+- `session_of` inherits the seed and capture turns. Each case enables its own recall question explicitly.
+- `scenarios/session-close/seeds/<seed>/` contains invented canonical pages with fixed memory IDs.
+- `scenarios/session-close/answer-keys/<case-id>.json` contains the independent scorer-only object. A missing, null or malformed key refuses scoring.
+- Each key has `reference`, `must_change`, `must_not_change`, `recap` and `new_pages`. The scorer rejects page paths outside the seed. `new_pages: none` still permits the recap Source.
 
-The answer key is `null` until its writer fills it. `session-score` refuses to score while any case in the runs has no key, and refuses a key that names a page outside the seed. The shape (fields only, no values) is in the `session_score.py` docstring.
+The key writer supplies the references and recall questions independently. Generation's `Case` object contains no key. The actor receives neither reference text nor scorer files. Cases c01, c02, c03, c07, c08, c09, c10 and c11 have fixed input recall probes. Case c11 combines a compiled-note update and an entity update in one session.
 
-Run it:
+1. Select both checkouts with `--product-root`, the actor with `--model`, and the number of repeats with `--repeats`.
+2. Run the existing `run` command with `--suite session-close` and an output directory outside every repository to capture raw runs.
+3. Add `--dry-run` to seed and validate without starting actors, or `--hook-turn` to append the arm's own close prompt.
+4. Run `session-score` on `runs.jsonl` with both arm labels and `--out` to prepare the native judge files.
+5. Give only `judge-views.jsonl` to the native Codex evaluator; keep `private/judge-map.json` outside its packet.
+6. Run `session-score` with the same `--out` and `--judgments` to import the returned judgments and write the report.
 
-1. Run `python -m benchmarks.import_guidance run --suite session-close --product-root baseline=<checkout> --product-root candidate=<checkout> --model sonnet --repeats 2 --out <dir outside every repository>` from the repository root, with `PYTHONPATH` unset. Add `--dry-run` to seed each case on each arm and start no agent. Add `--scenario c01` to run one case. Add `--hook-turn` to send the arm's own episode ask (`EPISODE_ASK`, read from the arm's Stop hook script) as one more user turn after the close turn.
-2. Run `python -m benchmarks.import_guidance session-score <out>/runs.jsonl --baseline baseline --candidate candidate --out <score dir>` to get `scores.jsonl` and `report.md`.
+The default preparation, also selected by `--prepare-judge`, starts no model. Each shuffled item contains an opaque `id`, its blind `prompt` and `answer_schema`. The evaluator returns JSONL objects with that `id` and `structured_output` matching the supplied schema. The scorer reuses the existing rubric and boolean-outcome parser. The separate private map binds each ID to its run, stage and exact prompt, including the reference and rubric. Preparation omits capture items whose outcomes are already deterministic because no material page changed. Changed evidence, missing results, malformed results and duplicate IDs leave semantic judgments unknown. The reader never starts a replacement judge. Deterministic failures and transport-unknown probes remain in the report, even when they need no semantic judgment.
 
-How a run is made:
+`--automatic-judge` explicitly selects the legacy Claude CLI path; `--judge-model` applies only there. The native path never discovers or starts Claude.
 
-- The server runs with `PYTHONPATH=<arm>/src`, a state tree under the run folder, embeddings off and `EXOMEM_PROMINENCE` set to the case's engagement. The agent reads the arm's `SKILL.md` and `references/engagement.md` as its system prompt and has the server's tools only.
-- The arm's own Stop and UserPromptSubmit hooks (from its `plugins/claude-code/hooks/hooks.json`) run with `EXOMEM_RETRIEVE_INJECT=mcp` and a hook home under the run folder.
-- The first turn waits 15 seconds so the index warm (`RETRIEVAL_INDEX_WARMING`) ends. A row counts the warming replies that remain.
-- The row holds the pages changed (as diffs), the pages created, each recap, for each changed page whether it is of a compiled note type and which written recaps its `sources:` cites (`pages`), where the last write of each changed page falls against the recap's write (`order`), the `compile` block of each `record_episode` reply, the hook counts and the cost.
+Only run actors or judging under an agreed evaluation protocol and budget. The no-model checks establish harness behavior; they do not establish a model improvement.
 
-Judge: it reads the person's turns, the key's `reference` and the page diffs, and answers J1 (the changes are correct) and J2 (the changes are appropriately scoped). It never sees the arm, the model, the recap or a tool reply.
+Each capture actor uses strict MCP configuration, no shell tools and no session persistence. The server imports the arm's source and keeps its vault, state, logs and caches in the run directory. The hooks use that actor's isolated hook home. The initial capture actor retains its context across the scripted turns.
+
+After capture exits, the harness retains its before/after snapshots, page diff, replies, session identity and paired tool requests and replies. It also retains raw stream, connectivity, errors, usage, cost, hook counts and compile diagnostics. Capture's `observed` field always comes from these capture snapshots.
+
+If `recall_turn` exists, the harness launches a new actor and stdio server against the same vault and external state. It never reseeds. The fresh actor gets one question, a fresh working directory and hook home, and no capture transcript, resume token or summary. Its raw stream, identity, question, answer, paired requests and replies, connectivity, errors, usage and cost live under `fresh`. Fresh before/after snapshots expose any probe writes separately. A failed probe leaves capture evidence intact and produces an unknown recall result.
+
+The deterministic checks retain required page changes, forbidden changes, recap adherence, citation adherence and extra-page restraint. Citation adherence applies only when a recap exists and a compiled page changed. It does not excuse missing entity work.
+
+The capture judge reads the turns, independent reference, canonical page diffs and final required pages. J1 checks factual correctness. J2 checks justified scope and preservation of unrelated knowledge, permitting semantic-unit representation required by the product. J3 checks completeness against every material reference fact and constraint. Missing required page work fails J3 even when the shown edits and citations are correct. The blind view excludes arm, model and compile diagnostics.
+
+Recall is scored separately. The scorer projects actual served text and its own path from the product's response schemas. It preserves lifecycle and truncation fields. The union of the independent key’s `must_change` and `must_not_change` paths defines the seeded canonical pages. The blind reference judge decides which retrieved content supports the answer. A recap cannot substitute for canonical content. R2 judges whether the retrieved canonical content, excerpts or units contain the relevant reference facts and support the answer. The judge must not assume unseen content.
+
+Supported content:
+
+- `read_memory`: page `body/path`; exact units with `status: found`, `unit.content/parent.path` and optional `parent_context.markdown`.
+- `search_memory`: direct hit lists or `hits` envelopes; page `excerpt/path` and semantic-unit `content` or `excerpt` with `parent_path`.
+- Deep search packs: `claims[path].lede/sections` and `semantic_units` entries with their own `parent.path` and unit excerpts.
+- `recall_context` or `activate_context`: `units[].text/provenance.path`, `current_state[].statement/path` and `map.items[].state.statement/state.path`.
+
+Anchors, enclosing map paths, titles and pointers do not supply canonical prose. Recognized empty or locator-only results fail. Failed transport and unrecognized structures remain unknown. The raw full tool replies stay in the run. The blind view omits arm, model, compile diagnostics and citation counts.
+
+The report gives separate known, unknown and inapplicable denominators for canonical correctness, restraint, recap production by required/optional/forbidden policy, applicable citation adherence and every input-enabled recall probe. Canonical correctness covers cases that owe an update; restraint covers cases that owe no update. It averages paired repeats and models within each case before it bootstraps cases. A 95% interval that includes zero means no change. For recap production, a reported success means a recap exists; production on forbidden cases is unwanted.
 
 Limits:
 
-- The agent has no shell, so the Stop hook's episode check never fires, because it asks only after a landing. Without `--hook-turn` the suite measures the hookless close; with it, the close turn is followed by the hook's own ask, and the row records that text as `hook_turn`.
-- `recap_cited` is `not_applicable` when no recap was written or no compiled page changed, and the verdict leaves it out. A change to an entity page never counts, because entity pages hold no `sources:` claim.
-- Cases c02, c09 and c10 update a compiled note (a pattern, an insight and a research note), so `recap_cited` can pass or fail there. The other cases update entity pages or nothing.
-- The agent has `references/engagement.md` in its prompt, where a real agent would read it on demand.
-- `order` uses the last write of a page. A page written twice shows its later write.
-- Sonnet is the agent. The judge is Opus.
+- The first actor waits for initial index warming using the existing driver behavior. The no-model stdio integration follows the product's retry hints instead of adding a sleep.
+- The no-model integration records a recap, commits a governed canonical edit, closes the first client/server, then finds and reads that edit through a new client/server.
+- Some legacy seed notes lack semantic units. Current governed edits must add a semantic unit; the integration does so without changing those seed fixtures.
+- Entity updates carry no compiled-note citation claim. Cases c02, c09, c10 and c11 exercise compiled-note citation adherence.
+- `order` records the page's final write time, so it cannot reconstruct earlier writes to that page.
+- The harness stages the engagement reference in the system prompt, where an ordinary actor may read it on demand.
+- The shell-free actor cannot trigger the landing-based Stop check. `--hook-turn` measures an explicit close prompt instead.
+- Real-model capture, recall and independent judging have not run for this increment. Their behavior and comparative effects remain unverified.

@@ -49,14 +49,14 @@ MEASURES: dict[str, Callable[[dict], bool | None]] = {
 
 
 def paired_interval(
-    pairs: Sequence[tuple[bool, bool]],
+    pairs: Sequence[tuple[float, float]],
     *,
     resamples: int = BOOTSTRAP_RESAMPLES,
     seed: int = BOOTSTRAP_SEED,
 ) -> tuple[float, float]:
-    """95% percentile interval of the mean (candidate - baseline), resampling the (model, repeat) clusters."""
+    """95% percentile interval of the mean (candidate - baseline), resampling the supplied paired clusters."""
     rng = random.Random(seed)
-    diffs = [int(candidate) - int(baseline) for baseline, candidate in pairs]
+    diffs = [float(candidate) - float(baseline) for baseline, candidate in pairs]
     means = sorted(sum(rng.choices(diffs, k=len(diffs))) / len(diffs) for _ in range(resamples))
     return means[int(0.025 * resamples)], means[int(0.975 * resamples) - 1]
 

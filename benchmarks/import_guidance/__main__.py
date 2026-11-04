@@ -79,12 +79,20 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files")
     score.add_argument("--baseline", required=True, help="the baseline arm's label")
     score.add_argument("--candidate", required=True, help="the candidate arm's label")
-    score.add_argument("--judge-model", default="opus")
+    score.add_argument("--judge-model", default="opus", help="used only with --automatic-judge")
+    judging = score.add_mutually_exclusive_group()
+    judging.add_argument("--prepare-judge", action="store_true", help="export shuffled blind views for a native evaluator; the default")
+    judging.add_argument("--judgments", type=Path, help="import native JSONL judgments by opaque ID; starts no model")
+    judging.add_argument("--automatic-judge", action="store_true", help="explicitly run the legacy Claude CLI judge")
     score.add_argument("--out", type=Path, required=True, help="a folder for scores.jsonl and report.md")
     args = parser.parse_args(argv)
 
     if args.command == "session-score":
-        scored = session_score.score_all(args.runs, out=args.out, judge_model=args.judge_model)
+        if args.prepare_judge or not (args.judgments or args.automatic_judge):
+            count = session_score.prepare_native(args.runs, out=args.out)
+            print(f"Prepared {count} blind items in {args.out / 'judge-views.jsonl'}. Keep private/judge-map.json from the evaluator.")
+            return 0
+        scored = session_score.score_all(args.runs, out=args.out, judge_model=args.judge_model, judgments=args.judgments, automatic_judge=args.automatic_judge)
         text = session_score.build_report(scored, baseline=args.baseline, candidate=args.candidate)
         (args.out / "report.md").write_text(text, encoding="utf-8")
         print(text)

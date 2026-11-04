@@ -7,7 +7,7 @@ The dispositions view SHALL carry an `effect` block computed from existing recor
 - `surfaced`: identities first stamped on the first-surfaced ledger in the window, and for upkeep families the first deliveries the Dreamer recorded in the window. An identity is one family's item, so an item whose fingerprint changed in the window counts once. It is a lower bound, because an item shown where nothing is recorded is not counted, and the block's `sources` SHALL say so;
 - `dismissed` and `snoozed`: items with a manual decision of that action and family updated in the window;
 - `cleared`: items surfaced in the window with no decision recorded and absent from the family's current set;
-- `acted`: the part of `cleared` that the family can prove was the owner's doing. Only a family that can tell a change from a re-read reports a count; every other family SHALL report `acted` as `unknown`, never 0;
+- `acted`: `unknown`, never 0. Current citation or queue state does not prove an action after surfacing, and current families record no matching mutation receipt for that attribution;
 - `open`: items surfaced in the window with no decision recorded and still in the current set.
 
 Events SHALL count from `since` 00:00Z through the time of the read. The stated window SHALL carry no time of day, so the block changes only when a count changes or at a UTC midnight.

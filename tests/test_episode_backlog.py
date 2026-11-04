@@ -120,15 +120,18 @@ def test_a_restricted_caller_is_not_served_the_stored_rows_and_its_audit_item_ig
     assert (seen.detail, seen.proposed_fix, seen.meta) == (twin.detail, twin.proposed_fix, twin.meta)
 
 
-def test_a_citation_counts_as_acted(vault: Path) -> None:
-    """A recap that a live page now cites is the one outcome that is the owner's doing."""
+def test_a_citation_that_predates_surfacing_does_not_count_as_a_later_action(vault: Path) -> None:
+    """A cached review can surface after citation; reconciliation must not invent a later action."""
     path = _record(vault, decided=["Buy the brass lamp"])["source"]["path"]
-    _surfaced_row(vault)
+    due_state.reconcile(vault)
+    ((_, entries),) = _rows(vault).items()
+    entry = entries["open"][0]
 
     _cite(vault, path)
+    review_state.record_surfaced(vault, [(entry["item_id"], entry["fingerprint"], FAMILY)], surface="review")
     due_state.reconcile(vault)
 
-    assert _effect(vault) == {"surfaced": 1, "dismissed": 0, "snoozed": 0, "cleared": 0, "acted": 1, "open": 0}
+    assert _effect(vault) == {"surfaced": 1, "dismissed": 0, "snoozed": 0, "cleared": 1, "acted": "unknown", "open": 0}
 
 
 def test_a_supersession_that_drops_the_open_line_counts_as_cleared(vault: Path) -> None:
@@ -139,7 +142,7 @@ def test_a_supersession_that_drops_the_open_line_counts_as_cleared(vault: Path) 
     _record(vault, decided=[], summary="Dropped the lamp purchase.")
     due_state.reconcile(vault)
 
-    assert _effect(vault) == {"surfaced": 1, "dismissed": 0, "snoozed": 0, "cleared": 1, "acted": 0, "open": 0}
+    assert _effect(vault) == {"surfaced": 1, "dismissed": 0, "snoozed": 0, "cleared": 1, "acted": "unknown", "open": 0}
 
 
 def test_a_deleted_recap_counts_as_cleared(vault: Path) -> None:
@@ -150,4 +153,4 @@ def test_a_deleted_recap_counts_as_cleared(vault: Path) -> None:
     find.clear_cache()
     due_state.reconcile(vault)
 
-    assert _effect(vault) == {"surfaced": 1, "dismissed": 0, "snoozed": 0, "cleared": 1, "acted": 0, "open": 0}
+    assert _effect(vault) == {"surfaced": 1, "dismissed": 0, "snoozed": 0, "cleared": 1, "acted": "unknown", "open": 0}

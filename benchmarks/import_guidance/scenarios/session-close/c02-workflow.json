@@ -9,16 +9,5 @@
     "Okay. One change: I'm no longer ordering the groceries on Saturday afternoon, because the delivery slots are gone by then. From now on I place the order on Friday evening. Everything else in the routine stays as it is.",
     "That's all for today, thanks."
   ],
-  "answer_key": {
-    "reference": "The person changed one step of the Sunday meal-prep routine: the grocery order is now placed on Friday evening instead of Saturday afternoon, because the Saturday delivery slots are gone by then. Step 3 of the routine page should say Friday evening; every other step and section stays as written. The pantry-check page and the Batch Cooking page do not change.",
-    "must_change": [
-      "Notes/Patterns/sunday-meal-prep-routine.md"
-    ],
-    "must_not_change": [
-      "Notes/Patterns/weekly-pantry-check.md",
-      "Entities/Concepts/Batch Cooking.md"
-    ],
-    "recap": "optional",
-    "new_pages": "none"
-  }
+  "recall_turn": "Can you walk me through my Sunday meal-prep routine?"
 }
