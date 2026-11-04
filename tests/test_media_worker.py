@@ -3487,8 +3487,9 @@ def test_a_gpu_that_fills_up_while_automatic_mode_loads_the_speech_model_runs_it
     assert devices == ["cuda", "cpu"]
 
 
+@pytest.mark.parametrize("transient_poll", [False, True])
 def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
-    vault, monkeypatch: pytest.MonkeyPatch
+    vault, monkeypatch: pytest.MonkeyPatch, transient_poll
 ) -> None:
     speech = _preserve_media_stub(vault, filename="waits-for-gpu.m4a")
     image = preserve.preserve_bytes(vault, scope="Rental", category="photos", filename="receipt.png", data=b"\x89PNG fake")
@@ -3511,6 +3512,17 @@ def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
     monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     monkeypatch.setattr(worker, "_launch_child", launch)
+    original_pending = worker._store.next_pending
+
+    def next_pending(**kwargs):
+        nonlocal transient_poll
+        if transient_poll:
+            transient_poll = False
+            raise media_worker.OpError("MUTATION_BUSY", "store temporarily busy")
+        return original_pending(**kwargs)
+
+    monkeypatch.setattr(worker._store, "next_pending", next_pending)
+    resumed_at = 1020.0 if transient_poll else 1010.0
 
     def poll(_timeout):
         if worker._child is None:  # the busy child was handled and the supervisor now waits
@@ -3525,8 +3537,8 @@ def test_work_queued_during_the_gpu_wait_starts_a_child_without_waiting_it_out(
     monkeypatch.setattr(worker._wake, "wait", poll)
     worker._supervise()
 
-    # The image arrived at 1010, inside the 60 s wait, and its child started then, not at 1060.
-    assert launches == [1000.0, 1010.0]
+    # The image runs inside the GPU wait, including after a refused store poll.
+    assert launches == [1000.0, resumed_at]
 
 
 def test_supervisor_backs_off_while_children_keep_dying_by_a_signal(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4620,7 +4632,7 @@ def test_idle_child_claims_unwoken_work_and_hands_off_the_whole_burst(
         assert "burst transcript" in (vault / result.sidecar_path).read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("signature_mode", ["real", "folded", "unknown"])
+@pytest.mark.parametrize("signature_mode", ["real", "folded", "unknown", "transient"])
 def test_living_child_parent_notices_results_and_retries_retained_publication(
     vault, monkeypatch: pytest.MonkeyPatch, signature_mode
 ) -> None:
@@ -4655,8 +4667,13 @@ def test_living_child_parent_notices_results_and_retries_retained_publication(
         )
 
     original_check = store.has_parent_work
+    refused = False
 
     def has_parent_work():
+        nonlocal refused
+        if signature_mode == "transient" and not refused:
+            refused = True
+            raise media_worker.OpError("MUTATION_BUSY", "store temporarily busy")
         work = original_check()
         if signature_mode == "folded" and not recorded:
             assert not work
@@ -4690,6 +4707,123 @@ def test_living_child_parent_notices_results_and_retries_retained_publication(
     assert published == [first, first + 0.5]
     assert store.pending_result_count() == 0
     assert "unwoken parent transcript" in sidecar.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("poll", ["has_parent_work", "needs_worker"])
+def test_supervisor_retries_store_refusal_and_processes_later_enqueue(
+    vault, monkeypatch: pytest.MonkeyPatch, poll
+) -> None:
+    result = _preserve_media_stub(vault, filename="resumed.mp3")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    store = worker._store
+    assert store is not None
+    original_poll = getattr(store, poll)
+    now = [0.0]
+    refused = False
+    enqueued = False
+    launches = []
+    publications = []
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda *_a, **_kw: extract.ExtractResult(
+            text="resumed transcript", media_type="audio", engine="test"
+        ),
+    )
+
+    def refuse_once():
+        nonlocal refused
+        if not refused:
+            refused = True
+            raise media_worker.OpError("MUTATION_BUSY", "store temporarily busy")
+        return original_poll()
+
+    monkeypatch.setattr(store, poll, refuse_once)
+
+    def wait(seconds):
+        nonlocal enqueued
+        now[0] += seconds
+        if not enqueued:
+            enqueued = True
+            worker.enqueue(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio", do_clip=False, do_reembed=False,
+            )
+            pending = store.get_by_binary(vault / result.path)
+            assert pending is not None
+            assert pending.attempts == 0
+        if now[0] > 6.0:
+            worker._stop_event.set()
+        return worker._wake.is_set()
+
+    monkeypatch.setattr(worker._wake, "wait", wait)
+
+    def launch():
+        launches.append(now[0])
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0) == 0
+        return _LivingChild()
+
+    monkeypatch.setattr(worker, "_launch_child", launch)
+    original_publish = worker._publish_parent_result
+
+    def publish(packet):
+        original_publish(packet)
+        publications.append(packet.job.attempts)
+        worker._stop_event.set()
+
+    monkeypatch.setattr(worker, "_publish_parent_result", publish)
+    worker._supervise()
+
+    assert launches == [media_worker._FOLLOWER_RECHECK_SECONDS]
+    assert publications == [1]
+    assert store.get_by_binary(vault / result.path) is None
+    assert store.pending_result_count() == 0
+    assert "resumed transcript" in (vault / result.sidecar_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("child_alive", [False, True])
+def test_supervisor_does_not_retry_nontransient_store_errors(
+    vault, monkeypatch: pytest.MonkeyPatch, child_alive
+) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    if child_alive:
+        worker._child = _LivingChild()
+    error = media_worker.OpError("STATE_MIGRATION_REQUIRED", "store needs migration")
+
+    def refuse():
+        raise error
+
+    monkeypatch.setattr(worker._store, "has_parent_work", refuse)
+    with pytest.raises(media_worker.OpError) as caught:
+        worker._supervise()
+    assert caught.value is error
+
+
+def test_supervisor_stops_promptly_while_store_refusal_persists(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    refused = threading.Event()
+
+    def refuse():
+        refused.set()
+        raise media_worker.OpError("MUTATION_BUSY", "store temporarily busy")
+
+    monkeypatch.setattr(worker._store, "has_parent_work", refuse)
+    worker._thread = threading.Thread(target=worker._supervise, daemon=True)
+    worker._thread.start()
+    try:
+        assert refused.wait(timeout=2)
+        started = time.monotonic()
+        worker.stop()
+        assert not worker._thread.is_alive()
+        assert time.monotonic() - started < 1.0
+    finally:
+        worker.stop()
 
 
 @pytest.mark.parametrize(
