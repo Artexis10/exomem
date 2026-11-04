@@ -161,6 +161,7 @@ def test_tool_only_rejects_a_synthetic_hook_turn_before_staging(tmp_path: Path) 
         main(["run", "--suite", "session-close", "--client-mode", "tool-only", "--hook-turn", "--model", "unused", "--dry-run", "--out", str(tmp_path)])
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shebang fake launcher")
 def test_credits_launcher_keeps_fresh_on_the_same_payer_and_preserves_tail_or_rejection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from import_guidance.recording import Arm
 
