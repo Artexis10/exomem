@@ -200,15 +200,20 @@ def test_the_interval_is_the_student_t_interval_at_the_adjusted_confidence() -> 
         2.0930 / 2.6251, abs=1e-3)
 
 
-# --- Private mode reports the head p95 against the target ------------------------
+# --- Paired private timings cannot establish absolute acceptance ----------------
 
 
-def test_private_mode_reports_a_store_group_against_its_p95_target() -> None:
+def test_private_mode_keeps_absolute_acceptance_unverified_for_paused_workers() -> None:
     ref = {**reference("read", allowance_ms=10), "gating_groups": {"read": {"allowance_ms": 10, "p95_target_ms": 100}}}
-    slow = summarize([fragment([group_cases("read", spread(1), base_ms=150)])], ref, mode="private")
-    fast = summarize([fragment([group_cases("read", spread(1), base_ms=40)])], ref, mode="private")
-    assert row(slow, "read")["target"] == {"p95_target_ms": 100, "result": "misses target"}
-    assert row(fast, "read")["target"] == {"p95_target_ms": 100, "result": "meets target"}
+    environment = {"cpu_pressure_start": 0.0, "cpu_pressure_end": 0.0, "python": "3.12.3", "cpus": 4,
+                   "arms": {"base": {"ready_s": 1.0, "quiescent_s": 1.0},
+                            "head": {"ready_s": 1.0, "quiescent_s": 1.0}}}
+    slow = summarize([fragment([group_cases("read", spread(1), base_ms=150)], environment=environment)], ref, mode="private")
+    fast = summarize([fragment([group_cases("read", spread(1), base_ms=40)], environment=environment)], ref, mode="private")
+    for summary in (slow, fast):
+        assert row(summary, "read")["target"] == {
+            "p95_target_ms": 100, "result": "unverified", "reason": "paused-worker-comparison"}
+        gate.validate_document(summary)
     assert "target" not in row(summarize([fragment([group_cases("read", spread(1), base_ms=40)])], ref), "read")
 
 
