@@ -22,4 +22,4 @@ A policy MAY declare at most one residual scope: a scope document with `residual
 
 #### Scenario: A vault without a residual scope
 - **WHEN** a policy declares no residual scope
-- **THEN** every membership, decision and response is unchanged
+- **THEN** scope membership is unchanged
