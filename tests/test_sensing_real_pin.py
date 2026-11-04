@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import resource
 import time
+from pathlib import Path
 
 import pytest
 
@@ -67,7 +68,8 @@ def test_cost_per_judgement_stays_inside_the_hourly_budget() -> None:
 
 
 def test_a_recorded_green_verdict_skips_the_fixture_run(tmp_path, monkeypatch) -> None:
-    evidence = tmp_path / "admission.json"
+    output = os.environ.get("EXOMEM_TEST_NLI_ADMISSION_OUTPUT")
+    evidence = Path(output) if output else tmp_path / "admission.json"
     sensing_nli._ADMITTED.clear()
     sensing_nli._LOADED.clear()
     sensing_nli.admit(evidence_path=evidence)
