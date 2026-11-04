@@ -290,8 +290,12 @@ def test_a_governed_session_previews_and_starts_without_loading_the_source(
     setup(store, b"")
     _write_export(store.root / SOURCE, 3_000, "ndjson")
     size = (store.root / SOURCE).stat().st_size
+    from dataclasses import replace
+
+    bound, _, _, _ = _granted_import_client(store, tmp_path, monkeypatch)
     session(store, monkeypatch, paths="Unrelated/**")
     who = _session_at(store, NOW, 600)
+    who = replace(who, client_binding=bound.client_binding, origin_session=bound.origin_session)
     tracemalloc.start()
     try:
         assert refused(call, store, who, mode="preview", source_ref=SOURCE, format="ndjson",
@@ -559,6 +563,32 @@ def test_target_becoming_mixed_release_pauses_the_job(store, monkeypatch):
     )
 
 
+def _granted_import_client(store, tmp_path, monkeypatch, *, audience="principal:person-1", protected=()):
+    """A real host grant and revocable transport session for the import's initiating client."""
+    import asyncio
+    from dataclasses import replace
+
+    from granted_writer import CLIENT, ISSUER, grant_writer
+
+    from exomem import auth_sessions, server_auth
+    from exomem.governance.principal import OriginSessionBinding
+
+    bound = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                         capture_paths=["Knowledge Base/Records"], protected=protected, audience=audience)(audience)
+    authority = auth_sessions.SessionAuthority.local(
+        directory=tmp_path / "origin-sessions", signing_root="temporary-import-signing-root",
+        issuer=ISSUER, audience=f"{ISSUER}/mcp", clock=lambda: NOW + 2,
+    )
+    bearer, origin = asyncio.run(authority.issue(
+        client_id=CLIENT, scopes=["exomem:read", "exomem:write"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="import-reader"),
+    ))
+    monkeypatch.setenv("EXOMEM_BASE_URL", ISSUER)
+    monkeypatch.setattr(server_auth, "build_session_authority", lambda **kwargs: authority)
+    return (replace(bound, issuer_family="mcp-oauth", origin_session=OriginSessionBinding(
+                origin.session_id, origin.generation, origin.audience)), authority, bearer, origin)
+
+
 def _session_at(store, at, ttl):
     """A further session for the governed principal; the fixture membership lasts 299 s."""
     custody = authorization_custody._load_authorization_custody_once()
@@ -582,12 +612,16 @@ def _session_at(store, at, ttl):
     )
 
 
-def test_grant_expiry_pauses_and_is_never_extended(store, monkeypatch):
+def test_grant_expiry_pauses_and_is_never_extended(store, tmp_path, monkeypatch):
     """A job that caches its initial grant keeps writing after the session expires."""
+    from dataclasses import replace
+
     setup(store)
     small(monkeypatch)
+    bound, _, _, _ = _granted_import_client(store, tmp_path, monkeypatch)
     session(store, monkeypatch, paths="Unrelated/**")
     who = _session_at(store, NOW, 60)
+    who = replace(who, client_binding=bound.client_binding, origin_session=bound.origin_session)
     job = start(store, who)
     run(store, max_batches=1)
     committed = count(store.connection)
@@ -597,6 +631,7 @@ def test_grant_expiry_pauses_and_is_never_extended(store, monkeypatch):
     run(store)
     assert count(store.connection) == committed
     renewed = _session_at(store, expired, 120)
+    renewed = replace(renewed, client_binding=bound.client_binding, origin_session=bound.origin_session)
     result = status(store, job, renewed)
     assert (result["state"], result["reason"], result["rows"]["imported"]) == (
         "partial",
@@ -676,12 +711,16 @@ def test_host_takeover_reproves_the_bound_source_hash(store, monkeypatch, change
             assert count(handle.connection) == len(valid(iter_exercises()))
 
 
-def test_status_after_a_restart_reports_what_a_fresh_check_finds(store, monkeypatch):
+def test_status_after_a_restart_reports_what_a_fresh_check_finds(store, tmp_path, monkeypatch):
     """A restarted host reading only the durable row reports running for a job its next batch pauses."""
+    from dataclasses import replace
+
     setup(store)
     small(monkeypatch)
+    bound, _, _, _ = _granted_import_client(store, tmp_path, monkeypatch)
     session(store, monkeypatch, paths="Unrelated/**")
     who = _session_at(store, NOW, 60)
+    who = replace(who, client_binding=bound.client_binding, origin_session=bound.origin_session)
     job = start(store, who)
     run(store, max_batches=1)
     path = store.handle.path
@@ -691,6 +730,7 @@ def test_status_after_a_restart_reports_what_a_fresh_check_finds(store, monkeypa
         expired = who.verified_authorization_session.expires_at + 1
         monkeypatch.setattr("time.time", lambda: expired)
         renewed = _session_at(store, expired, 120)
+        renewed = replace(renewed, client_binding=bound.client_binding, origin_session=bound.origin_session)
         lapsed = status(store, job, renewed, handle=handle)
         resumed = call(
             store, renewed, handle=handle, mode="start", continuation=job["continuation"]
@@ -994,16 +1034,21 @@ def test_bad_mapping_refuses_before_creating_a_job(store, mapping, at):
     ],
     ids=["absolute", "traversal", "url", "unpreserved-lane", "missing", "withheld"],
 )
-def test_source_ref_must_be_a_released_preserved_ref(store, reference):
+def test_source_ref_must_be_a_released_preserved_ref(store, tmp_path, monkeypatch, reference):
     """An importer accepting paths or URLs reads files that ordinary authorization never released."""
+    from test_governance_egress import SCOPE_ID
+
     setup(store)
+    who = _external()
     write_source(store.root, b'{"id": "x"}\n', "Knowledge Base/Notes/export.ndjson")
     if reference == SOURCE:
         write_scope(store.root, paths="Evidence/**")
         write_rule(store.root, ceiling=0)
+        who, _, _, _ = _granted_import_client(store, tmp_path, monkeypatch,
+                                             audience="external", protected=[SCOPE_ID])
     for mode in ("preview", "start"):
         error = refused(
-            call, store, mode=mode, source_ref=reference, format="ndjson", mapping=MAPPING
+            call, store, who, mode=mode, source_ref=reference, format="ndjson", mapping=MAPPING
         )
         assert (error.code, error.details["at"]) == (
             "IMPORT_SOURCE_NOT_FOUND",
@@ -1544,3 +1589,90 @@ def test_cloud_import_grant_does_not_survive_copy_to_another_cell(store, monkeyp
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "0")
     run(store)
     assert count(store.connection) == before
+
+
+def test_a_granted_import_keeps_its_client_across_restart_and_an_active_loop(store, tmp_path, monkeypatch):
+    """A durable import must retain its client without retaining the bearer or borrowing ambient authority."""
+    import asyncio
+
+    from exomem import local_ingress
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    who, authority, bearer, origin = _granted_import_client(store, tmp_path, monkeypatch)
+    access = local_ingress.LocalIngressAccessToken(
+        token=bearer, client_id=origin.client_id, scopes=list(origin.scopes), expires_at=origin.expires_at,
+    )
+    grant = local_ingress.LocalGrant(bearer, access, origin.client_id, origin.session_id,
+                                     who.origin_session, authority)
+
+    async def first_batch():
+        # Without copied request context, the active-loop bridge has no configured verifier here.
+        with monkeypatch.context() as request_environment:
+            request_environment.delenv("EXOMEM_BASE_URL")
+            token = local_ingress._GRANT.set(grant)
+            try:
+                job = start(store, who)
+                assert job["state"] == "running"
+                run(store, max_batches=1)
+                return job
+            finally:
+                local_ingress._GRANT.reset(token)
+
+    job = asyncio.run(first_batch())
+    assert 0 < count(store.connection) < len(valid(iter_exercises()))
+    encoded = store.connection.execute("SELECT binding_json FROM import_jobs").fetchone()[0]
+    assert bearer not in encoded
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        run(store, handle=handle)
+        assert status(store, job, who, handle=handle)["state"] == "complete"
+        assert count(handle.connection) == len(valid(iter_exercises()))
+
+
+@pytest.mark.parametrize("revocation", ["between-batches", "during-settlement"])
+def test_a_revoked_import_origin_keeps_rows_and_checkpoint_until_valid_continuation(
+    store, tmp_path, monkeypatch, revocation,
+):
+    """An origin lost after staging rows must roll back just as an origin lost before the next batch."""
+    import asyncio
+    from dataclasses import replace
+
+    from exomem import auth_sessions
+    from exomem.governance.principal import OriginSessionBinding
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    who, authority, bearer, _ = _granted_import_client(store, tmp_path, monkeypatch)
+    job = start(store, who)
+    assert job["state"] == "running"
+    run(store, max_batches=1)
+    before = store.connection.execute("SELECT * FROM items ORDER BY row_id").fetchall()
+    checkpoint = store.connection.execute("SELECT checkpoint_json FROM import_jobs").fetchone()[0]
+    if revocation == "between-batches":
+        asyncio.run(authority.revoke_bearer(bearer, reason="test revocation"))
+        run(store, max_batches=1)
+    else:
+        settle = importer()._Settlement.__call__
+
+        def revoke_after_rows_are_staged(settlement, writer, result):
+            asyncio.run(authority.revoke_bearer(bearer, reason="test revocation"))
+            return settle(settlement, writer, result)
+
+        with monkeypatch.context() as transaction:
+            transaction.setattr(importer()._Settlement, "__call__", revoke_after_rows_are_staged)
+            run(store, max_batches=1)
+    assert store.connection.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
+    assert store.connection.execute("SELECT checkpoint_json FROM import_jobs").fetchone()[0] == checkpoint
+    paused = status(store, job, who)
+    assert (paused["state"], paused["reason"]) == ("partial", "authority_lost")
+    _, origin = asyncio.run(authority.issue(
+        client_id=who.client_binding.client_id, scopes=["exomem:read", "exomem:write"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="import-reader"),
+    ))
+    renewed = replace(who, origin_session=OriginSessionBinding(origin.session_id, origin.generation, origin.audience))
+    call(store, renewed, mode="start", continuation=job["continuation"])
+    run(store)
+    assert status(store, job, renewed)["state"] == "complete"
+    assert count(store.connection) == len(valid(iter_exercises()))

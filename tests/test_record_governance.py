@@ -35,7 +35,7 @@ from exomem import (
 from exomem import note as note_module
 from exomem import structured_collections as collections
 from exomem.governance import egress, receipts
-from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.governance.principal import RequestPrincipal, library_scope, owner_principal, request_scope
 
 EXTERNAL = "external"
 
@@ -3597,14 +3597,15 @@ def test_a_page_written_through_the_service_resolves_on_the_next_query_without_a
     manifest = _vehicle_manifest(vault)
     _write_l6_rule(vault, ceiling=6, paths="Records/**")
     _publish_corpus(vault)
-    created = note_module.note(
-        vault,
-        content="# Freshly Written\n\nBody.\n",
-        note_type="insight",
-        title="Freshly Written",
-        status="draft",
-        today=datetime.date(2026, 7, 9),
-    )
+    with library_scope():
+        created = note_module.note(
+            vault,
+            content="# Freshly Written\n\nBody.\n",
+            note_type="insight",
+            title="Freshly Written",
+            status="draft",
+            today=datetime.date(2026, 7, 9),
+        )
     # The write's background workers may hold the corpus lock, and a query that cannot
     # take it walks instead. Wait for them so that the query below reads what the write
     # itself published.

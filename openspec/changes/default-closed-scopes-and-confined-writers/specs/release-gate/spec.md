@@ -8,10 +8,22 @@ For every write (create, edit, replace, append, observe, move source and destina
 
 A write door's side effects on a page outside a restricted writer's writable scopes and inbox SHALL be skipped: neither written nor refused. These side effects are activity log and index entries, a cited Source's `ingested_into` back-reference, and link rewrites in linking pages. A Records transition SHALL NOT skip its audit entry: a caller whose write ceiling excludes the activity log SHALL be refused, with nothing written. A skipped side effect on a page withheld from the writer SHALL leave every response detail as it is with no such page. Workflow state that a door keeps under `_Governance/curation/` or `_Schema/relation-reviews/` SHALL be written for a restricted writer. Curation runs SHALL use their content-addressed run ids; episode journals SHALL stay keyed to their audience. No audience is served the governance tree, and the residual scope withholds unclassified relation reviews; the policy documents and the activation manifest SHALL stay refused. A vocabulary change that the vocabulary authority has granted to the caller SHALL be admitted to the registry storage that the grant names. Without that grant, the caller SHALL receive the vocabulary authority's own refusal. No other write SHALL gain authority from a vocabulary grant.
 
+Durable import jobs SHALL retain verified client and origin-session identity without storing a bearer or a snapshot of writable grants. Each authority check SHALL revalidate the live origin and current host write authority. Older jobs without client bindings SHALL gain no client authority. Origin revocation SHALL pause the job at its committed checkpoint; revocation during the commit check SHALL roll the batch back. Explicit continuation SHALL prove the current caller's authority. Job ownership SHALL remain bound to audience and issuer.
+
 #### Scenario: Read access does not grant structured write authority
 - **WHEN** a non-owner appends or updates a readable SQL collection without host write authority for its canonical subjects
 - **THEN** the operation returns its existing opaque unavailable error and leaves canonical rows unchanged
 - **AND** a configured writer can mutate subjects inside its writable scopes only when their proposed membership remains admitted
+
+#### Scenario: A granted import survives a writer restart
+- **WHEN** a client-bound import commits a batch and the writer restarts while its origin and host grant remain valid
+- **THEN** status reports that source proof needs rechecking, and later batches complete under the same client binding
+- **AND** the service's own authority does not replace the job's authority
+
+#### Scenario: A revoked import origin cannot keep writing
+- **WHEN** the origin session of a granted import is revoked between batches or during a commit check
+- **THEN** the job pauses with its last committed checkpoint and no later rows commit
+- **AND** explicit continuation requires a currently authorized caller
 
 #### Scenario: A fenced connector cites a shared Source
 - **WHEN** a fenced connector creates a note in its inbox whose `sources:` names a Source that it may read but not write

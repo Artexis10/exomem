@@ -660,8 +660,10 @@ def test_a_withheld_item_makes_the_whole_collection_read_as_absent(scalar_vault_
 
 
 @pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
-def test_a_withheld_source_reads_exactly_like_an_absent_one(scalar_vault_root: Path) -> None:
-    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+def test_a_withheld_source_reads_exactly_like_an_absent_one(scalar_vault_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from granted_writer import grant_writer
+
+    from exomem.governance.principal import owner_principal, request_scope
 
     vault_root = scalar_vault_root
     _write_rule(
@@ -672,14 +674,17 @@ def test_a_withheld_source_reads_exactly_like_an_absent_one(scalar_vault_root: P
         vault_root, "hidden", "01ARZ3NDEKTSV4RRFFQ69G5FZZ", "01ARZ3NDEKTSV4RRFFQ69G5FZY",
         "Evidence/import-b.md", 0,
     )
+    writer = grant_writer(vault_root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], protected=["01ARZ3NDEKTSV4RRFFQ69G5FZZ"],
+                          writable_scopes=["01ARZ3NDEKTSV4RRFFQ69G5FAV"], config_dir=tmp_path.parent)("external")
     rows = _scalar_rows(3)
     rows[1]["source"] = EVIDENCE_B
     rows[2]["source"] = "Knowledge Base/Evidence/absent.md"
     with request_scope(owner_principal(surface="mcp")):
         visible = _bulk(vault_root, [rows[1]], on_reject="skip")
     assert visible["rows"][0]["outcome"] == "inserted"
-    # A restricted audience holds no write authority, so every row is rejected on its source and nothing is written.
-    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+    # The writer can change Records, but withheld and absent sources both refuse.
+    with request_scope(writer):
         result = _bulk(vault_root, [{**rows[1], "item": _scalar_rows(1, start=10)[0]["item"]}, rows[2]],
                        on_reject="skip", expected_container_hash=visible["after_container_hash"])
     hidden, absent = result["rows"]

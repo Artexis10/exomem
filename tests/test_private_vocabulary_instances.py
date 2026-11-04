@@ -40,6 +40,9 @@ def private_instances(configured_boundary, vault):
         f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Entities/Venues/**", "Notes/Meetings/**", "Sources/Inbox/limited/**"]\n',
         encoding="utf-8",
     )
+    public_scope = vault / "Knowledge Base/_Governance/scopes/public.yaml"
+    public_scope.write_text(public_scope.read_text(encoding="utf-8")
+                            + 'exclude:\n  paths: ["Notes/Meetings/**"]\n', encoding="utf-8")
     authority = state_migration.assert_offline_migration_authority(source="private vocabulary fixture")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
     return authenticate

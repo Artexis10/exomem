@@ -40,6 +40,8 @@ Governance decides each page from the scopes that select it. A page that no scop
 
 **D12. A vocabulary grant is write authority for its registry change.** The vocabulary authority already needs an owner decision for each change. For a vocabulary mutation it decides before the write gate: an ungranted change receives its refusal with a request id, and a granted change is admitted to the registry storage it names. No other write gains authority from it. Making non-owner sessions unable to change vocabulary under a governed policy was rejected, because it would silently remove a shipped owner-approved workflow.
 
+**D13. Durable imports retain identity, not write grants.** An import job retains its verified client and origin-session bindings without a bearer. Each authority check revalidates the origin through the existing session authority and reads the current host configuration. A revoked origin pauses the job at its committed checkpoint; a failed commit check rolls the batch back. Missing binding fields in older jobs confer no client authority. Audience and issuer still define job ownership; explicit continuation proves the current caller's authority. The synchronous writer uses a context-preserving bridge to the existing asynchronous origin validator. This prevents a revoked login from retaining host write authority; an unavailable validator costs import availability, with progress preserved for explicit continuation. A Cloud job without current gateway proof cannot manufacture that proof from its stored identity.
+
 ## Risks / Trade-offs
 
 - [Fenced connectors lose write-down into open pages and unscoped inbox creation on upgrade] → Deliberate; the scaffold skill documents inbox scopes and `writable_scope_ids`.
