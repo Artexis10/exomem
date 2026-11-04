@@ -522,12 +522,19 @@ def test_concurrent_managed_requests_start_one_background_proof(
     release = threading.Event()
     started: list[str] = []
     real_run = epistemic_graph._run_background_proof
+    real_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        # Count before scheduling, so a delayed worker cannot look absent.
+        if thread.name == "exomem-graph-proof":
+            started.append(thread.name)
+        real_start(thread)
 
     def held(vault_root: Path, registry_key: str) -> None:
-        started.append(threading.current_thread().name)
-        release.wait(30.0)
+        release.wait()
         real_run(vault_root, registry_key)
 
+    monkeypatch.setattr(threading.Thread, "start", start)
     monkeypatch.setattr(epistemic_graph, "_run_background_proof", held, raising=True)
     answers: dict[int, tuple[bool, list[str]]] = {}
 
@@ -538,18 +545,21 @@ def test_concurrent_managed_requests_start_one_background_proof(
         )
         answers[slot] = (bool(hits), degraded)
 
+    requests = [threading.Thread(target=request, args=(slot,)) for slot in range(4)]
     try:
-        requests = [threading.Thread(target=request, args=(slot,)) for slot in range(4)]
         for thread in requests:
             thread.start()
+        deadline = time.monotonic() + RECALL_BOUND_SECONDS
         for thread in requests:
-            thread.join(30.0)
+            thread.join(max(0.0, deadline - time.monotonic()))
         assert not any(thread.is_alive() for thread in requests), "a request blocked on the proof"
         assert len(answers) == 4, answers
         assert all(hit and "graph" in degraded for hit, degraded in answers.values()), answers
         assert started == ["exomem-graph-proof"], f"{len(started)} background proofs started"
     finally:
         release.set()
+        for thread in requests:
+            thread.join(30.0)
         for thread in threading.enumerate():
             if thread.name == "exomem-graph-proof":
                 thread.join(30.0)
