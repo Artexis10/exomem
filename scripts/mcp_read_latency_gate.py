@@ -201,9 +201,9 @@ def group_row(group: str, setting: dict, *, gating: bool, medians: list[float], 
         row["allowance_ms"] = setting["allowance_ms"]
         row["verdict"] = judge(row, setting["allowance_ms"])
     if private and "p95_target_ms" in setting and row["head_p95_ms"] is not None:
+        # Pausing workers changes lease and maintenance timing, so paired percentiles cannot prove an absolute target.
         row["target"] = {"p95_target_ms": setting["p95_target_ms"],
-                         "result": "meets target" if row["head_p95_ms"] <= setting["p95_target_ms"]
-                         else "misses target"}
+                         "result": "unverified", "reason": "paused-worker-comparison"}
     return row
 
 
