@@ -792,7 +792,7 @@ def build_lifecycle_decision(
 ) -> LifecycleDecision:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     fingerprint = _canonical_fingerprint(after_fingerprint)
-    normalized_reason = _review_reason(reason)
+    normalized_reason = review_reason(reason)
     decision = LifecycleDecision(
         _LIFECYCLE_SCHEMA_VERSION,
         _LIFECYCLE_CONTRACT_VERSION,
@@ -3663,9 +3663,10 @@ def _detach_auxiliaries(
     return tuple(detached)
 
 
-def _review_reason(value: object) -> str:
+def review_reason(value: object, decision: str = "reviewed-none") -> str:
+    """The bounded audit reason a review decision (`decision`) carries."""
     if type(value) is not str:
-        raise RelationReviewError("INVALID_RELATION_REVIEW", "reviewed-none requires a reason")
+        raise RelationReviewError("INVALID_RELATION_REVIEW", f"{decision} requires a reason")
     reason = value.strip()
     if (
         not reason
@@ -3673,7 +3674,7 @@ def _review_reason(value: object) -> str:
         or len(reason.encode("utf-8")) > _MAX_REASON_BYTES
     ):
         raise RelationReviewError(
-            "INVALID_RELATION_REVIEW", "reviewed-none reason is outside bounds"
+            "INVALID_RELATION_REVIEW", f"{decision} reason is outside bounds"
         )
     return reason
 
@@ -3958,7 +3959,7 @@ def prepare_commit_creation_draft(
         if fields.missing:
             raise missing_review_fields_error(fields.missing)
         requested_review = relation_disposition == "reviewed_none" and not fields.ignored
-        reason = _review_reason(relation_review_reason) if requested_review else None
+        reason = review_reason(relation_review_reason) if requested_review else None
         preliminary_commit_result, _preliminary_record = _commit_plan(
             preliminary,
             operation=operation,

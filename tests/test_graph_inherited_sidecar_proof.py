@@ -499,3 +499,68 @@ def test_a_managed_request_hands_the_cold_proof_to_the_background(
         assert proofs == ["exomem-graph-proof"]
     finally:
         readiness.reset()
+
+
+def test_concurrent_managed_requests_start_one_background_proof(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Requests that arrive before the proof claims its slot share one proof thread.
+
+    Mutant check: with the in-flight guard in `_start_background_proof` removed,
+    this fails with `4 background proofs started`.
+    """
+    root = inherited_vault
+    lexstore.ensure_fresh(root)
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        warmup.warm_retrieval_catalog(root)
+    finally:
+        readiness.finish_warm()
+    assert readiness.retrieval_admission(root)["admitted"]
+    # Hold each started proof before it claims the slot, so every request sees none running.
+    release = threading.Event()
+    started: list[str] = []
+    real_run = epistemic_graph._run_background_proof
+    real_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        # Count before scheduling, so a delayed worker cannot look absent.
+        if thread.name == "exomem-graph-proof":
+            started.append(thread.name)
+        real_start(thread)
+
+    def held(vault_root: Path, registry_key: str) -> None:
+        release.wait()
+        real_run(vault_root, registry_key)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    monkeypatch.setattr(epistemic_graph, "_run_background_proof", held, raising=True)
+    answers: dict[int, tuple[bool, list[str]]] = {}
+
+    def request(slot: int) -> None:
+        degraded: list[str] = []
+        hits = find_module.find(
+            root, query="generated note", mode="hybrid", graph=True, degraded_out=degraded
+        )
+        answers[slot] = (bool(hits), degraded)
+
+    requests = [threading.Thread(target=request, args=(slot,)) for slot in range(4)]
+    try:
+        for thread in requests:
+            thread.start()
+        deadline = time.monotonic() + RECALL_BOUND_SECONDS
+        for thread in requests:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        assert not any(thread.is_alive() for thread in requests), "a request blocked on the proof"
+        assert len(answers) == 4, answers
+        assert all(hit and "graph" in degraded for hit, degraded in answers.values()), answers
+        assert started == ["exomem-graph-proof"], f"{len(started)} background proofs started"
+    finally:
+        release.set()
+        for thread in requests:
+            thread.join(30.0)
+        for thread in threading.enumerate():
+            if thread.name == "exomem-graph-proof":
+                thread.join(30.0)
+        readiness.reset()

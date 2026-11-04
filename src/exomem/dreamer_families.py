@@ -422,6 +422,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     if payload is None:
         payload = review_state.empty_state()
     out: dict[str, dict[str, Any]] = {}
+    fit = relation_queue.RelationFit(ctx.vault_root, basis=ctx.type_basis)
     for candidate in relation_queue._page_candidates(
         ctx.vault_root, page, limit_per_page=_LINK_LIMIT_PER_PAGE, snapshot=snapshot
     ):
@@ -448,8 +449,13 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
             state_payload=payload,
             authored=ctx.authored(page),
             exact_refs=refs,
+            fit=fit,
         )
         if reason in {"authored_edge", "placeholder_target"} or enriched is None:
+            continue
+        # A pair that a specific relation fits stays in the queue: the agent chooses its relation,
+        # and this route could only accept the generic one.
+        if enriched.get("options"):
             continue
         evidence = [
             {

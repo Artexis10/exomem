@@ -115,7 +115,7 @@ def _meeting_content() -> str:
         "\n"
         "## Relations\n"
         "\n"
-        f"- relates_to [[{CLIENT_ENTITY}]]\n"
+        f"- about_entity [[{CLIENT_ENTITY}]]\n"
     )
 
 
@@ -131,7 +131,7 @@ def _quirk_content() -> str:
         "\n"
         "## Relations\n"
         "\n"
-        f"- relates_to [[{CLIENT_ENTITY}]]\n"
+        f"- about_entity [[{CLIENT_ENTITY}]]\n"
     )
 
 
@@ -213,7 +213,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
     assert sum("booking-lead-time" in name for name in notes) == 1, notes
 
     body = (vault / meeting["path"]).read_text(encoding="utf-8")
-    assert body.count("- relates_to [[") == 1
+    assert body.count("- about_entity [[") == 1
     assert CLIENT_ENTITY in body
 
 

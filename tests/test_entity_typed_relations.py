@@ -1,8 +1,8 @@
 """Typed relations authored when an entity is first created.
 
 `markdown-relations` "Entity creation can author typed relations": a caller that
-knows what an entity means to another page states the predicate at birth, and
-bare `connections` keep their conservative `relates_to` rendering.
+knows what an entity means to another page states the predicate at birth. A bare
+`relates_to` to an entity needs a stated reason when a specific relation fits.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(
             {"kind": "supports", "target": target_ref},
             {"kind": "part_of", "target": target},
             {"kind": "supports", "target": target},
+            {"kind": "relates_to", "target": target_ref, "reason": "no narrower relation fits"},
         ],
-        connections=[target_ref],
     )
 
     page = vault / created["path"]
