@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 3af5551176e1007a5d85a0a1b2ffede0454d1b2fe8c6e916a1cbe18da680e1a5
+  skill_contract: afddd6fe49ee1e0d686a561660b15b87fa7672ad015925652d4607acefa53158
   version: "0.1.0"
 ---
 
@@ -58,7 +58,7 @@ one `user_summary` names.
    For a whole folder or collection of existing files, use `import_memory` instead of
    capturing one by one. A folder outside the vault is staged first: run
    `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. (Exomem Cloud takes `exomem cloud import <folder>` instead.) Then set `operation.kind` to `start`
+   absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then set `operation.kind` to `start`
    with a `collection` name, `select` folders (with a `source_kind` and `domain` per folder rule where known),
    `plan`, `apply`, then `finish`. Repeat `plan` or `apply` with the returned `continuation`
    until none returns, and report the `coverage` from `finish`, including what was refused,

@@ -25,6 +25,41 @@ async def _import(client, kind: str, **fields) -> dict:
     return reply
 
 
+def test_a_compact_apply_names_only_this_pages_committed_paths_and_replays_them(
+    vault, build, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = paging._stage(vault, {"intact.pdf": paging.PDF + b"I", "changed.pdf": paging.PDF + b"C"})
+
+    async def scenario(client):
+        run_id = (await _import(client, "start", path=stage, consume=False))["run_id"]
+        await _import(client, "select", run_id=run_id, include=[stage])
+        plan_id = (await _import(client, "plan", run_id=run_id))["plan_id"]
+        items = adoption_run.AdoptionRunStore(vault).load(run_id)["plan"]["items"]
+        intact = next(item for item in items if item["original_path"] == f"{stage}/intact.pdf")
+        changed = next(item for item in items if item["original_path"] == f"{stage}/changed.pdf")
+        (vault / changed["original_path"]).write_bytes(paging.PDF + b"X")
+        # Obtain a real continuation before the page writes either destination.
+        monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(1 << 50))
+        stopped = await _import(client, "apply", run_id=run_id, plan_id=plan_id)
+        monkeypatch.delenv("EXOMEM_IMPORT_RESERVE_BYTES")
+        fields = {"run_id": run_id, "plan_id": plan_id, "continuation": stopped["continuation"]}
+        applied = await _import(client, "apply", **fields)
+        replay = await _call(client, "import_memory", {"operation": {"kind": "apply", **fields}})
+        repeated = await _call(client, "import_memory", {
+            "operation": {"kind": "apply", "run_id": run_id, "plan_id": plan_id},
+        }, key="fresh-repeat")
+        return applied, replay, repeated, intact["target_path"], changed["target_path"]
+
+    applied, replay, repeated, saved_path, refused_path = _session(build(), scenario)
+
+    assert applied["progress"]["applied"] == 1 and applied["progress"]["failed"] == 1
+    assert (vault / saved_path).is_file() and not (vault / refused_path).exists()
+    assert applied["paths"] == [saved_path]
+    assert saved_path in applied["user_summary"]
+    assert replay["apply_result"]["written"] == applied["paths"]
+    assert repeated["ok"] is True and repeated["paths"] == []
+
+
 def test_a_compact_apply_reply_at_a_space_stop_says_stop_and_marks_apply_blocked(
     vault, build, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

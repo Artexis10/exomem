@@ -1,0 +1,12 @@
+name: Free runner disk
+description: Remove unused hosted SDKs before loading large container images
+runs:
+  using: composite
+  steps:
+    - name: Remove unused hosted SDKs
+      shell: bash
+      run: |
+        df -h /
+        # These hosted SDKs are unused by the image builds and their tests.
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
