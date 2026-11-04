@@ -43,10 +43,23 @@ The row SHALL contain no vault text, conversation field, purpose text or raw cal
 
 Recording SHALL use one bounded SQLite insert with a declared short timeout, no retries and no propagated failure. It SHALL invalidate no heat cache. A successful response SHALL carry `served_context_id` after cache lookup. A failed insert SHALL omit that id and name `served_context_unrecorded` in diagnostics. Its measured stage latency SHALL be reported; it SHALL NOT be described as zero cost.
 
+A successfully recorded raw activation response SHALL carry `served_context_evidence` beside its id, with this fixed structure:
+
+```json
+{"scope":"server_composition","client_receipt":"unknown","opening":"unknown","citation":"unknown","use":"unknown","historical_text":"not_retained"}
+```
+
+Exact owner lookup SHALL return the same evidence structure and preserve its existing meaning text. The structure SHALL add no counted prose, row, usage inference or read requirement. It SHALL remain outside packet caches. Final serialized sizing SHALL include it. This contract covers raw MCP and REST delivery; it SHALL NOT require hook rendering.
+
+#### Scenario: A composed response states the client observation boundary
+
+- **WHEN** raw activation succeeds and its row is recorded
+- **THEN** its response and exact owner lookup carry the fixed composition evidence, without asserting client receipt, opening, citation, use or retained historical text
+
 #### Scenario: A locked database leaves the read served
 
 - **WHEN** the insert cannot complete within its timeout
-- **THEN** the read returns its authorized context without an id, with `served_context_unrecorded` in diagnostics
+- **THEN** the read returns its authorized context without an id or composition evidence, with `served_context_unrecorded` in diagnostics
 
 ### Requirement: Retention bounds the table
 
