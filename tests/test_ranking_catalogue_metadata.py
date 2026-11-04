@@ -188,11 +188,14 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 "/_bm25_query", "/_substring_query", "/_keyword_groups_query")) else 1
             ratio = (second / normalizer) / (first / normalizer) if first else None
             ratios["|".join(key)] = ratio
-            if ratio is None or ratio > 1.5:
+            bounded = ratio is not None and ratio <= 1.5
+            if not bounded:
                 failures.append((operation, key, ratio))
-            # Parent admission reuses published structure even while other admitted bounds remain debt.
-            if principal == "admitted" and key[2].startswith("filter_eligibility/"):
-                assert ratio is not None and ratio <= 1.5, (operation, key, ratio)
+            # These fixed instrumentation spans cover admission and match queries; other admitted bounds remain debt.
+            if principal == "admitted" and key[2].startswith((
+                "filter_eligibility/", "bm25/lexical.query/", "keyword/lexical.query/",
+            )):
+                assert bounded, (operation, key, ratio)
         for size, sample in ((400, small), (1600, large)):
             if sample["outside_output_reads"]:
                 failures.append((operation, size, "Markdown exceeds selected sources"))

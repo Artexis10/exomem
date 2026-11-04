@@ -10231,16 +10231,16 @@ class LexicalStore:
                 counted = postings.counted_from_page_terms(missing, document_frequency)
             else:
                 rows = conn.execute(
-                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
-                    "AND p.path IN (SELECT value FROM json_each(?))",
-                    (
-                        " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
-                        json.dumps(sorted(admitted_paths), ensure_ascii=False),
-                    ),
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1",
+                    (" OR ".join('"' + word.replace('"', '""') + '"' for word in missing),),
                 )
-                counted = postings.counted(
-                    ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
-                )
+                try:
+                    counted = postings.counted(
+                        ((path, stemmed.split()) for path, stemmed in rows if path in admitted_paths),
+                        missing, document_frequency,
+                    )
+                finally:
+                    rows.close()
             if counted is None:
                 return None
             held.update(counted)
@@ -10387,7 +10387,7 @@ class LexicalStore:
         col = "in_vault" if scope == "vault" else "in_kb"
         allowed_clause = ""
         params: list[object] = [match]
-        if allowed_paths is not None:
+        if allowed_paths is not None and admitted is None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         groups = [group for group in (corroboration_groups or []) if group]
@@ -10472,15 +10472,15 @@ class LexicalStore:
             if narrowing is not None:
                 # This branch scores in Python, so the MATCH only selects rows.
                 params[0] = f"({match}) AND ({narrowing})"
-            # SQL admits before scoring or cap. The scorer then corroborates
-            # with the same Counter it needs for each document's score.
-            ranking_clause += (
-                " AND p.path IN (SELECT value FROM json_each(?))" + excluded_clause
-            )
+            # Like carry statistics, filter MATCH rows before scoring; never serialize the whole admission set.
+            ranking_clause += excluded_clause
             ranking_params = [
                 params[0], *params[1:corroboration_at],
-                json.dumps(sorted(admitted_paths), ensure_ascii=False), *excluded_params,
+                *excluded_params,
             ]
+            def admitted_candidate(path: str) -> bool:
+                return path in admitted_paths and (allowed_paths is None or path in allowed_paths)
+
             filters = {
                 "min_matched_terms": min_matched_terms, "term_units": term_units,
                 "corroboration_tokens": corroboration_tokens, "corroboration_groups": groups,
@@ -10502,20 +10502,23 @@ class LexicalStore:
                         ),
                     )
                 )
-                if postings is None:
-                    # Rows newer than the corpus figures, or a word the index cannot
-                    # vouch for: score each candidate's own text.
-                    candidates = {
-                        path: stemmed.split()
-                        for path, stemmed in conn.execute("SELECT p.path, fts.stemmed " + ranked_rows, ranking_params)
-                    }
-                    call_spans.measure(call_spans.CANDIDATES, len(candidates))
-                    return admitted.score(candidates, tokens, k, **filters)
-                paths = [path for (path,) in conn.execute("SELECT p.path " + ranked_rows, ranking_params)]
-                call_spans.measure(call_spans.CANDIDATES, len(paths))
-                return admitted.score_counts(
-                    admitted_entry.postings.documents(paths, postings), tokens, k, **filters,
-                )
+                columns = "p.path, fts.stemmed" if postings is None else "p.path"
+                rows = conn.execute("SELECT " + columns + " " + ranked_rows, ranking_params)
+                try:
+                    if postings is None:
+                        # Unproved postings retain text scoring, over admitted matches alone.
+                        candidates = {
+                            path: stemmed.split() for path, stemmed in rows if admitted_candidate(path)
+                        }
+                        call_spans.measure(call_spans.CANDIDATES, len(candidates))
+                        return admitted.score(candidates, tokens, k, **filters)
+                    paths = [path for (path,) in rows if admitted_candidate(path)]
+                    call_spans.measure(call_spans.CANDIDATES, len(paths))
+                    return admitted.score_counts(
+                        admitted_entry.postings.documents(paths, postings), tokens, k, **filters,
+                    )
+                finally:
+                    rows.close()
             finally:
                 if owns_snapshot:
                     conn.rollback()
@@ -12151,7 +12154,6 @@ class LexicalStore:
     @staticmethod
     def _substring_predicate(
         tokens: list[str], scope: str,
-        allowed_paths: set[str] | None = None,
     ) -> tuple[list[str], list[object]]:
         """The shared trigram accelerator and exact all-token substring predicate."""
         col = "in_vault" if scope == "vault" else "in_kb"
@@ -12165,24 +12167,41 @@ class LexicalStore:
         for t in tokens:
             clauses.append("(instr(tri.title_lower, ?) > 0 OR instr(tri.body_lower, ?) > 0)")
             params.extend((t, t))
-        if allowed_paths is not None:
-            clauses.append("p.path IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         return clauses, params
+
+    def _matched_substring_paths(
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, allowed_paths: Set[str],
+    ) -> list[str]:
+        """Intersect exact matches without enumerating the allowed corpus or sorting hidden rows."""
+        clauses, params = self._substring_predicate(tokens, scope)
+        rows = conn.execute(
+            "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
+            + " AND ".join(clauses), params,
+        )
+        try:
+            return [path for (path,) in rows if path in allowed_paths]
+        finally:
+            rows.close()
 
     def _substring_query(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,
         allowed_paths: set[str] | None = None,
     ) -> list[str]:
         """Return the recency-ordered exact substring matches, capped after ordering."""
-        clauses, params = self._substring_predicate(tokens, scope, allowed_paths)
+        if allowed_paths is None:
+            clauses, params = self._substring_predicate(tokens, scope)
+            source = "FROM tri JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses)
+        else:
+            # The surrounding catalogue callback pins both statements to one proven snapshot.
+            matched = self._matched_substring_paths(conn, tokens, scope, allowed_paths)
+            source = "FROM json_each(?) matched CROSS JOIN pages p ON p.path = matched.value"
+            params = [json.dumps(matched, ensure_ascii=False)]
         limit = ""
         if k is not None:
             limit = " LIMIT ?"
             params.append(max(0, int(k)))
         rows = conn.execute(
-            "SELECT p.path FROM tri JOIN pages p ON p.rowid = tri.rowid "
-            "WHERE " + " AND ".join(clauses) + " "
+            "SELECT p.path " + source + " "
             "ORDER BY p.updated DESC, p.path DESC" + limit,
             params,
         ).fetchall()
@@ -12193,7 +12212,14 @@ class LexicalStore:
         allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
     ) -> list[KeywordGroup]:
         """Merge every frozen pending parent before grouping and capping matching sources."""
-        clauses, params = self._substring_predicate(tokens, scope, allowed_paths)
+        if allowed_paths is None:
+            clauses, params = self._substring_predicate(tokens, scope)
+            source = "FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid"
+        else:
+            matched = self._matched_substring_paths(conn, tokens, scope, allowed_paths)
+            source = "FROM json_each(?) matched CROSS JOIN pages p ON p.path = matched.value"
+            clauses = []
+            params = [json.dumps(matched, ensure_ascii=False)]
         clauses.extend((
             "p.eligibility_view_json IS NOT NULL", "p.content_hash IS NOT NULL",
             "p.ranking_json IS NOT NULL", "NOT EXISTS (SELECT 1 FROM pending WHERE path = p.path)",
@@ -12209,7 +12235,7 @@ class LexicalStore:
             "json_extract(value, '$.parseable') AS parseable FROM json_each(?)), "
             "matched AS (SELECT p.path, p.emitted_parent_path AS parent, p.updated, p.content_hash AS hash, "
             "json_extract(p.eligibility_view_json, '$.media_file') AS media_file, 1 AS priority, 0 AS ordinal "
-            "FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
+            + source + " WHERE " + " AND ".join(clauses) + " "
             "UNION ALL SELECT path, parent, updated, hash, media_file, 0, ordinal "
             "FROM pending WHERE matches = 1 AND parseable = 1), "
             "parents AS (SELECT m.*, CASE WHEN overlay.path IS NOT NULL THEN overlay.parseable "
