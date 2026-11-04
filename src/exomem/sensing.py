@@ -236,6 +236,10 @@ class Question:
     label_map_version: str
     unit_scope: UnitScope
     fixture_set: str
+    # Closed request and vector shapes belong to the reviewed question contract.
+    slot_names: tuple[str, ...] = ("a", "b")
+    extractors: tuple[str, ...] = ("unit-text-v1", "page-claim-v1")
+    vector_names: tuple[str, ...] = ("ab", "ba")
 
 
 UNITS_V1 = UnitScope(
@@ -360,6 +364,7 @@ class InstrumentIdentity:
     label_map_version: str
     fixture_set: str
     placement: str = "local-cpu"
+    label_token_map: str | None = None
 
     @property
     def unpinned_weights(self) -> bool:
@@ -367,7 +372,7 @@ class InstrumentIdentity:
 
     @property
     def instrument_id(self) -> str:
-        return _digest(
+        parts = (
             "instrument",
             self.model,
             self.revision,
@@ -376,9 +381,14 @@ class InstrumentIdentity:
             self.runtime_version,
             self.template_version,
         )
+        return (
+            _digest(*parts)
+            if self.label_token_map is None
+            else _digest(*parts, self.label_token_map)
+        )
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "model": self.model,
             "revision": self.revision,
             "weights_sha256": self.weights_sha256,
@@ -390,6 +400,9 @@ class InstrumentIdentity:
             "fixture_set": self.fixture_set,
             "placement": self.placement,
         }
+        if self.label_token_map is not None:
+            result["label_token_map"] = self.label_token_map
+        return result
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> InstrumentIdentity:
@@ -405,6 +418,7 @@ class InstrumentIdentity:
             label_map_version=str(data["label_map_version"]),
             fixture_set=str(data["fixture_set"]),
             placement=str(data.get("placement") or "local-cpu"),
+            label_token_map=data.get("label_token_map"),
         )
 
 
@@ -430,11 +444,135 @@ class InputUnit:
 
 
 @dataclass(frozen=True)
+class InputSlot:
+    unit_ref: str
+    path: str
+    slot: str
+    extractor: str
+    text_sha256: str
+    anchor: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        value = {
+            "unit_ref": self.unit_ref,
+            "path": self.path,
+            "slot": self.slot,
+            "extractor": self.extractor,
+            "text_sha256": self.text_sha256,
+        }
+        if self.anchor is not None:
+            value["anchor"] = self.anchor
+        return value
+
+
+def request_input_key(
+    question_type: str, input_version: int, inputs: Sequence[InputUnit | InputSlot]
+) -> str:
+    if input_version == 1:
+        return input_key(question_type, [item.text_sha256 for item in inputs])
+    return _digest(
+        "input",
+        2,
+        question_type,
+        [[item.slot, item.extractor, item.text_sha256, item.anchor] for item in inputs],
+    )
+
+
+def request_reading_id(
+    question_type: str,
+    instrument_id: str,
+    input_version: int,
+    inputs: Sequence[InputUnit | InputSlot],
+) -> str:
+    if input_version == 1:
+        return reading_id(question_type, instrument_id, [item.text_sha256 for item in inputs])
+    return _digest(
+        "reading",
+        2,
+        question_type,
+        instrument_id,
+        [[item.slot, item.extractor, item.text_sha256, item.anchor] for item in inputs],
+    )
+
+
+@dataclass(frozen=True)
+class SenseRequest:
+    question_type: str
+    input_version: int
+    inputs: tuple[InputUnit | InputSlot, ...]
+    texts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        entry = question(self.question_type)
+        if type(self.input_version) is not int:
+            raise ValueError("input version must be an integer")
+        if any(not isinstance(text, str) for text in self.texts):
+            raise ValueError("input texts must be strings")
+        if any(not isinstance(item, (InputUnit, InputSlot)) for item in self.inputs):
+            raise ValueError("inputs must be typed units or slots")
+        if len(self.inputs) != len(self.texts) or not self.inputs:
+            raise ValueError("each input needs its exact text")
+        if any(
+            text_sha256(text) != item.text_sha256
+            for item, text in zip(self.inputs, self.texts, strict=True)
+        ):
+            raise ValueError("input text hash mismatch")
+        if self.input_version == 1:
+            if self.question_type != PAIR_RELATION or len(self.inputs) != 2:
+                raise ValueError("legacy inputs require pair.relation")
+            if any(
+                type(item) is not InputUnit or item.extractor != EXTRACTOR for item in self.inputs
+            ):
+                raise ValueError("legacy inputs require unit-text-v1")
+            if tuple(item.text_sha256 for item in self.inputs) != ordered_hashes(
+                [item.text_sha256 for item in self.inputs]
+            ):
+                raise ValueError("legacy inputs must be ordered by text hash")
+        elif self.input_version == 2:
+            if any(not isinstance(item, InputSlot) for item in self.inputs):
+                raise ValueError("version 2 requires named input slots")
+            if tuple(item.slot for item in self.inputs) != entry.slot_names:
+                raise ValueError("input slots differ from the question contract")
+            if any(item.extractor not in entry.extractors for item in self.inputs):
+                raise ValueError("input extractor differs from the question contract")
+        else:
+            raise ValueError("unknown input version")
+
+    @property
+    def input_key(self) -> str:
+        return request_input_key(self.question_type, self.input_version, self.inputs)
+
+    def reading_id(self, instrument_id: str) -> str:
+        return request_reading_id(
+            self.question_type, instrument_id, self.input_version, self.inputs
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "question_type": self.question_type,
+            "input_version": self.input_version,
+            "inputs": [item.as_dict() for item in self.inputs],
+            "texts": list(self.texts),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> SenseRequest:
+        version = value["input_version"]
+        kind = InputUnit if version == 1 else InputSlot
+        return cls(
+            str(value["question_type"]),
+            version,
+            tuple(kind(**item) for item in value["inputs"]),
+            tuple(value["texts"]),
+        )
+
+
+@dataclass(frozen=True)
 class Reading:
     reading_id: str
     question_type: str
     instrument: InstrumentIdentity
-    inputs: tuple[InputUnit, ...]
+    inputs: tuple[InputUnit | InputSlot, ...]
     #: `{"ab": [...], "ba": [...]}` in input order, or None for an abstention
     #: the instrument decided before any vector existed.
     vectors: Mapping[str, Sequence[float]] | None
@@ -442,6 +580,7 @@ class Reading:
     sensed_at: str
     placement: str
     columns: tuple[str, ...] = field(default=("entailment", "neutral", "contradiction"))
+    input_version: int = 1
 
     @property
     def hashes(self) -> tuple[str, ...]:
@@ -449,9 +588,18 @@ class Reading:
 
     @property
     def input_key(self) -> str:
-        return input_key(self.question_type, self.hashes)
+        return request_input_key(self.question_type, self.input_version, self.inputs)
 
     def output(self) -> dict[str, Any]:
+        if self.input_version == 2:
+            return {
+                "version": 2,
+                "columns": list(self.columns),
+                "vectors": None
+                if self.vectors is None
+                else {key: list(value) for key, value in self.vectors.items()},
+                "verdict": self.verdict.as_dict(),
+            }
         return {
             "columns": list(self.columns),
             "directions": (
@@ -513,15 +661,70 @@ def make_reading(
     )
 
 
-def rederive(reading_vectors: Mapping[str, Sequence[float]] | None, stored: Verdict, version: str) -> Verdict | None:
-    """The verdict under the ACTIVE label map, from the stored vectors.
-
-    A label-map change is a re-derivation, never a re-sense. An abstention the
-    instrument decided without vectors stays that abstention.
-    """
+def rederive(
+    reading_vectors: Mapping[str, Sequence[float]] | None,
+    stored: Verdict,
+    version: str,
+    *,
+    columns: Sequence[str] | None = None,
+    vector_names: Sequence[str] = ("ab", "ba"),
+) -> Verdict | None:
+    """Validate the stored output at the consumer boundary, then apply the active map."""
+    mapping = label_map(version)
+    if columns is not None and tuple(columns) != mapping.columns:
+        return None
     if reading_vectors is None:
         return stored if stored.label == "abstain" else None
-    return label_map(version).apply(reading_vectors.get("ab"), reading_vectors.get("ba"))
+    if set(reading_vectors) != set(vector_names):
+        return None
+    try:
+        if any(
+            len(vector) != len(mapping.columns) or any(not _finite(float(v)) for v in vector)
+            for vector in reading_vectors.values()
+        ):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if hasattr(mapping, "apply_vectors"):
+        return mapping.apply_vectors(reading_vectors)
+    return mapping.apply(reading_vectors.get("ab"), reading_vectors.get("ba"))
+
+
+def make_request_reading(
+    request: SenseRequest,
+    instrument: InstrumentIdentity,
+    *,
+    vectors: Mapping[str, Sequence[float]] | None,
+    abstain_reason: str | None,
+    sensed_at: str,
+) -> Reading | None:
+    entry = question(request.question_type)
+    rounded = (
+        None
+        if vectors is None
+        else {name: round_vector(values) for name, values in vectors.items()}
+    )
+    stored = Verdict("abstain", None, reason=abstain_reason)
+    if abstain_reason is not None:
+        if abstain_reason not in ABSTAIN_REASONS or vectors is not None:
+            raise ValueError("invalid instrument abstention")
+    elif vectors is None:
+        return None
+    verdict = rederive(rounded, stored, entry.label_map_version, vector_names=entry.vector_names)
+    if verdict is None:
+        return None
+    return Reading(
+        request.reading_id(instrument.instrument_id),
+        request.question_type,
+        instrument,
+        request.inputs,
+        rounded,
+        verdict,
+        sensed_at,
+        instrument.placement,
+        label_map(entry.label_map_version).columns,
+        request.input_version,
+    )
 
 
 # ----------------------------------------------------------------------

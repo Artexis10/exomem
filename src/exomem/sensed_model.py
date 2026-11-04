@@ -36,6 +36,7 @@ import logging
 import math
 import sqlite3
 import threading
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,8 +51,10 @@ log = logging.getLogger(__name__)
 #: can tell a projection that no longer describes the live page. 3 caps each
 #: page pair instead of each page, and is rebuilt from the ledger without
 #: re-sensing.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 FILENAME = "projection.sqlite"
+# This internal namespace belongs to the fixed unit-proposer queue protocol.
+_PAIR_JOB_SCOPE = ("pair-proposer", "units-v1")
 
 #: Pairs one page pair may send to sensing: its first PAIR_CAP pairs in the
 #: fixed order (`_Candidate.order_key`). The rank is taken among that page
@@ -129,7 +132,14 @@ _TABLES = (
     "CREATE INDEX IF NOT EXISTS pairs_b ON pairs(path_b)",
     "CREATE INDEX IF NOT EXISTS pairs_partner ON pairs(path_a, path_b, pair_key)",
     "CREATE INDEX IF NOT EXISTS pairs_input ON pairs(input_key)",
-    "CREATE INDEX IF NOT EXISTS pairs_queue ON pairs(queued, priority, pair_key)",
+    "CREATE TABLE IF NOT EXISTS sense_scopes (owner TEXT NOT NULL, scope_key TEXT NOT NULL, "
+    "revision INTEGER NOT NULL, invocation INTEGER NOT NULL, PRIMARY KEY(owner, scope_key))",
+    "CREATE TABLE IF NOT EXISTS sense_jobs (owner TEXT NOT NULL, scope_key TEXT NOT NULL, "
+    "request_key TEXT NOT NULL, question_type TEXT NOT NULL, input_key TEXT NOT NULL, "
+    "priority INTEGER NOT NULL, order_key TEXT NOT NULL, request_json TEXT NOT NULL, "
+    "PRIMARY KEY(owner, scope_key, request_key))",
+    "CREATE INDEX IF NOT EXISTS sense_jobs_order ON sense_jobs(priority, order_key, owner, scope_key, request_key)",
+    "CREATE INDEX IF NOT EXISTS sense_jobs_input ON sense_jobs(question_type, input_key)",
 )
 
 
@@ -150,13 +160,18 @@ def _digest(*parts: Any) -> str:
 # ----------------------------------------------------------------------
 
 
-def active_instruments() -> dict[str, sensing.InstrumentIdentity]:
+def active_instruments(
+    question_type: str = sensing.PAIR_RELATION,
+) -> dict[str, sensing.InstrumentIdentity]:
     """Instruments whose readings are consumed now, by instrument id.
 
     The pinned NLI instrument's identity, computed from the repository pin and
     installed package metadata. Nothing is imported or loaded. An empty result
     means no reading is consumed, so the status degrades to absence.
     """
+    sensing.question(question_type)
+    if question_type != sensing.PAIR_RELATION:
+        return {}
     from . import sensing_nli
 
     identity = sensing_nli.identity()
@@ -199,10 +214,12 @@ class ProjectionStore:
                 for statement in _TABLES:
                     conn.execute(statement)
                 fresh = conn.execute(
-                    "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
+                    "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)",
+                    (str(SCHEMA_VERSION),),
                 ).rowcount
                 conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
                 if fresh:
+                    _set_meta(conn, "incarnation", uuid.uuid4().hex)
                     _set_meta(conn, "seeding", "start")
                 conn.execute("COMMIT")
                 return conn
@@ -828,7 +845,7 @@ def project(
     for row in rows:
         if row.instrument_id not in active:
             continue
-        verdict = sensing.rederive(row.vectors, row.verdict, label_map_version)
+        verdict = sensing.rederive(row.vectors, row.verdict, label_map_version, columns=row.columns)
         if verdict is not None:
             current.append((verdict, row))
     if not current:
@@ -933,6 +950,29 @@ def _refresh_selection(conn: sqlite3.Connection, paths: Iterable[str]) -> None:
                 "UPDATE pairs SET selected=?, queued=? WHERE pair_key=?",
                 (1 if selected else 0, 1 if selected and needs else 0, key),
             )
+            # The legacy queued field is a presentation mirror; sense_jobs alone schedules work.
+            conn.execute(
+                "DELETE FROM sense_jobs WHERE owner=? AND scope_key=? AND request_key=?",
+                (*_PAIR_JOB_SCOPE, key),
+            )
+            if selected and needs:
+                row = conn.execute(
+                    "SELECT p.path_a,p.unit_a,p.hash_a,ua.text,p.path_b,p.unit_b,p.hash_b,ub.text,p.priority "
+                    "FROM pairs p JOIN units ua ON ua.path=p.path_a AND ua.unit_ref=p.unit_a "
+                    "JOIN units ub ON ub.path=p.path_b AND ub.unit_ref=p.unit_b WHERE p.pair_key=?",
+                    (key,),
+                ).fetchone()
+                if row is not None:
+                    a, ar, ah, at, b, br, bh, bt, priority = row
+                    request = sensing.SenseRequest(
+                        sensing.PAIR_RELATION,
+                        1,
+                        (sensing.InputUnit(ar, a, ah), sensing.InputUnit(br, b, bh)),
+                        (at, bt),
+                    )
+                    _put_job(
+                        conn, *_PAIR_JOB_SCOPE, OwnedRequest(key, request, priority, key)
+                    )
         done.update(ranks)
 
 
@@ -982,10 +1022,21 @@ def run_tick(
         _ingest(store, conn, ledger, active, label_map_version, report, halt)
         cosine = _follow_cosine(vault_root, store, conn)
         _follow_pages(
-            vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now,
+            vault_root,
+            store,
+            conn,
+            ledger,
+            active,
+            label_map_version,
+            seen,
+            report,
+            halt,
+            now,
             cosine,
         )
         _follow_seeding(store, conn, seen)
+        with store.write(conn):
+            _retire_satisfied(conn, ledger)
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
         log.warning("sensed model: tick failed", exc_info=True)
         report.stop = "error"
@@ -1077,6 +1128,11 @@ def _drop_cosine_pairs(conn: sqlite3.Connection) -> None:
         for row in conn.execute("SELECT path_a, path_b FROM pairs WHERE proposer='cosine'")
         for path in row
     }
+    conn.execute(
+        "DELETE FROM sense_jobs WHERE owner=? AND scope_key=? AND request_key IN "
+        "(SELECT pair_key FROM pairs WHERE proposer='cosine')",
+        _PAIR_JOB_SCOPE,
+    )
     conn.execute("DELETE FROM pairs WHERE proposer='cosine'")
     _refresh_selection(conn, paths)
 
@@ -1146,6 +1202,7 @@ def _ingest(store, conn, ledger, active, label_map_version, report, halt) -> Non
                 ).fetchall():
                     _reproject(conn, ledger, pair[:6], active, label_map_version)
                     paths.update((str(pair[6]), str(pair[7])))
+                _retire_satisfied(conn, ledger, row.question_type, row.input_key)
                 report.ingested += 1
             cursor = rows[-1].seq
             _set_meta(conn, "ledger_seq", cursor)
@@ -1276,6 +1333,11 @@ def _as_applied(
 def _drop_page(conn: sqlite3.Connection, rel: str, store_key: str) -> None:
     """Forget a page. Every other page pair's selection is its own, so nothing
     else moves."""
+    conn.execute(
+        "DELETE FROM sense_jobs WHERE owner=? AND scope_key=? AND request_key IN "
+        "(SELECT pair_key FROM pairs WHERE path_a=? OR path_b=?)",
+        (*_PAIR_JOB_SCOPE, rel, rel),
+    )
     conn.execute("DELETE FROM pairs WHERE path_a=? OR path_b=?", (rel, rel))
     conn.execute("DELETE FROM units WHERE path=?", (rel,))
     conn.execute("DELETE FROM links WHERE path=?", (rel,))
@@ -1300,8 +1362,15 @@ def _bump_units(
 
 
 def _apply_page(
-    conn, ledger, facts: PageFacts, own_vectors: Mapping[str, Any], cosine_hits, sig, active,
-    label_map_version, store_key: str,
+    conn,
+    ledger,
+    facts: PageFacts,
+    own_vectors: Mapping[str, Any],
+    cosine_hits,
+    sig,
+    active,
+    label_map_version,
+    store_key: str,
 ) -> None:
     rel = facts.path
     before = {
@@ -1311,6 +1380,11 @@ def _apply_page(
             (rel, rel),
         )
     }
+    conn.execute(
+        "DELETE FROM sense_jobs WHERE owner=? AND scope_key=? AND request_key IN "
+        "(SELECT pair_key FROM pairs WHERE path_a=? OR path_b=?)",
+        (*_PAIR_JOB_SCOPE, rel, rel),
+    )
     conn.execute("DELETE FROM pairs WHERE path_a=? OR path_b=?", (rel, rel))
     conn.execute("DELETE FROM units WHERE path=?", (rel,))
     conn.execute("DELETE FROM links WHERE path=?", (rel,))
@@ -1386,6 +1460,233 @@ def _apply_page(
 
 
 @dataclass(frozen=True)
+class OwnedRequest:
+    request_key: str
+    request: sensing.SenseRequest
+    priority: int = 1
+    order_key: str = ""
+
+
+@dataclass(frozen=True)
+class ScopeToken:
+    owner: str
+    scope_key: str
+    incarnation: str
+    revision: int
+    invocation: bool = False
+
+
+@dataclass(frozen=True)
+class Submission:
+    state: str
+    count: int = 0
+
+
+class QueueUnavailable(RuntimeError):
+    """A producer defers until the dreamer publishes a compatible projection."""
+
+
+def _producer_connection(vault_root: Path) -> sqlite3.Connection:
+    path = projection_path(vault_root)
+    if not path.is_file():
+        raise QueueUnavailable("absent")
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            f"{path.as_uri()}?mode=rw", uri=True, timeout=0, isolation_level=None
+        )
+        row = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+        if row is None or row[0] != str(SCHEMA_VERSION):
+            raise QueueUnavailable("incompatible")
+        if _get_meta(conn, "seeding") is not None:
+            raise QueueUnavailable("seeding")
+        return conn
+    except (sqlite3.Error, QueueUnavailable) as error:
+        if conn is not None:
+            conn.close()
+        raise QueueUnavailable(
+            str(error) if isinstance(error, QueueUnavailable) else "busy-or-unavailable"
+        ) from error
+
+
+def producer_scope_key(identity: Any, config: Any) -> tuple[str, bool]:
+    """Hash the release predicate's published identity, never a request principal."""
+    if identity is None:
+        return uuid.uuid4().hex, True
+
+    def sets(value):
+        if isinstance(value, (set, frozenset)):
+            return sorted(value)
+        raise TypeError("unsupported published admission identity")
+
+    payload = json.dumps(
+        [identity, config], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=sets
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest(), False
+
+
+def capture_scope(
+    vault_root: Path, owner: str, scope_key: str, *, invocation: bool = False
+) -> ScopeToken | Submission:
+    """Capture before parsing inputs. Never initialize or repair a projection."""
+    try:
+        conn = _producer_connection(vault_root)
+    except QueueUnavailable as error:
+        return Submission(str(error))
+    try:
+        conn.execute("BEGIN")
+        if _get_meta(conn, "seeding") is not None:
+            return Submission("seeding")
+        row = conn.execute(
+            "SELECT revision FROM sense_scopes WHERE owner=? AND scope_key=?", (owner, scope_key)
+        ).fetchone()
+        incarnation = _get_meta(conn, "incarnation")
+        if not isinstance(incarnation, str):
+            return Submission("incompatible")
+        return ScopeToken(
+            owner, scope_key, incarnation, 0 if row is None else int(row[0]), invocation
+        )
+    except sqlite3.Error:
+        return Submission("busy-or-unavailable")
+    finally:
+        conn.close()
+
+
+def _put_job(conn: sqlite3.Connection, owner: str, scope_key: str, job: OwnedRequest) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO sense_jobs(owner,scope_key,request_key,question_type,input_key,priority,order_key,request_json) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (
+            owner,
+            scope_key,
+            job.request_key,
+            job.request.question_type,
+            job.request.input_key,
+            job.priority,
+            job.order_key or job.request_key,
+            _dumps(job.request.as_dict()),
+        ),
+    )
+
+
+def submit_scope(
+    vault_root: Path,
+    token: ScopeToken | Submission,
+    requests: Iterable[OwnedRequest],
+    *,
+    complete: bool = True,
+) -> Submission:
+    if not isinstance(token, ScopeToken):
+        return token
+    jobs = tuple(requests)
+    try:
+        conn = _producer_connection(vault_root)
+    except QueueUnavailable as error:
+        return Submission(str(error))
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if _get_meta(conn, "seeding") is not None:
+            return Submission("seeding")
+        row = conn.execute(
+            "SELECT revision FROM sense_scopes WHERE owner=? AND scope_key=?",
+            (token.owner, token.scope_key),
+        ).fetchone()
+        revision = 0 if row is None else int(row[0])
+        if _get_meta(conn, "incarnation") != token.incarnation or revision != token.revision:
+            return Submission("superseded")
+        if complete:
+            conn.execute(
+                "DELETE FROM sense_jobs WHERE owner=? AND scope_key=?",
+                (token.owner, token.scope_key),
+            )
+        for job in jobs:
+            _put_job(conn, token.owner, token.scope_key, job)
+        conn.execute(
+            "INSERT OR REPLACE INTO sense_scopes VALUES(?,?,?,?)",
+            (token.owner, token.scope_key, revision + 1, int(token.invocation)),
+        )
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        return Submission("busy-or-unavailable")
+    finally:
+        conn.close()
+
+    # A rebuild can unlink a producer's connection. Confirm publication after closing it.
+    try:
+        published = _producer_connection(vault_root)
+    except QueueUnavailable as error:
+        return Submission(str(error))
+    try:
+        if _get_meta(published, "incarnation") != token.incarnation:
+            return Submission("superseded")
+        return Submission("submitted" if complete else "partial", len(jobs))
+    except sqlite3.Error:
+        return Submission("busy-or-unavailable")
+    finally:
+        published.close()
+
+
+@dataclass(frozen=True)
+class QueuedJob:
+    owner: str
+    scope_key: str
+    request_key: str
+    priority: int
+    order_key: str
+    request: sensing.SenseRequest
+
+    @property
+    def cursor(self) -> tuple:
+        return (self.priority, self.order_key, self.owner, self.scope_key, self.request_key)
+
+    @property
+    def pair_key(self) -> str:
+        return _dumps([self.owner, self.scope_key, self.request_key])
+
+    @property
+    def inputs(self):
+        return self.request.inputs
+
+    @property
+    def texts(self):
+        return self.request.texts
+
+
+def iter_jobs(
+    conn: sqlite3.Connection, *, question_type: str | None = None, input_key: str | None = None
+) -> Iterator[QueuedJob]:
+    # SQL keyset pagination advances even when an entire page is stale or unknown.
+    cursor = None
+    while True:
+        where = []
+        params: list[Any] = []
+        if question_type is not None:
+            where.append("question_type=?")
+            params.append(question_type)
+        if input_key is not None:
+            where.append("input_key=?")
+            params.append(input_key)
+        if cursor is not None:
+            where.append("(priority,order_key,owner,scope_key,request_key) > (?,?,?,?,?)")
+            params.extend(cursor)
+        rows = conn.execute(
+            "SELECT priority,order_key,owner,scope_key,request_key,request_json FROM sense_jobs "
+            + ("WHERE " + " AND ".join(where) + " " if where else "")
+            + "ORDER BY priority,order_key,owner,scope_key,request_key LIMIT 256",
+            params,
+        ).fetchall()
+        if not rows:
+            break
+        for priority, order, owner, scope, key, payload in rows:
+            try:
+                request = sensing.SenseRequest.from_dict(json.loads(payload))
+            except (TypeError, ValueError, KeyError):
+                continue
+            yield QueuedJob(owner, scope, key, priority, order, request)
+        cursor = tuple(rows[-1][:5])
+
+
+@dataclass(frozen=True)
 class QueuedPair:
     pair_key: str
     inputs: tuple[sensing.InputUnit, sensing.InputUnit]
@@ -1393,40 +1694,84 @@ class QueuedPair:
 
 
 def queued_pairs(conn: sqlite3.Connection, limit: int) -> list[QueuedPair]:
-    """The next pairs to sense, open work first. Read-only."""
-    out: list[QueuedPair] = []
-    for row in conn.execute(
-        "SELECT p.pair_key, p.path_a, p.unit_a, p.hash_a, ua.text, p.path_b, p.unit_b, p.hash_b, "
-        "ub.text FROM pairs p "
-        "JOIN units ua ON ua.path=p.path_a AND ua.unit_ref=p.unit_a "
-        "JOIN units ub ON ub.path=p.path_b AND ub.unit_ref=p.unit_b "
-        "WHERE p.queued=1 ORDER BY p.priority, p.pair_key LIMIT ?",
-        (int(limit),),
-    ):
-        key, path_a, unit_a, hash_a, text_a, path_b, unit_b, hash_b, text_b = row
-        out.append(
-            QueuedPair(
-                str(key),
-                (
-                    sensing.InputUnit(str(unit_a), str(path_a), str(hash_a)),
-                    sensing.InputUnit(str(unit_b), str(path_b), str(hash_b)),
-                ),
-                (str(text_a), str(text_b)),
-            )
-        )
+    """Compatibility view of legacy pair jobs; sense_jobs is the sole queue."""
+    out = []
+    for job in iter_jobs(conn):
+        if (job.owner, job.scope_key) == _PAIR_JOB_SCOPE:
+            out.append(QueuedPair(job.request_key, job.inputs, job.texts))
+            if len(out) >= limit:
+                break
     return out
 
 
-def queue_depth(vault_root: Path) -> int:
+def _question_active(question_type: str) -> dict[str, sensing.InstrumentIdentity]:
+    # Preserve the established no-argument injection seam for pair.relation.
+    return (
+        active_instruments()
+        if question_type == sensing.PAIR_RELATION
+        else active_instruments(question_type)
+    )
+
+
+def _retire_satisfied(
+    conn: sqlite3.Connection,
+    ledger: sqlite3.Connection | None,
+    question_type: str | None = None,
+    input_key: str | None = None,
+) -> None:
+    if ledger is None:
+        return
+    active = {}
+    for job in iter_jobs(conn, question_type=question_type, input_key=input_key):
+        request = job.request
+        if request.question_type not in active:
+            active[request.question_type] = _question_active(request.question_type)
+        identities = active[request.question_type]
+        if identities and all(
+            sensing_ledger.has_reading(ledger, request.reading_id(key)) for key in identities
+        ):
+            conn.execute(
+                "DELETE FROM sense_jobs WHERE owner=? AND scope_key=? AND request_key=?",
+                (job.owner, job.scope_key, job.request_key),
+            )
+    conn.execute(
+        "DELETE FROM sense_scopes WHERE invocation=1 AND NOT EXISTS "
+        "(SELECT 1 FROM sense_jobs j WHERE j.owner=sense_scopes.owner AND j.scope_key=sense_scopes.scope_key)"
+    )
+
+
+def runnable_jobs(
+    vault_root: Path, *, refused: Callable[[str], bool] | None = None
+) -> Iterator[QueuedJob]:
     conn = open_readonly(vault_root)
     if conn is None:
-        return 0
+        return
+    ledger = sensing_ledger.open_readonly(vault_root)
     try:
-        return int(conn.execute("SELECT count(*) FROM pairs WHERE queued=1").fetchone()[0])
-    except sqlite3.Error:
-        return 0
+        active = {}
+        blocked = {}
+        for job in iter_jobs(conn):
+            q = job.request.question_type
+            if q not in blocked:
+                blocked[q] = refused is not None and refused(q)
+            if blocked[q]:
+                continue
+            if q not in active:
+                active[q] = _question_active(q)
+            if any(
+                ledger is None
+                or not sensing_ledger.has_reading(ledger, job.request.reading_id(key))
+                for key in active[q]
+            ):
+                yield job
     finally:
         conn.close()
+        if ledger is not None:
+            ledger.close()
+
+
+def queue_depth(vault_root: Path) -> int:
+    return sum(1 for _job in runnable_jobs(vault_root))
 
 
 # ----------------------------------------------------------------------
@@ -1474,7 +1819,9 @@ class _View:
     as of the last tick, and a request must not serve it as current.
     """
 
-    def __init__(self, vault_root: Path, conn: sqlite3.Connection, keep, instrument_key: str) -> None:
+    def __init__(
+        self, vault_root: Path, conn: sqlite3.Connection, keep, instrument_key: str
+    ) -> None:
         self.vault_root = Path(vault_root)
         self.conn = conn
         self.keep = keep
@@ -1515,8 +1862,10 @@ class _View:
         """True when the projection processed `path` at the signature it has now."""
         if path not in self._live:
             page = self.page(path)
-            self._live[path] = page is not None and page[3] is not None and page[3] == _live_sig(
-                self.vault_root, path
+            self._live[path] = (
+                page is not None
+                and page[3] is not None
+                and page[3] == _live_sig(self.vault_root, path)
             )
         return self._live[path]
 
@@ -1563,8 +1912,19 @@ class _View:
                     f"AND {non_neutral} ORDER BY pair_key LIMIT ?",
                     (path, other, path, other, *_SERVED_STATES, self.instrument_key, limit),
                 ):
-                    (key, path_a, unit_a, unit_b, state, verdict, direction, p, reading, inst,
-                     verdicts) = row
+                    (
+                        key,
+                        path_a,
+                        unit_a,
+                        unit_b,
+                        state,
+                        verdict,
+                        direction,
+                        p,
+                        reading,
+                        inst,
+                        verdicts,
+                    ) = row
                     if key not in loaded:
                         self._remaining -= 1
                         loaded.add(key)
@@ -1728,7 +2088,11 @@ def _item(edge: _Edge) -> dict[str, Any]:
 def _status(view: _View, path: str) -> dict[str, Any] | None:
     edges = view.edges(path)
     refined = sorted(
-        {e.other: e for e in edges if e.state == "current" and e.other_refines and view.later(e.other, path)}.items()
+        {
+            e.other: e
+            for e in edges
+            if e.state == "current" and e.other_refines and view.later(e.other, path)
+        }.items()
     )
     contradictions = sorted({e.other: e for e in edges if view.open_contradiction(e)}.items())
     if not refined and not contradictions:
@@ -1759,7 +2123,9 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
         status["contradiction_component"], component_truncated = _component(view, path)
     else:
         component_truncated = False
-    status["evidence_complete"] = view.complete(path) and not (chain_truncated or component_truncated)
+    status["evidence_complete"] = view.complete(path) and not (
+        chain_truncated or component_truncated
+    )
     return status
 
 
@@ -1859,10 +2225,17 @@ def for_packet(vault_root: Path, packet: dict[str, Any]) -> None:
                     continue
                 anchor["epistemic_status"] = {
                     key: status[key]
-                    for key in ("line", "refined_by_later", "open_contradictions", "evidence_complete")
+                    for key in (
+                        "line",
+                        "refined_by_later",
+                        "open_contradictions",
+                        "evidence_complete",
+                    )
                     if key in status
                 }
-                budget["used_chars"] = int(budget.get("used_chars") or 0) + len(status.get("line", ""))
+                budget["used_chars"] = int(budget.get("used_chars") or 0) + len(
+                    status.get("line", "")
+                )
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - a status never breaks an activation

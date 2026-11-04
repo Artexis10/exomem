@@ -11,7 +11,15 @@ import numpy as np
 import pytest
 import sensing_fixture as sf
 
-from exomem import dreamer, dreamer_store, freshness, sensed_model, sensing, sensing_ledger, sensor_worker
+from exomem import (
+    dreamer,
+    dreamer_store,
+    freshness,
+    sensed_model,
+    sensing,
+    sensing_ledger,
+    sensor_worker,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -587,6 +595,7 @@ def test_a_new_encoder_fingerprint_re_proposes_cosine_pairs(tmp_path: Path, monk
     monkeypatch.setattr(sensed_model, "stored_unit_vectors", lambda _v, _r, _fp: {})
     sf.settle(vault)
     assert sf.edges(vault) == [], "vectors of another encoder propose nothing"
+    assert sensed_model.queue_depth(vault) == 0, "invalidated proposals spend no sensor budget"
 
 
 def test_pages_in_one_tick_find_the_cosine_pairs_separate_ticks_find(
@@ -901,3 +910,190 @@ def test_the_projection_is_private(tmp_path: Path, monkeypatch) -> None:
     vault = sf.build(tmp_path)
     sf.settle(vault)
     assert sensed_model.projection_path(vault).stat().st_mode & 0o777 == 0o600
+
+
+def _ready_shared_queue(vault: Path) -> sensed_model.ProjectionStore:
+    store = sensed_model.ProjectionStore(vault)
+    conn = store.connect()
+    with store.write(conn):
+        sensed_model._set_meta(conn, "seeding", None)
+    conn.close()
+    return store
+
+
+def _claim_job(key: str, text: str = "First claim.", *, priority: int = 1):
+    texts = (text, "Second claim.")
+    inputs = tuple(
+        sensing.InputSlot(
+            f"{slot}.md", f"{slot}.md", slot, "page-claim-v1", sensing.text_sha256(value)
+        )
+        for slot, value in zip(("a", "b"), texts, strict=True)
+    )
+    return sensed_model.OwnedRequest(
+        key, sensing.SenseRequest(sensing.PAIR_RELATION, 2, inputs, texts), priority, key
+    )
+
+
+def test_shared_producers_replace_only_their_scope_and_compare_before_extraction(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _ready_shared_queue(vault)
+    first = sensed_model.capture_scope(vault, "audit", "released-a")
+    concurrent = sensed_model.capture_scope(vault, "audit", "released-a")
+    other = sensed_model.capture_scope(vault, "other", "released-a")
+    restricted = sensed_model.capture_scope(vault, "audit", "released-b")
+    assert sensed_model.submit_scope(vault, first, [_claim_job("candidate")]).state == "submitted"
+    assert (
+        sensed_model.submit_scope(vault, other, [_claim_job("candidate", "Other producer.")]).state
+        == "submitted"
+    )
+    assert (
+        sensed_model.submit_scope(
+            vault, restricted, [_claim_job("candidate", "Restricted caller.")]
+        ).state
+        == "submitted"
+    )
+    assert sensed_model.submit_scope(vault, concurrent, []).state == "superseded"
+    fresh = sensed_model.capture_scope(vault, "audit", "released-a")
+    assert (
+        sensed_model.submit_scope(vault, fresh, [_claim_job("candidate", "Edited claim.")]).state
+        == "submitted"
+    )
+    conn = sensed_model.open_readonly(vault)
+    jobs = list(sensed_model.iter_jobs(conn))
+    conn.close()
+    assert len(jobs) == 3
+    assert {(j.owner, j.scope_key, j.texts[0]) for j in jobs} == {
+        ("audit", "released-a", "Edited claim."),
+        ("other", "released-a", "Other producer."),
+        ("audit", "released-b", "Restricted caller."),
+    }
+
+
+def test_projection_incarnation_invalidates_a_slow_producer(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = _ready_shared_queue(vault)
+    old = sensed_model.capture_scope(vault, "audit", "scope")
+    store.wipe()
+    _ready_shared_queue(vault)
+    assert sensed_model.submit_scope(vault, old, [_claim_job("old")]).state == "superseded"
+    assert sensed_model.queue_depth(vault) == 0
+
+
+def test_rebuild_after_producer_opens_defers_the_unpublished_submission(
+    tmp_path: Path, monkeypatch
+) -> None:
+    vault = tmp_path / "vault"
+    store = _ready_shared_queue(vault)
+    token = sensed_model.capture_scope(vault, "audit", "scope")
+    connect = sensed_model._producer_connection
+    replaced = False
+
+    def rebuild_after_open(vault_root):
+        nonlocal replaced
+        conn = connect(vault_root)
+        if not replaced:
+            replaced = True
+            store.wipe()
+            _ready_shared_queue(vault)
+        return conn
+
+    monkeypatch.setattr(sensed_model, "_producer_connection", rebuild_after_open)
+    assert sensed_model.submit_scope(vault, token, [_claim_job("lost")]).state == "superseded"
+    assert sensed_model.queue_depth(vault) == 0
+
+
+def test_partial_replacement_keeps_the_previous_complete_set(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _ready_shared_queue(vault)
+    token = sensed_model.capture_scope(vault, "audit", "scope")
+    sensed_model.submit_scope(vault, token, [_claim_job("one"), _claim_job("two")])
+    token = sensed_model.capture_scope(vault, "audit", "scope")
+    assert (
+        sensed_model.submit_scope(
+            vault, token, [_claim_job("one", "Edited claim.")], complete=False
+        ).state
+        == "partial"
+    )
+    conn = sensed_model.open_readonly(vault)
+    assert {j.request_key for j in sensed_model.iter_jobs(conn)} == {"one", "two"}
+    conn.close()
+
+
+def test_narrow_producer_never_creates_or_repairs_a_projection(tmp_path: Path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    monkeypatch.setattr(
+        sensed_model.ProjectionStore,
+        "connect",
+        lambda *_: pytest.fail("producer initialized projection"),
+    )
+    assert sensed_model.capture_scope(vault, "audit", "scope").state == "absent"
+    assert not sensed_model.projection_path(vault).exists()
+
+
+def test_published_scope_identity_partitions_callers_and_unstable_views() -> None:
+    a = sensed_model.producer_scope_key(("release", frozenset({"scope-a", "scope-b"})), [0.8, 0.9])
+    assert a == sensed_model.producer_scope_key(
+        ("release", frozenset({"scope-b", "scope-a"})), [0.8, 0.9]
+    )
+    assert a != sensed_model.producer_scope_key(("release", frozenset({"scope-a"})), [0.8, 0.9])
+    one, unstable = sensed_model.producer_scope_key(None, [0.8, 0.9])
+    two, _ = sensed_model.producer_scope_key(None, [0.8, 0.9])
+    assert unstable and one != two
+
+
+def test_ledger_ingest_retires_audit_jobs_without_pairs_or_empty_worker_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sf.enable(monkeypatch)
+    vault = tmp_path / "vault"
+    _ready_shared_queue(vault)
+    token = sensed_model.capture_scope(vault, "audit", "invocation", invocation=True)
+    job = _claim_job("candidate")
+    sensed_model.submit_scope(vault, token, [job])
+    other = sensed_model.capture_scope(vault, "other-audit", "invocation", invocation=True)
+    sensed_model.submit_scope(vault, other, [job])
+    stub = sf.StubInstrument()
+    assert sf.sense(vault, stub) == sensor_worker.EXIT_IDLE
+    assert len(stub.calls) == 1, "two owners share one inference for identical content"
+    assert sensed_model.queue_depth(vault) == 0
+    sup = sensor_worker.Supervisor(
+        vault, launch=lambda *_: pytest.fail("completed work launched a child")
+    )
+    assert (
+        sup.step(
+            gate_run=True, gate_reason="ready", queue_depth=lambda: sensed_model.queue_depth(vault)
+        )
+        == "idle"
+    )
+    sensed_model.run_tick(vault, seen={}, halt=lambda: None)
+    conn = sensed_model.open_readonly(vault)
+    assert conn.execute("SELECT count(*) FROM sense_jobs").fetchone() == (0,)
+    assert conn.execute("SELECT count(*) FROM sense_scopes").fetchone() == (0,)
+    assert conn.execute("SELECT count(*) FROM pairs").fetchone() == (0,)
+    conn.close()
+
+
+@pytest.mark.parametrize("unavailable", ["seeding", "incompatible", "busy-or-unavailable"])
+def test_narrow_producer_defers_without_changing_unavailable_projection(
+    tmp_path: Path, unavailable: str
+) -> None:
+    vault = tmp_path / "vault"
+    store = _ready_shared_queue(vault)
+    token = sensed_model.capture_scope(vault, "audit", "scope")
+    conn = store.connect()
+    try:
+        if unavailable == "seeding":
+            with store.write(conn):
+                sensed_model._set_meta(conn, "seeding", "start")
+        elif unavailable == "incompatible":
+            conn.execute("UPDATE meta SET value='999' WHERE key='schema'")
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+        assert (
+            sensed_model.submit_scope(vault, token, [_claim_job("candidate")]).state == unavailable
+        )
+        assert conn.execute("SELECT count(*) FROM sense_jobs").fetchone() == (0,)
+    finally:
+        conn.close()
