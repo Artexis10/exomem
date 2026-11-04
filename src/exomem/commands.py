@@ -30,7 +30,6 @@ import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext, suppress
-from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
@@ -145,6 +144,7 @@ from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import vocabulary_delta as vocabulary_delta_module
 from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
@@ -189,13 +189,12 @@ from .kbdir import kb_dirname
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
+    latest_operation_id,
     resolve_under_vault,
 )
 from .viewer_map import op_viewer_map
 
 log = logging.getLogger(__name__)
-
-_legacy_selected_relation = ContextVar("legacy_selected_relation", default=False)
 
 _link_summary = link_summary_module.link_summary
 _QueryFilters = _public_filter_annotation()
@@ -852,7 +851,7 @@ def op_bootstrap(
     Reads no vault content. Full includes the public reference index.
 
     Args:
-        profile: compact (default), full, diagnostics, or session (needs installed skill digest).
+        profile: compact, full, diagnostics, or session (needs installed skill digest).
         workflow: Context label only.
         skill_contract: Session digest; missing/stale returns compact plus session_profile_unavailable.
         section: Compact block name; index lists available blocks.
@@ -1173,12 +1172,13 @@ def op_bootstrap(
         "extension_count": len(relation_registry.extensions),
         "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
-            "Resolve truthfully: specific, relates_to or no edge. Propose durable recurring "
-            "meaning, never automatically from questions. Hash-guard saves. New meaning uses a "
-            "new canonical key; deprecate replaced key."
+            "Resolve truthfully: a specific relation first; relates_to only for a real generic "
+            "link, with a reason when it joins an entity where a specific one fits; else no edge. "
+            "Propose durable recurring meaning, never automatically from questions. Hash-guard "
+            "saves. New meaning uses a new canonical key; deprecate replaced key."
             if profile == "compact" else
             (
-                "resolve: specific truthful, relates_to generic/no edge. "
+                "resolve: specific truthful first; relates_to generic (reason on an entity edge where a specific fits)/no edge. "
                 "propose-relation only for durable recurring meaning; explicit question is "
                 "consideration, never automatic type. Hash guard save-relations; new canonical "
                 "key deprecates old"
@@ -2015,6 +2015,13 @@ def op_bootstrap(
                     "relation_review_hash, and an explicit bounded relation_review_reason; "
                     "never fabricate a none decision or infer review from missing relations"
                 ),
+                "generic": (
+                    "a new generic edge to an entity, where a specific relation fits, is refused "
+                    "with GENERIC_RELATION_NEEDS_REASON and up to four options: write one, or "
+                    'commit with relation_disposition="generic", the returned '
+                    "relation_review_hash and a bounded relation_review_reason; a create-entity "
+                    "relations item takes reason"
+                ),
                 "adoption_handoff": (
                     f"{call_text('adopt_vault', {'mode': 'compile-selected'})} returns a proposal only; review "
                     "it, then call create_note() so normal semantic precommit still applies"
@@ -2025,7 +2032,8 @@ def op_bootstrap(
                     "rule": (
                         "validate the exact edit; retain transition_token and "
                         "relation_review_hash; commit that edit unchanged with an explicit "
-                        "reviewed_none reason only when no truthful relation applies"
+                        "reviewed_none reason only when no truthful relation applies, or "
+                        "relation_disposition generic with a reason for a generic entity edge"
                     )
                 }
                 if profile == "compact"
@@ -2064,7 +2072,8 @@ def op_bootstrap(
                     "rule": (
                         "retain semantic.transition_token and "
                         "semantic.relation_review_hash from validation; commit the "
-                        "identical proposed edit with a bounded reason"
+                        "identical proposed edit with a bounded reason: reviewed_none, or "
+                        "generic for a generic entity edge"
                     ),
                 }
             ),
@@ -4682,7 +4691,7 @@ def op_edit(
         relation_disposition: Reviewed relation outcome for the commit.
         relation_review_hash: Exact `relation_review_hash` returned by the
             validate-only semantic preflight.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
 
     Returns:
         Shape varies by mode (take-row -> {path, row, warnings};
@@ -4883,7 +4892,7 @@ def op_replace(
         draft_token: Opaque destination/date token returned by validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
         vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
             returned by an experiment-domain vocabulary preparation.
 
@@ -5072,9 +5081,13 @@ def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None]
             path = resolved
     except Exception:  # noqa: BLE001 - what cannot be read is an unknown origin, whatever the cause
         path = None
-    from .writer_lease import active_mutation_request_id
-
-    operation_id = active_mutation_request_id() if path else None
+    operation_id: str | None = None
+    if path:
+        try:
+            # The originating write's own logged id, not this creation's request id.
+            operation_id = latest_operation_id(vault_root, path)
+        except Exception:  # noqa: BLE001 - an unreadable log leaves the origin path without an id
+            operation_id = None
     return {"path": path, "operation_id": operation_id}
 
 
@@ -5133,9 +5146,10 @@ def op_link(
         connections: List of vault-relative wikilink targets to put under
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
-        relations: `{kind, target}` objects written under `## Relations` as
-            `- kind [[target]]`; kind is a registered relation key, target
-            follows `connections` conventions.
+        relations: `{kind, target, reason?}` objects written under `## Relations`
+            as `- kind [[target]]`; kind is a registered relation key, target
+            follows `connections` conventions. A generic kind (`relates_to`) to
+            an entity needs a `reason` when a specific relation fits.
         (per-type fields): see the bullet list above.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
             the name already denotes other active entities and this is a
@@ -5531,7 +5545,7 @@ def op_note(
         relation_disposition: Reviewed relation outcome for commit, usually
             reviewed_none when no honest relation exists.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
         vocabulary_decision: After a vocabulary_preparation response, submit its
             evidence_fingerprint with outcome reuse, create, or defer and the
             reviewed canonical value. The response is bound to that evidence.
@@ -5772,7 +5786,7 @@ def op_create_file(
         draft_token: Opaque destination/date token returned by validate_only.
         relation_disposition: Reviewed relation outcome for semantic file creation.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
 
     Returns: {path, warnings} for files; {path, created, warnings} for dirs.
     Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
@@ -6209,7 +6223,7 @@ def op_append_to_file(
         semantic_transition_token: Opaque transition token returned by validate_only.
         relation_disposition: Reviewed relation outcome for a semantic append.
         relation_review_hash: Transition hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
 
     Returns: {path, bytes_appended, warnings}.
     Errors: INVALID_APPEND; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
@@ -6863,6 +6877,10 @@ def op_activate_context(
                             trigger=trigger,
                             intent_resolution=intent_resolution,
                         )
+                        # Spend the reserved move before optional carriers share the public ceiling.
+                        if isinstance(packet.get("budget"), dict):
+                            packet["budget"]["limit_chars"] = requested_chars
+                        read_next_action.attach(packet)
                         # After the guard and outside the packet cache, like `continuity`:
                         # at a caller's session start, at most one upkeep item, and only in
                         # the process whose background worker proposed it. Never raises.
@@ -6876,6 +6894,9 @@ def op_activate_context(
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
                         due_state_module.for_activation(vault_root, packet, purpose=purpose)
+                        # Vocabulary added since this conversation was last told, once per admitted
+                        # digest change and counted inside the packet's own `limit_chars`.
+                        vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:
@@ -6899,9 +6920,6 @@ def op_activate_context(
                         block = active_budget.as_response_block() if active_budget is not None else None
                         if block is not None:
                             packet["request_budget"] = block
-                    if isinstance(packet.get("budget"), dict):
-                        packet["budget"]["limit_chars"] = requested_chars
-                    read_next_action.attach(packet)
                     if "map" in packet and isinstance(packet.get("budget"), dict):
                         packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
                     return packet
@@ -8183,13 +8201,13 @@ def op_remember(
             insight, failure or pattern only warns.
         bridge_of: Source paths or stable refs for a cross-domain bridge;
             requires bridge_scope and bridge_review.
-        suggestions: Off by default. `suggestions=true` also returns pages to link
+        suggestions: `suggestions=true` also returns pages to link
             (read under `response_detail='full'`); costs one retrieval pass.
         validate_only: Return an immutable creation draft without writing.
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         vocabulary_decision: Answers a vocabulary_preparation response.
     """
     return op_note(
@@ -8406,7 +8424,7 @@ def op_observe_memory(
         transition_token: From validate.
         relation_disposition: Semantic review disposition (existing page).
         relation_review_hash: Transition hash the reviewed-none covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         reason: Rationale kept with the prior interpretation.
         target_fingerprints: Exact corrective refs/current fingerprints.
             Omit for page/heading links; echo for episode unit leaves.
@@ -8546,7 +8564,7 @@ def op_replace_memory(
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         vocabulary_decision: Answers an experiment-domain vocabulary preparation.
     """
     return op_replace(
@@ -10046,15 +10064,42 @@ def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
     return {**result, "capture_sweep": block}
 
 
-def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
-    """Both post-batch advisories, in one place, for every operation leaf.
+def _carrying_undeclared_referents(vault_root: Path, result: Any) -> Any:
+    """Attach the names a batch's pages newly linked with no page behind them, each once.
 
-    One seam rather than two call chains: the two carriers answer different
+    Inside `due_state.batch_scope` the page seam holds these names rather than delivering
+    them (`capture_sweep.undeclared_referents`), so a name that several pages link is listed
+    once, here. Gated on an actual commit like the carriers beside it.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "undeclared_referents" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import capture_sweep as capture_sweep_module
+
+        block = capture_sweep_module.batch_referents(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("undeclared-referents batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "undeclared_referents": block}
+
+
+def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
+    """The post-batch advisories, in one place, for every operation leaf.
+
+    One seam rather than several call chains: the carriers answer different
     questions but they attach at exactly the same moment — after the batch scope
     has exited and the deltas have been applied — and a leaf that acquired one
     but not the other would be a silent coverage gap rather than a visible one.
     """
-    return _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    return _carrying_undeclared_referents(
+        vault_root, _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    )
 
 
 def _set_family_disposition(
@@ -10553,7 +10598,7 @@ def op_connect_memory(
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
-        relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
+        relations: create-entity only. {kind, target, reason?} edges; relates_to needs a reason.
     """
     if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
         raise ValueError(
@@ -10654,7 +10699,7 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
-        if requested_relation is not None and not _legacy_selected_relation.get() and (
+        if requested_relation is not None and (
             vocabulary_ref is None or vocabulary_fingerprint is None
         ):
             raise ValueError(
@@ -12007,6 +12052,7 @@ def op_schema_memory(
                 "target_kinds",
                 "projects",
                 "page_types",
+                "endpoints",
                 "query",
             }
             if set(proposal) - allowed_proposal_fields:
@@ -12058,6 +12104,13 @@ def op_schema_memory(
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: proposal text fields must be strings"
                 )
+            if proposal.get("endpoints") is not None and not isinstance(
+                proposal["endpoints"], dict
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal.endpoints must be an object with "
+                    "subject and object lists"
+                )
             if (
                 why is not None
                 or save
@@ -12098,10 +12151,20 @@ def op_schema_memory(
                 target_kinds=proposal.get("target_kinds"),
                 projects=proposal.get("projects"),
                 page_types=proposal.get("page_types"),
+                endpoints=proposal.get("endpoints"),
                 query=proposal.get("query"),
                 limit=limit,
                 observations=observations if observations is not None else (),
                 continuation=continuation,
+            )
+            # The entity types an endpoint names are vault data, so the vault checks them.
+            candidate = relation_registry_module.load_registry(
+                proposal={"schema_version": 1, "extensions": result["delta"]["upsert"]}
+            )
+            result["findings"].extend(
+                relation_registry_module.endpoint_findings(
+                    vault_root, candidate, candidate.extensions
+                )
             )
             return {
                 "subject": "relations",
@@ -13027,7 +13090,7 @@ def op_manage_memory_file(
         semantic_transition_token: The append transition token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create/append.
         relation_review_hash: Draft or transition hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
     """
     creation_review_requested = any(

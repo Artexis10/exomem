@@ -13,7 +13,8 @@ Each `## Relations` line below shows one registered relation that often fits tha
 page type; it is an example, not a default. State the meaning the note actually
 has with the registered relation that fits (resolve it with
 `read_connections(operation={'kind': 'resolve-relation'})`), use `relates_to`
-only for a real generic connection, and write no edge when no meaning is known.
+only for a real generic connection (it needs a stated reason when it joins an entity
+and a specific relation fits), and write no edge when no meaning is known.
 
 ## source
 

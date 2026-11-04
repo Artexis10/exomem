@@ -272,6 +272,8 @@ BATCH_LIMIT = 10
 #: The core's byte ceiling is a claim about a worst-case vault, so the summary's size
 #: follows this number, never the count of due categories.
 SUMMARY_CATEGORIES = 2
+#: The bootstrap section that delivers the full due-state block, entries included.
+DUE_SECTION = "epistemics"
 
 
 def _due_summary(block: object) -> dict:
@@ -302,12 +304,25 @@ def _due_summary(block: object) -> dict:
         if len(names) > SUMMARY_CATEGORIES:
             summary["more_categories"] = len(names) - SUMMARY_CATEGORIES
         if visible:
-            largest = max(visible, key=lambda name: visible[name])
-            summary["next"] = active_call_text(
-                "review_memory", {"mode": "attention", "categories": [largest], "limit": BATCH_LIMIT}
-            )
-    summary["list"] = "section=epistemics"
+            summary["next"] = _next_route(max(visible, key=lambda name: visible[name]))
+    summary["list"] = f"section={DUE_SECTION}"
     return summary
+
+
+def _next_route(category: str) -> str:
+    """The call that serves the entries of one due category.
+
+    The attention door pages the categories it declares. A recent promotion is not one of them: its
+    entries are read only in the delivered block, and that delivery is what spends the notice. So
+    the door's own declaration decides, and the route falls back to the delivering section.
+    """
+    from .attention import ATTENTION_CATEGORIES
+
+    if category in ATTENTION_CATEGORIES:
+        return active_call_text(
+            "review_memory", {"mode": "attention", "categories": [category], "limit": BATCH_LIMIT}
+        )
+    return active_call_text("bootstrap", {"section": DUE_SECTION})
 
 
 def project_core(reference: dict) -> dict:

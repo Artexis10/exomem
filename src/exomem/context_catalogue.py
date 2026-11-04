@@ -109,7 +109,7 @@ FOLD_DEFER = "defer"
 FOLD_BACKGROUND = "background"
 FOLD_MODES = (FOLD_INLINE, FOLD_DEFER, FOLD_BACKGROUND)
 
-#: `_graph_token` when another reader's proof of the graph sidecar is running.
+#: `_graph_token` when another reader's proof of the graph sidecar is running, or a managed request has handed it to the background.
 GRAPH_UNPROVEN = "unproven"
 
 
@@ -617,8 +617,8 @@ class ContextCatalogue:
         many pages and leaves the rest in `pending`. `fill_tags` runs one full fold when the
         entries' tags were never stored: only a background pass sets it, since a full fold ignores `limit`.
         `prove` is the graph's cold-proof mode: a request passes `SINGLE_FLIGHT`, so a graph
-        proof another reader is running leaves the stored edges as they are and the
-        catalogue reports them `warming`.
+        proof another reader is running, or one a managed request starts in the background,
+        leaves the stored edges as they are and the catalogue reports them `warming`.
         """
         return self._write(
             full=False,
@@ -882,7 +882,7 @@ class _Fold:
     def _pull_edges(self) -> None:
         token = _graph_token(self.root, self.prove)
         if token == GRAPH_UNPROVEN:
-            # Another reader's proof of the graph sidecar is running: keep the stored edges and pull at the next fold.
+            # Another reader's proof, or the background proof a managed request started, is running: keep the stored edges and pull at the next fold.
             self.edge_state, self.graph_token = EDGES_WARMING, ""
             return
         new_source = any(entry_id == entry.path and entry_id not in self.stored for entry_id, entry in self.new.items())
@@ -1264,7 +1264,7 @@ def _collections(vault_root: Path, token: tuple[int, int, int]) -> dict[str, tup
 
 
 def _graph_token(vault_root: Path, prove: bool | str = True) -> str:
-    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader proves it, or "" when it has none to read."""
+    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader or the background proves it, or "" when it has none to read."""
     from . import epistemic_graph
 
     try:

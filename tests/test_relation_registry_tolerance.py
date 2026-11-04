@@ -188,7 +188,7 @@ def test_a_field_this_release_does_not_know_never_blocks_page_writes(vault: Path
                 "parent": "relates_to",
                 "description": "A policy applies to a case.",
                 "aliases": ["applies_to"],
-                "endpoints": {"subject": "entity:*", "object": "entity:*"},
+                "cardinality": {"subject": "one", "object": "many"},
             }
         },
         written_by="a later release",
@@ -208,12 +208,34 @@ def test_a_new_proposal_with_an_unknown_field_is_still_refused() -> None:
             "vault.applies_to": {
                 "parent": "relates_to",
                 "description": "A policy applies to a case.",
-                "endpoints": {"subject": "entity:*"},
+                "cardinality": {"subject": "one"},
             }
         },
     }
     refused = relation_registry.validate_proposal(proposal)
     assert [(item["code"], item["severity"]) for item in refused] == [("unknown_field", "error")]
+
+
+def test_a_saved_endpoints_declaration_this_release_cannot_read_never_blocks_page_writes(
+    vault: Path,
+) -> None:
+    _save_overlay(
+        vault,
+        {
+            "vault.applies_to": {
+                "parent": "relates_to",
+                "description": "A policy applies to a case.",
+                "aliases": ["applies_to"],
+                "endpoints": {"subject": "entity:*", "object": "entity:*"},
+            }
+        },
+    )
+
+    registry = relation_registry.load_registry(vault)
+    assert {(item["code"], item["severity"]) for item in registry.findings} == {
+        ("invalid_endpoints", "warning")
+    }
+    _write_page(vault, "Written with unreadable endpoints", "applies_to")
 
 
 def test_a_grandfathered_family_mismatch_warning_does_not_block_page_writes(

@@ -231,13 +231,13 @@ def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
     packet = {"map": {"generation": "map", "ref": "exomem://map", "reason": "empty", "items": []},
               "stance": {"state": "ready", "generation": "one", "items": [
                   {"ref": "sample.md#rule", "text": "Keep the source.", "review_due": "2026-01-01"}], "omitted": 2}}
-    first, _ = hook._format_map_with_slice(packet, 4000, "")
-    held, _ = hook._format_map_with_slice(packet, 4000, "map", "one")
-    changed, _ = hook._format_map_with_slice(packet, 4000, "map", "zero")
+    first, *_ = hook._format_map_with_slice(packet, 4000, "")
+    held, *_ = hook._format_map_with_slice(packet, 4000, "map", "one")
+    changed, *_ = hook._format_map_with_slice(packet, 4000, "map", "zero")
     assert "Keep the source." in first and "review due" in first and "2 more" in first
     assert "Keep the source." not in held and "already held" in held
     assert "Keep the source." in changed
-    tiny, _ = hook._format_map_with_slice(packet, 30, "")
+    tiny, *_ = hook._format_map_with_slice(packet, 30, "")
     assert len(tiny) <= 30 and "Keep the source." not in tiny
 
 

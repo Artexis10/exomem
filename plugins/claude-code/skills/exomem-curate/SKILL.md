@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: 7ab7598a949f330ecb30f1eeed709bf88022782d5e47124b10df20bd99979c45
+  skill_contract: 9b34fe14ae104a597c105f09d57af4cbbf8a8c1d9565e8884fc64530d438fd2a
   version: "0.2.0"
 ---
 
@@ -76,7 +76,9 @@ and the returned restore route. Use only exposed operations.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
+joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
+them), or choose no edge. Durable recurring
 meaning is proposal-first through `propose-relation` and hash-guarded
 `save-relations`; corrections use a new canonical key and deprecate the old one.
 

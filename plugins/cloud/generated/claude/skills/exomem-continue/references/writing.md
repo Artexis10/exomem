@@ -14,7 +14,9 @@ Resolve entity candidates against the active entity registry and selected knowle
   `change_connections(operation={'kind': 'create-entity'})` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
   Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
-  `connections` always writes the generic `relates_to`.
+  `connections` always writes the generic `relates_to`, and a generic edge to an
+  entity where a specific relation fits is refused: use a `relations` item, which
+  takes a `reason` when no specific relation fits.
   An unregistered-type finding supplies `proposal` and `expected_hash`; save
   those exact values through the governed
   `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
@@ -395,7 +397,8 @@ generic link.
 So the vocabulary is extensible, not fixed. Resolve before authoring with
 `read_connections(operation={'kind': 'resolve-relation'})`, and reuse a specific truthful
 registered relation when one fits. `relates_to` is honest only for a real generic
-connection; no edge is better than invented meaning. For a durable recurring
+connection, and a new one that joins an entity needs a stated reason where a specific
+relation fits; no edge is better than invented meaning. For a durable recurring
 distinction, use `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})`,
 review the complete delta and duplicate evidence, then persist that exact delta
 with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
@@ -474,6 +477,8 @@ Read-only recall and review follow the live retrieval policy.
   and a `relation_review_reason`. The hash is the relation review's, never the
   page content hash. The alternative is a typed `## Relations` entry
   (`- supports [[...]]`); Dataview `supports:: [[...]]` is not relation syntax.
+  A `GENERIC_RELATION_NEEDS_REASON` refusal replays the same way with
+  `relation_disposition="generic"`.
 
 ### Correcting existing knowledge
 

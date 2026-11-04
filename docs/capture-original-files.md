@@ -5,6 +5,17 @@
 Use original bytes for documents, transcripts and other material that an agent did not author.
 Retyping an original can change it silently. A SHA-256 assertion makes an altered copy fail before capture.
 
+## ChatGPT attachments
+
+ChatGPT supplies file handles to `capture_source` and `preserve_artifacts` through the top-level `files` argument.
+Each handle requires `download_url` and `file_id`; `mime_type` and `file_name` are optional.
+The `file_id` correlates the attachment with its receipt. The ID alone cannot fetch bytes; an HTTPS `download_url` provides them.
+
+Exomem preserves the bytes that the client supplies. A rendered preview or screenshot does not prove custody of the camera original.
+Use the original file through a supported handle or the CLI and HTTP upload steps below.
+Issuing an upload handoff only permits a transfer; it does not transfer or preserve the file.
+Verify the capture receipt and stored SHA-256 before treating the original as preserved.
+
 ## HTTP MCP clients
 
 1. Compute the file's SHA-256 in the client process; retain the digest.
