@@ -47,6 +47,23 @@ A later CI gate will use neutral fixtures and configured allowances through the 
 
 The six collection-store groups carry a configured p95 target of 100 ms. It is the private-sandbox acceptance bar and never a shared-runner gate. The paired allowances are provisional until paired runs of identical code establish them, and list operations are reported without gating. Every optimization must preserve privacy, governance, source custody, and seal guarantees.
 
+Paired runs pause workers between calls, which changes lease and maintenance timing. Their per-arm percentiles remain descriptive and leave absolute acceptance unverified. Absolute acceptance needs a continuously runnable worker with CPU pressure observations throughout the measured interval.
+
+The maintained runner provides a separate `private-absolute` branch for one fixed prepared arm.
+It reuses the worker lifecycle, case loader, parsed-terminal timer, and nearest-rank reducer.
+It completes every warm-up before timed rounds and never pauses the worker between calls.
+CPU PSI `some avg60` must remain below the protocol's 10% threshold at opening, periodic observations, and closing.
+The report retains timestamps, cadence, observed gaps, and failed attempts; unavailable pressure stays unknown.
+Contention leaves target comparisons unverified rather than reporting a latency regression.
+
+An external group binding projects unchanged source labels onto contract groups for reporting.
+The runner rejects unresolved labels, undeclared targets, merged source groups, and absent target groups before worker startup.
+This branch does not inherit the paired CI case floor or invent base samples.
+Its numeric target comparison requires every expected warm-up and repeat to succeed exactly once.
+The watcher is requested by omitting its disable setting; startup can still fall back, so activation remains unverified.
+The checkout revision and interpreter module origin describe separate identities and do not attest served bytes.
+Overall acceptance remains unverified until independent corpus, watcher, runtime, and isolation proof is complete.
+
 ## Risks / Trade-offs
 
 - Sparse cases produce unstable percentiles → Label them descriptive and preserve configured acceptance minimums.

@@ -139,6 +139,8 @@ class StoredReading:
     fixture_set: str
     sensed_at: str
     placement: str
+    columns: tuple[str, ...] = ()
+    output_version: int = 1
 
     @property
     def hashes(self) -> tuple[str, ...]:
@@ -150,7 +152,8 @@ def _row(row: tuple[Any, ...]) -> StoredReading:
      sensed_at, placement) = row
     output = json.loads(output_json)
     verdict = output.get("verdict") or {}
-    directions = output.get("directions")
+    version = output.get("version", 1)
+    directions = output.get("vectors") if version == 2 else output.get("directions")
     return StoredReading(
         seq=int(seq),
         reading_id=str(rid),
@@ -169,6 +172,8 @@ def _row(row: tuple[Any, ...]) -> StoredReading:
         fixture_set=str(fixtures),
         sensed_at=str(sensed_at),
         placement=str(placement),
+        columns=tuple(output.get("columns") or ()),
+        output_version=version,
     )
 
 
@@ -334,3 +339,50 @@ def instrument(conn: sqlite3.Connection, instrument_id: str) -> sensing.Instrume
         "SELECT identity_json FROM instruments WHERE instrument_id=?", (instrument_id,)
     ).fetchone()
     return None if row is None else sensing.InstrumentIdentity.from_dict(json.loads(row[0]))
+
+
+@dataclass(frozen=True)
+class CurrentReading:
+    reading_id: str
+    verdict: sensing.Verdict
+    instrument: sensing.InstrumentIdentity
+
+
+def lookup_current(
+    vault_root: Path,
+    request: sensing.SenseRequest,
+    active: dict[str, sensing.InstrumentIdentity],
+    label_map_version: str,
+) -> CurrentReading | None:
+    """Read by current content; never return another producer's stored references."""
+    conn = open_readonly(vault_root)
+    if conn is None:
+        return None
+    try:
+        entry = sensing.question(request.question_type)
+        current = []
+        for row in by_input_key(conn, request.question_type, request.input_key):
+            identity = active.get(row.instrument_id)
+            if identity is None or row.output_version not in (1, 2):
+                continue
+            if row.reading_id != request.reading_id(identity.instrument_id):
+                continue
+            verdict = sensing.rederive(
+                row.vectors,
+                row.verdict,
+                label_map_version,
+                columns=row.columns,
+                vector_names=entry.vector_names,
+            )
+            if verdict is not None:
+                current.append(CurrentReading(row.reading_id, verdict, identity))
+        if (
+            not current
+            or len({(item.verdict.label, item.verdict.direction) for item in current}) != 1
+        ):
+            return None
+        return current[0]
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
+        return None
+    finally:
+        conn.close()
