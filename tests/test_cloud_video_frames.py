@@ -672,9 +672,9 @@ def test_request_cleanup_reaps_adopted_tools_in_its_own_process(vault, tmp_path,
     path = "Knowledge Base/Sources/video.mp4"
     (vault / path).write_bytes(b"video bytes")
     helper = textwrap.dedent('''
-        import os, subprocess, sys
+        import os, signal, subprocess, sys, threading
         from pathlib import Path
-        from exomem import media_brakes, request_budget, video_frames_worker as w
+        from exomem import media_brakes, video_frames_worker as w
         from exomem.service_manager import enable_subreaper
         from exomem.video_frames import VideoFramesError
 
@@ -682,27 +682,36 @@ def test_request_cleanup_reaps_adopted_tools_in_its_own_process(vault, tmp_path,
         enable_subreaper()
         media_brakes.read_cell = lambda: media_brakes.CellMemory(0, 3 << 30, None, 0.0)
         marker = Path(sys.argv[2])
+        cancelled = threading.Event()
+        # The owned tool signals readiness, so cancellation cannot precede its launch.
+        signal.signal(signal.SIGUSR1, lambda *_: cancelled.set())
         child_source = (
-            "import subprocess, sys, time\\n"
+            "import os, signal, subprocess, sys, time\\n"
             "from pathlib import Path\\n"
             "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\\n"
             "Path(sys.argv[1]).write_text(str(child.pid))\\n"
+            "os.kill(os.getppid(), signal.SIGUSR1)\\n"
             "time.sleep(30)\\n"
         )
-        decoder = subprocess.Popen([sys.executable, '-c', child_source, str(marker)],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
-        w._launch_child = lambda root: decoder
-        token = request_budget.set_current(request_budget.RequestBudget(
-            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 1.0))
+        decoder = None
+
+        def owned_launch(root):
+            global decoder
+            decoder = subprocess.Popen([sys.executable, '-c', child_source, str(marker)],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, start_new_session=True)
+            return decoder
+
+        w._launch_child = owned_launch
+        token = w._CANCEL.set(cancelled)
         try:
             try:
                 w.get_frames(Path(sys.argv[1]), 'Knowledge Base/Sources/video.mp4')
             except VideoFramesError as error:
-                assert error.code == 'VIDEO_TIMEOUT', error
+                assert error.code == 'VIDEO_CANCELLED', error
             else:
-                raise AssertionError('stalled decoder did not time out')
-            assert decoder.returncode is not None
+                raise AssertionError('the request ignored cancellation after tool startup')
+            assert decoder is not None and decoder.returncode is not None
             descendant = int(marker.read_text())
             try:
                 os.waitpid(descendant, os.WNOHANG)
@@ -713,9 +722,8 @@ def test_request_cleanup_reaps_adopted_tools_in_its_own_process(vault, tmp_path,
             assert not Path('/proc', str(descendant)).exists()
             print('owned decoder and adopted tool reaped')
         finally:
-            request_budget.reset_current(token)
-            if decoder.returncode is None:
-                import signal
+            w._CANCEL.reset(token)
+            if decoder is not None and decoder.returncode is None:
                 os.killpg(decoder.pid, signal.SIGKILL)
                 decoder.wait()
     ''')
