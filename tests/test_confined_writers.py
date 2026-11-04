@@ -202,6 +202,92 @@ def test_a_fenced_writer_edits_and_appends_to_its_path_selected_page(confined, v
     assert "More text." in (vault / path).read_text()
 
 
+@pytest.mark.parametrize("detail", ["compact", "full"])
+def test_a_confined_observation_ack_and_exact_unit_read_keep_their_parent(confined, vault, detail):
+    """A committed unit reference must survive terminal shaping and remain readable without revision history."""
+    _, authenticate = confined
+    writer = authenticate("writer")
+
+    observed = _call(vault, writer, "observe_memory", path=OWN_NOTE, operation="add", category="finding",
+                     content="Keep an independent observation.", response_detail=detail)
+
+    assert isinstance(observed, dict) and observed.get("state") == "committed", observed
+    assert "Keep an independent observation." in (vault / OWN_NOTE).read_text()
+    current = _call(vault, writer, "read_memory", path=OWN_NOTE, unit_ref=observed["unit_ref"])
+    assert isinstance(current, dict) and current.get("status") == "found", current
+    assert current["unit"]["unit_ref"] == observed["unit_ref"]
+    assert current["unit"]["content"] == "Keep an independent observation."
+    assert "revision_history" not in current
+    removed = _call(vault, writer, "observe_memory", path=OWN_NOTE, operation="remove",
+                    unit_ref=observed["unit_ref"], expected_hash=current["parent"]["content_hash"],
+                    expected_fingerprint=current["unit"]["fingerprint"], response_detail=detail)
+    assert isinstance(removed, dict) and removed.get("state") == "committed", removed
+    assert removed["removed_unit_ref"] == observed["unit_ref"]
+    assert "Keep an independent observation." not in (vault / OWN_NOTE).read_text()
+
+
+def _committed_unit_reply(path, source, reference):
+    """The public committed-terminal protocol, without unrelated producer diagnostics."""
+    from exomem import vault as vault_module
+
+    return {"ok": True, "state": "committed", "status": "committed", "terminal": True, "mutated": True,
+            "path": path, "after_hash": vault_module.content_hash(source), "unit_ref": reference}
+
+
+@pytest.mark.parametrize("protection", ["connector", "raw"])
+def test_a_valid_unit_parent_binding_keeps_connector_and_raw_floors(confined, vault, protection):
+    from exomem import memory_refs
+
+    _, authenticate = confined
+    path = PRIVATE if protection == "connector" else f"{NOTES_INBOX}/__exomem_raw_v1__blocked.md"
+    source = ("---\ntype: insight\nstatus: active\nproject: private-project\n"
+              "exomem_id: 33333333-3333-4333-8333-333333333333\n---\n- [finding] Protected content. ^kept\n")
+    if protection == "raw":
+        source = source.replace("project: private-project\n", "")
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(source, encoding="utf-8", newline="\n")
+    reply = _committed_unit_reply(path, source, f"{memory_refs.ref_from_markdown(source)}#kept")
+    writer = dataclasses.replace(authenticate("writer"), audience_id=NON_OWNER)
+
+    with principal.request_scope(writer):
+        assert egress.postfilter("unit_mutation", reply, vault) is None
+
+
+def test_a_sibling_unit_reference_cannot_inherit_a_permitted_parent_hash(confined, vault):
+    _, authenticate = confined
+    reply = _committed_unit_reply(OWN_NOTE, (vault / OWN_NOTE).read_bytes().decode("utf-8"),
+                                  "exomem://memory/33333333-3333-4333-8333-333333333333#kept")
+    (vault / PRIVATE).write_text(
+        "---\nproject: private-project\nexomem_id: 33333333-3333-4333-8333-333333333333\n---\n"
+        "- [finding] Protected sibling. ^kept\n", encoding="utf-8")
+
+    with principal.request_scope(authenticate("writer")):
+        assert egress.postfilter("unit_mutation", reply, vault) is None
+
+
+@pytest.mark.parametrize("change", ["stale_hash", "changed_identity", "malformed_fragment"])
+def test_unit_parent_binding_requires_current_hash_identity_and_fragment(confined, vault, change):
+    from exomem import semantic_index
+    from exomem import vault as vault_module
+
+    _, authenticate = confined
+    source = (vault / OWN_NOTE).read_bytes().decode("utf-8")
+    reference = semantic_index.current_parent_index_state(vault, OWN_NOTE).document.units[0].unit_ref
+    reply = _committed_unit_reply(OWN_NOTE, source, reference)
+    with principal.request_scope(authenticate("writer")):
+        current = commands.op_read_memory(vault, path=OWN_NOTE, unit_ref=reference)
+        if change == "stale_hash":
+            reply["after_hash"] = current["parent"]["content_hash"] = "0" * 64
+        elif change == "changed_identity":
+            source = source.replace("5a1e0000-0000-4000-8000-0000000000a1", "33333333-3333-4333-8333-333333333333")
+            (vault / OWN_NOTE).write_text(source, encoding="utf-8", newline="")
+            reply["after_hash"] = current["parent"]["content_hash"] = vault_module.content_hash(source)
+        else:
+            reply["unit_ref"] = current["unit_ref"] = reference.split("#", 1)[0] + "#bad_fragment!"
+        assert egress.postfilter("unit_mutation", reply, vault) is None
+        assert egress.postfilter("read_memory", current, vault) is None
+
+
 @pytest.mark.parametrize("resolved", [True, False])
 def test_a_non_owner_is_read_only_with_any_policy_and_no_host_config(vault, resolved):
     """Missing identity cannot turn a governed vault's read-only audience into an unrestricted writer."""
