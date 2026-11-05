@@ -1,6 +1,7 @@
 """A local callback proves only the exact canonical generation it observed."""
 
-from contextlib import closing
+import threading
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,68 @@ def test_exact_hidden_callback_keeps_the_complete_publication(tmp_path: Path) ->
     assert bridge.admissible(root, publication, lambda rel: rel != SOURCE)
     assert not bridge.admissible(root, publication, lambda _rel: True)
     assert bridge.published(root) is publication
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_callback_source_proof_leaves_the_boundary_free_for_another_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inherited: bool,
+) -> None:
+    root, index, _metadata, publication = _baseline(tmp_path)
+    _commit(root, SOURCE)
+    coordinator = index._mutation_coordinator
+    original = vault.read_bounded_guarded_bytes
+    proofs = []
+
+    def read_while_another_writer_enters(*args, **kwargs):
+        if args[:2] == (root, SOURCE):
+            assert not coordinator.current_thread_holds_boundary()
+            entered = []
+
+            def write_boundary():
+                with coordinator.try_hold(operation="unrelated_writer") as held:
+                    entered.append(held)
+
+            writer = threading.Thread(target=write_boundary)
+            writer.start()
+            writer.join(timeout=5)
+            assert not writer.is_alive()
+            assert entered == [True]
+            proofs.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", read_while_another_writer_enters)
+    with coordinator.hold() if inherited else nullcontext():
+        assert index_sync.publish_corpus_delta(root, changed=[root / SOURCE], populate_on_miss=False)
+        if inherited:
+            assert not proofs
+            assert not bridge.admissible(root, publication, lambda _rel: False)
+    assert proofs
+    assert bridge.admissible(root, publication, lambda _rel: False)
+
+
+@pytest.mark.parametrize("second", [SOURCE, DUP_TARGET], ids=["repeated", "distinct"])
+def test_one_outer_writer_preserves_every_pending_callback_endpoint(
+    tmp_path: Path, second: str,
+) -> None:
+    root, index, _metadata, publication = _baseline(tmp_path)
+    with index._mutation_coordinator.hold():
+        for path in (SOURCE, second):
+            _commit(root, path)
+            assert index_sync.publish_corpus_delta(root, changed=[root / path], populate_on_miss=False)
+            assert not bridge.admissible(root, publication, lambda _rel: False)
+    assert bridge.admissible(root, publication, lambda _rel: False)
+
+
+def test_a_later_callback_cannot_hide_an_earlier_unproved_endpoint(tmp_path: Path) -> None:
+    root, index, _metadata, publication = _baseline(tmp_path)
+    with index._mutation_coordinator.hold():
+        _commit(root, SOURCE)
+        source = root / SOURCE
+        source.write_text(source.read_text() + "\nBytes outside the checkpoint.\n")
+        assert index_sync.publish_corpus_delta(root, changed=[source], populate_on_miss=False)
+        _commit(root, DUP_TARGET)
+        assert index_sync.publish_corpus_delta(root, changed=[root / DUP_TARGET], populate_on_miss=False)
+    assert not bridge.admissible(root, publication, lambda _rel: False)
 
 
 def test_foreign_generation_cannot_be_hidden_by_a_later_complete_local_batch(

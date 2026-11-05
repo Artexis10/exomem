@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,11 +35,19 @@ class _Bridge:
 
 
 @dataclass(frozen=True)
+class _TargetProof:
+    path: str
+    digest: str | None
+    signature: freshness.FileSignature | None
+
+
+@dataclass(frozen=True)
 class _State:
     bridge: _Bridge
     publication: Publication
     coordinator: VaultMutationCoordinator
     reader_lock: threading.RLock
+    pending: tuple[_TargetProof, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -129,8 +137,9 @@ def prepare_complete(
             if previous is not None
             else active_manager()._mutation_coordinator_for(root)
         )
-        associated = previous is not None and previous.bridge == bridge and (
-            owner.lock_path.resolve() == previous.coordinator.lock_path.resolve()
+        associated = (
+            previous is not None and previous.pending is None and previous.bridge == bridge
+            and owner.lock_path.resolve() == previous.coordinator.lock_path.resolve()
         )
         if not associated and not full_source_proof:
             return None
@@ -226,7 +235,7 @@ def read_boundary(
     root = Path(root).resolve()
     with _lock:
         state = _states.get(root)
-    if state is None:
+    if state is None or state.pending is not None:
         yield False
         return
     owner = state.coordinator
@@ -253,7 +262,8 @@ def read_boundary(
             with _lock:
                 current = _states.get(root)
             yield (
-                held and current is not None and current.reader_lock is state.reader_lock
+                held and current is not None and current.pending is None
+                and current.reader_lock is state.reader_lock
                 and current.publication.lineage is state.publication.lineage
                 and (deadline is None or time.monotonic() < deadline)
             )
@@ -360,10 +370,9 @@ def begin_observation(
 
 
 def finish_observation(root: Path, observation: _Observation | None) -> None:
-    """Bind a contiguous epoch after its complete local corpus publication."""
+    """Stage a contiguous association; prove bytes after the outer writer releases."""
     if observation is None:
         return
-    from . import vault
 
     try:
         root = Path(root).resolve()
@@ -412,21 +421,14 @@ def finish_observation(root: Path, observation: _Observation | None) -> None:
                 or recall_delta.to != recall
             ):
                 return
-            for rel, digest in checkpoint.paths:
-                if digest is None:
-                    vault.PathGuard.capture(root, rel, leaf_policy="absent").recheck(root)
-                    continue
-                signature = signatures[rel]
-                if freshness.stat_signature(root / rel) != signature:
-                    return
-                vault.read_bounded_guarded_bytes(
-                    root,
-                    rel,
-                    limit=signature[2],
-                    expected_hash=digest,
-                )
-                if freshness.stat_signature(root / rel) != signature:
-                    return
+            # Coalesce repeated endpoints without dropping an earlier unproved mutation.
+            targets = {target.path: target for target in current.pending or ()}
+            targets.update({
+                rel: _TargetProof(rel, digest, signatures.get(rel))
+                for rel, digest in checkpoint.paths
+            })
+            if len(targets) > view_lag.MAX_DECIDED_PATHS:
+                return
             bridge = _Bridge(observation.epoch, consumer, recall)
             if not _current(root, bridge):
                 return
@@ -437,8 +439,58 @@ def finish_observation(root: Path, observation: _Observation | None) -> None:
                     and current.bridge is prior.bridge
                     and current.publication.lineage is prior.publication.lineage
                 ):
-                    _states[root] = _State(
+                    pending = _State(
                         bridge, current.publication, current.coordinator, current.reader_lock,
+                        tuple(targets[path] for path in sorted(targets)),
+                    )
+                    _states[root] = pending
+                    current.coordinator.defer_optional_after_release(
+                        (finish_observation, root), lambda: _complete_observation(root, pending),
                     )
     except Exception:  # noqa: BLE001 - optional association failure cannot fail publication
         return
+
+
+def _complete_observation(root: Path, pending: _State) -> None:
+    """Hash the pending endpoint union without either mutation guard, then compare and swap."""
+    from . import vault
+
+    try:
+        with _lock:
+            if _states.get(root) is not pending:
+                return
+        guards = []
+        for target in pending.pending or ():
+            if target.digest is None:
+                guard = vault.PathGuard.capture(root, target.path, leaf_policy="absent")
+            else:
+                signature = target.signature
+                if signature is None or freshness.stat_signature(root / target.path) != signature:
+                    raise ValueError("graph observation target changed")
+                _data, content = vault.read_bounded_guarded_bytes(
+                    root, target.path, limit=signature[2], expected_hash=target.digest,
+                )
+                # Keep the descriptor-bound identity; finalization reads no file contents.
+                guard = replace(content, leaf_policy="stable", expected_content_hash=None)
+            guards.append((target, guard))
+        with pending.coordinator.try_hold(operation="graph_observation_complete") as held:
+            if not held:
+                return
+            with _lock:
+                if _states.get(root) is not pending:
+                    return
+            if not _current(root, pending.bridge):
+                raise ValueError("graph observation epoch changed")
+            for target, guard in guards:
+                guard.recheck(root)
+                if target.signature is not None and (
+                    freshness.stat_signature(root / target.path) != target.signature
+                ):
+                    raise ValueError("graph observation target changed")
+            with _lock:
+                if _states.get(root) is pending:
+                    _states[root] = replace(pending, pending=None)
+    except Exception:  # noqa: BLE001 - unexplained bytes withdraw only the optional association
+        with _lock:
+            if _states.get(root) is pending:
+                _states.pop(root, None)

@@ -4681,7 +4681,9 @@ class EpistemicGraphIndex:
                 check = self._connect_existing(temporary, readonly=True)
                 try:
                     graph_sync.limit_graph_row_read(check)
-                    published = dict(check.execute("SELECT key, value FROM main.graph_publication_meta"))
+                    published = dict(check.execute(
+                        "SELECT key, value FROM main.graph_publication_meta"
+                    ))
                 finally:
                     check.close()
                 read_publication = graph_read_publication.prepare_complete(
@@ -5937,7 +5939,8 @@ class EpistemicGraphIndex:
             vocabulary_recovery.note_graph_published(self.vault_root)
 
     def _record_complete_read_publication(
-        self, resolver: vault_module.WikilinkResolver | None = None, *, full_source_proof: bool = False,
+        self, resolver: vault_module.WikilinkResolver | None = None, *,
+        full_source_proof: bool = False,
     ) -> None:
         """Pair only a committed, finally checked publication with its resolver.
 
@@ -5955,7 +5958,9 @@ class EpistemicGraphIndex:
                 conn = self._connect_existing(readonly=True, timeout=0.0)
                 try:
                     graph_sync.limit_graph_row_read(conn)
-                    values = dict(conn.execute("SELECT key, value FROM main.graph_publication_meta"))
+                    values = dict(conn.execute(
+                        "SELECT key, value FROM main.graph_publication_meta"
+                    ))
                 finally:
                     conn.close()
                 previous = graph_read_publication.published(self.vault_root)
@@ -5967,7 +5972,7 @@ class EpistemicGraphIndex:
                     values.get("recall_access_fingerprint"),
                 )
                 if not reuse and resolver is not None and not full_source_proof:
-                    # Incremental maintenance can borrow mutable maps; retain a detached existing resolver.
+                    # Incremental maintenance can borrow mutable maps; retain a detached resolver.
                     with find_module._RESOLVER_LOCK:
                         resolver = resolver.fork()
                 graph_read_publication.record_complete(

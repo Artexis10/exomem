@@ -43,6 +43,30 @@ _HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
 
 
+def test_optional_release_work_coalesces_after_the_outer_guard_and_survives_reentry(
+    tmp_path: Path,
+) -> None:
+    coordinator = VaultMutationCoordinator(tmp_path / "state", tmp_path / "vault")
+    calls = []
+
+    def released():
+        assert not coordinator.current_thread_holds_boundary()
+        calls.append("released")
+        with coordinator.hold():
+            assert coordinator.defer_optional_after_release("nested", lambda: calls.append("nested"))
+
+    def failed():
+        raise RuntimeError("optional source proof failed")
+
+    with coordinator.hold():
+        assert coordinator.defer_optional_after_release("proof", lambda: calls.append("obsolete"))
+        with coordinator.hold():
+            assert coordinator.defer_optional_after_release("proof", released)
+            assert coordinator.defer_optional_after_release("failure", failed)
+        assert not calls
+    assert calls == ["released", "nested"]
+
+
 def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> None:
     """A full recent-refusal deque may be evicted while a view is built."""
 

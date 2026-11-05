@@ -327,10 +327,16 @@ Row coherence does not prove that a local watcher has observed every committed w
 Governed publication associates the canonical graph generation and digest with its known local recall checkpoint.
 Only contiguous known canonical generations advance that association.
 A complete corpus callback can prove one paths-scoped epoch without a trusted callback origin.
-Two short canonical holds surround corpus publication; the corpus work runs outside those holds.
-The second hold compares the exact prior association, durable floor and checkpoint, and current policy.
+Short canonical holds surround corpus publication; the corpus work runs outside those holds.
+The next hold compares the exact prior association, durable floor and checkpoint, and current policy.
 The consumer delta must name every epoch endpoint with its exact changed or deleted classification.
 Current guarded bytes and target signatures must match that delta and the epoch.
+Byte proof runs after the outermost canonical holder releases both mutation guards, on the same thread.
+Pending callbacks retain each unresolved endpoint's latest digest and signature within the existing 16-path bound.
+Readers and incremental publication cannot use a pending association.
+A final short hold compares the exact pending candidate, epoch, local checkpoints, file identities and signatures.
+The release hook coalesces callbacks by key and clears its queue before running them.
+Callback failure withdraws optional proof without changing the committed mutation's result.
 A subset does not suffice: a changed endpoint can retain its previous stat signature.
 Full checkpoints, gaps and incomplete histories require the existing full-source recovery.
 Duplicate callbacks cannot attach a newer local checkpoint to the same canonical epoch.
