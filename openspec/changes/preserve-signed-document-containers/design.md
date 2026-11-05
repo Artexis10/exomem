@@ -24,6 +24,10 @@ Resolve staged parent evidence from the planned batch during catalog preflight. 
 
 Check selected projected candidates before their text reaches a scorer or changes visible graph results. Apply the same parent check to held Markdown and path-only snapshots.
 
+Keep cached lexical selection before current-parent reads. Validate only the existing retained primary and graph windows; do not scan the namespace for parent proofs.
+
+An evicted parent retains its verified stored identity. Authorize that binary through existing path-only admission and authorize its current companion separately, without hydrating it.
+
 Require a valid binding throughout the reserved payload subtree. Outside it, use the existing tolerant frontmatter parser to detect a parsed container_member claim, then validate that claim strictly. This also checks retained provenance after a desktop move. Preserve ordinary path classification for malformed notes without a parsed claim; this binding does not add an ancestry registry.
 
 ### Reuse byte proofs within one request

@@ -379,13 +379,19 @@ def evaluate_path_only(
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
 
-    try:
-        dependency = document_containers.parent_for_path(vault_root, rel_path, artifact_copy=artifact_copy)
-        inherited = frozenset() if dependency is None else _current_parent_scopes(
-            vault_root, dependency[1], policy
-        ) | evaluate_path_only(vault_root, dependency[0], policy).require_classified()
-    except (ValueError, OSError, reserved_paths.ReservedPathLeafError) as error:
-        raise MembershipUnresolved("container parent provenance is unavailable") from error
+    dependency = None
+    inherited = frozenset()
+    if not resolve_bytes:
+        if document_containers.in_payload_tree(rel_path):
+            return MembershipOutcome("unresolved", frozenset(), "metadata_required")
+    else:
+        try:
+            dependency = document_containers.parent_for_path(vault_root, rel_path, artifact_copy=artifact_copy)
+            inherited = frozenset() if dependency is None else _current_parent_scopes(
+                vault_root, dependency[1], policy
+            ) | evaluate_path_only(vault_root, dependency[0], policy).require_classified()
+        except (ValueError, OSError, reserved_paths.ReservedPathLeafError, MembershipUnresolved):
+            return MembershipOutcome("unresolved", frozenset(), "companion_unsafe")
 
     from ..vocabulary import instances
 

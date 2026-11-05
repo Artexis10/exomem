@@ -54,6 +54,7 @@ from .. import (
     call_spans,
     find_corpus,
     memory_refs,
+    originals,
     request_budget,
     reserved_paths,
     state_paths,
@@ -2051,9 +2052,16 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
             and connector_boundary.unrestricted(vault_root, who))
 
 
+def _independent_content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
+                                 snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    """Independent content floors cannot be widened by owner status or grants."""
+    return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
+            and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
+
+
 def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
                     snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
-    """Independent content floors cannot be widened by owner status or grants."""
+    """Apply current container dependencies and independent content floors to a real path."""
     from .. import document_containers
 
     try:
@@ -2062,19 +2070,13 @@ def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
         return False
     if dependency is not None and any(not content_permits(vault_root, parent, who) for parent in dependency):
         return False
-    return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
-            and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
+    return _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy)
 
 
 
 def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
-    """`content_permits` for each path of one walk.
-
-    Inside a request scope the connector snapshot is read once for the walk;
-    see `connector_boundary.permits_filter`.
-    """
-    boundary = connector_boundary.permits_filter(vault_root, who)
-    return lambda path: boundary(path) and content_permits(vault_root, path, who)
+    """Apply all content floors once per path, using their shared request memos."""
+    return lambda path: content_permits(vault_root, path, who)
 
 
 def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool:
@@ -2185,18 +2187,25 @@ def container_parent_allows(
     from .. import document_containers
 
     try:
-        dependency = document_containers.parent_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        parent = document_containers.parent_binding_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        if parent is None:
+            return True
+        # Recheck the validated binding before using its fingerprint without a local inode.
+        parent = document_containers._require_identity(vault_root, parent.path, parent.sha256, parent.size)
     except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
         return False
-    for parent in dependency or ():
-        decision = _decide_path(
-            vault_root, parent, policy=policy, audience=principal.audience_id, purpose=purpose,
-            grants_hash=_grants_hash(policy), authorization_session=principal.authorization_session_id,
-            authorization_context=principal.verified_authorization_session, principal=principal,
-        )
-        if decision is None or decision.level < LEVEL_FULL:
-            return False  # A parent's excerpt cannot authorize an intact payload or its complete extracted text.
-    return True
+    if _release_level_for_path_only_snapshot(
+        vault_root, parent.path, policy=policy, principal=principal, purpose=purpose,
+        content_fingerprint=parent.sha256,
+    ) < LEVEL_FULL:
+        return False  # A parent's excerpt cannot authorize an intact payload or its complete extracted text.
+    decision = _decide_path(
+        vault_root, originals.sidecar_path(Path(parent.path)).as_posix(),
+        policy=policy, audience=principal.audience_id, purpose=purpose,
+        grants_hash=_grants_hash(policy), authorization_session=principal.authorization_session_id,
+        authorization_context=principal.verified_authorization_session, principal=principal,
+    )
+    return decision is not None and decision.level >= LEVEL_FULL
 
 
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
@@ -8797,7 +8806,7 @@ def filter_withheld_entries(
             return candidates
         review_audience = _bridge_review_audience(entry)
         for rel_path in candidates:
-            if not content_permits(vault_root, rel_path, who):
+            if not _independent_content_permits(vault_root, rel_path, who):
                 return None
             if fail_closed:
                 _record_blocked_outcome(who.audience_id)
@@ -8812,6 +8821,8 @@ def filter_withheld_entries(
                 # A bridge-review finding is owner work derived from an exact
                 # release approval. It remains actionable when that approval
                 # is stale; hiding it then would strand the required reapproval.
+                if not content_permits(vault_root, resolved, who):
+                    return None
                 continue
             if not _permitted(resolved):
                 return None
@@ -8832,7 +8843,7 @@ def filter_withheld_entries(
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
         request_budget.checkpoint()
         if isinstance(node, Mapping) and any(
-            not content_permits(vault_root, path, who)
+            not _independent_content_permits(vault_root, path, who)
             for path in _entry_candidate_paths(
                 node, directory,
                 reference_markup=_reference_markup if explicit_reference_markup else None,

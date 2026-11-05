@@ -38,6 +38,8 @@ Payload pages, extracted text parts and original downloads SHALL retain every ap
 
 Exomem SHALL check current parent access before selected payload text reaches a scorer or changes visible graph results. Held Markdown and path-only snapshots SHALL enforce the same parent access.
 
+Current-parent validation SHALL use the existing retained candidate windows rather than scan the namespace. An evicted parent with a verified stored identity SHALL retain its current access rules without requiring hydration.
+
 The reserved payload subtree SHALL require a valid binding. Outside it, Exomem SHALL strictly validate every parsed container_member claim. Malformed ordinary notes without a parsed claim SHALL retain their existing path classification.
 
 #### Scenario: Parent access changes after extraction
@@ -56,6 +58,11 @@ The reserved payload subtree SHALL require a valid binding. Outside it, Exomem S
 - **WHEN** stored projected scopes still admit a payload whose current parent denies access
 - **THEN** the payload text does not reach a scorer or appear in results
 - **AND** the payload does not contribute to visible graph ranking or counts
+
+#### Scenario: The parent original is evicted
+- **WHEN** a payload remains local and its exact parent has a verified stored identity
+- **THEN** the payload remains accessible to a principal that retains full parent access
+- **AND** a current parent restriction still denies the payload
 
 ### Requirement: Share byte identity proofs within a request
 

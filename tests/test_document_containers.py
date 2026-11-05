@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from test_media_store import selected_store as selected_store
 
 from exomem import preserve
 
@@ -364,6 +365,23 @@ def test_forged_missing_or_changed_parent_binding_never_grants_access(vault):
     assert not egress.content_permits(vault, child, owner_principal())
 
 
+def test_owner_bridge_review_cannot_release_payload_from_changed_parent(vault):
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal, request_scope
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0] + ".md"
+    finding = {
+        "path": child,
+        "categories": ["bridge_review"],
+        "reasons": [{"category": "bridge_review", "meta": {"bridge_audience": "external"}}],
+    }
+    with request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(vault, [finding])
+        (vault / stored.path).write_bytes(b"changed original")
+        assert egress.filter_withheld_entries(vault, [finding]) == []
+
+
 def test_raw_protection_covers_the_entire_document_subtree(vault):
     from exomem.governance import egress, raw_protection
     from exomem.governance.principal import RequestPrincipal
@@ -372,6 +390,83 @@ def test_raw_protection_covers_the_entire_document_subtree(vault):
     child = stored.document_container["payloads"][0]
     assert raw_protection.marked(child)
     assert not egress.content_permits(vault, child, RequestPrincipal(audience_id="external"))
+
+
+def test_metadata_only_membership_keeps_payload_parent_unknown(vault):
+    from exomem.governance import membership, policy
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    scope = policy.Scope(id="scope", source="test", paths=(child,))
+    compiled = policy.Policy(fingerprint="metadata-only", scopes={scope.id: scope})
+    outcome = membership.evaluate_path_only(vault, child, compiled, resolve_bytes=False)
+    assert outcome.state == "unresolved"
+    assert outcome.reason == "metadata_required"
+
+
+def test_evicted_parent_keeps_verified_session_access_and_current_policy(vault, selected_store, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from test_governance_egress import _verified_external_session
+
+    from exomem import media_store, originals
+    from exomem.governance import authorization_session_authority, egress
+    from exomem.governance.principal import owner_principal
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    parent = vault / stored.path
+    parent_bytes = parent.read_bytes()
+    media_store.offload(vault, parent)
+    assert media_store.evict(vault, parent)
+    assert originals.original_state(vault, parent).state == "evicted"
+    fingerprints = {
+        path: hashlib.sha256(parent_bytes if path == stored.path else (vault / path).read_bytes()).hexdigest()
+        for path in (stored.path, stored.sidecar_path, child, child + ".md")
+    }
+    rules = vault / "Knowledge Base" / "_Governance"
+    (rules / "scopes").mkdir(parents=True, exist_ok=True)
+    (rules / "rules").mkdir(exist_ok=True)
+    scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    scope_file = rules / "scopes" / "container.yaml"
+    scope_file.write_text(f'governance_version: 1\nid: {scope_id}\npaths: ["absent/**"]\n')
+    (rules / "rules" / "external.yaml").write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["{scope_id}"]\naudience: external\nceiling: 0\n')
+    external, context = _verified_external_session()
+    owner_context = replace(context, principal_id="owner")
+    owner = owner_principal(purpose="support").with_verified_authorization_session(owner_context, issuer_family=context.issuer_family)
+    expected_context = owner_context
+    granted = False
+    observed = set()
+    monkeypatch.setattr(egress.store, "open_authorization_session_connection", lambda root: SimpleNamespace(close=lambda: None))
+
+    def session_grants(**kwargs):
+        assert kwargs["context"] is expected_context
+        path, digest = kwargs["path"], kwargs["fingerprint"]
+        assert digest == fingerprints[path]
+        observed.add(path)
+        if not granted or not kwargs["scope_ids"]:
+            return (), "without-grant"
+        grant = authorization_session_authority.SessionGrant(
+            grant_id="8" * 64, authorization_session_id=context.session_id,
+            principal_id=external.audience_id, issuer_family=context.issuer_family,
+            audience=external.audience_id, purpose="support", ceiling=6,
+            paths=(path,), fingerprints=(digest,), scope_ids=tuple(kwargs["scope_ids"]),
+            membership=(authorization_session_authority.SessionMembership(path, digest, tuple(kwargs["scope_ids"])),),
+            policy_fingerprint=kwargs["policy_fingerprint"], token_jti="container-grant",
+            created_at=1_800_000_000, expires_at=1_900_000_000,
+        )
+        return (grant,), "with-grant"
+
+    monkeypatch.setattr(authorization_session_authority, "active_session_grants", session_grants)
+    assert egress.release_allows_download(vault, child, principal=owner)
+    assert stored.path in observed
+    scope_file.write_text(f'governance_version: 1\nid: {scope_id}\npaths: ["{stored.path}"]\n')
+    expected_context = context
+    assert not egress.release_allows_download(vault, child, principal=external)
+    granted = True
+    assert egress.release_allows_download(vault, child, principal=external)
+    assert not parent.exists()
 
 
 def test_catalog_preflight_classifies_staged_parent_and_payload_bytes(vault):

@@ -237,7 +237,7 @@ def planned_scope(vault_root: Path, writes) -> Iterator[None]:
         _OVERLAY.reset(token)
 
 
-def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> None:
+def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding:
     staged = _OVERLAY.get().get(path)
     if isinstance(staged, PreparedBinaryContent):
         actual = staged.sha256, staged.size
@@ -257,6 +257,7 @@ def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact
             actual = stored.binary_sha256, stored.binary_size
     if actual != (digest, size):
         raise ValueError("container original identity does not match its provenance")
+    return originals.BinaryBinding(path, actual[0], actual[1])
 
 
 def _canonical_path(value: object) -> str:
@@ -267,7 +268,7 @@ def _canonical_path(value: object) -> str:
     return value
 
 
-def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
+def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Validate a child binding against location, parent companion and current byte identities."""
     binding = frontmatter.get("container_member")
     # The reserved subtree cannot become public by deleting the provenance block.
@@ -302,15 +303,23 @@ def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_cop
         descriptor = parent_fm.get("governance_companion", {})
         if not isinstance(descriptor, dict) or descriptor.get("artifact_path") != parent:
             raise ValueError("container parent companion names different bytes")
-    _require_identity(root, parent, binding["parent_sha256"], binding["parent_size"])
+    parent_binding = _require_identity(root, parent, binding["parent_sha256"], binding["parent_size"])
     _require_identity(root, artifact, binding["artifact_sha256"], binding["artifact_size"], artifact_copy=artifact_copy)
-    return parent, parent_page
+    return parent_binding
 
 
-def parent_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
+def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
+    """Return both current parent paths after validating the member binding."""
+    binding = _parent_binding_for_page(root, path, frontmatter, artifact_copy=artifact_copy)
+    return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
+
+
+def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Resolve direct pages, binary originals and extraction parts through one binding validator."""
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
+    if reserved_paths.classify_logical(path).disposition is reserved_paths.PathDisposition.RESERVED:
+        return None
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
     try:
@@ -335,7 +344,13 @@ def parent_for_path(root: Path, path: str, *, content: bytes | None = None, arti
             raise ValueError("container extraction part has an invalid source")
         page_path = source_path.as_posix()
         fm = parse_frontmatter(reserved_paths.read_generic_bytes(root, page_path).data.decode("utf-8"), strict=True)[0]
-    return parent_for_page(root, page_path, fm, artifact_copy=artifact_copy)
+    return _parent_binding_for_page(root, page_path, fm, artifact_copy=artifact_copy)
+
+
+def parent_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
+    """Return both current parent paths after resolving one member binding."""
+    binding = parent_binding_for_path(root, path, content=content, artifact_copy=artifact_copy)
+    return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
 
 
 
