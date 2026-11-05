@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.161.1](https://github.com/Artexis10/exomem/compare/v0.161.0...v0.161.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **cache:** synchronize page residency status ([#2419](https://github.com/Artexis10/exomem/issues/2419)) ([a1e95d3](https://github.com/Artexis10/exomem/commit/a1e95d34dc52121f6356664132e00e94b4a43bef))
+* **recall:** reuse role state during advisory rebuilds ([#2422](https://github.com/Artexis10/exomem/issues/2422)) ([978a623](https://github.com/Artexis10/exomem/commit/978a62389600c25e81b0ae297a31a54af468e648))
+
 ## [0.161.0](https://github.com/Artexis10/exomem/compare/v0.160.0...v0.161.0) (2026-11-05)
 
 
