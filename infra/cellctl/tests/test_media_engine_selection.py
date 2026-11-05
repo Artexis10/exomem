@@ -129,3 +129,19 @@ def test_a_default_that_names_what_a_cell_already_runs_restarts_no_cell(monkeypa
     partial = dataclasses.replace(rolled_out, media_engine_cell_ids={"documents": (CANARY,), "ocr": (CANARY,)})
     partial_with_default = dataclasses.replace(partial, media_engine_fleet_default=("ocr", "documents"))
     assert _digest(OTHER, partial_with_default) != _digest(OTHER, partial)
+
+
+def test_frame_selection_changes_only_the_selected_cells_digest(monkeypatch) -> None:
+    monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
+    monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME", "backup-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_STAGING_BUCKET_NAME", "staging-bucket")
+    monkeypatch.setenv("CELLCTL_CELL_DATA_ENDPOINT", "https://s3.cell-data.example")
+    monkeypatch.setenv("CELLCTL_MEDIA_ENGINE_CELL_IDS", json.dumps({"frames": [CANARY]}))
+    selected = main.build_cluster_config()
+    unselected = dataclasses.replace(selected, media_engine_cell_ids={})
+
+    assert selected.media_engines_for_cell(CANARY) == "frames"
+    assert selected.media_engines_for_cell(OTHER) == ""
+    assert _digest(CANARY, selected) != _digest(CANARY, unselected)
+    assert _digest(OTHER, selected) == _digest(OTHER, unselected)

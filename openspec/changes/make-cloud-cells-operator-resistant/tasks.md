@@ -15,6 +15,11 @@ The media producer and tenant-lock crash recovery remain deferred to their ownin
 
 ## 2. Access record
 
+Batch B implements the code and disposable-sandbox portions of groups 2–4 together.
+The implementation plan is in design D6, under "Batch B source and sandbox plan".
+Its approval does not create a live bucket, move a credential, change repository administration or enforce hardware-only SSH.
+These tasks stay open until their named live evidence exists.
+
 - [ ] 2.1 Choose the shipper (Vector or fluent-bit) by fit with K3s audit files and journald, and record the choice in design D4. Create the B2 bucket with Object Lock compliance-mode default retention of at least one year, and a write-only key for the nodes. Evidence: a delete and a retention shortening with the owner key are both refused.
 - [ ] 2.2 Pin the audit policy so that connect subresources, Secret access, RBAC and admission changes and certificate requests stay at Metadata or above. Ship them and the node session events (SSH login, key or certificate identity, sudo, session end) within five minutes. Strip query parameters from request URIs, and check every shipped field, including StatefulSet bodies, for Secret values and content. Evidence:
   - a rendered-policy test;

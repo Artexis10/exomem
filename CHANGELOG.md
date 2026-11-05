@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.161.1](https://github.com/Artexis10/exomem/compare/v0.161.0...v0.161.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **cache:** synchronize page residency status ([#2419](https://github.com/Artexis10/exomem/issues/2419)) ([a1e95d3](https://github.com/Artexis10/exomem/commit/a1e95d34dc52121f6356664132e00e94b4a43bef))
+* **recall:** reuse role state during advisory rebuilds ([#2422](https://github.com/Artexis10/exomem/issues/2422)) ([978a623](https://github.com/Artexis10/exomem/commit/978a62389600c25e81b0ae297a31a54af468e648))
+
+## [0.161.0](https://github.com/Artexis10/exomem/compare/v0.160.0...v0.161.0) (2026-11-05)
+
+
+### Features
+
+* **cloud:** record metadata access and constrain routine deployments ([#2415](https://github.com/Artexis10/exomem/issues/2415)) ([90c8590](https://github.com/Artexis10/exomem/commit/90c8590d5d8c03f410f107814ee186d2c33ee695))
+* **media:** serve bounded video frames on selected Cloud cells ([#2412](https://github.com/Artexis10/exomem/issues/2412)) ([b36d68e](https://github.com/Artexis10/exomem/commit/b36d68e1e382a819af48a98fadafd7205e50ac32))
+* **sensing:** route audit readings through the shared queue ([#2409](https://github.com/Artexis10/exomem/issues/2409)) ([aa3cd56](https://github.com/Artexis10/exomem/commit/aa3cd56071f8d79046d1f67227aebbaa6b7ae683))
+
+
+### Bug Fixes
+
+* **latency:** keep paused comparisons from claiming absolute acceptance ([#2408](https://github.com/Artexis10/exomem/issues/2408)) ([6350e86](https://github.com/Artexis10/exomem/commit/6350e8661414d86b4119613efe36db40c16dee29))
+* **latency:** observe prepared reads without pausing workers ([#2411](https://github.com/Artexis10/exomem/issues/2411)) ([8d130e8](https://github.com/Artexis10/exomem/commit/8d130e885c916204def4d8aa90fbb2e6d05111b8))
+* **maintenance:** exclude protected pages from identity backfill ([#2418](https://github.com/Artexis10/exomem/issues/2418)) ([28c2a70](https://github.com/Artexis10/exomem/commit/28c2a70d3462dd31bb3db6949266492613b996f8))
+* **media:** keep supervisor alive after transient store refusals ([#2413](https://github.com/Artexis10/exomem/issues/2413)) ([17f91c3](https://github.com/Artexis10/exomem/commit/17f91c3b55638d30fed12dcc7df896c6f5ebdc71))
+* **recall:** bound warm admitted lexical work to matching paths ([#2414](https://github.com/Artexis10/exomem/issues/2414)) ([f72f755](https://github.com/Artexis10/exomem/commit/f72f755977816832824a5005de0ad9b9310f1044))
+* **recall:** reuse parent links during pending writes ([#2416](https://github.com/Artexis10/exomem/issues/2416)) ([166f89b](https://github.com/Artexis10/exomem/commit/166f89b5451b9e163d88d1dde738f6a73feb7994))
+* **sqlite:** keep sidecar validation reliable under concurrent cleanup ([#2417](https://github.com/Artexis10/exomem/issues/2417)) ([fe85d8c](https://github.com/Artexis10/exomem/commit/fe85d8c8208b982919bc9d5c80554f72452dc908))
+
 ## [0.160.0](https://github.com/Artexis10/exomem/compare/v0.159.0...v0.160.0) (2026-11-04)
 
 

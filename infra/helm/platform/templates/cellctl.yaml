@@ -1,4 +1,5 @@
 {{- if .Values.cellctl.enabled }}
+{{- $workloadName := "cellctl" }}
 {{- $shared := .Values.cellctl.sharedWorker }}
 {{- /*
 The cell alerts' thresholds come from the observability contract the chart already
@@ -205,7 +206,7 @@ subjects:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cellctl
+  name: {{ $workloadName }}
   namespace: {{ .Values.cellctl.namespace }}
   labels:
     app.kubernetes.io/name: cellctl
@@ -244,6 +245,21 @@ spec:
           image: {{ .Values.cellctl.image | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            - name: CELLCTL_ACCESS_RECORD_ENABLED
+              value: {{ .Values.cellctl.accessRecord.enabled | quote }}
+            {{- if .Values.cellctl.accessRecord.enabled }}
+            - name: CELLCTL_ACCESS_RECORD_PLATFORM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CELLCTL_ACCESS_RECORD_PLATFORM_WORKLOAD
+              value: {{ $workloadName | quote }}
+            - name: CELLCTL_ACCESS_RECORD_READER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "access record reader Secret is required" .Values.cellctl.accessRecord.readerSecretName | quote }}
+                  key: reader.json
+            {{- end }}
             - name: CELLCTL_SHARED_WORKER
               value: {{ .Values.cellctl.sharedWorker | toJson | quote }}
             - name: CELLCTL_DEDICATED_CELL_IDS

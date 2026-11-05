@@ -717,7 +717,7 @@ SERVER_INSTRUCTIONS = (
     'Reuse live policy; bootstrap first if absent/stale. Connection grants no recall/save. off: '
     'explicit-only; light: clear relevance. When recall is warranted, recall_context once '
     'initially, turn verbatim; skip a turn whose Exomem working set a hook already injected. Echo '
-    'continuity unchanged; ambiguity/correction: set `anchor`. `conversation` (see the tool): '
+    'continuity unchanged. Follow `next_action` when present. `conversation` (see the tool): '
     'relevant excerpts, never full history. New evidence/task: trigger=task_refresh, keep turn, use '
     '`conversation.focus`; initiator=agent labels origin. No refresh from memory replies alone. '
     'search_memory/read_memory: gaps. On a map, pull by ref (read_memory) or search_memory before '
@@ -967,6 +967,10 @@ def build_server(
                 command=cmd,
                 surface_descriptor=surface_descriptor,
             )
+            if cloud and cmd.leaf is commands_module.op_read_media:
+                from .video_frames_worker import async_owner
+
+                bound = async_owner(bound)
             grouped = bound if exposed_name == cmd.name else grouped
             mcp.tool(bound, **tool_kwargs)
         if tool_shape != "grouped":

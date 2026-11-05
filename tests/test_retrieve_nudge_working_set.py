@@ -638,7 +638,7 @@ def test_a_real_rare_term_candidate_from_the_leaf_is_rendered(tmp_path: Path) ->
         "- resource: Quibbleflux Zorbnax Panel [Knowledge Base/Products/panel.md]"
         in block
     )
-    assert hook._WORKING_SET_UNRESOLVED_LINE in block
+    assert (packet.get("next_action") or {}).get("say", hook._WORKING_SET_UNRESOLVED_LINE) in block
 
 
 def test_at_most_five_candidates_are_rendered() -> None:
@@ -690,24 +690,6 @@ def test_a_candidate_ref_kind_or_title_cannot_forge_a_line() -> None:
 
     assert len(block.splitlines()) == 3, block
     assert block.count("forged") == 3, "the text survives, but only inside its line"
-
-
-def test_the_anchor_instruction_is_the_same_one_in_both_abstentions() -> None:
-    """`ambiguous` says two senses compete; `unresolved` says none resolved. The
-    instruction they end with — the thing the agent has to DO — is one string."""
-    assert hook._WORKING_SET_AMBIGUITY_LINE.endswith(
-        hook._WORKING_SET_ANCHOR_INSTRUCTION
-    )
-    assert hook._WORKING_SET_UNRESOLVED_LINE.endswith(
-        hook._WORKING_SET_ANCHOR_INSTRUCTION
-    )
-    assert hook._WORKING_SET_AMBIGUITY_LINE != hook._WORKING_SET_UNRESOLVED_LINE
-    # The ambiguity line's bytes are a contract already asserted above; the
-    # refactor into a shared instruction must not have moved them.
-    assert hook._WORKING_SET_AMBIGUITY_LINE == (
-        "Two senses match this turn. Call `recall_context` again with `anchor` "
-        "set to the ref you mean."
-    )
 
 
 def test_the_reminder_follows_an_unresolved_block_and_not_the_others() -> None:
@@ -2812,3 +2794,51 @@ def test_a_session_that_was_never_told_shows_nothing_after_a_compaction(
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path))
 
     assert hook._VOCABULARY_DELTA_HEADER not in context
+
+
+def test_a_whole_stance_is_held_when_vocabulary_forces_the_map_to_be_cut(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "1100")
+    packet = _shaped_packet("map", _DELTA)
+    packet["stance"] = {"state": "ready", "generation": "stance-one", "items": [
+        {"ref": "sample.md#rule", "text": "Keep the source for each claim."},
+    ]}
+    values = {}
+    monkeypatch.setattr(hook, "_read_activation_token", lambda _session: "opaque-token")
+    monkeypatch.setattr(hook, "_write_activation_token", lambda *_args: None)
+    monkeypatch.setattr(hook, "_read_activation_value", lambda path: values.get(path, ""))
+    monkeypatch.setattr(hook, "_write_activation_value", lambda path, value: values.__setitem__(path, value))
+    _serve(monkeypatch, packet)
+
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert "Keep the source for each claim." in first
+    assert "Depot Ledger 7" not in first
+    assert "Keep the source for each claim." not in second
+    assert "already held" in second
+    assert "map unchanged" not in second
+    assert max(len(first), len(second)) <= 1100
+
+
+def test_an_undelivered_method_reset_does_not_advance_hook_continuity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    """A tiny render retries stale-method invalidation instead of acknowledging an unseen reset."""
+    packet = {
+        "map": {"ref": "exomem://map", "generation": "map", "items": []},
+        "task_context": {"methods": {"reset": True, "items": []}},
+        "continuity": "refreshed-token", "abstained": False,
+    }
+    seen = _serve(monkeypatch, packet)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "20")
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert hook._METHOD_RESET_LINE not in first
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "500")
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert hook._METHOD_RESET_LINE in second
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert [request["continuity"] for request in seen] == ["", "", "refreshed-token"]

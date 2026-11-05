@@ -448,6 +448,7 @@ class ClusterConfig:
     cell_data_staging_bucket: str = ""
     cell_data_endpoint: str = ""
     key_retention_sources: tuple[object, ...] = ()
+    access_record_enabled: bool = False
     resources: ResourceSettings = ResourceSettings()
     model_env: dict[str, str] | None = None
     capacity: CapacityConfig = CapacityConfig()
@@ -1646,7 +1647,7 @@ async def _deliver_alert(
     if retry_at is not None and now < retry_at:
         return
     try:
-        webhook_url = cluster.read_secret_value(*cluster_config.alert_delivery_secret)
+        webhook_url = await asyncio.to_thread(cluster.read_secret_value, *cluster_config.alert_delivery_secret)
         await asyncio.to_thread(alerts.deliver, webhook_url, alert=alert, active=firing, observed_at=now)
     except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
         memory.alert_retry_at[alert] = now + ALERT_RETRY

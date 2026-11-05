@@ -10,6 +10,7 @@ one of the two committed transactions can disappear.
 
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import subprocess
@@ -23,30 +24,73 @@ from exomem import audit, claims, deferred_index, held_fs, index_paths
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
-    reason="reads this process's POSIX locks from /proc/locks, which only Linux provides",
+    reason="exercises Linux POSIX lock retention and fdinfo observations",
 )
 
 # Another process, as an online-upgrade standby would be: it writes, checkpoints and closes.
 _WRITE_CHECKPOINT_CLOSE = """
 import sqlite3, sys
-writer = sqlite3.connect(sys.argv[1])
+writer = sqlite3.connect(sys.argv[1], timeout=0)
 writer.execute("INSERT INTO probe(n) VALUES (2)")
 writer.commit()
-writer.execute("PRAGMA wal_checkpoint(PASSIVE)")
+writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 writer.close()
 """
 
+_TRY_WRITE = """
+import sqlite3, sys
+writer = sqlite3.connect(sys.argv[1], timeout=0)
+try:
+    writer.execute("BEGIN IMMEDIATE")
+except sqlite3.OperationalError as error:
+    if error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+        raise
+else:
+    writer.rollback()
+    raise AssertionError("another process acquired the retained writer's reservation")
+finally:
+    writer.close()
+"""
+
+def _assert_retained_snapshot(database: Path, reader: sqlite3.Connection) -> None:
+    subprocess.run(
+        [sys.executable, "-c", _WRITE_CHECKPOINT_CLOSE, os.fspath(database)],
+        check=True,
+        timeout=60,
+    )
+    wal = Path(f"{database}-wal")
+    assert wal.exists() and wal.stat().st_size > 0, "another process discarded the reader's WAL"
+    assert reader.execute("SELECT n FROM probe ORDER BY n").fetchall() == [(1,)]
+
 
 def _locks_held_here(path: Path) -> set[str]:
-    """The process's lock coverage; duplicate proc records add no protection."""
+    """Read lock coverage without opening the inode or walking the global lock list."""
     info = path.stat()
     file_id = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
     held = set()
-    for line in Path("/proc/locks").read_text().splitlines():
-        # "7: POSIX  ADVISORY  READ 4242 08:30:1234 128 128"; a blocked waiter's line adds "->".
-        fields = line.split()
-        if fields[1] == "POSIX" and fields[4] == str(os.getpid()) and fields[5] == file_id:
-            held.add(" ".join((fields[3], *fields[6:8])))
+    # fdinfo walks this inode's locks under its lock; unrelated /proc/locks churn can skip rows.
+    for descriptor in os.listdir("/proc/self/fd"):
+        try:
+            opened = os.fstat(int(descriptor))
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                continue
+            contents = Path("/proc/self/fdinfo", descriptor).read_text()
+        except OSError as error:
+            # Directory enumeration can include its own descriptor after that descriptor closes.
+            if error.errno not in (errno.EBADF, errno.ENOENT):
+                raise
+            continue
+        for line in contents.splitlines():
+            fields = line.split()
+            # These field positions and tokens are the fixed Linux fdinfo lock protocol.
+            if (
+                len(fields) == 9
+                and fields[0] == "lock:"
+                and fields[2] == "POSIX"
+                and fields[5] == str(os.getpid())
+                and fields[6] == file_id
+            ):
+                held.add(" ".join((fields[4], *fields[7:9])))
     return held
 
 
@@ -57,60 +101,64 @@ def _wal_reader(database: Path) -> sqlite3.Connection:
     assert setup.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
     setup.execute("CREATE TABLE chunks (file_path TEXT, chunk_idx INTEGER, file_mtime REAL)")
     setup.execute("INSERT INTO chunks VALUES ('Knowledge Base/note.md', 0, 0)")
+    setup.execute("CREATE TABLE probe (n INTEGER)")
+    setup.execute("INSERT INTO probe(n) VALUES (1)")
     setup.commit()
     reader = sqlite3.connect(database, isolation_level=None)
     reader.execute("BEGIN")
-    assert reader.execute("SELECT count(*) FROM chunks").fetchone() == (1,)
+    assert reader.execute("SELECT n FROM probe").fetchall() == [(1,)]
     setup.close()
     return reader
 
 
+def test_lock_observer_detects_actual_shm_lock_loss(tmp_path: Path) -> None:
+    database = tmp_path / "reader.sqlite"
+    reader = _wal_reader(database)
+    shm = Path(f"{database}-shm")
+    try:
+        before = {path: _locks_held_here(path) for path in (database, shm)}
+        assert all(before.values())
+
+        # Closing an ordinary SHM descriptor drops this process's locks, even with a live reader.
+        descriptor = os.open(shm, os.O_RDONLY)
+        os.close(descriptor)
+
+        assert _locks_held_here(shm) == set()
+        assert _locks_held_here(database) == before[database]
+    finally:
+        reader.close()
+
+
 def test_owner_bound_connect_keeps_an_open_readers_snapshot(tmp_path: Path) -> None:
+    """Opening another owned connection must not let a checkpoint invalidate an active reader."""
     index = claims.ClaimIndex(tmp_path)
     database = index.path
     setup = index._connect()
     setup.execute("CREATE TABLE probe (n INTEGER)")
     setup.execute("INSERT INTO probe(n) VALUES (1)")
     setup.commit()
-    query = "SELECT group_concat(n) FROM probe"
-    committed = setup.execute(query).fetchone()
     setup.close()
 
     reader = index._connect()
     reader.isolation_level = None
     reader.execute("BEGIN")
-    reader.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    assert reader.execute("SELECT n FROM probe").fetchall() == [(1,)]
     second = index._connect()
     try:
-        reader_locks = _locks_held_here(database)
-        subprocess.run(
-            [sys.executable, "-c", _WRITE_CHECKPOINT_CLOSE, os.fspath(database)],
-            check=True,
-            timeout=60,
-        )
-        wal_kept = Path(f"{database}-wal").exists()
-        view = reader.execute(query).fetchone()
+        _assert_retained_snapshot(database, reader)
     finally:
         second.close()
         reader.close()
-
-    # SQLite 3.53 refuses that close checkpoint while the reader keeps its -shm
-    # locks; 3.50 and 3.45 checkpoint, delete the WAL and change the view.
-    assert reader_locks, "the reader no longer holds its lock on the database file"
-    assert wal_kept, "another process checkpointed over the reader and removed the WAL"
-    assert view == committed
 
 
 @pytest.mark.parametrize("operation", ["identity file", "children", "enumerate"])
 def test_held_identity_reads_keep_this_process_sqlite_locks(
     tmp_path: Path, operation: str
 ) -> None:
+    """Identity reads and directory scans must not expose a live reader to checkpoint truncation."""
     database = tmp_path / "held" / "store.sqlite"
     reader = _wal_reader(database)
-    shm = Path(f"{database}-shm")
     try:
-        before = {path: _locks_held_here(path) for path in (database, shm)}
-        assert all(before.values())
         with held_fs.acquire(tmp_path).require() as filesystem:
             with filesystem.parent("held").require() as parent:
                 if operation == "identity file":
@@ -123,19 +171,16 @@ def test_held_identity_reads_keep_this_process_sqlite_locks(
                 else:
                     assert filesystem.enumerate(parent).ok
 
-        assert {path: _locks_held_here(path) for path in before} == before
+        _assert_retained_snapshot(database, reader)
     finally:
         reader.close()
 
 
 def test_audit_census_read_keeps_this_process_sqlite_locks(tmp_path: Path) -> None:
+    """Reading a census must not let another process checkpoint over an existing reader."""
     database = tmp_path / "state" / "census.sqlite"
     reader = _wal_reader(database)
-    shm = Path(f"{database}-shm")
     try:
-        before = {path: _locks_held_here(path) for path in (database, shm)}
-        assert all(before.values())
-
         rows, _truncated, _last, failure = audit._sidecar_rows(
             tmp_path,
             database,
@@ -145,22 +190,19 @@ def test_audit_census_read_keeps_this_process_sqlite_locks(tmp_path: Path) -> No
         )
 
         assert (rows, failure) == ([("Knowledge Base/note.md",)], None)
-        assert {path: _locks_held_here(path) for path in before} == before
+        _assert_retained_snapshot(database, reader)
     finally:
         reader.close()
 
 
 def test_embedding_freshness_snapshot_keeps_this_process_sqlite_locks(tmp_path: Path) -> None:
+    """Copying the freshness snapshot must not let a checkpoint invalidate another active reader."""
     note = tmp_path / "Knowledge Base" / "note.md"
     note.parent.mkdir(parents=True)
     note.write_text("# note\n", encoding="utf-8")
     database = index_paths.sidecar_path(tmp_path)
     reader = _wal_reader(database)
-    shm = Path(f"{database}-shm")
     try:
-        before = {path: _locks_held_here(path) for path in (database, shm)}
-        assert all(before.values())
-
         freshness = deferred_index.inspect_embedding_freshness(
             tmp_path, ["Knowledge Base/note.md"]
         )
@@ -168,7 +210,7 @@ def test_embedding_freshness_snapshot_keeps_this_process_sqlite_locks(tmp_path: 
         # Only a completed read of the snapshot copy answers other than UNVERIFIABLE.
         unverifiable = deferred_index.EmbeddingFreshness.UNVERIFIABLE
         assert freshness["Knowledge Base/note.md"] is not unverifiable
-        assert {path: _locks_held_here(path) for path in before} == before
+        _assert_retained_snapshot(database, reader)
     finally:
         reader.close()
 
@@ -176,6 +218,7 @@ def test_embedding_freshness_snapshot_keeps_this_process_sqlite_locks(tmp_path: 
 def test_vocabulary_authority_connect_keeps_a_writers_reserved_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A second authority connection must not let an independent writer bypass a reservation."""
     # This database runs in rollback-journal mode: its file locks are its only
     # guard against a writer in another process.
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
@@ -191,13 +234,15 @@ def test_vocabulary_authority_connect_keeps_a_writers_reserved_lock(
     database = authority._database_path(custody)
     writer.execute("BEGIN IMMEDIATE")
     try:
-        before = _locks_held_here(database)
-        assert before
         second = authority._connect(custody, create=False, marker=marker)
         assert second is not None
         second.close()
 
-        assert _locks_held_here(database) == before
+        subprocess.run(
+            [sys.executable, "-c", _TRY_WRITE, os.fspath(database)],
+            check=True,
+            timeout=60,
+        )
     finally:
         writer.execute("ROLLBACK")
         writer.close()

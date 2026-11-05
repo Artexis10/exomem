@@ -14,7 +14,7 @@ def _committed_sql(fixtures: Path, key: str) -> str:
     checkout = os.environ["CELLCTL_SUBSTRATE_CONTRACT_ROOT"]
     # Committed blobs keep dirty or newer checkout files outside the fixture contract.
     return subprocess.run(
-        ["git", "-C", checkout, "show", f"{contract['ref']}:{contract[key]}"],
+        ["git", "-C", checkout, "show", f"{contract.get('artifact_refs', {}).get(key, contract['ref'])}:{contract[key]}"],
         check=True,
         capture_output=True,
         text=True,
@@ -71,3 +71,8 @@ def operation_grant_test_sql(fixtures: Path) -> str:
     It mirrors Substrate migration 0082 and its grants stanzas until the pin reaches a commit with both.
     """
     return (fixtures / "exomem_cloud_operation_grants.sql").read_text(encoding="utf-8")
+
+
+def access_record_test_sql(fixtures: Path) -> str:
+    """The canonical access migration and additive grants, after the existing grant fixtures."""
+    return _committed_sql(fixtures, "access_migration") + "\n" + _committed_sql(fixtures, "access_grants")

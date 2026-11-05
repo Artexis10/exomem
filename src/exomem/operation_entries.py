@@ -592,7 +592,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes")),
+        _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes", "view", "offset", "limit", "revision")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.

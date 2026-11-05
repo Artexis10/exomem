@@ -387,7 +387,7 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
     real_time = runtime.time
     real_flag, real_clock, real_check = derived_rows.is_derived, real_time.monotonic, runtime.ReadSession.check
     offset, errors = [0.0], []
-    clock = SimpleNamespace(monotonic=lambda: real_clock() + offset[0], perf_counter=real_time.perf_counter,
+    clock = SimpleNamespace(monotonic=lambda: offset[0], perf_counter=real_time.perf_counter,
                             thread_time=real_time.thread_time, process_time=real_time.process_time,
                             time_ns=real_time.time_ns)
 

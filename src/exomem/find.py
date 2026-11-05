@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import ChainMap, OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack, contextmanager
@@ -699,15 +699,24 @@ class FreshnessSnapshot:
         if not paths:
             return set()
         parents = None
-        if scope in self._catalogue_scopes and (self._pending is None or self._pending.empty):
+        if scope in self._catalogue_scopes:
             from . import lexstore
 
-            # Reuse structural links, never parent authority. Pending bytes keep their existing overlay path.
+            # Pending custody replaces only its child links; parent authority stays live below.
             published = lexstore.get_store(self._root).recall_emitted_parents(
                 scope, self._expected_recall_checkpoints.get(scope)
             )
-            if published is not None and paths <= published.keys():
+            pending = self._pending
+            stable = paths if pending is None or pending.empty else paths - pending.paths
+            if published is not None and stable <= published.keys():
                 parents = published
+                if pending is not None and not pending.empty:
+                    pending_parents = {
+                        path: page.emitted_parent for path in paths & pending.paths
+                        if (page := pending.page(path)) is not None
+                    }
+                    paths = stable | pending_parents.keys()
+                    parents = ChainMap(pending_parents, published)
         try:
             if parents is None:
                 metadata = _managed_page_metadata(
@@ -2995,6 +3004,14 @@ class _UnitCandidate:
         return self.unit_view.get("verdict")
 
     @property
+    def as_of(self) -> str | None:
+        return self.selected_unit.as_of
+
+    @property
+    def until(self) -> str | None:
+        return self.selected_unit.until
+
+    @property
     def check_by(self) -> str | None:
         value = self.unit_view.get("check_by")
         return value.isoformat() if value is not None else None
@@ -3491,6 +3508,8 @@ def _semantic_unit_hit(
         context=unit.context,
         verdict=getattr(unit, "verdict", None),
         check_by=getattr(unit, "check_by", None),
+        as_of=getattr(unit, "as_of", None),
+        until=getattr(unit, "until", None),
         relations=[relation.to_dict() for relation in unit.relations],
         source_anchor=unit.anchor,
         source_span=_unit_span(unit),
@@ -8421,19 +8440,15 @@ def reset_page_and_result_caches() -> dict[str, int]:
 
 
 def cache_status() -> dict:
-    """No-allocation residency status for find's rebuildable RAM caches."""
-    page_entries = list(_CACHE.entries.values())
+    """Read resident counts without loading pages or rebuilding caches."""
+    pages = _CACHE.cache_status()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         hot_hits = sum(len(v[0]) for v in _FIND_CACHE.values())
     return {
-        "pages": {
-            "entries": len(page_entries),
-            "body_chars": sum(len(p.body) for p in page_entries),
-            "hits": int(_CACHE.hits),
-        },
+        "pages": pages,
         "resolvers": {"entries": resolver_entries},
         "hot_find": {"entries": hot_entries, "hits": hot_hits},
     }

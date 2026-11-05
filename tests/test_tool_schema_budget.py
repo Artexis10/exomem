@@ -47,7 +47,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The record_episode description carries the close step and its completion-before-citation
 # condition, so the total budget and the record_episode ceiling rise 100 B.
 # The `window_days` field on the dispositions kind of read_review sizes the effect window, so the budget rises 150 B.
-TOTAL_BUDGET = 165_700
+# Bounded import status adds four view and paging fields. read_import measures 3,052 B;
+# its ceiling rounds to 3,100 B, and the total budget rises 550 B for those protocol inputs.
+TOTAL_BUDGET = 166_250
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -86,7 +88,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_import": 2550,
+    "read_import": 3100,
     "read_connections": 3300,
     "read_episode": 1500,
     "read_governance": 2250,

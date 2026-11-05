@@ -508,7 +508,8 @@ owner.save(run)
                 await client.initialize()
                 await client.list_tools()
                 await client.call_tool("adoption_studio", {"action": "status"})
-                await client.call_tool("adoption_studio", {"action": "status", "run_id": run_id})
+                # Full status exposes the synthetic credential and exercises the read-audit boundary.
+                await client.call_tool("adoption_studio", {"action": "status", "run_id": run_id, "view": "full"})
                 await client.call_tool("adoption_studio", {"action": "plan", "run_id": run_id})
 
     # Keep the derived owner's connection open so shutdown deterministically leaves a WAL to checkpoint.

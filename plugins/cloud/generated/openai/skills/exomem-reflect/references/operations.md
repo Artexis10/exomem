@@ -974,6 +974,8 @@ Every selected file is imported or refused with a per-path code; none is dropped
 
 `plan` and `apply` stop inside the request budget. While a result carries `continuation`, call the same action again with that `continuation` and the unchanged other arguments. The run is done when no `continuation` returns and `phase` is `applied`; a stopped call leaves the remaining work in `status`.
 
+Per-run `status` defaults to a compact summary. Detail views (`inventory`, `selection`, `plan`, `outcomes`, `stale`) accept `offset`, `limit` (1 to 100) and `revision`. Carry the returned revision across pages and restart from the summary on `IMPORT_STATUS_CHANGED`. A row too large for a page appears in `omitted`; explicit `view="full"` remains unbounded. [Interrupted apply](importing.md#interrupted-apply) explains exact-identity recovery and unresolved legacy states.
+
 ### Agent actions after apply
 - `work-item` returns bounded read-only context (`sources`, `max_sources` default 5, `max_chars_per_source` default 2000).
 - `propose` submits structured `proposals`.

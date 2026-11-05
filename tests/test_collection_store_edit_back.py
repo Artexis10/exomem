@@ -1447,6 +1447,7 @@ def test_an_unreleased_route_takes_no_view_edit(quick_service, monkeypatch, rele
 
     root, view = quick_service.root, quick_service.root / manifest_path()
     until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state!='current'") == [(0,)])
+    runtime.flush_for_export(root)
     monkeypatch.setattr(capability, "RELEASED", released)
     view.write_bytes(view.read_bytes().replace(b"title: Work", b"title: Renamed"))
     before, txns_before = vault_bytes(root), store_rows(root, "SELECT COUNT(*) FROM txns")

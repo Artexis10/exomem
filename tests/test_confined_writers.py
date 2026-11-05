@@ -804,6 +804,10 @@ def test_a_restricted_client_cannot_tell_a_hidden_page_from_an_absent_one(unarme
         answers[label] = {probe: _call(root, who, command, **arguments)
                           for probe, (command, arguments) in _twin_probes().items()}
 
+    identifiers = [answer["recent-context"]["served_context_id"] for answer in answers.values()]
+    assert len(set(identifiers)) == 2, "composition identifiers are fresh for every response"
+    for answer in answers.values():
+        answer["recent-context"]["served_context_id"] = "<composition-id>"
     assert answers["A"] == answers["B"]
     # The twin test proves nothing if the client sees nothing: it still reads its own matter and its own capture.
     assert OWN_PAGE in json.dumps(answers["A"]["search-own"])

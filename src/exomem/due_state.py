@@ -3343,6 +3343,7 @@ def _served_rows(
     horizon_passed = (
         hit is not None and hit["horizon"] is not None and effective_now >= hit["horizon"]
     )
+    role_state = None
     if (
         hit is not None
         and age < _SERVE_CACHE_STALE_SECONDS
@@ -3366,7 +3367,8 @@ def _served_rows(
             unchanged = all(keep(path) == verdict for path, verdict in hit["asked"].items())
         if unchanged and hit["role_token"] is not None:
             with call_spans.span("recall.due_state.role", {}):
-                unchanged = _role_token(vault_root, keep) == hit["role_token"]
+                role_state = _read_role_state(vault_root, keep)
+                unchanged = role_state.token == hit["role_token"]
         if unchanged:
             held = hit["rows"]
             if borrowed:
@@ -3388,7 +3390,7 @@ def _served_rows(
             return rows
     rows, _stored = _build_served(
         vault_root, key, today=today, now=effective_now, principal=who,
-        purpose=purpose, payload=payload, built=monotonic,
+        purpose=purpose, payload=payload, built=monotonic, role_state=role_state,
     )
     return rows
 
@@ -3488,6 +3490,7 @@ def _build_served(
     purpose: str | None,
     payload: dict[str, Any] | None,
     built: float,
+    role_state: _ServedRoleState | None = None,
 ) -> tuple[list[dict[str, Any]], tuple[Any, ...] | None]:
     """Build the served rows for `key` and memoise them; the key they were stored under."""
     with call_spans.span("recall.due_state.build", {}):
@@ -3508,6 +3511,7 @@ def _build_served(
             payload=payload,
             review_payload=review_payload,
             sources=sources,
+            role_state=role_state,
         )
     with _SERVE_LOCK:
         if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
@@ -3725,15 +3729,33 @@ def _owes_nothing(payload: Mapping[str, Any]) -> bool:
     return not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins")
 
 
-def _role_token(vault_root: Path, keep: Callable[[str], bool]) -> str:
-    """Fingerprint of the artifact-role findings this audience would be served right now."""
+@dataclass
+class _ServedRoleState:
+    """One role read and its authorization decisions, held only through an inline rebuild."""
+
+    findings: list[Any] | None
+    token: str
+    keep: Callable[[str], bool]
+    asked: dict[str, bool]
+
+
+def _read_role_state(vault_root: Path, decide: Callable[[str], bool]) -> _ServedRoleState:
+    """Keep dependency verdicts with findings so a rebuild uses the same release walk."""
     from . import artifact_role_state
+
+    asked: dict[str, bool] = {}
+
+    def keep(path: str) -> bool:
+        if path not in asked:
+            asked[path] = bool(decide(path))
+        return asked[path]
 
     try:
         findings, _ = artifact_role_state.served(vault_root, keep)
+        token = _findings_token(findings)
     except Exception:  # noqa: BLE001 - the build omits advice whose evidence is unavailable
-        return "unavailable"
-    return _findings_token(findings)
+        findings, token = None, "unavailable"
+    return _ServedRoleState(findings, token, keep, asked)
 
 
 def _findings_token(findings: list[Any]) -> str:
@@ -3769,6 +3791,7 @@ def _served_entries_uncached(
     paths: frozenset[str] | None = None,
     recover: bool = True,
     sources: dict[tuple[str, str, str], list[tuple[str, str, str, str]]] | None = None,
+    role_state: _ServedRoleState | None = None,
 ) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
     """The build behind `served_entries`, and what a memo of it must re-check.
 
@@ -3829,7 +3852,8 @@ def _served_entries_uncached(
     keep = None
     try:
         writer = bound_writer(vault_root)
-        keep = (writer._operation.allows_file if writer is not None else
+        keep = (role_state.keep if role_state is not None else
+                writer._operation.allows_file if writer is not None else
                 egress_module.release_walk_filter(
                     Path(vault_root), principal=principal, purpose=purpose
                 ))
@@ -3842,7 +3866,8 @@ def _served_entries_uncached(
     # Every verdict this build relies on, recorded so a memo of the build can
     # ask the plane the same questions again. An empty policy is recorded too:
     # its answers are the ones a policy arriving later must be checked against.
-    asked: dict[str, bool] = {}
+    # An inline rebuild keeps the role read's positive and negative dependency verdicts.
+    asked: dict[str, bool] = role_state.asked if role_state is not None else {}
     decide = keep
 
     def keep(path: str) -> bool:
@@ -3882,12 +3907,15 @@ def _served_entries_uncached(
 
         role_families = frozenset(artifact_role_review.FAMILIES)
         try:
-            findings, _ = (
-                artifact_role_state.served(vault_root, keep, paths=paths)
-                if paths is not None else artifact_role_state.served(vault_root, keep)
-            )
-            role_token = _findings_token(findings)
-            role_grouped = _entries_from_findings(vault_root, findings)
+            if role_state is None:
+                findings, _ = (
+                    artifact_role_state.served(vault_root, keep, paths=paths)
+                    if paths is not None else artifact_role_state.served(vault_root, keep)
+                )
+                role_token = _findings_token(findings)
+            else:
+                findings, role_token = role_state.findings, role_state.token
+            role_grouped = _entries_from_findings(vault_root, findings or [])
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {
                     path: _bucket(entries, today)

@@ -11,5 +11,8 @@ dependencies:
 - name: topolvm
   repository: https://topolvm.github.io/topolvm
   version: 17.2.0
-digest: sha256:caa9884933bd5c16bd4bd0ef9f69dedc806e7396793e0d12f69e47e024737cf7
-generated: "2026-10-06T01:08:56.041460185+01:00"
+- name: kyverno
+  repository: https://kyverno.github.io/kyverno/
+  version: 3.9.2
+digest: sha256:587636473360374153d7a12652d27e5255fc63b00fe2246778fecee451f99db6
+generated: "2026-10-26T19:15:41.611980367Z"

@@ -569,7 +569,6 @@ def test_a_restricted_current_state_page_never_reaches_an_external_packet(
 @pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 def test_the_declared_page_is_served_to_its_owner(tmp_path):
     from exomem import commands
-
     from exomem.governance.principal import RequestPrincipal, request_scope
 
     vault = _governed_entity_vault(tmp_path, declared=True)
@@ -711,3 +710,70 @@ def test_a_full_current_state_page_path_beats_a_same_stem_lookalike(monkeypatch,
         tmp_path, anchors=(_hub_anchor({named, lookalike}),), state_fields=("state",),
         date_fields=("as_of",))
     assert [entry["path"] for entry in out] == [named]
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "until", "check_by", "history", "review"),
+    [
+        ("superseded", "2026-12-01", "2026-01-01", True, None),
+        ("active", "2026-10-31", "2026-01-01", True, None),
+        ("active", "2026-11-02", "2026-11-01", False, "2026-11-01"),
+        ("active", None, "2026-11-02", False, None),
+        ("active", None, None, False, None),
+    ],
+)
+def test_typed_currency_precedence(lifecycle, until, check_by, history, review):
+    unit = _item("unit", "Keep the source", lifecycle=lifecycle,
+                 provenance={"until": until, "check_by": check_by})
+    assert working_set_currency.state(unit, today=date(2026, 11, 2)) == (history, review)
+
+
+def test_real_unit_lane_keeps_typed_dates_for_currency(tmp_path, monkeypatch):
+    class Clock(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 5)
+
+    monkeypatch.setattr(working_set_currency, "date", Clock)
+    _write(tmp_path, PAGE, (
+        "---\ntype: insight\nstatus: active\ntitle: Relay trial\n---\n\n"
+        "## Decision\n- id: expired\n- as_of: 2026-11-01\n- until: 2026-11-04\n\n"
+        "Keep the source with the release.\n"
+    ))
+    lexstore.ensure_fresh(tmp_path)
+    items = _lane_items(tmp_path, PAGE, "recent_change")
+    assert len(items) == 1
+    assert items[0].updated == "2026-11-01"
+    assert items[0].provenance["until"] == "2026-11-04"
+    assert _packet(items)["units"][0]["history"] is True
+
+
+@pytest.mark.usefixtures("anchors_packet")
+def test_cached_anchor_packet_changes_currency_after_midnight(tmp_path, monkeypatch):
+    from test_working_set_egress import _prepare_end_to_end_vault
+
+    from exomem import commands, working_set_runtime
+
+    class Clock(date):
+        day = 4
+
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, cls.day)
+
+    monkeypatch.setattr(working_set_currency, "date", Clock)
+    monkeypatch.setattr(working_set_runtime, "date", Clock, raising=False)
+    _write(tmp_path, PAGE, (
+        "---\ntype: insight\nstatus: active\ntitle: Relay trial\ntags: [hub]\n---\n\n"
+        "## Decision\n- id: review\n- check_by: 2026-11-04\n\n"
+        "Keep the source with the release.\n"
+    ))
+    _prepare_end_to_end_vault(tmp_path)
+    commands.op_activate_context(tmp_path, turn="Relay trial")
+    before = commands.op_activate_context(tmp_path, turn="Relay trial")
+    assert before["abstained"] is False and before["units"]
+    assert not any(unit.get("review_due") for unit in before["units"])
+    Clock.day = 5
+    after = commands.op_activate_context(tmp_path, turn="Relay trial")
+    reviewed = [unit for unit in after["units"] if unit["ref"].endswith("#review")]
+    assert reviewed and all(unit.get("review_due") == "2026-11-04" for unit in reviewed)

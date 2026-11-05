@@ -89,6 +89,8 @@ _CONTENTION_RECENT_WINDOW_SECONDS = 60.0
 _CONTENTION_RECENT_SAMPLES = 128
 _WINDOWS_DACL_STABILIZATION_SECONDS = 0.25
 _WINDOWS_DACL_STABILIZATION_POLL_SECONDS = 0.01
+_WINDOWS_SQLITE_PATH_RETRY_SECONDS = 0.25
+_WINDOWS_SQLITE_PATH_RETRY_POLL_SECONDS = 0.01
 
 # The most recent `wait_ms`/`hold_ms` this task/thread measured acquiring and
 # holding the vault mutation boundary — set by `VaultMutationCoordinator.hold()`
@@ -1343,22 +1345,33 @@ def validate_windows_idempotency_runtime_paths(
             _validate_windows_runtime_entry(
                 owners_dir, directory=True, sid=sid, handle=owners.windows_handle
             )
+        deadline = time.monotonic() + _WINDOWS_SQLITE_PATH_RETRY_SECONDS
         for path in private_paths:
             if path.parent != state_dir:
                 raise RuntimeError("idempotency runtime database escaped its trusted state directory")
-            try:
-                fd = _open_secure_file_at(state, path.name, os.O_RDONLY)
-            except FileNotFoundError:
-                continue
-            try:
-                _validate_windows_runtime_entry(
-                    path,
-                    directory=False,
-                    sid=sid,
-                    handle=getattr(msvcrt, "get_osfhandle")(fd),  # noqa: B009 - Windows-only stub
-                )
-            finally:
-                os.close(fd)
+            while True:
+                try:
+                    fd = _open_secure_file_at(state, path.name, os.O_RDONLY)
+                except FileNotFoundError:
+                    break
+                except OSError as error:
+                    # Win32 ERROR_ACCESS_DENIED (5) also means SQLite's sidecar is delete-pending.
+                    # Retry only the open; genuine denial costs at most this shared short wait.
+                    remaining = deadline - time.monotonic()
+                    if error.errno != 5 or remaining <= 0:
+                        raise
+                    time.sleep(min(_WINDOWS_SQLITE_PATH_RETRY_POLL_SECONDS, remaining))
+                    continue
+                try:
+                    _validate_windows_runtime_entry(
+                        path,
+                        directory=False,
+                        sid=sid,
+                        handle=getattr(msvcrt, "get_osfhandle")(fd),  # noqa: B009 - Windows-only stub
+                    )
+                finally:
+                    os.close(fd)
+                break
 
 
 def _windows_handle_identity(handle: int) -> tuple[int, int, int]:

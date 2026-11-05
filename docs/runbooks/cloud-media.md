@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Cloud media: documents, OCR and speech
+# Cloud media: documents, OCR, speech and on-demand frames
 
 **Status:** the Cloud image ships documents, OCR and speech behind the existing engine switches.
 It also carries the aligned multilingual image query artifact.
@@ -8,7 +8,7 @@ The document and OCR measurements below used a local container with 2 CPUs and 3
 Speech budgets remain provisional until integrated qualification and cell acceptance.
 This runbook records no completed owner-sized speech backlog or two-cell sharing acceptance.
 
-Media extraction makes uploaded files searchable. The Cloud image carries three engines:
+Media extraction makes uploaded files searchable. The Cloud image carries these extraction engines:
 
 - `documents` reads PDF, Word, Excel, PowerPoint, HTML, EPUB, OpenDocument (text, spreadsheet, presentation) and RTF files.
 - `ocr` reads the text in images, and in PDF pages that carry no text layer.
@@ -21,6 +21,34 @@ HEIC images use the maintained Pillow decoder shared by OCR and personal image e
 The Cloud image gate includes a real HEIC sample with known text and runs without networking.
 The decoder stays inside the existing media worker and its resource limits.
 The measurements below predate HEIC support; they do not qualify an owner-sized HEIC backlog.
+
+## On-demand video frames
+
+The `frames` engine enables the video operation of `read_media` on selected Cloud cells.
+It stays off by default and uses the existing per-cell and fleet engine selection.
+The media-status operation remains available when the frame engine is off.
+Selecting `frames` enables no transcription, model or persistent scene-frame generation.
+
+A request hydrates, hashes and decodes the original in a disposable child.
+The serving process retains its own file handle and authorizes the child's exact file version and digest before decoding.
+It checks the retained original and current disclosure authority again before returning JPEGs and timestamps.
+The request writes no note, sidecar or durable processing job; verified hydration can update the original cache.
+
+The child shares the vault media lock and the configured node media slot with extraction.
+A competing owner or refused memory admission returns a retryable busy result.
+The frame reader uses the default media budget unless `EXOMEM_MEDIA_BUDGETS` supplies a `frames` entry.
+Existing pressure stops, hard limits and the MCP request deadline bound preparation through decoding.
+Cancellation stops the owned process group before it releases the slot.
+Interrupted hydration retains the existing dead-reservation recovery owner.
+
+The `frame-codecs` package extra installs the shared image codecs and PyAV without speech or document dependencies.
+The Cloud image already receives these codecs through `media-cpu`.
+The isolated registered-tool proof uses a small retained video and real JPEG decoding, without a model.
+It does not qualify node capacity, owner-sized videos or connected-client image rendering.
+A source release does not activate a cell, change a deployment or authorize a provider rescan.
+
+To undo activation, remove `frames` from the cell or fleet selection and let the existing controller reconcile the cell.
+Media status and stored originals remain available.
 
 ## Speech and image query artifacts
 

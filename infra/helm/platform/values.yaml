@@ -151,6 +151,10 @@ traefik:
 # with their own StorageClass, separate from the `storage` block above.
 
 cellctl:
+  # Prepared source only. Reader JSON lives in a separate read-only Secret.
+  accessRecord:
+    enabled: false
+    readerSecretName: ""
   # Observed deployed retention policies; missing windows remain unknown.
   keyRetentionSources: []
   enabled: false
@@ -597,3 +601,62 @@ cert-manager:
   startupapicheck:
     image:
       digest: sha256:20bc1106514032737873e8d46afacfbcc61d6ffe0e29f47b9d914b28e18ad521
+
+# Enable only after receipt, publisher and repository custody prerequisites pass.
+operatorDeploy:
+  enabled: false
+  group: exomem:deploy
+  sourceRepository: ""
+  workflow: .github/workflows/release-please.yml
+  cellFamily: cloud
+  registryReadSecretName: ""
+  # Family comes from the release build plan; gateway has a different producer.
+  workloads:
+    - name: cellctl
+      namespace: exomem-cloud
+      family: cellctl
+kyverno:
+  namespaceOverride: exomem-admission
+  fullnameOverride: kyverno
+  webhooksCleanup: {enabled: false}
+  crds:
+    migration: {enabled: false}
+  features:
+    admissionReports: {enabled: false}
+    aggregateReports: {enabled: false}
+    policyReports: {enabled: false}
+    validatingAdmissionPolicyReports: {enabled: false}
+    backgroundScan: {enabled: false}
+    configMapCaching: {enabled: false}
+    generateValidatingAdmissionPolicy: {enabled: false}
+    generateMutatingAdmissionPolicy: {enabled: false}
+  admissionController:
+    replicas: 1
+    rbac:
+      create: false
+      createViewRoleBinding: false
+      serviceAccount:
+        name: exomem-image-admission
+    createSelfSignedCert: false
+    certManager:
+      enabled: true
+      createSelfSignedIssuer: true
+    container:
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: "1", memory: 384Mi}
+    initContainer:
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {cpu: "1", memory: 128Mi}
+  backgroundController:
+    enabled: false
+  cleanupController:
+    enabled: false
+  reportsController:
+    enabled: false
+  openreports:
+    enabled: false
+    installCrds: false
+  reportsServer:
+    enabled: false

@@ -201,6 +201,65 @@ def test_remote_backfill_assigns_exactly_the_previewed_pages(server, vault) -> N
     assert final["committed"] == len(previewed)
 
 
+def test_remote_backfill_skips_readonly_files_and_canonical_views(vault, tmp_path, monkeypatch) -> None:
+    """A protected candidate must not abort a job after earlier chunks committed."""
+    from test_collection_store_service import _served_vault, coordinator, offline_create
+    from test_collection_store_writer import manifest_path
+
+    setup = tmp_path / "store"
+    root = _served_vault(setup, monkeypatch)
+    shutil.copytree(vault / "Knowledge Base/_Schema", root / "Knowledge Base/_Schema", dirs_exist_ok=True)
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        assert offline_create(root, setup / "c.md", manifest_path(), why="store fixture") == 0
+        # Use the real published view so receipt visibility follows canonical records.
+        protected = {
+            "Knowledge Base/Records/Work/Items/_summary.md": (
+                root / "Knowledge Base/Records/Work/Items/_summary.md"
+            ).read_text(encoding="utf-8"),
+            "Knowledge Base/Reference/locked.md": "---\ntitle: Reference\n---\nReference body.\n",
+        }
+        eligible = {
+            "Knowledge Base/Notes/ordinary.md": "---\ntitle: Ordinary\n---\nNote body.\n",
+            "Knowledge Base/Sources/original.md": "---\ntitle: Original\n---\nSource body.\n",
+            # An untrusted stamp cannot appoint a file as a canonical view.
+            "Knowledge Base/Notes/stamped.md": "---\ntitle: Stamped\nexomem_view: true\n---\nNote body.\n",
+        }
+        for relative, text in {**protected, **eligible}.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        (root / "Knowledge Base/_access.yaml").write_text("readonly:\n  - Reference\n", encoding="utf-8")
+        before = {relative: (root / relative).read_bytes() for relative in protected}
+
+        async def scenario(client):
+            preview_handle, preview_final = await _preview_job(client, {"kind": "backfill-ids"})
+            assert preview_final["state"] == "completed"
+            preview_entries = await _receipt_entries(client, preview_handle["run_id"])
+            handle = await _start(client, preview_final["receipt"]["result"]["plan_id"])
+            final = await _until_terminal(client, handle["run_id"])
+            return preview_entries, final, await _receipt_entries(client, handle["run_id"])
+
+        try:
+            preview_entries, final, entries = _session(server_module.build_server(require_auth=False), scenario)
+        finally:
+            writer_lease.reset_managers_for_tests()
+
+    planned = {entry["path"] for entry in preview_entries if entry["kind"] == "planned"}
+    skipped = {entry["path"]: entry["value"] for entry in preview_entries if entry["kind"] == "skipped"}
+    assert set(eligible) <= planned
+    assert planned.isdisjoint(protected)
+    assert all(skipped[relative] for relative in protected)
+    assert final["state"] == "completed", final
+    assert final["receipt"]["outcome_unknown"] == 0
+    assert final["committed"] == len(planned)
+    assert {entry["path"] for entry in entries if entry["kind"] == "committed"} == planned
+    assert all(_page_ids(root)[relative] is not None for relative in eligible)
+    assert {relative: (root / relative).read_bytes() for relative in protected} == before
+
+
 def test_a_finished_job_reads_as_totals_and_its_paths_come_page_by_page_under_the_response_bound(
     server, vault, monkeypatch
 ) -> None:

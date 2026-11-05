@@ -3,7 +3,7 @@
   "type": "object",
   "required": ["platformJobs", "scheduler", "observability"],
   "$defs": {
-    "mediaEngineName": {"enum": ["documents", "ocr", "speech"]}
+    "mediaEngineName": {"enum": ["documents", "ocr", "speech", "frames"]}
   },
   "allOf": [
     {"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}},
@@ -70,11 +70,38 @@
         "alertDeliverySecretKey": {"type": "string", "minLength": 1}
       }
     },
+    "operatorDeploy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "group", "sourceRepository", "workflow", "cellFamily", "registryReadSecretName", "workloads"],
+      "properties": {
+        "enabled": {"type": "boolean"}, "group": {"type": "string", "minLength": 1},
+        "sourceRepository": {"type": "string"}, "workflow": {"type": "string", "minLength": 1},
+        "cellFamily": {"type": "string", "minLength": 1}, "registryReadSecretName": {"type": "string"},
+        "workloads": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+          "required": ["name", "namespace", "family"], "properties": {
+            "name": {"type": "string", "enum": ["cellctl"]}, "namespace": {"type": "string", "minLength": 1},
+            "family": {"type": "string", "minLength": 1}
+          }}}
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {"sourceRepository": {"minLength": 1}, "registryReadSecretName": {"minLength": 1}}}
+    },
+    "kyverno": {"type": "object"},
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
+        "accessRecord": {
+          "type": "object", "additionalProperties": false,
+          "required": ["enabled", "readerSecretName"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "readerSecretName": {"type": "string"}
+          },
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"properties": {"readerSecretName": {"minLength": 1}}}
+        },
         "keyRetentionSources": {
           "type": "array",
           "items": {

@@ -831,6 +831,8 @@ _UNIT_FIELDS: frozenset[str] = frozenset(
         "context",
         "verdict",
         "check_by",
+        "as_of",
+        "until",
         "relations",
         "source_anchor",
         "source_span",
@@ -3813,6 +3815,7 @@ def guard_working_set(
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
         guarded.pop("turn_slice", None)
+        guarded.pop("task_context", None)
     if "map" in guarded:
         from .. import context_views
 
@@ -3840,7 +3843,19 @@ def guard_working_set(
                         release_gate_active=release_gate_active, who=who, purpose=purpose,
                     )
                 guarded["turn_slice"] = slice_block
-            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block)
+            if "task_context" in guarded:
+                from .. import context_task
+
+                guarded["task_context"] = context_task.guarded(
+                    vault_root, caller, guarded["task_context"], limit=guarded["budget"]["limit_chars"],
+                )
+            if "stance" in guarded:
+                from .. import stance
+
+                guarded["stance"] = stance.guard_block(vault_root, caller, guarded["stance"])
+            guarded["budget"]["used_chars"] = context_views.packet_chars(
+                map_block, slice_block, guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+            )
 
     ctx = _packet_release(
         vault_root,
@@ -5970,6 +5985,16 @@ def postfilter(
         and cleaned != evidence_projection
     ):
         cleaned.pop("evidence_version", None)
+    if command_name == "activate_context" and isinstance(cleaned, dict):
+        from .. import context_views, served_context
+
+        with call_spans.span("working_set.served_context"):
+            served_context.finalize(
+                vault_root, cleaned, session=(request_kwargs or {}).get("session"),
+                purpose=(request_kwargs or {}).get("purpose"),
+            )
+        if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
+            cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
             if metadata_evidence is not None else cleaned)
 
@@ -6230,6 +6255,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # what it emits is refs and short provenance-bearing excerpts naming vault
     # items, which is exactly what the structure backstop filters.
     "activate_context": "structure",
+    "served_context": "structure",
     # `inspect` names the caller's own recap by ref; `record` names the page
     # the caller just wrote. Both go through the dispatcher cross-check.
     "episode_memory": "structure",
@@ -6263,6 +6289,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "plan_memory": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
+    "served_context": "structure",
     "episode_memory": "structure",
 }
 
@@ -7991,6 +8018,7 @@ def release_allows_frames(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
     """True only at full disclosure.
 
@@ -8000,7 +8028,7 @@ def release_allows_frames(
     return partial pixels.
     """
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who, derived=True):
+    if not content_permits(vault_root, rel_path, who, derived=True, artifact_copy=artifact_copy):
         return False
     return _binary_boundary(
         vault_root,
@@ -8009,6 +8037,7 @@ def release_allows_frames(
         minimum_level=LEVEL_FULL,
         principal=principal,
         purpose=purpose,
+        artifact_copy=artifact_copy,
     )
 
 

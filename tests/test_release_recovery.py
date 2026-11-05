@@ -764,3 +764,45 @@ def test_missing_native_role_finishes_verified_roles_and_reports_incomplete(tmp_
         recovery.finish_images("v1.2.3", images, tmp_path)
     assert tags == {"registry.example/controller:1.2.3": digest}
     assert uploaded == ["v1.2.3"]
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_family_assertion_uses_the_existing_verified_index_and_publication_plan(
+    tmp_path, monkeypatch, recovered
+):
+    verified = []
+    digest = "sha256:" + "a" * 64
+
+    def verify(bundle, tag, commit, repository, name):
+        verified.append((bundle, tag, commit, repository, name))
+        return digest
+
+    monkeypatch.setattr(recovery, "verify_image_bundle", verify)
+    monkeypatch.setattr(recovery, "recovered_image", lambda name, repository, tag, commit, directory:
+                        (verify(directory / "original.sigstore.json", tag, commit, repository, name), []))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    plan = {"new-variant": {"ref": "ghcr.io/example/runtime:v1.2.3-variant"}}
+    bundle = tmp_path / "original.sigstore.json"
+    result = recovery.family_assertion(None if recovered else bundle, "v1.2.3", "b" * 40,
+                                       plan, "new-variant", directory=tmp_path)
+    assert verified == [(bundle, "v1.2.3", "b" * 40, "ghcr.io/example/runtime", "new-variant")]
+    assert result["digest"] == digest
+    assert result["repository"] == "ghcr.io/example/runtime"
+    assert result["predicate"] == {
+        "family": "new-variant",
+        "source": {"repository": "example/runtime", "ref": "refs/tags/v1.2.3", "commit": "b" * 40},
+    }
+
+
+def test_failed_original_evidence_cannot_emit_a_family_assertion(tmp_path, monkeypatch):
+    def refuse(*args):
+        raise ValueError("original image verification failed")
+
+    monkeypatch.setattr(recovery, "verify_image_bundle", refuse)
+    with pytest.raises(ValueError, match="original image verification"):
+        recovery.family_assertion(
+            tmp_path / "original.sigstore.json",
+            "v1.2.3",
+            "b" * 40,
+            {"cloud": {"ref": "ghcr.io/example/runtime:v1.2.3"}},
+            "cloud",
+        )
