@@ -634,13 +634,32 @@ def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
 
-def _sample_video_keyframes(path: Path | BinaryIO) -> list[tuple[float, object]]:
+def _retain_video_candidate(image, max_edge: int | None, hashes: list[int | None] | None):
+    """Keep the original hash beside a resized candidate, never the original pixels."""
+    value = None
+    if hashes is not None:
+        try:
+            value = _avg_hash(image)
+        except Exception:  # noqa: BLE001 - a failed hash keeps dedup's existing all-frames fallback.
+            pass
+    if max_edge is not None:
+        image.thumbnail((max_edge, max_edge))
+    if hashes is not None:
+        hashes.append(value)
+    return image
+
+
+def _sample_video_keyframes(
+    path: Path | BinaryIO, *, max_edge: int | None = None,
+    hashes: list[int | None] | None = None,
+) -> list[tuple[float, object]]:
     """Seek-sample duration-scaled candidate keyframes → `(timestamp_seconds, PIL image)`.
 
     Candidate count scales with duration (≈ one per `VIDEO_CANDIDATE_INTERVAL_SECS`),
     clamped to `[MIN_VIDEO_KEYFRAMES, 2×cap]` so a fast-cut video has headroom for the
     pHash dedup to keep distinct scenes. Seeks to each timestamp (O(1) in length);
     falls back to first-N sequential decode when the duration is unknown.
+    When requested, keep original hashes beside resized images.
     """
     try:
         import av
@@ -666,7 +685,8 @@ def _sample_video_keyframes(path: Path | BinaryIO) -> list[tuple[float, object]]
                 t = total_secs * (k + 0.5) / n  # evenly-spaced midpoints
                 try:
                     container.seek(int(t / float(stream.time_base)), stream=stream, backward=True)
-                    frames.append((t, next(container.decode(stream)).to_image()))
+                    image = next(container.decode(stream)).to_image()
+                    frames.append((t, _retain_video_candidate(image, max_edge, hashes)))
                 except Exception:  # noqa: BLE001 — best-effort sample; skip a bad seek
                     continue
         if not frames:  # unknown duration or all seeks failed → first-N sequential
@@ -674,25 +694,31 @@ def _sample_video_keyframes(path: Path | BinaryIO) -> list[tuple[float, object]]
             fallback = max(MIN_VIDEO_KEYFRAMES, min(CLIP_VIDEO_FRAMES, cap))
             for i, frame in enumerate(container.decode(stream)):
                 ts = float(frame.time) if frame.time is not None else float(i)
-                frames.append((ts, frame.to_image()))
+                image = frame.to_image()
+                frames.append((ts, _retain_video_candidate(image, max_edge, hashes)))
                 if len(frames) >= fallback:
                     break
     return frames
 
 
 def _dedup_keyframes(
-    frames: list[tuple[float, object]], *, distance: int = PHASH_DEDUP_DISTANCE
+    frames: list[tuple[float, object]], *, distance: int = PHASH_DEDUP_DISTANCE,
+    hashes: list[int | None] | None = None,
 ) -> list[tuple[float, object]]:
     """Drop frames whose average-hash is within `distance` of the last KEPT frame —
-    collapses static runs while keeping scene changes. Soft: returns input on any error."""
+    collapses static runs while keeping scene changes. Soft: returns input on any error.
+    Optional hashes describe pixels before candidate resizing.
+    """
     if len(frames) <= 1:
         return frames
     try:
-        kept = [frames[0]]
-        last_hash = _avg_hash(frames[0][1])
-        for ts, img in frames[1:]:
-            h = _avg_hash(img)
-            if _hamming(h, last_hash) <= distance:
+        values = iter(hashes) if hashes is not None else (_avg_hash(img) for _, img in frames)
+        kept = []
+        last_hash = None
+        for (ts, img), h in zip(frames, values, strict=True):
+            if h is None:
+                return frames
+            if kept and _hamming(h, last_hash) <= distance:
                 continue
             kept.append((ts, img))
             last_hash = h
@@ -882,11 +908,15 @@ def _iter_iframe_metrics(path: Path) -> list[tuple[float, int, np.ndarray]]:
     return out
 
 
-def _decode_frames_at(path: Path | BinaryIO, ts_list: list[float]) -> list[object]:
+def _decode_frames_at(
+    path: Path | BinaryIO, ts_list: list[float], *, max_edge: int | None = None,
+    hashes: list[int | None] | None = None,
+) -> list[object]:
     """Pass 2 of scene detection: seek+decode ONE full-res frame per timestamp.
 
     Same O(1) seek pattern as `_sample_video_keyframes`. Returns one entry per
     requested timestamp; a failed seek/decode yields None at that position.
+    When requested, keep original hashes beside resized images.
     """
     try:
         import av
@@ -896,15 +926,20 @@ def _decode_frames_at(path: Path | BinaryIO, ts_list: list[float]) -> list[objec
     av_source = path if hasattr(path, "read") else str(path)
     with av.open(av_source) as container:
         if not container.streams.video:
+            if hashes is not None:
+                hashes.extend([None] * len(ts_list))
             return [None] * len(ts_list)
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
         for t in ts_list:
             try:
                 container.seek(int(t / float(stream.time_base)), stream=stream, backward=True)
-                images.append(next(container.decode(stream)).to_image())
+                image = next(container.decode(stream)).to_image()
+                images.append(_retain_video_candidate(image, max_edge, hashes))
             except Exception:  # noqa: BLE001 — best-effort; a bad seek skips one frame
                 images.append(None)
+                if hashes is not None:
+                    hashes.append(None)
     return images
 
 
