@@ -292,6 +292,7 @@ def publish_corpus_delta(
     changed: tuple[Path, ...] | list[Path] = (),
     deleted: tuple[Path | str, ...] | list[Path | str] = (),
     attempts: int = 1,
+    populate_on_miss: bool = True,
 ) -> bool:
     """Publish one complete vault delta, retrying before any consumer fan-out.
 
@@ -302,13 +303,19 @@ def publish_corpus_delta(
     two halves broke: a registry-advance failure is registry loss and takes
     the full withdraw, while a corpus-patch failure leaves the registry intact
     and withdraws the RAM projections only.
+
+    ``populate_on_miss`` passes through to
+    :func:`semantic_contract.publish_corpus_files_changed_classified`.
     """
-    from . import semantic_contract
+    from . import graph_read_publication, semantic_contract
 
     changed_values = tuple(Path(path) for path in changed)
     deleted_values = tuple(deleted)
     if not changed_values and not deleted_values:
         return True
+    observation = graph_read_publication.begin_observation(
+        vault_root, changed_values, deleted_values,
+    )
     bounded_attempts = max(1, min(int(attempts), 2))
     failure: semantic_contract.CorpusPublicationFailure | None = None
     for attempt in range(1, bounded_attempts + 1):
@@ -317,6 +324,7 @@ def publish_corpus_delta(
                 vault_root,
                 changed=changed_values,
                 deleted=deleted_values,
+                populate_on_miss=populate_on_miss,
             )
         except Exception as error:  # noqa: BLE001 - canonical bytes already committed
             # Escaped the classified seam, so it belongs to neither half.  An
@@ -326,6 +334,7 @@ def publish_corpus_delta(
                 semantic_contract.CORPUS_PUBLICATION_REGISTRY_ADVANCE, error
             )
         if failure is None:
+            graph_read_publication.finish_observation(vault_root, observation)
             return True
         log.warning(
             "canonical corpus publication failed (attempt %d/%d, stage=%s)",

@@ -186,46 +186,75 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
     layer is admitted.  Other paths remain ordinary candidates without being
     opened; Records descendants are rejected before their content is read.
     """
+    return _admitted_relative(vault_root, path, None) is not None
+
+
+def admits_markdown_content(vault_root: Path, path: Path | str, content: bytes) -> bool:
+    """Apply recall policy to bytes a guarded canonical writer will publish.
+
+    The writer proves the destination separately. This decision also works
+    before creation or restoration, when no regular destination exists yet.
+    """
+    root = Path(vault_root)
+    rel = _vault_relative(root, path)
+    if rel is None or not access.is_indexable(root, rel):
+        return False
+    parts = rel.split("/")
+    if _is_structured_alias(parts):
+        return (
+            _is_collection_manifest(parts)
+            and len(content) <= _MAX_MANIFEST_BYTES
+            and _manifest_admits(root, rel, content)
+        )
+    return True
+
+
+def _admitted_relative(
+    vault_root: Path, path: Path | str, proven_directories: set[str] | None
+) -> str | None:
+    """`is_recall_candidate`'s decision, as the admitted vault-relative path or None.
+
+    `proven_directories` holds the directories whose ancestry one pass has
+    already proven (see `admitted_relative_paths`); None proves every ancestor.
+    """
     from .foreground_activity import checkpoint
 
     checkpoint(vault_root)
     root = Path(vault_root)
     rel = _vault_relative(root, path)
     if rel is None:
-        return False
+        return None
     parts = rel.split("/")
     # Validate the spelling we were handed before asking the OS to expand it.
     # That preserves the no-follow/reparse boundary while still allowing the
     # post-validation canonicalization below to catch Windows 8.3 aliases that
     # would otherwise look like an unrelated ordinary note.
-    if not _safe_regular_file(root, parts):
-        return False
+    if not _safe_regular_file(root, parts, proven_directories):
+        return None
     if _needs_canonical_alias_check(parts):
         canonical_parts = _canonical_parts_after_safe_validation(root, parts)
         # A changed spelling is an alias we cannot safely classify without
         # trusting a filesystem-specific path form.  Suppress it rather than
         # letting it bypass the exact Records boundary.
         if canonical_parts is None or canonical_parts != parts:
-            return False
+            return None
     if _is_structured_alias(parts):
         # Casefold/Unicode aliases are never ordinary pages: on a
         # case-insensitive filesystem they can reach the same Records bytes.
-        if not _is_structured_descendant(parts):
-            return False
-        if len(parts) < 3 or parts[-1] != "_collection.md":
-            return False
+        if not _is_collection_manifest(parts):
+            return None
         if not access.is_indexable(root, rel):
-            return False
+            return None
         try:
             data, _guard = vault.read_bounded_guarded_bytes(
                 root, rel, limit=_MAX_MANIFEST_BYTES
             )
         except (UnicodeError, ValueError, OSError, vault.PathGuardError):
-            return False
-        return _manifest_admits(root, rel, data)
+            return None
+        return rel if admits_markdown_content(root, rel, data) else None
     if not access.is_indexable(root, rel):
-        return False
-    return True
+        return None
+    return rel
 
 
 #: Admission of a collection manifest, keyed by its exact bytes. Parsing is a
@@ -270,6 +299,31 @@ def iter_recall_markdown(vault_root: Path, paths: Iterable[Path]) -> Iterator[Pa
             yield path
 
 
+def admitted_relative_paths(vault_root: Path, paths: Iterable[Path]) -> frozenset[str]:
+    """The vault-relative spelling of every path `iter_recall_markdown` would yield.
+
+    The answer is the relative spelling that admission checked, so a caller
+    needs no second `resolve()` per path. The pass consumes `paths` whole and
+    proves each directory's ancestry once, at its first page, as
+    `vault.recheck_path_guards` proves shared ancestors once per round. On a
+    tree that holds still the answer is the per-path one. `iter_recall_markdown`
+    keeps proving every ancestor per path, because its consumers read each page
+    before they ask for the next, and a shared proof would leave an ancestor
+    swapped in that time unseen.
+    """
+    return frozenset(rel for _path, rel in iter_admitted_relative(vault_root, paths))
+
+
+def iter_admitted_relative(vault_root: Path, paths: Iterable[Path]) -> Iterator[tuple[Path, str]]:
+    """`admitted_relative_paths` as `(path, relative spelling)` pairs, for a caller that keys on the path."""
+    root = Path(vault_root)
+    proven: set[str] = set()
+    for path in paths:
+        rel = _admitted_relative(root, path, proven)
+        if rel is not None:
+            yield path, rel
+
+
 def recall_policy_identity(vault_root: Path) -> tuple[str, str]:
     """Static policy and local access-policy identities for semantic sidecars."""
     return RECALL_POLICY_VERSION, access.policy_fingerprint(Path(vault_root))
@@ -291,17 +345,22 @@ def _vault_relative(root: Path, path: Path | str) -> str | None:
     if not candidate.is_absolute():
         candidate = root / candidate
     try:
-        rel = candidate.relative_to(root)
+        # `relative_to` itself, by string slice for a path spelled under `root`.
+        rel = vault.relative_posix(candidate, root)
     except ValueError:
         return None
-    parts = rel.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
+    if any(part in {"", ".", ".."} for part in rel.split("/")):
         return None
-    return "/".join(parts)
+    return rel
 
 
 def _is_structured_descendant(parts: list[str]) -> bool:
     return len(parts) >= 3 and parts[0] == vault.kb_dirname() and parts[1] in {"Records", "Planning"}
+
+
+def _is_collection_manifest(parts: list[str]) -> bool:
+    # The collection storage contract fixes the manifest filename and layer spelling.
+    return _is_structured_descendant(parts) and parts[-1] == "_collection.md"
 
 
 def _is_structured_alias(parts: list[str]) -> bool:
@@ -312,23 +371,45 @@ def _is_structured_alias(parts: list[str]) -> bool:
     )
 
 
-def _safe_regular_file(root: Path, parts: list[str]) -> bool:
-    current = root
+def _safe_regular_file(
+    root: Path, parts: list[str], proven_directories: set[str] | None = None
+) -> bool:
+    """Whether `parts` reach a regular file under `root` through real directories only.
+
+    Every component is `lstat`ed, so a symlink or reparse point anywhere refuses
+    the path. A page whose parent directory is in `proven_directories` had its
+    whole ancestry proven earlier in the same pass and skips those `lstat`
+    calls. A directory not yet there has every ancestor proven afresh, so a
+    deeper directory reached through an ancestor swapped since its proof is
+    still refused.
+    """
+    if not parts:
+        return False
+    root_text = os.fspath(root)
+    parent = "/".join(parts[:-1])
     try:
-        for index, part in enumerate(parts):
-            current /= part
-            info = current.lstat()
-            is_reparse = bool(
-                getattr(info, "st_file_attributes", 0)
-                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-            )
-            if stat.S_ISLNK(info.st_mode) or is_reparse:
-                return False
-            if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
-                return False
-        return stat.S_ISREG(current.lstat().st_mode)
+        if proven_directories is None or parent not in proven_directories:
+            current = root_text
+            for part in parts[:-1]:
+                # Plain string joins: a pass checks thousands of pages, and
+                # pathlib construction cost more than the `lstat` calls.
+                current = os.path.join(current, part)
+                info = os.lstat(current)
+                if _is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+                    return False
+            if proven_directories is not None:
+                proven_directories.add(parent)
+        info = os.lstat(os.path.join(root_text, *parts))
+        return stat.S_ISREG(info.st_mode) and not _is_link_or_reparse(info)
     except OSError:
         return False
+
+
+def _is_link_or_reparse(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
 
 
 def _canonical_parts_after_safe_validation(root: Path, parts: list[str]) -> list[str] | None:

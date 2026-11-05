@@ -27,12 +27,13 @@
 ## 4. Sensor worker (slice 1)
 
 - [x] 4.1 Add `sensor_worker.py` (supervisor, child loop, spend accounting) and the `sensor_worker_child.py` entry point: vault lock, lowest priority, CPU only, one thread, 60-second idle exit.
-  - The supervisor inherits `dreamer_policy.decide` and adds 300 CPU-s and 600 judgements per rolling hour.
-  - It terminates the child when any gate closes and kills it in quiet mode, under pressure and in standby.
+  - The supervisor follows `dreamer_policy.sensor_gate` and adds 300 CPU-s and 600 judgements per rolling hour.
+  - It terminates the child when that gate closes (setting, standby) and launches only while available memory is above the last recorded peak.
   - It charges an unreported death the whole allotment.
   - It suspends relaunch after a named refusal until the setting or pin changes.
 - [x] 4.2 Drive the supervisor from the dreamer loop, re-evaluating at least every 2 seconds while a child lives. Keep `tests/test_dreamer_no_side_effects.py` green: the dreamer thread imports no model runtime.
-- [x] 4.3 Tests with a fake launcher and a real no-weights child cover: launch only with every gate open; kill on quiet, pressure, standby, foreground and setting off; budgets across launches; the refusal backoff; and the child's exit when its parent dies.
+- [x] 4.3 Tests with a fake launcher and a real no-weights child cover: launch only with every gate open; kill on standby, pause and setting off, and keep running through quiet and foreground; never launch in a Cloud cell; launch only above the recorded memory peak; budgets across launches; the refusal backoff; and the child's exit when its parent dies.
+  - Tasks 4.1 and 4.3 were amended by `run-upkeep-on-a-busy-vault`: the child has its own gate, and launch needs available memory.
 
 ## 5. The `pair.relation` instrument on the admitted NLI pin (slice 1)
 
@@ -83,12 +84,13 @@
 
 ## 9. Later slices (specified here, built later)
 
-- [ ] 9.1 Slice 2: `mention.same_referent` (same, different, abstain) on an open-weight 3–8B instruct model chosen by a fixture spike. The generative template runtime has delimited slots and label-token logits, never sampled text (R1). Local GPU placement comes only after `detect-co-tenant-gpu-pressure` ships (R5).
+- [ ] 9.1 Slice 2: `mention.same_referent` (same, different, abstain) on an open-weight instruct model chosen by a CPU fixture spike. Compare quantized dense and mixture-of-experts candidates by measured question quality, CPU latency, and memory cost per node. Parameter count alone does not bound the candidates. The generative template runtime has delimited slots and label-token logits, never sampled text (R1). Local GPU placement comes only after `detect-co-tenant-gpu-pressure` ships (R5).
 - [ ] 9.2 Slice 3:
   - Tensions on active or recent work become sensed upkeep families (`upkeep_sensed_*`) under the existing carrier caps and S6. They never touch structural families.
   - The relation writer cites the reading id (R2).
   - The audit's in-request NLI enrichment (`audit.py:6218-6268`) moves onto the ledger with extractor `page-claim-v1`, per the `contradiction-queue` delta.
 - [ ] 9.3 Slice 5:
+  - Cells now start the Dreamer (`run-upkeep-on-a-busy-vault`); cell sensing still waits for this placement, and the supervisor launches no child in a cell until then.
   - The Cloud placement: cells run the dreamer, each cell senses with its own instruments on shared read-only model weights, and no third-party API sees vault text by default. Measure it against the hosted-inference acceptance measures, which include per-cell activation memory and CPU contention between cells.
   - Move the NLI instrument to a runtime that maps its weights read-only, such as ONNX Runtime with prepacking off, for every placement. One pin serves personal vaults and Cloud cells, because no runtime configuration may select a pin (frozen-verifiers). The change alters `runtime` in `instrument_id`, so it is a new pin: re-admit it on the fixture set and run the instrument migration (D3) for every ledger. Measure per-cell activation memory on the node.
   - Remove `cloud-plane` from `PLACEMENTS` in `src/exomem/sensing.py`. A Cloud cell's instruments run on CPU inside the cell and record `local-cpu` (D2).

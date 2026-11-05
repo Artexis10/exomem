@@ -54,7 +54,7 @@ def test_arming_preserves_active_selectors_and_detects_same_id_reclassification(
     compiled = policy.compile_protective_scopes(requirement["protected_scopes"])
     source = policy.load(vault)
     assert policy.protective_scope_documents(compiled, frozenset(compiled.scopes)) == (
-        policy.protective_scope_documents(source, frozenset(source.scopes)))
+        policy.protective_scope_documents(source, frozenset(compiled.scopes)))
     scope = vault / "Knowledge Base/_Governance/scopes/private.yaml"
     scope.write_text(scope.read_text().replace("private-project", "another-private-project"))
     with pytest.raises(state_migration.StateMigrationOfflineRequired):

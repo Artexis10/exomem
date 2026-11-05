@@ -36,6 +36,7 @@ from . import (
     source_taxonomy,
 )
 from .vault import (
+    GENERATION_RACY_WINDOW_NS,
     kb_root,
     parse_frontmatter,
     slugify_with_truncation_check,
@@ -632,7 +633,7 @@ class _NotePage:
 
 # A page whose timestamps are this close to the refresh may change again within the same
 # timestamp tick, which a later stat cannot see; FAT keeps timestamps at 2 s granularity.
-_RACY_NS = 2_000_000_000
+_RACY_NS = GENERATION_RACY_WINDOW_NS
 # The knowledge bases whose note pages this process remembers. A process serves one vault;
 # a test process makes many, so the oldest is dropped.
 _KNOWN_VAULTS = 4

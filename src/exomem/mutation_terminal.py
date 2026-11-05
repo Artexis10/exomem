@@ -9,8 +9,9 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
-from . import capabilities, operation_entries, relation_registry
+from . import capabilities, cloud_cell, operation_entries, relation_registry
 from . import curation as curation_module
+from .kbdir import kb_prefix
 from .operation_entries import OutcomeVerb
 
 log = logging.getLogger(__name__)
@@ -141,6 +142,12 @@ _ADVISORY_FAILURE = (
 #: Bounds the diagnostics carried by one acknowledgement, not one batch: a
 #: multi-batch mutation shares this budget rather than multiplying it.
 _MAX_DERIVED_DIAGNOSTICS = 9
+
+#: Each media operation and the outcome its result reports.
+# nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
+MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+#: The media operations whose result reports how many jobs they requeued.
+MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 
 #: How an agent tells the user about a write. One sentence, carried by the bootstrap
 #: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
@@ -318,6 +325,12 @@ def _path_projection(result: Any) -> dict[str, Any]:
     raw_paths = result.get("paths")
     if isinstance(raw_paths, (list, tuple)) and all(isinstance(item, str) for item in raw_paths):
         return {"paths": list(raw_paths)}
+    apply_result = result.get("apply_result")
+    if isinstance(apply_result, Mapping):
+        # The import leaf records only this page's committed Sources and notes.
+        written = apply_result.get("written")
+        if isinstance(written, (list, tuple)) and all(isinstance(item, str) for item in written):
+            return {"paths": list(written)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
         return {"path": source["path"]}
@@ -380,7 +393,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         return {}
     operation = result.get("operation")
-    if operation not in {"process", "retry"}:
+    if operation not in MEDIA_OUTCOMES:
         return {}
 
     def integer(value: Any, *, allow_none: bool = False) -> bool:
@@ -409,7 +422,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         return (
             isinstance(value, str)
             and 0 < len(value) <= 2048
-            and value.startswith("Knowledge Base/")
+            and value.startswith(kb_prefix())
             and "\\" not in value
             and "\x00" not in value
         )
@@ -432,7 +445,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
             "sidecar_path": result["sidecar_path"],
             "job_id": result["job_id"],
         }
-        if operation == "retry":
+        if operation in MEDIA_REQUEUE_OPERATIONS:
             if not integer(result.get("requeued")):
                 return {}
             projected["requeued"] = result["requeued"]
@@ -467,7 +480,8 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
                 }
             )
             continue
-        if outcome not in {"processed", "retried"} or state not in {
+        # nosemgrep: ep-word-membership -- the media job's closed states, which this projection reports.
+        if outcome not in MEDIA_OUTCOMES.values() or state not in {
             "pending",
             "running",
             "blocked",
@@ -1123,6 +1137,79 @@ def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+#: Wire bounds on the advisory `undeclared_referents` block
+#: (`write-time-identity-candidates` spec): at most three names, each with the page that
+#: linked it and the write-advisory handle that dismisses it. This module's own numbers,
+#: for the reason the bounds above are: the terminal re-validates what a leaf attached.
+_MAX_UNDECLARED_REFERENTS = 3
+_MAX_UNDECLARED_REFERENT_NAME_CHARS = 64
+_MAX_UNDECLARED_REFERENT_ORIGIN_CHARS = 512
+_UNDECLARED_REFERENT_REVIEW_PREFIX = "exomem://review/write-advisory/"
+_REVIEW_FINGERPRINT_CHARS = 24
+
+
+def _undeclared_referent(value: Any) -> dict[str, Any] | None:
+    """One validated name of the block, with its `create-entity` route spelled for this surface.
+
+    The route leaves `entity_type` and `summary` to the agent: the server never chooses a
+    type for a name. Its `ref` is the page that linked the name, which the entity's log
+    entry records as the origin.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    name = value.get("name")
+    origin = value.get("origin")
+    review = value.get("review")
+    fingerprint = value.get("fingerprint")
+    if not isinstance(name, str) or not 0 < len(name) <= _MAX_UNDECLARED_REFERENT_NAME_CHARS:
+        return None
+    if not isinstance(origin, str) or not 0 < len(origin) <= _MAX_UNDECLARED_REFERENT_ORIGIN_CHARS:
+        return None
+    if (
+        not isinstance(review, str)
+        or not review.startswith(_UNDECLARED_REFERENT_REVIEW_PREFIX)
+        or len(review) > _MAX_DUE_STATE_REF_CHARS
+    ):
+        return None
+    if not (
+        isinstance(fingerprint, str)
+        and len(fingerprint) == _REVIEW_FINGERPRINT_CHARS
+        and all(char in "0123456789abcdef" for char in fingerprint)  # a field's format, not a meaning
+    ):
+        return None
+    return {
+        "name": name,
+        "route": capabilities.active_call_route(
+            "connect_memory", {"operation": "create-entity", "name": name, "ref": origin}
+        ),
+        "review": review,
+        "fingerprint": fingerprint,
+    }
+
+
+def _undeclared_referents_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory `undeclared_referents` block out of a write leaf.
+
+    Same posture as `_entity_candidate_projection`: kept at compact detail, and a malformed
+    or oversized block is DROPPED rather than allowed to widen the wire contract.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("undeclared_referents")
+        names = value.get("names") if isinstance(value, Mapping) else None
+        if not isinstance(names, (list, tuple)) or not 0 < len(names) <= _MAX_UNDECLARED_REFERENTS:
+            continue
+        projected = [_undeclared_referent(item) for item in names]
+        if any(item is None for item in projected):
+            continue
+        return {"names": projected}
+    return None
+
+
 #: Wire bounds on the advisory due-state block. Deliberately this module's own
 #: numbers rather than an import of the producer's: the terminal re-validates what
 #: a leaf attached instead of trusting it, and a bound that came from the producer
@@ -1485,8 +1572,37 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+def _relation_advisory_context(leaf: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The semantic writer's lookup context for this committed write.
+
+    The writer nests it with the advisory facts, so a creation carries it under `creation`, an
+    edit under `semantic`, and a bare result at the top. The first container that holds one wins.
+    """
+    for container_key in ("creation", "semantic", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        context = (
+            container.get("_relation_advisory_context") if isinstance(container, Mapping) else None
+        )
+        if isinstance(context, Mapping):
+            return context
+    return None
+
+
+def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The specific-relation options the semantic writer built for this committed write.
+
+    It has already bounded the list and shaped each entry.
+    """
+    context = _relation_advisory_context(leaf)
+    options = context.get("specific_options") if context is not None else None
+    if not isinstance(options, (list, tuple)):
+        return []
+    return [dict(option) for option in options if isinstance(option, Mapping)]
+
+
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
-    """Project just-parsed unregistered facts plus optional indexed recurrence.
+    """Project just-parsed unregistered facts plus optional indexed recurrence, and the
+    specific relations a note-to-note generic edge could take.
 
     The fact scan is bounded by the semantic feedback renderer. Recurrence is a
     point lookup against one already-current graph snapshot and is deliberately
@@ -1495,12 +1611,12 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
     """
     if not isinstance(leaf, Mapping):
         return None
-    context = leaf.get("_relation_advisory_context")
+    context = _relation_advisory_context(leaf)
     labels: set[str] = set()
     facts_truncated = False
     registry_hash: str | None = None
     vault_hint: str | None = None
-    if isinstance(context, Mapping):
+    if context is not None:
         candidate_hash = context.get("registry_hash")
         if isinstance(candidate_hash, str) and 0 < len(candidate_hash) <= 256:
             registry_hash = candidate_hash
@@ -1539,8 +1655,9 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)
+    specific = _specific_options_projection(leaf)
     if not labels:
-        return None
+        return {"specific_options": specific} if specific else None
     ordered = sorted(labels)
     retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
     truncated = facts_truncated or len(ordered) > len(retained)
@@ -1613,7 +1730,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
         except Exception:  # noqa: BLE001 - advisory evidence never breaks a commit
             recurrence_available = False
             occurrences = []
-    return {
+    advisory = {
         "raw_relations": retained,
         "registry_hash": registry_hash,
         "recurrence_available": recurrence_available,
@@ -1625,6 +1742,9 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             "args": {"operation": "resolve-relation"},
         },
     }
+    if specific:
+        advisory["specific_options"] = specific
+    return advisory
 
 
 def _without_relation_advisory_context(result: Any) -> Any:
@@ -1919,16 +2039,88 @@ def split_response_detail(
     return payload, cast(ResponseDetail, detail)
 
 
-def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | None:
+def _batch_rows(
+    leaf: Any, artifact_receipt: Mapping[str, Any], media: Mapping[str, Any]
+) -> list[tuple[str, str]]:
+    """One (state, path) pair per attempted file of a batch, read from the projected rows.
+
+    The projections, never the raw leaf: a malformed row is already a `failed` row there, so the
+    sentence cannot claim more than the rows the agent reads. `replayed` is a file an earlier call
+    committed, so it counts with `already_stored`. `unselected` files were never attempted.
+    A media row is `failed` or it was accepted; the media contract has no duplicate state.
+    One file written alone has no rows; its stored leaf says `already_stored` when the bytes were
+    already there, and names the earlier copy it resolved to.
+    """
+    rows = []
+    for item in artifact_receipt.get("files", ()):
+        state = _artifact_state(item)
+        state = "already_stored" if state == "replayed" else state
+        if state in _ARTIFACT_STATES:
+            rows.append((state, item.get("stored_path", "")))
+    for item in media.get("media_results", ()):
+        rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
+    if (
+        not rows
+        and isinstance(leaf, Mapping)
+        and leaf.get("state") == "already_stored"
+        and isinstance(leaf.get("stored_path"), str)
+        and isinstance(leaf.get("duplicate_of"), Mapping)
+    ):
+        rows.append(("already_stored", leaf["stored_path"]))
+    return rows
+
+
+def _lead(head: str, names: Sequence[str], *, of: int | None = None) -> str:
+    """`head -> first`, or `head N files -> first and N-1 more`; `of` makes it `N of T files`."""
+    if len(names) == 1 and of is None:
+        return f"{head} -> {names[0]}"
+    count = f"{len(names)} of {of}" if of is not None else str(len(names))
+    more = f" and {len(names) - 1} more" if len(names) > 1 else ""
+    return f"{head} {count} files -> {names[0]}{more}"
+
+
+def _partial_batch_summary(verb: OutcomeVerb, rows: Sequence[tuple[str, str]]) -> str | None:
+    """The sentence for a batch in which some file was not newly stored, else None.
+
+    Never says "Saved" unless a file was stored by this call. No codes, ids or reasons: the
+    agent reads those from the `files` rows.
+    """
+    stored = [path for state, path in rows if state == "stored"]
+    already = [path for state, path in rows if state == "already_stored"]
+    failed = sum(state == "failed" for state, _ in rows)
+    if not failed and not already:
+        return None
+    lost = f"{failed} {'file' if failed == 1 else 'files'} could not be {verb}"
+    if stored:
+        parts = [_lead(verb.capitalize(), stored, of=len(stored) + len(already) + failed)]
+        if failed:
+            parts.append(lost)
+        if already:
+            parts.append(f"{len(already)} already {verb}")
+        return "; ".join(parts)
+    if not failed:
+        return _lead(f"Already {verb}", already)
+    if not already:
+        return f"Nothing {verb}; {lost}"
+    return f"Nothing new {verb}; {len(already)} already {verb}, {lost}"
+
+
+def _user_summary(
+    result: Mapping[str, Any], verb: OutcomeVerb | None, batch: Sequence[tuple[str, str]] = ()
+) -> str | None:
     """One plain sentence for the person, built only from fields the terminal stores.
 
-    A replay stores the same `path` or `paths`, so it yields the same sentence.
+    A replay stores the same `path` or `paths`, so it yields the same sentence. A batch
+    passes its per-file states (`batch`, from the projected rows) so that a file which
+    failed or was already there is never reported as saved.
     A refusal, a call that awaits review, or a write that declares no verb has no outcome to state.
     """
     if verb is None or result.get("ok") is not True:
         return None
     if result.get("status") == "committed":
         head = verb.capitalize()
+        if (partial := _partial_batch_summary(verb, batch)) is not None:
+            return partial
     elif result.get("status") == "replayed":
         head = f"Already {verb}"
     else:
@@ -1943,15 +2135,13 @@ def _user_summary(result: Mapping[str, Any], verb: OutcomeVerb | None) -> str | 
         names = []
     if not names:
         return head
-    if len(names) == 1:
-        return f"{head} -> {names[0]}"
     if verb == "moved" and len(names) == 2:
         # A move stores its two ends as `paths`: [from, to].
         return f"{head} {names[0]} -> {names[1]}"
     if verb == "replaced" and len(names) == 2:
         # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
-        return f"{head} -> {names[1]} (was {names[0]})"
-    return f"{head} {len(names)} files -> {names[0]} and {len(names) - 1} more"
+        return f"{head} -> {names[1]}, was {names[0]}"
+    return _lead(head, names)
 
 
 def project_terminal(
@@ -1970,22 +2160,44 @@ def project_terminal(
     raw_leaf = result["leaf_result"]
     due_state, due_state_vault = _due_state_projection(raw_leaf)
     capture_sweep = _capture_sweep_projection(raw_leaf)
+    undeclared_referents = _undeclared_referents_projection(raw_leaf)
     relation_advisory = (
         _relation_advisory_projection(raw_leaf)
         if result.get("state") == "committed"
         else None
     )
     leaf = _without_relation_advisory_context(
-        _without_advisory_capture_sweep(
-            _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+        _without_leaf_advisory(
+            _without_advisory_capture_sweep(
+                _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+            ),
+            "undeclared_referents",
         )
     )
     if detail == "legacy":
         return leaf
     compact: dict[str, Any] = {}
-    user_summary = _user_summary(result, outcome_verb)
+    artifact_receipt = _artifact_receipt_projection(leaf)
+    media_projection = _media_result_projection(leaf)
+    # A media batch whose rows did not project gives no per-file states, and its `paths`
+    # include failed files, so no sentence is safer than one that claims them all.
+    unread_media_batch = (
+        isinstance(leaf, Mapping)
+        and leaf.get("operation") in MEDIA_OUTCOMES
+        and leaf.get("results") is not None
+        and not media_projection
+    )
+    user_summary = (
+        None
+        if unread_media_batch
+        else _user_summary(
+            result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
+        )
+    )
     if user_summary is not None:
-        compact["user_summary"] = user_summary
+        # Named at render time from the deployment, so a replay of the stored terminal reads the
+        # same. Two connectors can present one display name; the sentence says which store it was.
+        compact["user_summary"] = f"{user_summary} ({cloud_cell.store_identity()['name']})"
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
@@ -2092,7 +2304,6 @@ def project_terminal(
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
             compact["plan_id"] = plan["plan_id"]
         compact.update(_adoption_control_projection(leaf))
-    artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
     if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):
         # Closed text capture outcomes belong to the durable capture protocol.
@@ -2108,7 +2319,7 @@ def project_terminal(
             }
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
-    compact.update(_media_result_projection(leaf))
+    compact.update(media_projection)
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the
     # registered derived-graph rebuild has not converged yet. It has to survive
     # into `compact` -- the default detail -- or a bounded write would be
@@ -2167,6 +2378,8 @@ def project_terminal(
     entity_candidate = _entity_candidate_projection(leaf)
     if entity_candidate is not None:
         compact["entity_candidate"] = entity_candidate
+    if undeclared_referents is not None:
+        compact["undeclared_referents"] = undeclared_referents
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
     if capture_sweep is not None:
@@ -2187,6 +2400,13 @@ def project_terminal(
         from .vocabulary_delivery import public_projection
 
         compact.update(public_projection(result))
+    from . import vocabulary_delta
+
+    if vocabulary_delta.PENDING_KEY in result:
+        # Delivery is decided here, where the detail is known: a `legacy` response returned above.
+        delivered = vocabulary_delta.delivered_by(result)
+        if delivered is not None:
+            compact["vocabulary_delta"] = delivered
     if "additive_authority" in result:
         from .vocabulary_receipts import valid_projection
 

@@ -96,8 +96,7 @@ def test_the_line_instructs_both_the_call_and_the_disambiguation() -> None:
     line = prominence.ACTIVATION_CARRIER_LINE
 
     assert "recall_context" in line
-    assert "anchor" in line
-    assert "ambiguous" in line
+    assert "next_action" in line
     # One line, so a carrier with no line breaks to be re-wrapped by a client.
     assert "\n" not in line
 

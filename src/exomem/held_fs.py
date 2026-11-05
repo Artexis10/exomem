@@ -21,6 +21,8 @@ from typing import Generic, TypeVar
 T = TypeVar("T")
 _MISSING = object()
 PUBLISH_TEMP_PREFIX = ".exomem-held-publish-"
+# nosemgrep: ep-word-set -- the closed `file()` access modes that every backend implements.
+FILE_ACCESS_MODES = frozenset({"read", "write", "mutate", "identity"})
 # The name format that publish_temporary_name creates: the prefix and 32 hexadecimal digits.
 _PUBLISH_TEMP_RE = re.compile(rf"{re.escape(PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}", re.ASCII)
 _CAPABILITY_CACHE: dict[tuple[int, str, int, int], Capabilities] = {}
@@ -224,6 +226,15 @@ class HeldFilesystem:
         create: bool = False,
         exclusive: bool = False,
     ) -> HeldResult[HeldFile]:
+        """Hold the regular file `leaf` under `parent`.
+
+        `access="identity"` holds the file only to observe and compare its
+        identity: such a handle cannot be created, read, copied, written or
+        renamed. On POSIX it opens no descriptor that can carry a record lock.
+        Closing any ordinary descriptor for a file drops every POSIX lock that
+        this process holds on the file, including the locks of its own open
+        SQLite connections.
+        """
         raise NotImplementedError
 
     def validate_directory(
@@ -667,7 +678,8 @@ def publish_sqlite_identities(
     names = (primary, f"{primary}-wal", f"{primary}-shm")
     identities: dict[str, StableIdentity] = {}
     for name in names:
-        result = filesystem.file(parent, name)
+        # The caller's connection is live: an ordinary descriptor would drop its locks on close.
+        result = filesystem.file(parent, name, access="identity")
         if not result.ok:
             return HeldResult(error=result.error)
         with result.require() as file:

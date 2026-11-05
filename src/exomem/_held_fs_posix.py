@@ -15,6 +15,7 @@ from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, 
 from pathlib import Path
 
 from .held_fs import (
+    FILE_ACCESS_MODES,
     Capabilities,
     Chunks,
     FileVersion,
@@ -74,6 +75,13 @@ _WRITE_FLAGS = (
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
+)
+# An open that only reads a file's identity. Closing an ordinary descriptor
+# drops every POSIX record lock this process holds on the file, such as the
+# locks of its own SQLite connections; Linux skips that removal when it closes
+# an O_PATH descriptor. openat2 refuses O_PATH with any flag outside this set.
+_IDENTITY_FLAGS = (
+    getattr(os, "O_PATH", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 )
 
 
@@ -434,16 +442,21 @@ class PosixHeldFilesystem(HeldFilesystem):
         create: bool = False,
         exclusive: bool = False,
     ) -> HeldResult[HeldFile]:
-        if not _leaf(leaf) or access not in {"read", "write", "mutate"}:
+        if not _leaf(leaf) or access not in FILE_ACCESS_MODES:
             return HeldResult(error=_invalid())
         if exclusive and not create:
             return HeldResult(error=HeldFsError("INVALID_INPUT", "exclusive requires create"))
+        if create and access == "identity":
+            return HeldResult(error=HeldFsError("INVALID_INPUT", "identity access cannot create"))
         parent_descriptor: int | None = None
         descriptor: int | None = None
         try:
             checked = self._check_directory(parent)
             parent_descriptor = _dup(checked.descriptor)
-            flags = _READ_FLAGS if access in {"read", "mutate"} else _WRITE_FLAGS
+            if access == "identity":
+                flags = _IDENTITY_FLAGS
+            else:
+                flags = _READ_FLAGS if access in {"read", "mutate"} else _WRITE_FLAGS
             if create:
                 flags |= os.O_CREAT
             if exclusive:
@@ -486,6 +499,8 @@ class PosixHeldFilesystem(HeldFilesystem):
     def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         try:
             checked = self._check_file(file)
+            if checked.access == "identity":
+                return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is identity-only"))
             if max_bytes is not None and checked.version().size > max_bytes:
                 return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
             _lseek(checked.descriptor, 0, os.SEEK_SET)
@@ -705,6 +720,8 @@ class PosixHeldFilesystem(HeldFilesystem):
         destination: PosixHeldDirectory | None = None
         try:
             checked = self._check_file(source)
+            if checked.access == "identity":
+                return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is identity-only"))
             if not _leaf(destination_leaf):
                 raise OSError(errno.ELOOP, "invalid destination leaf")
             if not isinstance(destination_parent, PosixHeldDirectory):
@@ -794,7 +811,7 @@ class PosixHeldFilesystem(HeldFilesystem):
                 observed = _identity(info)
                 if observed.kind not in {"file", "directory"}:
                     continue
-                flags = _DIRECTORY_FLAGS if observed.kind == "directory" else _READ_FLAGS
+                flags = _DIRECTORY_FLAGS if observed.kind == "directory" else _IDENTITY_FLAGS
                 child = _open_relative(checked.descriptor, name, flags)
                 try:
                     retained = _identity(_fstat(child))
@@ -820,7 +837,7 @@ class PosixHeldFilesystem(HeldFilesystem):
             info = _stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode):
                 raise OSError(errno.ELOOP, "unsafe recursive entry")
-            flags = _DIRECTORY_FLAGS if stat.S_ISDIR(info.st_mode) else _READ_FLAGS
+            flags = _DIRECTORY_FLAGS if stat.S_ISDIR(info.st_mode) else _IDENTITY_FLAGS
             child = _open_relative(descriptor, name, flags)
             try:
                 identity = _identity(_fstat(child))
@@ -865,6 +882,8 @@ def _probe(root: Path) -> Capabilities:
         )
     ):
         return Capabilities.disabled("descriptor-relative no-follow operations are unavailable")
+    if not getattr(os, "O_PATH", 0):
+        return Capabilities.disabled("identity-only descriptors are unavailable")
     try:
         descriptor = _open(os.fspath(root), _DIRECTORY_FLAGS)
     except OSError:

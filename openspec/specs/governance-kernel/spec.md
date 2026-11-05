@@ -1166,3 +1166,43 @@ batch without publishing a new active catalog or overwriting that file.
 
 - **WHEN** a navigation file changes after its exact guarded write was prepared
 - **THEN** commit refuses without overwriting the changed file or activating the prepared catalog
+
+### Requirement: A scene frame is also governed by its video
+
+A scene-frame page SHALL belong to its own scopes and to the scopes of its video's Source page. A page SHALL take its video's scopes only when its `parent_media` field names the parent and the page sits in that parent's canonical `<parent-media>.frames/` directory. When the video's Source page cannot be read, the frame's membership SHALL be unresolved and fail closed. Live evaluation SHALL read the video's current membership. A governed projection catalog row of a frame published after this rule SHALL hold the video's scopes as of the frame's publication. A row published before this rule SHALL keep only the frame's own scopes until the frame is published again or the owner refreshes the projection.
+
+#### Scenario: A frame belongs to the scopes of its video
+- **WHEN** a governance scope selects a video's Source page by its stable identifier
+- **THEN** each scene-frame page of that video is a member of the scope
+
+#### Scenario: A frame keeps its own scopes
+- **WHEN** a governance scope selects scene frames by their tag, path or identifier
+- **THEN** each frame stays a member of that scope as well as of its video's scopes
+
+#### Scenario: A claimed parent cannot widen a page
+- **WHEN** a page names a parent in `parent_media`
+- **THEN** it keeps every scope its own selectors give it
+
+### Requirement: A residual scope selects what no other scope selects
+
+A policy MAY declare at most one residual scope: a scope document with `residual: true` and no selector or exclude fields. Membership SHALL assign the residual scope to a page or file exactly when no other scope selects that item and no vocabulary registry binding classifies it. The public instance's registry storage SHALL count as classified with no scope. The residual scope SHALL never select a directory. Otherwise it SHALL be an ordinary scope that rules, grants, release grants, `default_deny`, organisation caps, connector denied sets and private vocabulary instances name by id. Membership SHALL remain a function of the item, its path and the compiled policy. A policy without a residual scope SHALL produce exactly its previous membership. The compile SHALL refuse a residual document with selector or exclude fields, a second residual scope, or a non-boolean `residual`. When the connector boundary protects the residual scope, its pinned document SHALL include `residual`.
+
+#### Scenario: An unclassified page is withheld from an unnamed audience
+- **WHEN** a residual scope declares `default_deny` and an audience that no rule names reads a page that no other scope selects
+- **THEN** the page is answered as a missing page, and the owner receives it in full
+
+#### Scenario: Classification moves a page out of the residual scope
+- **WHEN** the owner adds a scope that selects a residual page
+- **THEN** the next decision for that page uses the new scope and not the residual scope
+
+#### Scenario: A fenced connector and an opted-in connector
+- **WHEN** one client's denied set lists the residual scope and another client's does not
+- **THEN** the first receives no unclassified page from any read, search, recall or recent-context door, and the second receives them
+
+#### Scenario: Vocabulary and folders stay available
+- **WHEN** a fenced connector interprets pages or browses a folder that holds pages it may see
+- **THEN** public vocabulary overlays and history are admitted, and the folder is listed
+
+#### Scenario: A vault without a residual scope
+- **WHEN** a policy declares no residual scope
+- **THEN** scope membership is unchanged

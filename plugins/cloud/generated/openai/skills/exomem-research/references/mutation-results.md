@@ -5,10 +5,17 @@
 Successful product mutations return a compact decisive terminal by default. Its
 first key, `user_summary`, is one plain sentence for the user: `Saved -> <path>`,
 `Updated -> <path>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
-`Replaced -> <new path> (was <old path>)`, `Discarded -> <path>` or `Restored -> <path>`.
-Several files read `Saved 3 files -> first.md and 2 more`. A result whose status is
-`replayed` reads `Already saved -> <path>`. A repeat of a request with the same
-idempotency key returns the first reply, so it reads as the first call did.
+`Replaced -> <new path>, was <old path>`, `Discarded -> <path>` or `Restored -> <path>`.
+Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
+failed or was already stored counts each state, and `Saved` covers only the files that
+this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,
+`Already saved -> <path>`, or `Nothing saved; 2 files could not be saved`. A single file
+whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
+carry the codes and reasons. A result whose status is
+`replayed` reads `Already saved -> <path>`. Each sentence ends with the name of the store
+that took the write, such as `Saved -> <path> (personal Exomem)`; the bootstrap's `store`
+names the same store. A repeat of a request with the same idempotency key returns the
+first reply, so it reads as the first call did.
 A refusal carries no `user_summary`; its `message` names the fix. The other fields
 are diagnostics for the agent: `ok: true`, `status: committed`, `mutated: true`,
 `path` or `paths`, `request_id`, `receipt_id`, and `warnings_count` (plus a caller-supplied
@@ -90,6 +97,30 @@ terminals. Preserve the same mutation identity and unchanged payload when
 following their remediation: wait before retrying a warming or busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
+
+## Relation choices and unlinked names on a write
+
+Write the specific relation when one fits. `relates_to` is for a real generic
+connection. A write can answer in three ways.
+
+- **A new generic edge that joins an entity is refused.** The error is
+  `GENERIC_RELATION_NEEDS_REASON`. The write commits nothing and lists up to four
+  fitting relations. Either write the edge as one of them, or keep it generic:
+  repeat the call with `relation_disposition="generic"`, a `relation_review_reason`
+  that says why none fits, the returned `relation_review_hash`, and the returned
+  draft fields (a creation) or `transition_token` (an edit). On `create-entity`,
+  give the `relations` item a `reason` instead. An edge the page already carried is
+  not asked about again.
+- **A new generic edge between two notes commits.** The write returns
+  `relation_advisory.specific_options`: fitting relations, each with an `edit_note`
+  route that swaps the predicate of that one bullet. Follow a route when the
+  relation states what the source says. Otherwise dismiss the offer with
+  `triage_memory(ref=<its review>, action="dismiss", why=..., expected_fingerprint=<its
+  fingerprint>)`.
+- **`undeclared_referents` lists links to nothing.** Each of its `names` is a link that
+  this write added and that has no page and no entity, with its `create-entity` route.
+  Follow the route when the name is a durable referent: stable, recurring and
+  useful beyond this source. Otherwise dismiss it the same way.
 
 ## Relation disposition on compiled writes
 

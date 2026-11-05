@@ -40,12 +40,21 @@ A reading SHALL record:
 
 - its instrument identity: model, revision, weights sha256 or `unpinned_weights`, runtime and runtime version, template version, label-map version, fixture-set version and placement;
 - each input's unit ref, page path, the sha256 of the exact text fed in, and the extractor version;
-- the full probability vector for each direction;
+- the full probability vectors for the question's declared columns and vector names;
 - the verdict, including abstain and its reason;
 - `sensed_at`;
 - the placement.
 
-The reading id SHALL be the hash of the question type, the instrument id and the ordered input text hashes. The instrument id SHALL cover the fields that determine the vectors (model, revision, weights, runtime, runtime version, template version) and SHALL exclude the label-map and fixture-set versions.
+Legacy unit-pair requests SHALL retain their existing input keys, reading ids, and output serialization.
+Version 2 input keys SHALL bind the question and each ordered slot's name, extractor, text hash, and occurrence anchor.
+The reading id SHALL also bind the instrument id.
+Paths and references SHALL remain provenance rather than content identity.
+Changing a relation definition SHALL change its input identity; an unrelated registry edit SHALL NOT.
+
+The instrument id SHALL cover every field that determines its vectors, including a generative instrument's label-token map.
+It SHALL exclude threshold-only label-map changes and fixture-set versions.
+New version 2 output JSON SHALL declare its version, columns, vectors, and verdict.
+Readers SHALL retain support for legacy outputs without rewriting ledger history.
 
 The ledger SHALL NOT store vault text. Wiping the dreamer sidecar or the sensed projection SHALL NOT touch it. The ledger SHALL be named in the state-root backup guidance, and SHALL be a portable-derived member of hosted export and restore once cells sense.
 
@@ -63,6 +72,54 @@ The ledger SHALL NOT store vault text. Wiping the dreamer sidecar or the sensed 
 
 - **WHEN** the dreamer sidecar or the sensed projection is wiped and reseeded
 - **THEN** every reading remains in the ledger and is consumed again without re-sensing
+
+#### Scenario: Input roles preserve relation direction
+
+- **WHEN** a version 2 relation request reverses its source and target slots
+- **THEN** it has a different input key and cannot consume the original request's reading
+
+#### Scenario: Content reuse keeps the current consumer's references
+
+- **WHEN** a current request reuses a reading first recorded for other pages with identical input content
+- **THEN** the consumer renders only its own current input references
+- **AND** the lookup does not expose the stored request's page references
+
+### Requirement: Producers share one disposable inference queue
+
+The sensed projection SHALL hold one inference queue for every admitted question.
+The dreamer SHALL own page, unit, and pair presentation rows.
+Other producers SHALL submit through a narrow writer that opens only an existing compatible projection.
+An unavailable, busy, seeding, or incompatible projection SHALL defer submission without initialization or replacement.
+
+A producer SHALL partition stable scopes through the maintained release predicate's published-admission identity and its sweep configuration.
+An unstable release view SHALL use invocation-local ownership without cross-invocation pruning.
+A producer SHALL capture the projection incarnation and scope revision before extraction.
+It SHALL replace a completed scope atomically only if both remain unchanged.
+A concurrent loser SHALL defer without deleting another result's requests.
+An incomplete sweep SHALL NOT erase its previous completed scope.
+Producers SHALL own current extraction, invalidation, and resubmission after a projection rebuild.
+Worker scans SHALL use keyset pagination and deduplicate inference through reading identity.
+Completed or refused jobs SHALL NOT prevent another question's runnable work from being found.
+The supervisor SHALL exclude completed and question-refused jobs before child launch.
+Dreamer ingestion SHALL retire satisfied jobs for every owner without requiring a pair presentation row.
+The worker SHALL NOT acknowledge jobs by writing the projection.
+
+#### Scenario: An audit request cannot rebuild the projection
+
+- **WHEN** audit has no current reading and submits while the sensed projection is absent or being rebuilt
+- **THEN** it receives an unavailable submission result and serves the finding without a label
+- **AND** the request does not create or wipe a projection
+
+#### Scenario: Changed content replaces obsolete queued input
+
+- **WHEN** a producer replaces a candidate's request after its input changes
+- **THEN** its previous queued request is removed and only the new input remains scheduled
+- **AND** any historical ledger reading remains unchanged
+
+#### Scenario: A completed prefix cannot starve another question
+
+- **WHEN** more than one scan page of completed or refused jobs precedes runnable NLI work
+- **THEN** the worker reaches and records the NLI work without repeating inference for completed jobs
 
 ### Requirement: Readings invalidate by input content and migrate lazily across instruments
 
@@ -91,21 +148,23 @@ When the active instrument changes (a new pin, a new runtime version, or a retir
 
 Model inference SHALL run only in a disposable child process supervised from the dreamer's loop. The dreamer thread and request threads SHALL NOT load or run a model.
 
-- **Launch.** The supervisor SHALL launch a child only when all of these hold: sensing is `on` (`EXOMEM_SENSING`, else the per-machine config key `sensing`, default `off`, effective only while the dreamer runs); the dreamer's own gate would run a tick; the sense queue is not empty; and the worker's hourly budgets have room.
-- **Termination.** It SHALL terminate the child when any gate closes, and SHALL kill it in quiet mode, under auto-quiet pressure and in standby, so its memory returns to the host.
+- **Launch.** The supervisor SHALL launch a child only when all of these hold: sensing is `on` (`EXOMEM_SENSING`, else the per-machine config key `sensing`, default `off`, effective only while the dreamer runs); the child's own gate is open (setting on, not in standby) and the service is not a Cloud cell; the sense queue is not empty; the worker's hourly budgets have room; and the host's available memory is above the peak resident memory the last child recorded for the active instrument. With no such peak the first child launches and records one.
+- **Termination.** The child SHALL have its own gate: the setting and standby. The supervisor SHALL terminate the child when that gate closes, so its memory returns to the host, and SHALL NOT launch it in a Cloud cell until the Cloud placement ships (task 9.3). Quiet mode, a foreground request, a settling vault, graph debt, an index backlog and the dreamer's own CPU budget SHALL NOT stop it. The supervisor SHALL NOT kill a running child for memory.
 - **Budgets and priority.** The worker SHALL spend at most 300 CPU-seconds and 600 judgements per rolling hour, including model load. It SHALL run at the lowest OS priority on CPU until co-tenant GPU pressure detection ships, and SHALL exit after 60 seconds without work.
 - **Isolation.** The child SHALL read only the sense queue and the ledger, SHALL append only to the ledger, and SHALL NOT read or write the vault, take the writer lease, or schedule index work.
-- **Refusal.** A child that cannot admit its instrument SHALL exit with a named refusal. The supervisor SHALL NOT relaunch it until the setting or pin changes.
+- **Refusal.** Instrument admission and refusal backoff SHALL be scoped to the question, identity, and admission evidence. A refused question SHALL NOT disable other admitted questions. Ledger incompatibility SHALL remain a worker-wide refusal.
 
-#### Scenario: Quiet mode returns the memory
+#### Scenario: Quiet mode and requests do not stop the child
 
-- **WHEN** a sensor child is running and the compute mode becomes `quiet`
-- **THEN** the child process is terminated within one supervisor poll and is not relaunched while quiet holds
+- **WHEN** a sensor child is running and the compute mode becomes `quiet`, or a foreground request arrives
+- **THEN** the child keeps running
+- **AND** the supervisor terminates it within one poll only when the setting turns off or pauses, or the service enters standby
 
-#### Scenario: A foreground request closes the gate
+#### Scenario: A launch waits for memory
 
-- **WHEN** a foreground request arrives while the child senses
-- **THEN** the supervisor terminates the child and relaunches only after the dreamer's idle gate reopens
+- **WHEN** the last child recorded a peak resident memory and the host's available memory is not above it
+- **THEN** the supervisor does not launch a child and reports the action `memory`
+- **AND** it launches once available memory is above the peak
 
 #### Scenario: The budget holds across launches
 
@@ -232,7 +291,7 @@ At request time, an edge SHALL be dropped when either page's live signature diff
 
 Personal vaults SHALL sense with local instruments by default. An API instrument SHALL be an opt-in placement per vault, enabled by the owner for personal vaults and by an explicit per-tenant grant for Cloud (off by default). Its identity SHALL be provider, model id and version or snapshot date, flagged `unpinned_weights`. It SHALL obey the same template, closed-label, abstain and fixture-admission contract. Its request SHALL carry only delimited slot texts. A vendor's retirement of the model SHALL trigger the ordinary instrument migration.
 
-Cloud cells SHALL run the dreamer, and each cell SHALL sense with its own local instruments in a process inside the cell. Cells SHALL have only the shared read-only model weights in common, never a process, writable memory, or a cache of inputs or results. No third-party API SHALL receive vault text unless the tenant opted in. The Cloud placement SHALL be measured against the acceptance measures in `docs/hosted-inference-boundary.md`.
+Cloud cells SHALL run the dreamer, and each cell SHALL sense with its own local instruments in a process inside the cell. Until that placement ships (task 9.3), the supervisor SHALL launch no child in a cell. Cells SHALL have only the shared read-only model weights in common, never a process, writable memory, or a cache of inputs or results. No third-party API SHALL receive vault text unless the tenant opted in. The Cloud placement SHALL be measured against the acceptance measures in `docs/hosted-inference-boundary.md`.
 
 #### Scenario: One process never holds two tenants' text
 

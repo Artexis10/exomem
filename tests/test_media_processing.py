@@ -2320,6 +2320,9 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
     )
 
     assert result["terminal"] is True
+    assert result["user_summary"] == (
+        f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved (personal Exomem)"
+    )
     assert result["media_results"][0]["outcome"] == "processed"
     assert result["media_results"][1:] == [
         {
@@ -2337,6 +2340,77 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
             "remediation": "Select an existing governed media artifact, then retry processing.",
         },
     ]
+
+
+def _selected_media_batch(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, operation: str, refuse: str, vanish: str, paths: list[str]
+):
+    """Run one selected-media batch in which `refuse` raises a policy refusal and `vanish` is gone."""
+    from exomem import writer_lease
+
+    media_processing = _media_processing()
+    real = {
+        "process": media_processing.reconcile_media,
+        "reprocess": media_processing.reprocess_media,
+    }[operation]
+
+    def attempt(root: Path, binary: Path, **kwargs: object):
+        if Path(binary).name == refuse:
+            raise ValueError("WRITE_REFUSED")
+        if Path(binary).name == vanish:
+            raise FileNotFoundError(binary)
+        return real(root, binary, **kwargs)
+
+    target = {"process": "reconcile_media", "reprocess": "reprocess_media"}[operation]
+    monkeypatch.setattr(media_processing, target, attempt)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / f"{operation}-batch-state")
+    )
+    return manager.invoke(
+        command,
+        (vault,),
+        {"paths": paths, "operation": operation},
+        idempotency_key=f"{operation}-batch",
+    )
+
+
+def test_a_reprocess_batch_that_lost_two_files_says_so(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _drop_media(vault, "reprocess-first.m4a")
+    readonly = _drop_media(vault, "reprocess-readonly.m4a")
+    vanished = _drop_media(vault, "reprocess-vanished.m4a")
+    relative = [path.relative_to(vault).as_posix() for path in (first, readonly, vanished)]
+
+    result = _selected_media_batch(
+        vault, monkeypatch, "reprocess", readonly.name, vanished.name, relative
+    )
+
+    assert result["terminal"] is True
+    assert result["user_summary"] == (
+        f"Updated 1 of 3 files -> {relative[0]}; 2 files could not be updated (personal Exomem)"
+    )
+    assert [row["outcome"] for row in result["media_results"]] == ["reprocessed", "failed", "failed"]
+
+
+def test_a_media_batch_in_a_renamed_knowledge_base_folder_still_says_which_files_were_lost(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (vault / "Knowledge Base").rename(vault / "Brain")
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+    first = vault / "Brain" / "Evidence" / "Audio" / "renamed-first.m4a"
+    vanished = vault / "Brain" / "Evidence" / "Audio" / "renamed-vanished.m4a"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_bytes(b"\x00\x00\x00\x18ftypM4A fake audio")
+    vanished.write_bytes(b"\x00\x00\x00\x18ftypM4A fake audio")
+    relative = [path.relative_to(vault).as_posix() for path in (first, vanished)]
+
+    result = _selected_media_batch(vault, monkeypatch, "process", "", vanished.name, relative)
+
+    assert result["user_summary"] == (
+        f"Saved 1 of 2 files -> {relative[0]}; 1 file could not be saved (personal Exomem)"
+    )
 
 
 @pytest.mark.parametrize(

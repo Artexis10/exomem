@@ -2,13 +2,32 @@
 
 Use this when the person wants existing files in the Knowledge Base: a folder, a ZIP or a notes export. Adoption never changes an original, and the person keeps their own copy in every route. Fields of each operation are in [operations](operations.md#collection-adoption).
 
+## Cloud prerequisites
+
+Call `observe_transfer(action="import_handoff")` before sending local files to Cloud. Read `open_import` and the returned routes.
+Use the CLI route's `argv_folder` or `argv_zip`, replacing its path placeholder with the real absolute path.
+The returned command includes the endpoints and can use `uvx` without a global Exomem installation.
+
+Check that the command's runner and `age` are on `PATH` before starting it.
+`uvx` comes with [uv](https://docs.astral.sh/uv/getting-started/installation/); [age](https://github.com/FiloSottile/age#installation) has separate installation instructions.
+Use their official instructions for the current platform when either is missing. Cloud imports need no local vault or Exomem service.
+
+An unversioned `uvx exomem` command can reuse a cached or installed CLI. Refreshing the connector or plugin does not update it.
+After a CLI fix ships, use `uvx exomem@latest` in place of that prefix when retrying the returned command.
+Keep its endpoints, other arguments and existing checkpoint. [uv's tool-version guidance](https://docs.astral.sh/uv/concepts/tools/#tool-versions) explains this refresh.
+
+The CLI opens its own browser sign-in, even when the MCP connector is already authenticated.
+Explain this before starting, and have the person authorize the same Cloud account.
+Keep the background command's output available while authorization and filing continue.
+If another import is open, inspect its progress through MCP and agree whether to resume it or cancel it before starting another.
+
 ## Flow
 1. Send the files to the server. Never retype or paste file contents.
    - Local server with a shell: run `exomem import <folder>`. It copies the folder into `_Imports/<id>/` and prints the path to start on.
-   - Exomem Cloud with a shell: start `exomem cloud import <folder>` in the background, never in the foreground. It can run for hours, and it waits for you: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID, and room appears only as you file. The folder or ZIP is encrypted before it leaves the machine.
+   - Exomem Cloud with a shell: start the returned CLI command in the background, never in the foreground. It can run for hours, and it waits for you: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID, and room appears only as you file. The folder or ZIP is encrypted before it leaves the machine.
      While it runs, file each window once it reaches `done` (steps 3 to 5), and discard it (step 8). Read its output for the window IDs.
      The command waits for room, and it stops with the members not yet sent if the cell cannot take them. Until it finishes, those members are only at the source.
-   - Exomem Cloud without a shell: give the person the exact `exomem cloud import <folder>` command to run themselves, or the Home link from `observe_transfer(action="import_handoff")` for a browser upload. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
+   - Exomem Cloud without a shell: give the person the returned CLI command or Home link. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
 2. Wait until the import, or the first window, is `done`. On Cloud, poll `observe_transfer`. `read_import` status lists each landed window's `import_id`, so later windows are found there.
 3. Call `import_memory(operation={"kind": "start", "path": "_Imports/<id>"})`. Add `collection` when the person names one.
 4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.
@@ -27,6 +46,42 @@ Use this when the person wants existing files in the Knowledge Base: a folder, a
 - `apply_stop` with `INSUFFICIENT_SPACE`: stop, even though the reply carries a `continuation`. The next `apply` stops at the same chunk until the volume has the chunk's bytes plus the reserve free. Tell the person, and call `apply` again with the `continuation` after space is free.
 - A file over the adoption ceiling stays staged and is listed in the residual with its code and the ceiling.
 - A file that changed after `plan` is refused for that item, and its neighbours still file.
+
+## Interrupted apply
+
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` means data committed, but the call's exact terminal result could not be saved.
+`MUTATION_OUTCOME_UNKNOWN` does not establish how many files committed.
+Keep the original folder, staged import, run and original tool call until recovery resolves their state.
+Refreshing the connector or plugin does not repair the Cloud server or update its runtime.
+
+On servers through v0.161.1, per-run status includes the full inventory, plan and outcomes.
+If that reply is too large, `read_import(operation={"kind":"status"})` lists compact run rows without a `run_id`.
+That listing does not reconcile the interrupted call.
+
+On a server whose status schema includes `view`, use this sequence:
+
+1. Read `status` with the existing `run_id`; expect a compact summary with counts, `plan_id`, `revision` and interruption state.
+2. Read details with `view="outcomes"`, `limit=100` and that `revision`; expect a bounded page with `next_offset`.
+3. Carry `next_offset` as `offset` and keep the revision; expect each page from the same saved run.
+4. If `IMPORT_STATUS_CHANGED` returns, read the summary again; expect a new revision before restarting the detail pages.
+
+Other detail views are `inventory`, `selection`, `plan` and `stale`.
+One oversized row appears in `omitted` with `ROW_TOO_LARGE`; it is uninspected, not an empty or successful item.
+`view="full"` remains unbounded for the browser and explicit compatibility callers.
+
+After the server recovery repair is deployed, repeat the interrupted `import_memory` apply call exactly once.
+Keep its account, client, arguments, original `continuation` and explicit idempotency key when present.
+The server reconciles the same abandoned mutation identity before it resumes the retained scope.
+Do not substitute a continuation from a later status reply or change retry filters for this call.
+After recovery returns a new continuation, follow that continuation normally.
+If replay returns only a committed envelope, read the summary again for the current phase and continuation.
+
+An active writer returns `MUTATION_ACKNOWLEDGEMENT_PENDING`; wait for that call before retrying its exact identity.
+`IMPORT_RECOVERY_UNRESOLVED` means the server cannot prove the original scope or exact custody.
+Preserve the run and staging, and report that code with the server version and run metadata to the operator.
+Do not create another run, change the mutation identity, force an import or discard the stage to bypass it.
+Some older runs lack enough evidence, especially failed-only retries or partially published chunks without a complete receipt.
+Recovery confirms filing and custody; `finish` must still report recall coverage and any pending extraction or visibility.
 
 ## What adoption leaves staged
 - Each file that is filed as an artifact loses its staged copy once its Knowledge Base copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.

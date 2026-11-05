@@ -586,11 +586,13 @@ def test_recall_carries_the_block_again_after_the_projection_changes(
     assert isinstance(third, dict) and third["due_state"]["total"] == 2
 
 
-def test_recall_on_a_quiet_vault_keeps_its_existing_shape(vault: Path) -> None:
-    """No block means no envelope: the bare-list return must not be disturbed."""
+def test_recall_on_a_quiet_vault_keeps_due_advice_absent(vault: Path) -> None:
+    """A search miss carries recovery, without adding a due-state block."""
     result = commands.op_ask_memory(vault, query="autovacuum backlog", limit=5)
 
-    assert isinstance(result, list)
+    assert result["hits"] == []
+    assert result["next_action"]["state"] == "search_miss"
+    assert "due_state" not in result
 
 
 # ==========================================================================

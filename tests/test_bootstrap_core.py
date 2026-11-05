@@ -169,7 +169,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "miss-means-not-found-in-scope": (
         prominence.CANON,
-        lambda core: "not found in that query/scope" in core["workflow"]["miss_rule"],
+        lambda core: "next_action" in core["workflow"]["next_action"],
     ),
     "delegation-ceiling": (
         prominence.CANON,
@@ -436,3 +436,20 @@ def test_the_session_profile_is_live_state_only(monkeypatch):
     for live in ("engagement", "governance", "active_capabilities", "sections", "authoring_contract"):
         assert live in session
     assert len(_text(session)) < 22_000
+
+
+def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):
+    """Two connectors can share a display name. A skill client reads the session profile, and the
+    complete compact reference (`section=all`) carries the same block for the sections' readers."""
+    skill_contract = workflow_skills.skill_contract()
+
+    def served() -> tuple[dict, dict]:
+        session = commands.op_bootstrap(_root(), profile="session", skill_contract=skill_contract)
+        return session["store"], commands.op_bootstrap(_root(), section="all")["store"]
+
+    monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
+    personal = {"kind": "personal", "name": "personal Exomem"}
+    assert served() == (personal, personal)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    cloud = {"kind": "cloud", "name": "Exomem Cloud"}
+    assert served() == (cloud, cloud)

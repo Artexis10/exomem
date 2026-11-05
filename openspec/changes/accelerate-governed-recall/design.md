@@ -795,6 +795,28 @@ threshold, and compares work between two corpus sizes as ratios.
   page (decision 8). The BM25 and keyword step ratios pass, because their
   matched rows are the same at both sizes.
 
+**Admitted match membership.** Restricted BM25 filters matching rows against the
+existing admitted and eligible sets before scoring or applying a cap. Its
+statistics still describe the whole admitted corpus. Missing-word postings
+discard withheld paths before counting their text.
+
+Restricted keyword reads first intersect exact matching paths with the existing
+allowed set, without sorting or capping. A second query probes only those paths
+before SQL orders or groups them. Managed statements use the existing proven
+connection and read transaction; legacy reads retain their publication barrier.
+Pending rows, parent joins and frame precedence
+keep their existing treatment. Unrestricted keyword reads retain one statement.
+This adds a statement for restricted keyword reads; it introduces no membership
+cache, callback binding or temporary table. Cold statistics and broad matches
+remain separate costs, so structural bounds establish no whole-call latency gain.
+
+Admission reuses immediate parent links from the same proven catalogue snapshot.
+Exact pending custody replaces only its own child links. A covered child without
+held content stays suppressed, and stable children require complete snapshot
+coverage. Each referenced parent still receives the current release decision.
+Unavailable snapshot proof retains the existing metadata path and warming behavior.
+The request adds no persistent parent cache or retained authorization.
+
 **Paired comparison, full CI.** The `recall-latency-paired` jobs run on shared
 `ubuntu-24.04` runners, one job per series of the case file, and feed `gate`
 and release evidence, so they apply no absolute threshold. They sample only the

@@ -781,8 +781,10 @@ profiles through one proposal-first surface.
    reality or another named contract.
 6. Before authoring a typed edge, call
    `read_connections(operation={'kind': 'resolve-relation'})`; reuse a specific truthful
-   registered meaning. Use `relates_to` only for a real generic connection, and
-   prefer no edge to an invented label.
+   registered meaning. Use `relates_to` only for a real generic connection; a new
+   generic edge that joins an entity is refused until you name a fitting relation or
+   give a reason (see [mutation-results](mutation-results.md)). Prefer no edge to an
+   invented label.
 7. For a durable recurring distinction, call
    `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})` with a
    reviewed parent, description, and direction. Review its full duplicate
@@ -971,6 +973,8 @@ Every selected file is imported or refused with a per-path code; none is dropped
 5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, reports `coverage` (imported, refused, pending extraction, unresolved links, hidden folders counted, notes created, found and failed) and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true). For a staged import it also reports `residual`, the files still staged by reason, and the discard route once the last page is done.
 
 `plan` and `apply` stop inside the request budget. While a result carries `continuation`, call the same action again with that `continuation` and the unchanged other arguments. The run is done when no `continuation` returns and `phase` is `applied`; a stopped call leaves the remaining work in `status`.
+
+Per-run `status` defaults to a compact summary. Detail views (`inventory`, `selection`, `plan`, `outcomes`, `stale`) accept `offset`, `limit` (1 to 100) and `revision`. Carry the returned revision across pages and restart from the summary on `IMPORT_STATUS_CHANGED`. A row too large for a page appears in `omitted`; explicit `view="full"` remains unbounded. [Interrupted apply](importing.md#interrupted-apply) explains exact-identity recovery and unresolved legacy states.
 
 ### Agent actions after apply
 - `work-item` returns bounded read-only context (`sources`, `max_sources` default 5, `max_chars_per_source` default 2000).

@@ -15,13 +15,19 @@ Sensing (default off, `sensing`). With sensing on, a tick also advances the
 sensed epistemic model (`sensed_model`), which projects the readings ledger into
 its own disposable file, and the loop supervises the sensor worker
 (`sensor_worker`), a separate child process. Only that child ever loads or runs
-a model. The dreamer thread starts it, gates it and kills it.
+a model. The dreamer thread starts it, gates it and kills it. The child has its
+own gate (`dreamer_policy.sensor_gate`): the operator's posture, not the tick's
+idle and graph holds, and it admits itself against the host's available memory
+before it launches. A Cloud cell never launches it.
 
-When it runs. Only when the service is idle and the graph owes nothing
-(`dreamer_policy.decide`): graph work strictly outranks upkeep and there is no
-max-wait, because nothing online waits on it. Inside a tick it yields per page
-and stops before the next page on the first foreground request or the first
-vault change. Starvation is the safe failure, and `status()` reports it.
+When it runs. A tick starts only when no foreground request is live and the
+graph owes nothing (`dreamer_policy.decide`); graph work strictly outranks
+upkeep. It prefers an idle, settled vault and waits for one at most
+`MAX_DEFER_SECONDS` since the last tick, so a vault that is never idle still
+gets upkeep. Quiet mode does not stop it: quiet keeps the GPU and model preload
+off, and a tick loads no model. Inside a tick it yields per page and stops
+before the next page on the first foreground request or the first vault change.
+`status()` reports what holds a tick.
 
 What it reads. The freshness registry's delta, or an exact diff of the live
 signature map against its persisted `seen` map (`dreamer_delta`). Never a
@@ -135,6 +141,11 @@ class _State:
     loops: int = 0
     vault_generation: int | None = None
     vault_changed_at: float = field(default_factory=_time.monotonic)
+    #: Monotonic time the worker thread started, and when its last tick did upkeep
+    #: or found none (None before the first). `seconds_since_tick` counts from the
+    #: later one.
+    started_mono: float = field(default_factory=_time.monotonic)
+    last_tick_mono: float | None = None
     ledger: CpuLedger = field(default_factory=CpuLedger)
     #: The waiting reason last written to the sidecar, and when (monotonic).
     recorded_reason: str | None = None
@@ -250,7 +261,8 @@ def _launch_locked(vault_root: Path, current: str) -> tuple[threading.Thread, bo
     _stop = stop_event
     _STATE.setting = current
     _STATE.phase = current
-    _STATE.vault_changed_at = _time.monotonic()
+    _STATE.vault_changed_at = _STATE.started_mono = _time.monotonic()
+    _STATE.last_tick_mono = None
     thread = threading.Thread(
         target=_run, args=(vault_root, stop_event), name=THREAD_NAME, daemon=True
     )
@@ -361,9 +373,9 @@ def _wait(vault_root: Path, clock: Clock, stop_event: threading.Event, sleep: fl
     """Sleep until the next loop. True when the worker was told to stop.
 
     While a sensor child lives, its gate is re-read every
-    `POLL_WHILE_ALIVE_SECONDS` without running a tick, so a foreground request
-    or quiet mode stops the child promptly and the dreamer's own schedule and
-    CPU budget are unchanged.
+    `POLL_WHILE_ALIVE_SECONDS` without running a tick, so standby or a pause
+    stops the child promptly and the dreamer's own schedule and CPU
+    budget are unchanged.
     """
     deadline = _time.monotonic() + max(0.0, sleep)
     while True:
@@ -380,7 +392,7 @@ def _wait(vault_root: Path, clock: Clock, stop_event: threading.Event, sleep: fl
 def _regate_sensor(vault_root: Path, clock: Clock) -> None:
     """Probe the gate and supervise the sensor child, running no tick. Never raises."""
     try:
-        decision = policy.decide(gather_signals(vault_root, clock))
+        decision = policy.sensor_gate(gather_signals(vault_root, clock))
     except Exception:  # noqa: BLE001 - an unreadable gate is re-probed next poll
         log.debug("dreamer: sensor gate probe failed", exc_info=True)
         return
@@ -393,8 +405,9 @@ def _loop_once(vault_root: Path, clock: Clock, stop_event: threading.Event | Non
     decision = policy.decide(signals)
     with _LOCK:
         _STATE.setting = signals.setting
-    # The sensor child inherits this gate: it runs only while a tick could.
-    sensor_worker.supervise(vault_root, gate_run=decision.run, gate_reason=decision.reason)
+    # The sensor child has its own gate: a busy or quiet service does not stop it.
+    sensor = policy.sensor_gate(signals)
+    sensor_worker.supervise(vault_root, gate_run=sensor.run, gate_reason=sensor.reason)
     if not decision.run:
         _note_waiting(decision.reason, clock)
         if signals.setting == "on" and not signals.standby:
@@ -474,7 +487,7 @@ def _record_waiting(vault_root: Path, clock: Clock) -> None:
 
 def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickSignals:
     """Probe the gate once. The costly probes run only when the cheap ones pass."""
-    from . import mode, service_standby
+    from . import service_standby
 
     clock = clock or Clock()
     now = clock.monotonic()
@@ -489,6 +502,10 @@ def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickS
         since_failure = (
             None if _STATE.last_failure_at is None else max(0.0, now - _STATE.last_failure_at)
         )
+        since_tick = max(
+            0.0,
+            now - (_STATE.started_mono if _STATE.last_tick_mono is None else _STATE.last_tick_mono),
+        )
         hour_cpu = _STATE.ledger.used(now)
     try:
         from . import epistemic_graph
@@ -499,7 +516,6 @@ def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickS
     signals = policy.TickSignals(
         setting=current,
         standby=service_standby.in_standby(),
-        compute_mode=mode.resolve_mode(),
         pressure=None,
         idle_seconds=foreground_activity.idle_seconds(vault_root),
         vault_quiet_seconds=quiet,
@@ -510,6 +526,7 @@ def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickS
         hour_cpu_used=hour_cpu,
         consecutive_failures=failures,
         seconds_since_failure=since_failure,
+        seconds_since_tick=since_tick,
     )
     if not policy.decide(signals).run:
         return signals
@@ -544,7 +561,7 @@ def run_once(
     budget: Budget | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> TickResult:
-    """One bounded tick over the next pages, ignoring the idle gate.
+    """One bounded tick over the next pages, ignoring the tick gate.
 
     Progress commits per page: one transaction records the page's `seen`
     signature, its contribution and its removal from `pending`, so a tick cut
@@ -800,6 +817,10 @@ def _record_tick(
     with _LOCK:
         state = _STATE
         state.ledger.add(now_mono, cpu)
+        # A tick cut off at page 0 by a request or a vault change did no upkeep,
+        # so it must not restart the bound that keeps upkeep from going stale.
+        if processed or stop not in {"foreground", "generation"}:
+            state.last_tick_mono = now_mono
         state.ticks += 1
         state.pages_processed += len(processed)
         state.last_tick_at = clock.time()

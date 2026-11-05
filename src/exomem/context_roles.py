@@ -93,6 +93,7 @@ _OVERRIDE_FIELDS = frozenset(
         "add_cues",
         "evidence_cues",
         "evidence_categories",
+        "projection",
     }
 )
 _NEW_ROLE_FIELDS = frozenset(
@@ -105,6 +106,7 @@ _NEW_ROLE_FIELDS = frozenset(
         "evidence_cues",
         "evidence_categories",
         "intent",
+        "projection",
     }
 )
 
@@ -132,6 +134,8 @@ class ContextRole:
     #: the role is selected only when the turn's tokens have that shape, never
     #: as an anchor default and never merely by rank.
     intent: str = ""
+    #: A closed projection discriminator; categories and lens names remain registry data.
+    projection: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +148,7 @@ class ContextRole:
             "evidence_cues": list(self.evidence_cues),
             "evidence_categories": sorted(self.evidence_categories),
             "intent": self.intent,
+            "projection": self.projection,
             "shipped": self.shipped,
         }
 
@@ -170,6 +175,11 @@ class RoleRegistry:
 
 _CACHE: dict[Path, tuple[str, RoleRegistry]] = {}
 _SHIPPED: RoleRegistry | None = None
+
+
+def projection_categories(registry: RoleRegistry, projection: str) -> frozenset[str]:
+    """Categories declared by every effective lens that selects this packet shape."""
+    return frozenset(category for role in registry.roles.values() if role.projection == projection for category in role.categories)
 
 
 def _finding(code: str, field_name: str, message: str) -> dict[str, str]:
@@ -406,6 +416,14 @@ def _intent(value: object, *, role_name: str, findings: list[dict[str, str]]) ->
     return ""
 
 
+def _projection(value: object, *, role_name: str, findings: list[dict[str, str]]) -> str:
+    # These are implemented packet shapes, not semantic categories or lens names.
+    if value in (None, "", "method"):
+        return str(value or "")
+    findings.append(_finding("invalid_projection", f"{role_name}.projection", "must be method or empty"))
+    return ""
+
+
 def _parse_shipped(
     data: Any, resolver: Any
 ) -> tuple[dict[str, ContextRole], tuple[dict[str, str], ...]]:
@@ -449,6 +467,7 @@ def _parse_shipped(
                 raw.get("evidence_categories"), role_name=name, resolver=resolver, findings=findings
             ),
             intent=_intent(raw.get("intent"), role_name=name, findings=findings),
+            projection=_projection(raw.get("projection"), role_name=name, findings=findings),
         )
     return roles, tuple(findings)
 
@@ -507,6 +526,9 @@ def _merge(shipped: RoleRegistry, data: Any, digest: str, resolver: Any) -> Role
         for key in unknown:
             if key in {"remove", "removed"}:
                 continue
+            # A vault holds a full copy of the shipped file, which restates what the role has.
+            if key in _NEW_ROLE_FIELDS and getattr(existing, key, None) == raw[key]:
+                continue
             findings.append(
                 _finding("unknown_field", f"{name}.{key}", "unknown override field")
             )
@@ -538,7 +560,7 @@ def _cap(
 
 
 def _validated_evidence_cues(
-    value: object, *, role_id: str, findings: list[dict[str, str]]
+    value: object, *, role_id: str, findings: list[dict[str, str]], shipped: Sequence[str] = ()
 ) -> tuple[str, ...]:
     """Strip, drop empty/over-length (dropped, with a finding), dedupe.
 
@@ -547,6 +569,9 @@ def _validated_evidence_cues(
     matched as a substring), only evidence is stricter -- but flagged with a
     finding, since it can never be evidence. No cap here; the caller caps
     the combined list once (`_cap`).
+
+    A cue the shipped role already holds is restated, not added: it is kept and never judged
+    again, because the shipped file ships a deliberately weak cue and a vault copy repeats it.
     """
     if not isinstance(value, (list, tuple)):
         return ()
@@ -556,6 +581,9 @@ def _validated_evidence_cues(
             continue
         text = item.strip().casefold()
         if not text:
+            continue
+        if text in shipped:
+            accepted.append(text)
             continue
         if len(text) > MAX_CUE_CHARS:
             findings.append(
@@ -648,6 +676,7 @@ def _new_role(
             evidence_cues=evidence_cues,
             evidence_categories=frozenset(evidence_categories),
             intent=_intent(raw.get("intent"), role_name=name, findings=findings),
+            projection=_projection(raw.get("projection"), role_name=name, findings=findings),
         ),
         findings,
     )
@@ -705,7 +734,9 @@ def _narrowed(
     # field directly ADDS to the shipped role's list rather than replacing
     # it, so there is no separate `add_evidence_cues`/`add_evidence_categories`.
     if "evidence_cues" in raw:
-        replacement = _validated_evidence_cues(raw.get("evidence_cues"), role_id=role.id, findings=findings)
+        replacement = _validated_evidence_cues(
+            raw.get("evidence_cues"), role_id=role.id, findings=findings, shipped=role.evidence_cues
+        )
         if replacement or isinstance(raw.get("evidence_cues"), (list, tuple)):
             evidence_cues = list(dict.fromkeys([*role.evidence_cues, *replacement]))
         else:
@@ -744,6 +775,8 @@ def _narrowed(
         cues=tuple(cues),
         evidence_cues=tuple(evidence_cues),
         evidence_categories=frozenset(evidence_categories_capped),
+        projection=(_projection(raw["projection"], role_name=role.id, findings=findings)
+                    if "projection" in raw else role.projection),
     )
 
 

@@ -89,6 +89,8 @@ _CONTENTION_RECENT_WINDOW_SECONDS = 60.0
 _CONTENTION_RECENT_SAMPLES = 128
 _WINDOWS_DACL_STABILIZATION_SECONDS = 0.25
 _WINDOWS_DACL_STABILIZATION_POLL_SECONDS = 0.01
+_WINDOWS_SQLITE_PATH_RETRY_SECONDS = 0.25
+_WINDOWS_SQLITE_PATH_RETRY_POLL_SECONDS = 0.01
 
 # The most recent `wait_ms`/`hold_ms` this task/thread measured acquiring and
 # holding the vault mutation boundary — set by `VaultMutationCoordinator.hold()`
@@ -420,15 +422,23 @@ class RetainedRegularFile:
                 self.directory.close()
 
 
-def retain_regular_file(path: Path) -> RetainedRegularFile:
-    """Pin one regular child without following aliases or replacement races."""
+def retain_regular_file(path: Path, *, identity_only: bool = False) -> RetainedRegularFile:
+    """Pin one regular child without following aliases or replacement races.
+
+    With `identity_only` the descriptor only observes identity and cannot be
+    read. On Linux it is an O_PATH descriptor: closing an ordinary descriptor
+    drops every POSIX lock that this process holds on the file, such as the
+    locks of its own SQLite connections. Elsewhere O_PATH is 0 and the open
+    stays read-only; a Windows LockFileEx lock belongs to its own handle.
+    """
     target = Path(path)
     if target.name != target.as_posix().split("/")[-1]:
         raise OSError("retained file target must be one child basename")
     directory = _acquire_secure_directory(target.parent, create=False)
     try:
+        flags = getattr(os, "O_PATH", 0) if identity_only else os.O_RDONLY
         fd = _open_secure_file_at(
-            directory, target.name, os.O_RDONLY, delete_access=True
+            directory, target.name, flags, delete_access=True
         )
         try:
             info = os.fstat(fd)
@@ -1335,22 +1345,33 @@ def validate_windows_idempotency_runtime_paths(
             _validate_windows_runtime_entry(
                 owners_dir, directory=True, sid=sid, handle=owners.windows_handle
             )
+        deadline = time.monotonic() + _WINDOWS_SQLITE_PATH_RETRY_SECONDS
         for path in private_paths:
             if path.parent != state_dir:
                 raise RuntimeError("idempotency runtime database escaped its trusted state directory")
-            try:
-                fd = _open_secure_file_at(state, path.name, os.O_RDONLY)
-            except FileNotFoundError:
-                continue
-            try:
-                _validate_windows_runtime_entry(
-                    path,
-                    directory=False,
-                    sid=sid,
-                    handle=getattr(msvcrt, "get_osfhandle")(fd),  # noqa: B009 - Windows-only stub
-                )
-            finally:
-                os.close(fd)
+            while True:
+                try:
+                    fd = _open_secure_file_at(state, path.name, os.O_RDONLY)
+                except FileNotFoundError:
+                    break
+                except OSError as error:
+                    # Win32 ERROR_ACCESS_DENIED (5) also means SQLite's sidecar is delete-pending.
+                    # Retry only the open; genuine denial costs at most this shared short wait.
+                    remaining = deadline - time.monotonic()
+                    if error.errno != 5 or remaining <= 0:
+                        raise
+                    time.sleep(min(_WINDOWS_SQLITE_PATH_RETRY_POLL_SECONDS, remaining))
+                    continue
+                try:
+                    _validate_windows_runtime_entry(
+                        path,
+                        directory=False,
+                        sid=sid,
+                        handle=getattr(msvcrt, "get_osfhandle")(fd),  # noqa: B009 - Windows-only stub
+                    )
+                finally:
+                    os.close(fd)
+                break
 
 
 def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
@@ -1958,6 +1979,7 @@ class _LocalLockState:
     acquired_at: float | None = None
     long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
     long_warning_emitted: bool = False
+    after_release: dict[object, Callable[[], None]] = field(default_factory=dict)
     # Contention attribution. These are *measurement only* — nothing in the
     # acquire path reads them, so no fairness or timeout behaviour depends on
     # them. They share ``metadata_guard`` with the holder fields so a published
@@ -2310,6 +2332,18 @@ class VaultMutationCoordinator:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
 
+    def defer_optional_after_release(self, key: object, work: Callable[[], None]) -> bool:
+        """Run the latest keyed optional work after this thread's outer real release.
+
+        A borrowed hold cannot enqueue work in its lender's context. Failures
+        must not change a committed mutation's result.
+        """
+        state = _state_for(self.lock_path)
+        if state.owner_thread != threading.get_ident() or state.borrower is not None:
+            return False
+        state.after_release[key] = work
+        return True
+
     def waiter_count(self) -> int:
         """Waiters for this boundary, in this process or another on the host.
 
@@ -2545,6 +2579,7 @@ class VaultMutationCoordinator:
                 entered = state.guard.acquire(timeout=remaining)
         if not entered:
             raise _Contended() if probe else self._refused(wait_start)
+        released_work: tuple[Callable[[], None], ...] = ()
         try:
             handle = self._open_lock_file(self.lock_path)
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
@@ -2595,6 +2630,8 @@ class VaultMutationCoordinator:
             try:
                 yield
             finally:
+                released_work = tuple(state.after_release.values())
+                state.after_release.clear()
                 hold_ms = round((time.monotonic() - acquired_at) * 1000, 2)
                 # The part of `hold_ms` that borrowers held (`lend`), so a long hold reads honestly.
                 lent_ms = round(state.lent_seconds * 1000, 2)
@@ -2703,6 +2740,11 @@ class VaultMutationCoordinator:
             # A waiting borrower waits on `turn`, not on the guard (`_enter_or_borrow`).
             with state.turn:
                 state.turn.notify_all()
+            for work in released_work:
+                try:
+                    work()
+                except Exception:  # noqa: BLE001 - optional work cannot change the committed result
+                    logger.warning("optional post-release work failed", exc_info=True)
 
     def snapshot(self) -> dict[str, object]:
         """Measure this vault's OS boundary without exposing identity or content.

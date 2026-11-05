@@ -15,6 +15,10 @@ from exomem.session_oauth import ExomemSessionOAuthProxy
 
 ISSUER = "https://memory.example.test"
 SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+INBOX = "01ARZ3NDEKTSV4RRFFQ69G5FB7"
+OPEN_MATTER = "01ARZ3NDEKTSV4RRFFQ69G5FB8"
+RESIDUAL = "01ARZ3NDEKTSV4RRFFQ69G5FB9"
+PUBLIC_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FBG"
 PUBLIC = "Knowledge Base/Notes/public.md"
 PRIVATE = "Knowledge Base/Notes/private.md"
 
@@ -25,6 +29,20 @@ def configured_boundary(vault, tmp_path, monkeypatch):
     scopes.mkdir(parents=True, exist_ok=True)
     (scopes / "private.yaml").write_text(
         f'governance_version: 1\nid: {SCOPE}\nprojects: [private-project]\n', encoding="utf-8",
+    )
+    # The host refuses writable scopes in a vault with no residual scope. The default context is
+    # denied the residual scope, so the Notes tree that its tests read has a scope of its own. It
+    # selects by path: a semantic selector leaves a path-only release of registry storage
+    # undecided, and a capture page that names the public project keeps its path membership.
+    (scopes / "residual.yaml").write_text(
+        f"governance_version: 1\nid: {RESIDUAL}\nresidual: true\n", encoding="utf-8",
+    )
+    (scopes / "public.yaml").write_text(
+        f'governance_version: 1\nid: {PUBLIC_SCOPE}\npaths: ["Notes/**"]\n', encoding="utf-8",
+    )
+    # The inbox scope selects the capture path; only the limited client may write it.
+    (scopes / "inbox.yaml").write_text(
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**"]\n', encoding="utf-8",
     )
     for path, project, content in ((PUBLIC, "public-project", "public information"),
                                    (PRIVATE, "private-project", "protected canary")):
@@ -39,10 +57,11 @@ def configured_boundary(vault, tmp_path, monkeypatch):
         ensure_manifest(vault)
     config = tmp_path / "host-boundary.json"
     config.write_text(json.dumps({
-        "version": 1, "default_denied_scope_ids": [SCOPE],
+        "version": 1, "default_denied_scope_ids": [SCOPE, INBOX, RESIDUAL],
         "capture_paths": ["Knowledge Base/Capture"],
-        "clients": [{"issuer": ISSUER, "client_id": client, "denied_scope_ids": denied}
-                    for client, denied in (("limited", [SCOPE]), ("full", []))],
+        "clients": [{"issuer": ISSUER, "client_id": client, "denied_scope_ids": denied,
+                     "writable_scope_ids": writable}
+                    for client, denied, writable in (("limited", [SCOPE], [INBOX]), ("full", [], []))],
     }), encoding="utf-8")
     monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
     monkeypatch.setenv("EXOMEM_BASE_URL", ISSUER)
@@ -64,6 +83,45 @@ def configured_boundary(vault, tmp_path, monkeypatch):
         monkeypatch.setattr(dependencies, "get_access_token", lambda: token)
         return principal.resolve_mcp_principal()
 
+    return config, authenticate
+
+
+@pytest.fixture
+def sources_inbox_writer(configured_boundary, vault):
+    """`configured_boundary`, with `limited` also given an inbox under the Sources tree.
+
+    A restricted client's Source capture keeps its tree, so it lands only under a capture path
+    inside `Sources/`. Call it before arming, because arming pins the inbox scope.
+    """
+    config, authenticate = configured_boundary
+    (vault / "Knowledge Base/_Governance/scopes/inbox.yaml").write_text(
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Sources/Inbox/limited/**"]\n', encoding="utf-8",
+    )
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["capture_paths"].append("Knowledge Base/Sources/Inbox/limited")
+    config.write_text(json.dumps(data), encoding="utf-8")
+    return config, authenticate
+
+
+@pytest.fixture
+def public_matter_writer(configured_boundary, vault):
+    """`configured_boundary`, with `limited` also granted the public matter it already reads.
+
+    A restricted client writes only the scopes its host configuration lists, so a test that
+    edits a public page as `limited` needs the public matter as one of them.
+    """
+    config, authenticate = configured_boundary
+    # The matter takes the Notes scope's place, because a writable scope must be the page's only scope.
+    (vault / "Knowledge Base/_Governance/scopes/public.yaml").unlink()
+    (vault / "Knowledge Base/_Governance/scopes/open-matter.yaml").write_text(
+        f"governance_version: 1\nid: {OPEN_MATTER}\nprojects: [public-project]\n", encoding="utf-8",
+    )
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["default_denied_scope_ids"].append(OPEN_MATTER)
+    for client in data["clients"]:
+        if client["client_id"] == "limited":
+            client["writable_scope_ids"].append(OPEN_MATTER)
+    config.write_text(json.dumps(data), encoding="utf-8")
     return config, authenticate
 
 
@@ -94,7 +152,7 @@ def test_live_configuration_change_restricts_an_existing_filter(configured_bound
     keep = egress.release_walk_filter(vault, principal=who)
     assert keep(PUBLIC)
     data = json.loads(config.read_text())
-    data["clients"][0]["denied_scope_ids"] = []
+    data["clients"][0].update(denied_scope_ids=[], writable_scope_ids=[])
     config.write_text(json.dumps(data))
     assert keep(PRIVATE)
     data["clients"][0]["denied_scope_ids"] = [SCOPE]
@@ -113,7 +171,7 @@ def test_a_filter_built_in_a_request_scope_follows_a_change_after_the_scope_ends
         keep = connector_boundary.permits_filter(vault, who)
         assert keep(PRIVATE)
     data = json.loads(config.read_text())
-    data["clients"][1]["denied_scope_ids"] = [SCOPE]
+    data["clients"][1]["denied_scope_ids"] = [SCOPE, INBOX]
     config.write_text(json.dumps(data))
     assert not keep(PRIVATE)
 
@@ -131,7 +189,7 @@ def test_each_terminal_pass_sees_host_changes_despite_an_outer_request_memo(
     data = json.loads(config.read_text())
     with principal.request_scope(who), state_paths.resolution_scope():
         assert connector_boundary.permits(vault, PRIVATE, who)
-        data["clients"][1]["denied_scope_ids"] = [SCOPE]
+        data["clients"][1]["denied_scope_ids"] = [SCOPE, INBOX]
         config.write_text(json.dumps(data))
         restricted = egress.postfilter("activate_context", payload, vault)
         assert restricted == {"items": [{"path": PUBLIC}]}
@@ -151,65 +209,52 @@ def test_unknown_scope_never_turns_configuration_into_unrestricted_access(config
     assert not policy.load(vault).blocked
 
 
-def test_limited_owner_edits_allowed_content_without_review_queue(configured_boundary, vault):
+def test_limited_owner_edits_its_inbox_and_every_other_target_is_refused_alike(configured_boundary, vault):
+    """A fenced client edits what its writable scopes hold; a readable page it may not write answers as a hidden or absent one."""
+    from exomem import state_migration
     from exomem.edit import EditError, edit
 
     _, authenticate = configured_boundary
+    draft = "Knowledge Base/Capture/draft.md"
+    (vault / draft).parent.mkdir(parents=True)
+    (vault / draft).write_text("---\nproject: public-project\n---\ndraft information\n", encoding="utf-8")
+    authority = state_migration.assert_offline_migration_authority(source="isolated inbox edit stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    refused = []
     with principal.request_scope(authenticate("limited")):
-        edit(vault, path=PUBLIC, why="correct allowed note", old_string="public information",
-             new_string="corrected public information")
-        with pytest.raises(EditError) as hidden:
-            edit(vault, path=PRIVATE, why="attempt private edit", new_body="replacement")
-    assert "corrected public information" in (vault / PUBLIC).read_text()
-    assert hidden.value.code == "NOT_FOUND"
+        edit(vault, path=draft, why="correct allowed note", old_string="draft information",
+             new_string="corrected draft information")
+        for target in (PUBLIC, PRIVATE, "Knowledge Base/Notes/absent.md"):
+            with pytest.raises(EditError) as error:
+                edit(vault, path=target, why="attempt edit", new_body="replacement")
+            refused.append((error.value.code, error.value.reason))
+    assert "corrected draft information" in (vault / draft).read_text()
+    assert refused == [("WRITE_REFUSED", "target is unavailable")] * 3
+    assert "public information" in (vault / PUBLIC).read_text()
     assert "protected canary" in (vault / PRIVATE).read_text()
 
 
-def test_an_unclassifiable_visible_label_refuses_only_the_writes_that_depend_on_it(configured_boundary, vault):
-    """A visible page whose status label the limited client cannot classify blocks no unrelated edit.
-
-    The label's definition would live in the status overlay, which the limited
-    client cannot read. Its edit of another allowed page still succeeds; an edit
-    whose relation touches the unclassifiable page refuses with the shared
-    unavailable error. This catches a corpus-wide refusal of every limited edit,
-    and a relaxation that judges a relation without its endpoint's class.
-    """
-    from exomem.edit import edit
-    from exomem.lifecycle_statuses import ClassificationUnavailable
-
-    notes = vault / "Knowledge Base/Notes/Insights"
-    notes.mkdir(parents=True, exist_ok=True)
-    (notes / "shelved.md").write_text(
-        "---\ntype: insight\nproject: public-project\nstatus: shelved\n---\n"
-        "# Shelved\n\n- [decision] Pause the archive migration.\n", encoding="utf-8",
-    )
-    (notes / "linked.md").write_text(
-        "---\ntype: insight\nproject: public-project\nstatus: active\n---\n"
-        "# Linked\n\n- [decision] Keep retry windows bounded.\n\n## Relations\n- supports [[shelved]]\n",
-        encoding="utf-8",
-    )
-    _, authenticate = configured_boundary
-    with principal.request_scope(authenticate("limited")):
-        edit(vault, path=PUBLIC, why="correct allowed note", old_string="public information",
-             new_string="corrected public information")
-        with pytest.raises(ClassificationUnavailable):
-            edit(vault, path="Knowledge Base/Notes/Insights/linked.md", why="tighten the decision",
-                 old_string="bounded.", new_string="tightly bounded.")
-    assert "corrected public information" in (vault / PUBLIC).read_text()
-    assert "tightly" not in (notes / "linked.md").read_text()
-
-
-def test_proposed_membership_cannot_move_allowed_content_under_the_denied_scope(configured_boundary, vault):
+def test_proposed_membership_cannot_move_a_writable_page_under_another_scope(configured_boundary, vault):
+    """The page is writable before the write; the bytes it would hold are judged as well."""
+    from exomem import state_migration
     from exomem import vault as vault_module
 
     _, authenticate = configured_boundary
-    original = (vault / PUBLIC).read_text()
+    page = vault / "Knowledge Base/Capture/draft.md"
+    page.parent.mkdir(parents=True)
+    original = "---\nproject: public-project\n---\ndraft information\n"
+    page.write_text(original, encoding="utf-8")
+    authority = state_migration.assert_offline_migration_authority(source="isolated inbox write stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
     with principal.request_scope(authenticate("limited")):
         with pytest.raises(ValueError, match="WRITE_REFUSED"):
             vault_module.batch_atomic_write([
-                vault_module.PlannedWrite(vault / PUBLIC, original.replace("public-project", "private-project")),
+                vault_module.PlannedWrite(page, original.replace("public-project", "private-project")),
             ], vault_root=vault)
-    assert (vault / PUBLIC).read_text() == original
+        vault_module.batch_atomic_write([
+            vault_module.PlannedWrite(page, original.replace("draft information", "corrected draft")),
+        ], vault_root=vault)
+    assert "corrected draft" in page.read_text()
 
 
 def test_global_policy_operations_are_unavailable_before_private_observations(configured_boundary, vault):
@@ -291,7 +336,11 @@ def test_capture_namespace_preserves_useful_creation_without_hidden_collision_ob
             outcomes.append(error.value.as_dict())
         result = create_file(vault, path="Knowledge Base/Capture/new.md", content="Allowed new note",
                              frontmatter={"project": "public-project"})
-    assert outcomes[0] == outcomes[1] == {"code": "WRITE_REFUSED", "reason": "target is unavailable"}
+        with pytest.raises(CreateFileError) as outside:
+            create_file(vault, path="Knowledge Base/Notes/new.md", content="Allowed new note",
+                        frontmatter={"project": "public-project"})
+    assert outcomes[0] == outcomes[1] == outside.value.as_dict() == {
+        "code": "WRITE_REFUSED", "reason": "target is unavailable"}
     assert result.path == "Knowledge Base/Capture/new.md"
     assert "Allowed new note" in (vault / result.path).read_text()
 
@@ -352,6 +401,8 @@ def test_an_archive_kept_as_members_is_refused_in_a_capture_namespace_before_any
     data = json.loads(config.read_text())
     data["capture_paths"].append("Knowledge Base/Evidence/Device")
     config.write_text(json.dumps(data))
+    inbox = vault / "Knowledge Base/_Governance/scopes/inbox.yaml"
+    inbox.write_text(inbox.read_text().replace('["Capture/**"]', '["Capture/**", "Evidence/Device/**"]'))
     authority = state_migration.assert_offline_migration_authority(source="isolated capture stop window")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
     buffer = io.BytesIO()
@@ -465,7 +516,7 @@ def test_rest_discards_a_result_when_configuration_changes_during_computation(co
     def change_after_computation(*args, **kwargs):
         result = original(*args, **kwargs)
         data = json.loads(config.read_text())
-        data["clients"][0]["denied_scope_ids"] = []
+        data["clients"][0].update(denied_scope_ids=[], writable_scope_ids=[])
         config.write_text(json.dumps(data))
         return result
 
@@ -490,6 +541,8 @@ def test_atomic_artifact_capture_uses_proposed_companion_and_cannot_be_reclassif
     data = json.loads(config.read_text())
     data["capture_paths"].append("Knowledge Base/Evidence/Workspace/Files")
     config.write_text(json.dumps(data))
+    inbox = vault / "Knowledge Base/_Governance/scopes/inbox.yaml"
+    inbox.write_text(inbox.read_text().replace('["Capture/**"]', '["Capture/**", "Evidence/Workspace/Files/**"]'))
     authority = state_migration.assert_offline_migration_authority(source="isolated artifact capture stop window")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
     with principal.request_scope(authenticate("limited")):
@@ -633,8 +686,8 @@ def test_private_registries_cannot_change_resolution_bootstrap_or_save_outcomes(
     assert "private-hop" not in json.dumps(after)
 
 
-def test_limited_owner_can_update_a_wholly_admitted_public_relation_registry(configured_boundary, vault):
-    """A ceiling alone must not put an independent public registry update into review."""
+def test_a_fenced_client_cannot_publish_into_the_public_relation_registry(configured_boundary, vault):
+    """Public registry storage has no scope, so no writable scope holds it: the save is refused and the registry stays."""
     from exomem import commands, registry_history, relation_registry, state_migration
 
     config, authenticate = configured_boundary
@@ -660,15 +713,15 @@ def test_limited_owner_can_update_a_wholly_admitted_public_relation_registry(con
     owner = principal.owner_principal(surface="library")
     with principal.request_scope(owner):
         before = relation_registry.load_registry(vault).extension_hash
-    with principal.request_scope(authenticate("limited")):
-        result = commands.op_schema_memory(vault, subject="relations", operation="save-relations", expected_hash=before,
+    with principal.request_scope(authenticate("limited")), pytest.raises(ValueError, match="WRITE_REFUSED"):
+        commands.op_schema_memory(vault, subject="relations", operation="save-relations", expected_hash=before,
             why="retain a public relation", proposal={"upsert": {"vault.correlates": {
                 "parent": "relates_to", "description": "A public correlation.", "direction": "directed",
             }}})
-    assert result["valid"] is True
-    assert result["saved"]["previous_hash"] == before
     with principal.request_scope(owner):
-        assert "vault.correlates" in relation_registry.load_registry(vault).extensions
+        registry = relation_registry.load_registry(vault)
+    assert registry.extension_hash == before
+    assert "vault.correlates" not in registry.extensions
 
 
 def test_private_registry_blocks_vocabulary_currency_before_work_item_lookup(configured_boundary, vault):
@@ -798,16 +851,20 @@ def test_a_limited_move_answers_the_same_whether_or_not_a_hidden_page_holds_or_l
     """A move admits its destination before any existence check and leaves hidden linkers alone.
 
     The first vault's hidden page holds the destination name and links the moved
-    page; the second has no hidden page. Unadmitted, the move answered
+    inbox page; the second has no hidden page. Unadmitted, the move answered
     DEST_EXISTS only when the hidden page existed, and refused or rewrote a move
-    into the capture namespace only when a hidden page linked the moved one.
+    only when a hidden page linked the moved one. A destination outside the
+    inbox is refused whether or not it is occupied.
     """
     import shutil
 
     from exomem import commands, state_migration
 
     _, authenticate = configured_boundary
-    hidden = "---\nproject: private-project\n---\nprotected canary [[Notes/public]] [[public]]\n"
+    mine = "Knowledge Base/Capture/mine.md"
+    (vault / mine).parent.mkdir(parents=True)
+    (vault / mine).write_text("---\nproject: public-project\n---\nmy information\n", encoding="utf-8")
+    hidden = "---\nproject: private-project\n---\nprotected canary [[Capture/mine]] [[mine]]\n"
     (vault / PRIVATE).write_text(hidden, encoding="utf-8")
     twin = tmp_path / "twin"
     shutil.copytree(vault, twin)
@@ -821,9 +878,9 @@ def test_a_limited_move_answers_the_same_whether_or_not_a_hidden_page_holds_or_l
         with principal.request_scope(authenticate("limited")):
             for destination in (PRIVATE, "Knowledge Base/Notes/elsewhere.md"):
                 with pytest.raises(ValueError) as refused:
-                    commands.op_move_file(root, old_path=PUBLIC, new_path=destination)
+                    commands.op_move_file(root, old_path=mine, new_path=destination)
                 outcomes.append(str(refused.value))
-            moved = commands.op_move_file(root, old_path=PUBLIC, new_path="Knowledge Base/Capture/public.md")
+            moved = commands.op_move_file(root, old_path=mine, new_path="Knowledge Base/Capture/moved.md")
         outcomes.append({key: moved[key] for key in ("old_path", "new_path", "files_touched", "index")})
         observed.append(outcomes)
 

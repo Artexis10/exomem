@@ -8,10 +8,17 @@ admitted instrument, appends readings to the ledger and exits.
 
 The supervisor is the policy:
 
-* It inherits the dreamer's gate (`dreamer_policy.decide`). The child runs only
-  while a dreamer tick could run, and is terminated the moment the gate closes.
-* It kills the child in quiet mode, under auto-quiet pressure and in standby,
-  so the child's memory returns to the host.
+* It follows its own gate (`dreamer_policy.sensor_gate`): the setting and
+  standby. The child is terminated the moment that gate closes, so its memory
+  returns to the host. Quiet mode, a busy service and the dreamer's tick holds
+  do not stop it: it is CPU only, one thread, at the lowest priority, in its
+  own process.
+* It never launches in a Cloud cell (`cloud_placement`): until
+  add-sensed-epistemic-model task 9.3's Cloud placement, cells write no readings.
+* It launches only while the host's available memory is above the peak resident
+  memory the last child recorded for the active instrument (`memory`). A
+  running child is never killed for memory. With no such peak it launches, and
+  that child records one.
 * It spends at most `CPU_SECONDS_PER_HOUR` CPU-seconds (model load included)
   and `JUDGEMENTS_PER_HOUR` judgements per rolling hour. A child that dies
   without reporting its spend is charged its whole allotment.
@@ -37,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import sensing, sensing_ledger
+from . import cloud_cell, runtime_resources, sensing, sensing_ledger
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +71,11 @@ EXIT_REFUSED = 78
 SPEND_FILE = "spend.json"
 STATUS_FILE = "worker-status.json"
 ADMISSION_FILE = "admission.json"
+#: The last child's peak resident memory and the instrument key it was recorded
+#: under. The supervisor owns this file: each child overwrites `SPEND_FILE` from
+#: its first report, which would erase it.
+PEAK_FILE = "peak-rss.json"
+
 
 def _state_file(vault_root: Path, name: str) -> Path:
     return sensing_ledger.ledger_path(vault_root).with_name(name)
@@ -116,7 +128,13 @@ class Supervisor:
         self._window: deque[_Charge] = deque()
         self._refusal: tuple[str, str] | None = None
         self._refusal_key: str | None = None
+        #: The instrument key of the running child, taken at launch, so its peak
+        #: is filed under the model it loaded.
+        self._launch_key: str | None = None
         self.last_action: str = "off"
+        #: The recorded peak as (instrument key, bytes), loaded once from `PEAK_FILE`.
+        self._peak: tuple[str, int] | None = None
+        self._peak_loaded = False
         self.launches = 0
         self.kills = 0
 
@@ -149,6 +167,43 @@ class Supervisor:
             return None
         return spend
 
+    def _recorded_peak(self, key: str) -> int | None:
+        if not self._peak_loaded:
+            stored = _read_json(_state_file(self.vault_root, PEAK_FILE)) or {}
+            peak = _peak_value(stored.get("peak_rss_bytes"))
+            stored_key = stored.get("key")
+            self._peak = (stored_key, peak) if peak is not None and isinstance(stored_key, str) else None
+            self._peak_loaded = True
+        if self._peak is None or self._peak[0] != key:
+            return None
+        return self._peak[1]
+
+    def peak_rss_bytes(self) -> int | None:
+        """The recorded child peak in bytes for the active instrument, else None.
+
+        A peak recorded under another instrument key says nothing about the
+        model that would load now, so it is ignored.
+        """
+        return self._recorded_peak(_instrument_key())
+
+    def _note_peak(self, spend: dict[str, Any]) -> None:
+        """Keep a child's reported peak. A completed model peak replaces the last one.
+
+        A report cut off mid-load is a lower bound, so it can only raise it.
+        """
+        reported = _peak_value(spend.get("peak_rss_bytes"))
+        if reported is None:
+            return
+        key = self._launch_key or _instrument_key()
+        recorded = self._recorded_peak(key)
+        if recorded is not None and not spend.get("peak_complete", spend.get("final")):
+            reported = max(reported, recorded)
+        self._peak = (key, reported)
+        with contextlib.suppress(OSError):
+            _write_json(
+                _state_file(self.vault_root, PEAK_FILE), {"peak_rss_bytes": reported, "key": key}
+            )
+
     def _harvest(self) -> None:
         """Charge a finished child and record why it ended."""
         child = self._child
@@ -157,6 +212,10 @@ class Supervisor:
         self._child = None
         pid = getattr(child, "pid", None)
         spend = self._reported(pid)
+        if spend is not None and child.returncode != EXIT_REFUSED:
+            # A refused child never loaded the instrument: its peak says nothing
+            # about what the next launch needs.
+            self._note_peak(spend)
         if spend is not None and spend.get("final"):
             self._charge(float(spend.get("cpu") or 0.0), int(spend.get("judgements") or 0))
         else:
@@ -195,6 +254,7 @@ class Supervisor:
         spend = self._reported(pid)
         if spend is not None and not spend.get("final"):
             self._child = None
+            self._note_peak(spend)
             since = 0.0
             with contextlib.suppress(OSError):
                 since = max(0.0, time.time() - _state_file(self.vault_root, SPEND_FILE).stat().st_mtime)
@@ -206,7 +266,11 @@ class Supervisor:
     # the step ------------------------------------------------------------
 
     def step(self, *, gate_run: bool, gate_reason: str, queue_depth: Callable[[], int]) -> str:
-        """One supervision decision. Returns the action taken, a closed code."""
+        """One supervision decision. Returns the action taken, a closed code.
+
+        The codes: `off`, `gate:<reason>`, `cloud_placement`, `running`, `refused`,
+        `budget`, `idle`, `memory`, `launch_failed` and `launched`.
+        """
         self._harvest()
         if not sensing.enabled():
             self.terminate("off")
@@ -214,6 +278,11 @@ class Supervisor:
         if not gate_run:
             self.terminate(gate_reason)
             return self._act(f"gate:{gate_reason}")
+        if cloud_cell.cloud_mode_enabled():
+            # Until add-sensed-epistemic-model task 9.3's Cloud placement, cells
+            # write no readings (that change's design, R3's export note).
+            self.terminate("cloud_placement")
+            return self._act("cloud_placement")
         if self.alive():
             return self._act("running")
         if self._refusal is not None:
@@ -228,7 +297,24 @@ class Supervisor:
             return self._act("budget")
         if queue_depth() <= 0:
             return self._act("idle")
+        # A child that could not fit is killed by the kernel after it loaded the
+        # model for nothing. With no peak on record the first child measures it.
+        # A host that reports no available memory launches, as an unmeasurable
+        # host builds in `embedding_backend`: refusing would lock sensing out for
+        # good on a host that can record a peak but not read free memory.
+        peak = self.peak_rss_bytes()
+        if peak is not None:
+            available = runtime_resources.available_memory()
+            if available is not None and available <= peak:
+                if self.last_action != "memory":
+                    log.info(
+                        "sensor worker not launched (memory): peak %d bytes, available %d bytes",
+                        peak,
+                        available,
+                    )
+                return self._act("memory")
         self._allotment = (cpu_left, judgements_left)
+        self._launch_key = _instrument_key()
         try:
             self._child = self._launch(self.vault_root, cpu_left, judgements_left)
         except OSError:
@@ -250,16 +336,30 @@ class Supervisor:
             "hour_cpu_used": round(cpu, 3),
             "hour_judgements": judgements,
             "refused": None if self._refusal is None else self._refusal[0],
+            "peak_rss_bytes": self.peak_rss_bytes(),
             "launches": self.launches,
             "kills": self.kills,
         }
 
 
-def _refusal_key() -> str:
-    """What must change before a refused child is tried again."""
+def _peak_value(value: Any) -> int | None:
+    """A peak in bytes: an int above zero. A bool is an int in Python, and no peak."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _instrument_key() -> str:
+    """The active instruments: what a recorded peak holds for."""
     from . import sensed_model
 
-    return json.dumps([sensing.setting(), sorted(sensed_model.active_instruments())])
+    return json.dumps(sorted(sensed_model.active_instruments()))
+
+
+def _refusal_key() -> str:
+    """The setting and active instruments: a refused child is tried again only
+    when this changes."""
+    return json.dumps([sensing.setting(), json.loads(_instrument_key())])
 
 
 #: The only variables the child inherits: where state, logs and the model
@@ -348,7 +448,12 @@ def supervise(vault_root: Path, *, gate_run: bool, gate_reason: str) -> str:
         return supervisor(vault_root).step(
             gate_run=gate_run,
             gate_reason=gate_reason,
-            queue_depth=lambda: sensed_model.queue_depth(vault_root),
+            queue_depth=lambda: sum(
+                1
+                for _job in sensed_model.runnable_jobs(
+                    vault_root, refused=lambda q: question_refused(vault_root, q)
+                )
+            ),
         )
     except Exception:  # noqa: BLE001 - supervision never breaks the dreamer
         log.warning("sensor worker: supervision failed", exc_info=True)
@@ -393,6 +498,86 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def question_admission_evidence(vault_root: Path, question_type: str) -> list[Any]:
+    """Lightweight admission evidence; a later instrument supplies its artifact stats here."""
+    evidence: list[Any] = []
+    if question_type == sensing.PAIR_RELATION:
+        from . import claims, model_cache
+
+        pin = claims._active_pin()
+        if pin is not None:
+            root = (
+                model_cache.hub_dir()
+                / model_cache.snapshot_dirname(pin.model_name)
+                / "snapshots"
+                / pin.model_revision
+            )
+            for relative in pin.artifact_files:
+                try:
+                    info = (root / relative).stat()
+                    evidence.append(
+                        [
+                            relative,
+                            info.st_dev,
+                            info.st_ino,
+                            info.st_size,
+                            info.st_mtime_ns,
+                            info.st_ctime_ns,
+                        ]
+                    )
+                except OSError:
+                    evidence.append([relative, None])
+    entry = sensing.question(question_type)
+    evidence.append([entry.fixture_set, repr(sensing.LABEL_MAPS.get(entry.label_map_version))])
+    from . import sensed_model
+
+    recorded = _read_json(_state_file(vault_root, ADMISSION_FILE)) or {}
+    for instrument_id in sorted(sensed_model._question_active(question_type)):
+        evidence.append(
+            [
+                instrument_id,
+                sorted(
+                    (key, value)
+                    for key, value in recorded.items()
+                    if key == instrument_id or key.startswith(instrument_id + ":")
+                ),
+            ]
+        )
+    return evidence
+
+
+def _question_refusal_key(vault_root: Path, question_type: str) -> str:
+    from . import sensed_model
+
+    identities = sensed_model._question_active(question_type)
+    return json.dumps(
+        [
+            question_type,
+            sorted(identities),
+            question_admission_evidence(vault_root, question_type),
+        ],
+        sort_keys=True,
+    )
+
+
+def question_refused(vault_root: Path, question_type: str) -> bool:
+    status = _read_json(_state_file(vault_root, STATUS_FILE)) or {}
+    refusal = (status.get("refusals") or {}).get(question_type)
+    return isinstance(refusal, dict) and refusal.get("key") == _question_refusal_key(
+        vault_root, question_type
+    )
+
+
+def admit_question(vault_root: Path, question_type: str) -> Any:
+    """Only the child calls this dispatch, after selecting the question."""
+    sensing.question(question_type)
+    if question_type == sensing.PAIR_RELATION:
+        from . import sensing_nli
+
+        return sensing_nli.admit(evidence_path=_state_file(vault_root, ADMISSION_FILE))
+    raise ValueError("question has no admitted instrument")
+
+
 def run_child(
     vault_root: Path,
     *,
@@ -402,58 +587,49 @@ def run_child(
     idle_seconds: float = IDLE_EXIT_SECONDS,
     instrument: Any = None,
     admit: Callable[[], Any] | None = None,
+    admit_selected: Callable[[str], Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     cpu_clock: Callable[[], float] = time.process_time,
 ) -> int:
-    """Sense queued pairs until idle, out of budget, or orphaned. Returns an exit code.
+    """Read the sole queue, lazily admit each question, and append ledger evidence."""
+    from . import sensed_model
 
-    Reads only the projection's queue and the ledger, and appends only to the
-    ledger. Never reads or writes the vault.
-    """
     vault_root = Path(vault_root)
     pid = os.getpid()
     started_cpu = cpu_clock()
     judgements = 0
+    ledger = sensing_ledger.Ledger(vault_root)
+    lconn = None
+    loaded = {} if instrument is None else {sensing.PAIR_RELATION: instrument}
+    refused: set[str] = set()
+    checked_refusals: set[str] = set()
+    status = _read_json(_state_file(vault_root, STATUS_FILE)) or {}
+    refusals = status.get("refusals") or {}
 
     def report(final: bool) -> None:
+        spend: dict[str, Any] = {
+            "pid": pid,
+            "cpu": round(max(0.0, cpu_clock() - started_cpu), 3),
+            "judgements": judgements,
+            "final": final,
+            # Budget finality does not mean that every selected model was admitted.
+            "peak_complete": final and bool(loaded) and not refused,
+        }
+        # Recorded only where the host reports it, so the supervisor can admit
+        # the next launch against what this child needed.
+        peak = runtime_resources.peak_rss_bytes()
+        if peak is not None:
+            spend["peak_rss_bytes"] = peak
+        _write_json(_state_file(vault_root, SPEND_FILE), spend)
+
+    def write_status() -> None:
         _write_json(
-            _state_file(vault_root, SPEND_FILE),
-            {
-                "pid": pid,
-                "cpu": round(max(0.0, cpu_clock() - started_cpu), 3),
-                "judgements": judgements,
-                "final": final,
-            },
+            _state_file(vault_root, STATUS_FILE),
+            {"refused": None, "refusals": refusals, "pid": pid},
         )
 
     report(False)
-    if instrument is None:
-        from . import sensing_nli
-
-        try:
-            instrument = (admit or (lambda: sensing_nli.admit(
-                evidence_path=_state_file(vault_root, ADMISSION_FILE)
-            )))()
-        except sensing_nli.Refused as refused:
-            _write_json(
-                _state_file(vault_root, STATUS_FILE),
-                {"refused": refused.reason, "detail": refused.detail[:500], "pid": pid},
-            )
-            report(True)
-            return EXIT_REFUSED
-    identity: sensing.InstrumentIdentity = instrument.identity
-    ledger = sensing_ledger.Ledger(vault_root)
-    try:
-        lconn = ledger.connect()
-    except sensing_ledger.LedgerUnavailable as error:
-        _write_json(
-            _state_file(vault_root, STATUS_FILE),
-            {"refused": "ledger-unavailable", "detail": str(error)[:500], "pid": pid},
-        )
-        report(True)
-        return EXIT_REFUSED
-    _write_json(_state_file(vault_root, STATUS_FILE), {"refused": None, "pid": pid})
     done: set[str] = set()
     last_work = clock()
     try:
@@ -461,50 +637,131 @@ def run_child(
             if cpu_clock() - started_cpu >= cpu_allotment or judgements >= judgement_allotment:
                 report(True)
                 return EXIT_BUDGET
-            batch = _next_batch(
-                vault_root, lconn, identity, done, min(BATCH, judgement_allotment - judgements)
-            )
-            if not batch:
+            conn = sensed_model.open_readonly(vault_root)
+            selected = None
+            if conn is not None:
+                try:
+                    for job in sensed_model.iter_jobs(conn):
+                        q = job.request.question_type
+                        if q not in checked_refusals:
+                            checked_refusals.add(q)
+                            if question_refused(vault_root, q):
+                                refused.add(q)
+                        if job.pair_key in done or q in refused:
+                            continue
+                        identities = (
+                            {loaded[q].identity.instrument_id: loaded[q].identity}
+                            if q in loaded
+                            else sensed_model._question_active(q)
+                        )
+                        if (
+                            lconn is not None
+                            and identities
+                            and all(
+                                sensing_ledger.has_reading(lconn, job.request.reading_id(key))
+                                for key in identities
+                            )
+                        ):
+                            done.add(job.pair_key)
+                            continue
+                        selected = job
+                        break
+                finally:
+                    conn.close()
+            if selected is None:
                 if clock() - last_work >= idle_seconds:
                     report(True)
                     return EXIT_IDLE
                 sleep(min(1.0, idle_seconds))
                 continue
+            q = selected.request.question_type
+            if q not in loaded:
+                try:
+                    loaded[q] = (
+                        admit_selected(q)
+                        if admit_selected is not None
+                        else admit()
+                        if admit is not None and q == sensing.PAIR_RELATION
+                        else admit_question(vault_root, q)
+                    )
+                except Exception as error:  # noqa: BLE001 - refusal is local to this question
+                    reason = str(getattr(error, "reason", "admission-failed"))
+                    refusals[q] = {
+                        "key": _question_refusal_key(vault_root, q),
+                        "reason": reason,
+                        "detail": str(getattr(error, "detail", error))[:500],
+                    }
+                    refused.add(q)
+                    write_status()
+                    continue
+                refusals.pop(q, None)
+                write_status()
+            selected_instrument = loaded[q]
+            identity = selected_instrument.identity
+            if lconn is None:
+                try:
+                    lconn = ledger.connect()
+                except sensing_ledger.LedgerUnavailable as error:
+                    _write_json(
+                        _state_file(vault_root, STATUS_FILE),
+                        {"refused": "ledger-unavailable", "detail": str(error)[:500], "pid": pid},
+                    )
+                    report(True)
+                    return EXIT_REFUSED
+            batch = _next_batch(
+                vault_root,
+                lconn,
+                identity,
+                done,
+                min(BATCH, judgement_allotment - judgements),
+                question_type=q,
+            )
+            if not batch:
+                continue
             last_work = clock()
             try:
-                results = instrument.judge([pair.texts for pair in batch])
-            except ValueError:
-                # Non-finite or misshapen output refuses that output: no reading,
-                # and the batch is not retried by this child.
+                if hasattr(selected_instrument, "judge_requests"):
+                    results = selected_instrument.judge_requests([job.request for job in batch])
+                else:
+                    results = selected_instrument.judge([job.texts for job in batch])
+                readings = []
+                for job, result in zip(batch, results, strict=True):
+                    if isinstance(result, Mapping):
+                        vectors, reason = result.get("vectors"), result.get("abstain_reason")
+                    else:
+                        ab, ba, reason = result
+                        vectors = None if reason is not None else {"ab": ab, "ba": ba}
+                    reading = sensing.make_request_reading(
+                        job.request,
+                        identity,
+                        vectors=vectors,
+                        abstain_reason=reason,
+                        sensed_at=_utc_now(),
+                    )
+                    if reading is not None:
+                        readings.append(reading)
+                ledger.append(lconn, readings)
+            except (ValueError, TypeError):
                 log.warning("sensor worker: a batch produced unusable output", exc_info=True)
-                done.update(pair.pair_key for pair in batch)
-                judgements += len(batch)
-                report(False)
-                continue
-            readings = []
-            for pair, (ab, ba, reason) in zip(batch, results, strict=True):
-                done.add(pair.pair_key)
-                reading = sensing.make_reading(
-                    sensing.PAIR_RELATION,
-                    identity,
-                    list(pair.inputs),
-                    ab=ab,
-                    ba=ba,
-                    abstain_reason=reason,
-                    sensed_at=_utc_now(),
-                )
-                if reading is not None:
-                    readings.append(reading)
-            ledger.append(lconn, readings)
+            done.update(job.pair_key for job in batch)
             judgements += len(batch)
             report(False)
         report(True)
         return EXIT_IDLE
     finally:
-        lconn.close()
+        if lconn is not None:
+            lconn.close()
 
 
-def _next_batch(vault_root, lconn, identity, done: set[str], limit: int) -> list:
+def _next_batch(
+    vault_root,
+    lconn,
+    identity,
+    done: set[str],
+    limit: int,
+    *,
+    question_type: str = sensing.PAIR_RELATION,
+) -> list:
     from . import sensed_model
 
     if limit <= 0:
@@ -513,19 +770,19 @@ def _next_batch(vault_root, lconn, identity, done: set[str], limit: int) -> list
     if conn is None:
         return []
     out = []
+    scheduled: set[str] = set()
     try:
-        for pair in sensed_model.queued_pairs(conn, 256):
-            if pair.pair_key in done:
+        for job in sensed_model.iter_jobs(conn):
+            if job.pair_key in done or job.request.question_type != question_type:
                 continue
-            hashes = [item.text_sha256 for item in pair.inputs]
-            if [sensing.text_sha256(text) for text in pair.texts] != hashes:
-                done.add(pair.pair_key)
-                continue
-            rid = sensing.reading_id(sensing.PAIR_RELATION, identity.instrument_id, hashes)
+            rid = job.request.reading_id(identity.instrument_id)
             if sensing_ledger.has_reading(lconn, rid):
-                done.add(pair.pair_key)
+                done.add(job.pair_key)
                 continue
-            out.append(pair)
+            if rid in scheduled:
+                continue
+            scheduled.add(rid)
+            out.append(job)
             if len(out) >= limit:
                 break
     finally:

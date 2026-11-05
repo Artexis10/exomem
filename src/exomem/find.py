@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import ChainMap, OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack, contextmanager
@@ -624,6 +624,17 @@ class FreshnessSnapshot:
         """Read the lexical catalogue at `checkpoint`."""
         self._lexical[scope] = checkpoint
 
+    def lexical_view(
+        self, scope: str, checkpoint: freshness.RecallFreshnessCheckpoint
+    ) -> FreshnessSnapshot:
+        """Read a proved catalogue checkpoint without changing earlier request consumers."""
+        if self.lexical_checkpoint(scope) == checkpoint:
+            return self
+        view = copy.copy(self)
+        view._lexical = dict(self._lexical)
+        view.pin_lexical_checkpoint(scope, checkpoint)
+        return view
+
     def projection_key(self, scope: str) -> tuple:
         checkpoint = self.recall_checkpoint(scope)
         return (
@@ -698,12 +709,32 @@ class FreshnessSnapshot:
             paths = {path for path in candidates if admit_path(path)}
         if not paths:
             return set()
-        try:
-            metadata = _managed_page_metadata(
-                self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
-                pending=self._pending, parents_only=True,
+        parents = None
+        if scope in self._catalogue_scopes:
+            from . import lexstore
+
+            # Pending custody replaces only its child links; parent authority stays live below.
+            published = lexstore.get_store(self._root).recall_emitted_parents(
+                scope, self._expected_recall_checkpoints.get(scope)
             )
-            parents = {path: row.parent for path, row in metadata.items()}
+            pending = self._pending
+            stable = paths if pending is None or pending.empty else paths - pending.paths
+            if published is not None and stable <= published.keys():
+                parents = published
+                if pending is not None and not pending.empty:
+                    pending_parents = {
+                        path: page.emitted_parent for path in paths & pending.paths
+                        if (page := pending.page(path)) is not None
+                    }
+                    paths = stable | pending_parents.keys()
+                    parents = ChainMap(pending_parents, published)
+        try:
+            if parents is None:
+                metadata = _managed_page_metadata(
+                    self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
+                    pending=self._pending, parents_only=True,
+                )
+                parents = {path: row.parent for path, row in metadata.items()}
         except RetrievalIndexWarming:
             if readiness.runtime_managed():
                 raise
@@ -1354,7 +1385,9 @@ def _with_catalog_scope(function):
             )
             if values["catalog_proof_out"] is not None:
                 values["catalog_proof_out"].clear()
-            # Initial warm admission precedes catalogue access and repair.
+            # Initial warm admission precedes catalogue access and repair. A
+            # warm that already proved its catalogue reads `unavailable`, not
+            # `warming`, and serves the published catalogue below.
             if (
                 readiness.retrieval_admission()["state"] == "warming"
                 and not readiness.required_warm_finished()
@@ -2982,6 +3015,14 @@ class _UnitCandidate:
         return self.unit_view.get("verdict")
 
     @property
+    def as_of(self) -> str | None:
+        return self.selected_unit.as_of
+
+    @property
+    def until(self) -> str | None:
+        return self.selected_unit.until
+
+    @property
     def check_by(self) -> str | None:
         value = self.unit_view.get("check_by")
         return value.isoformat() if value is not None else None
@@ -3478,6 +3519,8 @@ def _semantic_unit_hit(
         context=unit.context,
         verdict=getattr(unit, "verdict", None),
         check_by=getattr(unit, "check_by", None),
+        as_of=getattr(unit, "as_of", None),
+        until=getattr(unit, "until", None),
         relations=[relation.to_dict() for relation in unit.relations],
         source_anchor=unit.anchor,
         source_span=_unit_span(unit),
@@ -4611,6 +4654,7 @@ def _resolve_relation_filter(
     """Resolve the relation filter to a participant path set (None when inactive),
     plus per-path provenance and advisory findings. `keep` is a restricted
     caller's admission (`None` for the owner): its edges resolve in that view.
+    A withheld anchor yields an authoritative empty before registry selection.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -4628,7 +4672,12 @@ def _resolve_relation_filter(
             f"got {relation_direction!r}",
         )
     from . import epistemic_graph, traversal_profiles
+    from .governance import egress
 
+    if relation_of:
+        relation_of = epistemic_graph._page_rel(relation_of)
+        if not egress.quick_page_visible(vault_root, relation_of):
+            return frozenset(), {}, ()
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     # An anchored filter inherits its anchor page's instance; otherwise public.
     registry = graph_index.relation_query_registry(anchor=relation_of)
@@ -7762,7 +7811,11 @@ def recall_resolver_snapshot(
     candidate = expected_checkpoint
     if candidate is not None and not allow_fallback:
         if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
-            lexstore.request_repair(root)
+            # The registry moved past the request's admission, so the catalogue
+            # may trail it. The lag repair replays that delta and falls back to
+            # the full pass on any refusal. Admission stays: the registry moving
+            # does not prove the catalogue trails it.
+            lexstore.request_repair(root, lag_only=True, cause=lexstore.RepairCause.CATALOGUE_LAG)
             raise RetrievalIndexWarming(
                 site="resolver_checkpoint_stale",
                 status="temporarily_unavailable",
@@ -7774,7 +7827,7 @@ def recall_resolver_snapshot(
     if candidate is not None and identity == _recall_checkpoint_identity(candidate):
         checkpoint = candidate
     if not allow_fallback and checkpoint is None:
-        lexstore.request_repair(root)
+        lexstore.request_repair(root, cause=lexstore.RepairCause.RESOLVER_CHECKPOINT_ABSENT)
         raise RetrievalIndexWarming(
             site="resolver_checkpoint_absent",
             status="temporarily_unavailable",
@@ -7818,8 +7871,8 @@ def recall_resolver_snapshot(
             if not allow_fallback:
                 # Declining beats both alternatives: blocking past the client's
                 # deadline answers nobody, and building our own here would pay
-                # the same whole-vault walk the leader is already paying.
-                lexstore.request_repair(root)
+                # the same whole-vault walk the leader is already paying. The
+                # catalogue is not at fault, so no repair is asked for.
                 raise RetrievalIndexWarming(
                     site="resolver_build_wait",
                     status="temporarily_unavailable",
@@ -7845,7 +7898,9 @@ def recall_resolver_snapshot(
         entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
             if not allow_fallback:
-                lexstore.request_repair(root)
+                lexstore.request_repair(
+                    root, cause=lexstore.RepairCause.RESOLVER_ENTRIES_UNAVAILABLE
+                )
                 raise RetrievalIndexWarming(
                     site="resolver_entries_unavailable",
                     status="temporarily_unavailable",
@@ -8323,6 +8378,10 @@ def unload_ram_caches(
         from . import lexstore
 
         lexstore.release_admitted_recall_rows()
+    if not keep_recall_resolver:
+        from . import graph_read_publication
+
+        graph_read_publication.clear()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
@@ -8365,6 +8424,9 @@ def release_idle_ram_caches() -> dict[str, int]:
 def evict_resolver_caches(vault_root: Path) -> int:
     """Withdraw both resolver projections for one vault after an event gap."""
     root = Path(vault_root)
+    from . import graph_read_publication
+
+    graph_read_publication.forget(root)
     with _RESOLVER_LOCK:
         removed = int(root in _RESOLVER_CACHE) + int(root in _RECALL_RESOLVER_CACHE)
         _evict_resolver(root)
@@ -8390,19 +8452,15 @@ def reset_page_and_result_caches() -> dict[str, int]:
 
 
 def cache_status() -> dict:
-    """No-allocation residency status for find's rebuildable RAM caches."""
-    page_entries = list(_CACHE.entries.values())
+    """Read resident counts without loading pages or rebuilding caches."""
+    pages = _CACHE.cache_status()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         hot_hits = sum(len(v[0]) for v in _FIND_CACHE.values())
     return {
-        "pages": {
-            "entries": len(page_entries),
-            "body_chars": sum(len(p.body) for p in page_entries),
-            "hits": int(_CACHE.hits),
-        },
+        "pages": pages,
         "resolvers": {"entries": resolver_entries},
         "hot_find": {"entries": hot_entries, "hits": hot_hits},
     }

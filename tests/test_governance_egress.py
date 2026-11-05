@@ -3332,18 +3332,26 @@ def test_l5_dataset_is_missing_before_rows_are_loaded(
             commands.op_query_data(vault, path=dataset)
 
 
-def test_receipt_conflict_never_turns_a_committed_mutation_into_a_retry_error(vault: Path) -> None:
+def test_receipt_conflict_never_turns_a_committed_mutation_into_a_retry_error(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from granted_writer import grant_writer
+
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_FULL)
+    writer = grant_writer(vault, tmp_path, monkeypatch,
+                          writable_paths=["Notes/receipt-mutation.md"],
+                          capture_paths=["Knowledge Base/Notes"])(EXTERNAL)
     events = _gov_dir(vault) / "events"
     events.mkdir(parents=True, exist_ok=True)
     (events / "conflicted copy.jsonl").write_text("{}\n", encoding="utf-8")
-    result = _through_dispatcher(
-        vault,
-        "create_file",
-        path="Knowledge Base/Notes/receipt-mutation.md",
-        content="committed body",
-    )
+    with request_scope(writer):
+        result = _through_dispatcher(
+            vault,
+            "create_file",
+            path="Knowledge Base/Notes/receipt-mutation.md",
+            content="committed body",
+        )
     assert (vault / "Knowledge Base/Notes/receipt-mutation.md").exists()
     assert "GOVERNANCE_RECEIPT_UNAVAILABLE" not in str(result)
 

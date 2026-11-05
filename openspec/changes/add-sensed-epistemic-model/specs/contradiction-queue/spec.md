@@ -14,6 +14,12 @@ A `corpus_contradictions` proximity pair MAY carry a model polarity label.
 - **Asserted pairs.** Asserted pairs SHALL NOT carry a model polarity label — the author's assertion outranks a model's guess.
 - **Pair stance.** The model polarity label is distinct from the reader-recorded competing-alternatives pair stance, which remains a triage disposition under its own contract and is unaffected by this requirement.
 
+Audit SHALL extract both claim texts from the same parsed page snapshots used for the finding's signal version.
+It SHALL NOT substitute an unverified cached claim.
+The sensing setting SHALL control this ledger path; legacy claim flags SHALL NOT enable inline inference.
+Current-reading metadata SHALL include the reading identity and active instrument provenance.
+The consumer SHALL render its own current references rather than another request's stored references.
+
 #### Scenario: The label arrives on the sweep, not the write
 
 - **WHEN** a write lands a proximity pair, the sensor worker records a current reading, and the next audit pass runs

@@ -64,28 +64,64 @@ def k3s(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
     log_path = tmp_path_factory.mktemp("k3s-admission") / f"{name}.log"
     failures_before = request.session.testsfailed
     logs_retained = False
-    _run(
-        [
-            "docker",
-            "run",
-            "--privileged",
-            "--detach",
-            "--name",
-            name,
-            "--publish",
-            "127.0.0.1::6443",
-            "--volume",
-            f"{ADMISSION_CONFIG}:/etc/rancher/k3s/admission-config.yaml:ro",
-            K3S_IMAGE,
-            "server",
-            "--disable=traefik",
-            "--disable=servicelb",
-            "--disable=local-storage",
-            "--write-kubeconfig-mode=600",
-            "--kube-apiserver-arg=admission-control-config-file=/etc/rancher/k3s/admission-config.yaml",
-        ]
+    # The private helper exists on agent hosts. Disposable CI uses its run identity.
+    helper = shutil_which("agent-docker-clean")
+    label = (
+        _run([helper, "--print-label"]).stdout.strip()
+        if helper
+        else f"exomem.test-run={os.environ.get('GITHUB_RUN_ID', name)}"
     )
+    disposable = (
+        _run([helper, "--print-disposable-label"]).stdout.strip()
+        if helper
+        else f"exomem.disposable={os.environ.get('GITHUB_RUN_ID', name)}"
+    )
+    image = _run(["docker", "image", "inspect", K3S_IMAGE], check=False)
+    if image.returncode != 0:
+        _run(["docker", "pull", K3S_IMAGE])
+        image = _run(["docker", "image", "inspect", K3S_IMAGE])
+    # Inspect Docker's declared volumes so no image-created anonymous data escapes ownership.
+    paths = set(json.loads(image.stdout)[0]["Config"].get("Volumes") or {}) | {
+        "/var/lib/rancher/k3s"
+    }
+    volumes = []
+    mounts = []
     try:
+        for index, path in enumerate(sorted(paths)):
+            volume = f"{name}-{index}"
+            _run(["docker", "volume", "create", "--label", label, "--label", disposable, volume])
+            volumes.append(volume)
+            mounts.extend(["--mount", f"type=volume,src={volume},dst={path}"])
+        _run(
+            [
+                "docker",
+                "run",
+                "--label",
+                label,
+                "--label",
+                disposable,
+                "--memory",
+                os.environ.get("K3S_TEST_MEMORY", "2g"),
+                "--cpus",
+                "2",
+                *mounts,
+                "--privileged",
+                "--detach",
+                "--name",
+                name,
+                "--publish",
+                "127.0.0.1::6443",
+                "--volume",
+                f"{ADMISSION_CONFIG}:/etc/rancher/k3s/admission-config.yaml:ro",
+                K3S_IMAGE,
+                "server",
+                "--disable=traefik",
+                "--disable=servicelb",
+                "--disable=local-storage",
+                "--write-kubeconfig-mode=600",
+                "--kube-apiserver-arg=admission-control-config-file=/etc/rancher/k3s/admission-config.yaml",
+            ]
+        )
         consecutive_ready = 0
         for _ in range(90):
             ready = _run(
@@ -113,6 +149,8 @@ def k3s(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
         if not logs_retained and request.session.testsfailed > failures_before:
             _retain_k3s_logs(name, log_path)
         _run(["docker", "rm", "--force", name], check=False)
+        for volume in volumes:
+            _run(["docker", "volume", "rm", volume], check=False)
 
 
 def shutil_which(command: str) -> str | None:
@@ -214,3 +252,571 @@ def test_exact_k3s_accepts_only_the_rendered_service_account_token_audience(
     rejected_status = json.loads(rejected.stdout)["status"]
     assert rejected_status.get("authenticated") is not True
     assert "audience" in rejected_status.get("error", "").lower()
+
+
+def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k3s: str) -> None:
+    """A deploy cannot inject a command; offline Job admission trusts only its cell StatefulSet."""
+    import copy
+
+    rendered = _run(
+        [
+            str(HELM),
+            "template",
+            "exomem-platform",
+            "infra/helm/platform",
+            "-f",
+            "infra/helm/platform/values.validation.yaml",
+            "--set",
+            "operatorDeploy.enabled=true",
+            "--set",
+            "operatorDeploy.sourceRepository=example/runtime",
+            "--set",
+            "operatorDeploy.registryReadSecretName=registry-read",
+        ]
+    )
+    documents = [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
+    names = {"exomem-image-only-deploy", "exomem-cell-job-image"}
+    policies = [
+        doc
+        for doc in documents
+        if doc.get("kind") in ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
+        and doc["metadata"]["name"] in names
+    ]
+    _kubectl(k3s, ["apply", "-f", "-"], documents=policies)
+    policy_state = json.loads(
+        _kubectl(k3s, ["get", "validatingadmissionpolicies", "-o", "json"]).stdout
+    )
+    for policy in policy_state["items"]:
+        if policy["metadata"]["name"] in names:
+            assert not policy.get("status", {}).get("typeChecking", {}).get("expressionWarnings"), (
+                policy
+            )
+    namespace = "deploy-proof"
+    _kubectl(k3s, ["create", "namespace", namespace])
+    deployment = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "controller", "namespace": namespace},
+        "spec": {
+            "replicas": 0,
+            "selector": {"matchLabels": {"app": "controller"}},
+            "template": {
+                "metadata": {"labels": {"app": "controller"}},
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "controller",
+                            "image": "unreachable.example/controller@sha256:" + "a" * 64,
+                        }
+                    ]
+                },
+            },
+        },
+    }
+    _kubectl(k3s, ["apply", "-f", "-"], documents=[deployment])
+    _kubectl(
+        k3s,
+        [
+            "create",
+            "clusterrolebinding",
+            "deploy-proof-admin",
+            "--clusterrole=cluster-admin",
+            "--group=exomem:deploy",
+        ],
+    )
+    actor = ["--as=deploy-proof", "--as-group=exomem:deploy", "--as-group=system:authenticated"]
+    image_only = _kubectl(
+        k3s,
+        [
+            *actor,
+            "patch",
+            "deployment/controller",
+            "-n",
+            namespace,
+            "--type=json",
+            "-p",
+            json.dumps(
+                [
+                    {
+                        "op": "replace",
+                        "path": "/spec/template/spec/containers/0/image",
+                        "value": "unreachable.example/controller@sha256:" + "b" * 64,
+                    }
+                ]
+            ),
+        ],
+        check=False,
+    )
+    assert image_only.returncode == 0, image_only.stderr
+    for patch in (
+        [
+            {
+                "op": "add",
+                "path": "/spec/template/spec/containers/0/command",
+                "value": ["sh", "-c", "read-content"],
+            }
+        ],
+        [{"op": "add", "path": "/spec/template/spec/serviceAccountName", "value": "privileged"}],
+        [{"op": "add", "path": "/metadata/annotations", "value": {"escape": "yes"}}],
+        [
+            {
+                "op": "add",
+                "path": "/spec/template/spec/containers/-",
+                "value": {"name": "sidecar", "image": "unreachable.example/sidecar"},
+            }
+        ],
+    ):
+        refused = _kubectl(
+            k3s,
+            [
+                *actor,
+                "patch",
+                "deployment/controller",
+                "-n",
+                namespace,
+                "--type=json",
+                "-p",
+                json.dumps(patch),
+            ],
+            check=False,
+        )
+        assert refused.returncode != 0 and "container images only" in refused.stderr, refused.stderr
+    cell_namespace = "exo-cell-aaaaaaaaaaaaaaaa"
+    _kubectl(
+        k3s,
+        ["apply", "-f", "-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": cell_namespace,
+                    "labels": {"exomem.io/cloud-cell": "aaaaaaaaaaaaaaaa"},
+                },
+            }
+        ],
+    )
+    image = "unreachable.example/cell@sha256:" + "c" * 64
+    statefulset = {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {"name": "cell", "namespace": cell_namespace},
+        "spec": {
+            "serviceName": "cell",
+            "replicas": 0,
+            "selector": {"matchLabels": {"app": "cell"}},
+            "template": {
+                "metadata": {"labels": {"app": "cell"}},
+                "spec": {"containers": [{"name": "exomem", "image": image}]},
+            },
+        },
+    }
+    _kubectl(k3s, ["apply", "-f", "-"], documents=[statefulset])
+    # No registry verifier exists on Jobs or Pods. The native parameter is enough offline.
+    job = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": "backup", "namespace": cell_namespace},
+        "spec": {
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [{"name": "backup", "image": image}],
+                    "initContainers": [{"name": "init", "image": image}],
+                }
+            }
+        },
+    }
+    allowed = _kubectl(
+        k3s, [*actor, "create", "--dry-run=server", "-f", "-"], documents=[job], check=False
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    for key in ("containers", "initContainers"):
+        wrong = copy.deepcopy(job)
+        wrong["spec"]["template"]["spec"][key][0]["image"] = (
+            "unreachable.example/wrong@sha256:" + "d" * 64
+        )
+        denied = _kubectl(
+            k3s, [*actor, "create", "--dry-run=server", "-f", "-"], documents=[wrong], check=False
+        )
+        assert denied.returncode != 0 and "admitted cell StatefulSet" in denied.stderr, (
+            denied.stderr
+        )
+    missing = copy.deepcopy(job)
+    missing["metadata"]["namespace"] = namespace
+    assert (
+        _kubectl(
+            k3s, [*actor, "create", "--dry-run=server", "-f", "-"], documents=[missing], check=False
+        ).returncode
+        == 0
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_IMAGE_ADMISSION_RUNTIME_TEST") != "1",
+    reason="dedicated disposable admission runtime job",
+)
+@pytest.mark.timeout(900)
+def test_image_admission_runtime_has_no_tenant_keys_and_rotates_its_webhook_ca(k3s: str) -> None:
+    """The selected vendor profile starts with scoped credentials and updates its own trust after CA rotation."""
+    profile = json.loads((ROOT / "infra/helm/platform/files/image-admission-v1.json").read_text())
+    rendered = _run(
+        [
+            str(HELM),
+            "template",
+            "exomem-platform",
+            "infra/helm/platform",
+            "-f",
+            "infra/helm/platform/values.validation.yaml",
+            "--include-crds",
+            "--set",
+            "operatorDeploy.enabled=true",
+            "--set",
+            "operatorDeploy.sourceRepository=example/runtime",
+            "--set",
+            "operatorDeploy.registryReadSecretName=registry-read",
+            "--set",
+            "cellctl.cellImageRepository=127.0.0.1:1/runtime",
+        ]
+    )
+    all_docs = [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
+    namespace = "exomem-admission"
+    # These groups are the selected vendor's versioned CRD API, not tenant vocabulary.
+    crds = [
+        doc
+        for doc in all_docs
+        if doc.get("kind") == "CustomResourceDefinition"
+        and doc["spec"]["group"]
+        in ("kyverno.io", "policies.kyverno.io", "reports.kyverno.io", "wgpolicyk8s.io")
+    ]
+    _kubectl(k3s, ["apply", "--server-side", "-f", "-"], documents=crds)
+    cert_chart = next((ROOT / "infra/helm/platform/charts").glob("cert-manager-*.tgz"))
+    certificates = _run(
+        [
+            str(HELM),
+            "template",
+            "proof-certs",
+            str(cert_chart),
+            "--namespace",
+            "proof-certs",
+            "--include-crds",
+            "--set",
+            "crds.enabled=true",
+            "--set",
+            "startupapicheck.enabled=false",
+            "--set",
+            "global.leaderElection.namespace=proof-certs",
+        ]
+    )
+    cert_docs = [doc for doc in yaml.safe_load_all(certificates.stdout) if isinstance(doc, dict)]
+    _kubectl(k3s, ["create", "namespace", "proof-certs"])
+    _kubectl(k3s, ["apply", "--server-side", "-f", "-"], documents=cert_docs)
+    deadline = time.monotonic() + 180
+    for deployment in (doc for doc in cert_docs if doc["kind"] == "Deployment"):
+        _kubectl(
+            k3s,
+            [
+                "rollout",
+                "status",
+                f"deployment/{deployment['metadata']['name']}",
+                "-n",
+                "proof-certs",
+                f"--timeout={max(1, int(deadline - time.monotonic()))}s",
+            ],
+        )
+    own_names = {hook["name"] for hook in profile["webhooks"]}
+    selected = [
+        doc
+        for doc in all_docs
+        if (
+            doc.get("metadata", {}).get("namespace") == namespace
+            or doc.get("kind") == "Namespace"
+            and doc["metadata"]["name"] == namespace
+            or doc.get("metadata", {}).get("name") == "exomem-image-admission"
+            or doc.get("metadata", {}).get("name") in own_names
+            or doc.get("kind") == "ImageValidatingPolicy"
+            or doc.get("kind") in ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
+            and doc["metadata"]["name"] == "exomem-cell-job-image"
+            or doc.get("kind") == "ClusterIssuer"
+            and doc["metadata"]["name"] == "kyverno-selfsigned-issuer"
+        )
+    ]
+    namespaces = [doc for doc in selected if doc["kind"] == "Namespace"]
+    _kubectl(k3s, ["apply", "-f", "-"], documents=namespaces)
+    _kubectl(
+        k3s,
+        ["apply", "-f", "-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": "registry-read", "namespace": namespace},
+                "type": "kubernetes.io/dockerconfigjson",
+                "stringData": {".dockerconfigjson": '{"auths":{}}'},
+            }
+        ],
+    )
+    _kubectl(
+        k3s,
+        ["apply", "--server-side", "-f", "-"],
+        documents=[doc for doc in selected if doc["kind"] != "Namespace"],
+    )
+    deployments = [doc for doc in selected if doc["kind"] == "Deployment"]
+    assert len(deployments) == 1
+    for container in deployments[0]["spec"]["template"]["spec"]["containers"]:
+        assert (
+            container["resources"]["requests"]["memory"]
+            and container["resources"]["limits"]["memory"]
+        )
+        assert container["resources"]["requests"]["cpu"] and container["resources"]["limits"]["cpu"]
+    rollout = _kubectl(
+        k3s,
+        [
+            "rollout",
+            "status",
+            "deployment/kyverno-admission-controller",
+            "-n",
+            namespace,
+            "--timeout=180s",
+        ],
+        check=False,
+    )
+    if rollout.returncode != 0:
+        for arguments in (
+            ["get", "pods", "-n", namespace, "-o", "wide"],
+            ["describe", "pods", "-n", namespace],
+            ["get", "events", "-n", namespace, "--sort-by=.metadata.creationTimestamp"],
+            [
+                "logs",
+                "deployment/kyverno-admission-controller",
+                "-n",
+                namespace,
+                "--all-containers=true",
+                "--tail=100",
+                "--prefix=true",
+            ],
+            [
+                "logs",
+                "deployment/kyverno-admission-controller",
+                "-n",
+                namespace,
+                "--all-containers=true",
+                "--previous=true",
+                "--tail=100",
+                "--prefix=true",
+            ],
+        ):
+            diagnostic = _kubectl(k3s, [*arguments, "--request-timeout=10s"], check=False)
+            print("kubectl " + " ".join(arguments) + "\n" + diagnostic.stdout + diagnostic.stderr)
+    assert rollout.returncode == 0, rollout.stdout + rollout.stderr
+    actor = f"system:serviceaccount:{namespace}:exomem-image-admission"
+    for verb, resource, target_namespace in (
+        ("get", "secrets", "exo-cell-aaaaaaaaaaaaaaaa"),
+        ("list", "secrets", "exo-cell-aaaaaaaaaaaaaaaa"),
+        ("create", "secrets", namespace),
+        ("update", "serviceaccounts", namespace),
+        ("create", "validatingadmissionpolicies", None),
+        ("update", "imagevalidatingpolicies.policies.kyverno.io", None),
+        ("create", "validatingwebhookconfigurations", None),
+    ):
+        arguments = ["auth", "can-i", verb, resource, f"--as={actor}"]
+        if target_namespace:
+            arguments.extend(["-n", target_namespace])
+        result = _kubectl(k3s, arguments, check=False)
+        assert result.stdout.strip() == "no", (verb, resource, result.stdout, result.stderr)
+    for hook in profile["webhooks"]:
+        resource = (
+            "validatingwebhookconfigurations"
+            if hook["kind"] == "ValidatingWebhookConfiguration"
+            else "mutatingwebhookconfigurations"
+        )
+        allowed = _kubectl(
+            k3s,
+            ["auth", "can-i", "update", f"{resource}/{hook['name']}", f"--as={actor}"],
+        )
+        assert allowed.stdout.strip() == "yes"
+    hook = "kyverno-resource-validating-webhook-cfg"
+
+    # Wait for actual policy registration, then rotate only this test installation's CA and leaf.
+    def bundle():
+        item = json.loads(
+            _kubectl(k3s, ["get", "validatingwebhookconfiguration", hook, "-o", "json"]).stdout
+        )
+        return next(
+            (
+                entry.get("clientConfig", {}).get("caBundle")
+                for entry in item.get("webhooks", [])
+                if entry.get("clientConfig", {}).get("caBundle")
+            ),
+            None,
+        )
+
+    deadline = time.monotonic() + 120
+    previous = None
+    while time.monotonic() < deadline and not previous:
+        previous = bundle()
+        if not previous:
+            time.sleep(1)
+    assert previous, "the runtime did not register its validating webhook"
+
+    controller = next(
+        doc
+        for doc in all_docs
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "cellctl"
+    )
+    producer_namespace = controller["metadata"]["namespace"]
+    producer_account = controller["spec"]["template"]["spec"]["serviceAccountName"]
+    producer = [
+        f"--as=system:serviceaccount:{producer_namespace}:{producer_account}",
+        "--as-group=system:authenticated",
+    ]
+    cell_namespace = "exo-cell-eeeeeeeeeeeeeeee"
+    image = "127.0.0.1:1/runtime@sha256:" + "a" * 64
+    # Admin seeds the previously admitted image; this does not prove a live signed family.
+    _kubectl(
+        k3s,
+        ["apply", "-f", "-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": cell_namespace,
+                    "labels": {"exomem.io/cloud-cell": "eeeeeeeeeeeeeeee"},
+                },
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {"name": "runtime-proof-producer", "namespace": cell_namespace},
+                "rules": [
+                    {
+                        "apiGroups": ["apps"],
+                        "resources": ["statefulsets"],
+                        "verbs": ["get", "patch"],
+                    },
+                    {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create"]},
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": "runtime-proof-producer", "namespace": cell_namespace},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "Role",
+                    "name": "runtime-proof-producer",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": producer_account,
+                        "namespace": producer_namespace,
+                    }
+                ],
+            },
+            {
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSet",
+                "metadata": {"name": "cell", "namespace": cell_namespace},
+                "spec": {
+                    "serviceName": "cell",
+                    "replicas": 0,
+                    "selector": {"matchLabels": {"app": "cell"}},
+                    "template": {
+                        "metadata": {"labels": {"app": "cell"}},
+                        "spec": {"containers": [{"name": "exomem", "image": image}]},
+                    },
+                },
+            },
+        ],
+    )
+    changed_patch = [
+        *producer,
+        "patch",
+        "statefulset/cell",
+        "-n",
+        cell_namespace,
+        "--dry-run=server",
+        "--type=json",
+        "-p",
+        json.dumps(
+            [
+                {
+                    "op": "replace",
+                    "path": "/spec/template/spec/containers/0/image",
+                    "value": "127.0.0.1:1/runtime@sha256:" + "b" * 64,
+                }
+            ]
+        ),
+    ]
+    changed_image = _kubectl(k3s, changed_patch, check=False)
+    assert (
+        changed_image.returncode != 0 and "exomem-release-image-cloud-cell" in changed_image.stderr
+    ), changed_image.stderr
+    unchanged_patch = [
+        *producer,
+        "patch",
+        "statefulset/cell",
+        "-n",
+        cell_namespace,
+        "--dry-run=server",
+        "--type=merge",
+        "-p",
+        json.dumps(
+            {
+                "spec": {
+                    "template": {
+                        "metadata": {
+                            "annotations": {
+                                "kubectl.kubernetes.io/restartedAt": "2026-10-26T12:00:00Z"
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+    ]
+    _kubectl(k3s, unchanged_patch)
+    _kubectl(
+        k3s,
+        [*producer, "create", "--dry-run=server", "-f", "-"],
+        documents=[
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {"name": "backup", "namespace": cell_namespace},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "restartPolicy": "Never",
+                            "containers": [{"name": "backup", "image": image}],
+                        }
+                    }
+                },
+            }
+        ],
+    )
+    secrets = [f"kyverno-svc.{namespace}.svc.{suffix}" for suffix in profile["tlsSecretSuffixes"]]
+    _kubectl(k3s, ["delete", "secret", *secrets, "-n", namespace])
+    deadline = time.monotonic() + 180
+    changed = False
+    while time.monotonic() < deadline:
+        current = bundle()
+        if current and current != previous:
+            changed = True
+            break
+        time.sleep(1)
+    assert changed, "the runtime did not update its webhook CA with UPDATE-only credentials"
+    # The API server must also trust the replacement leaf, not only store a new CA string.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        trusted = _kubectl(k3s, unchanged_patch, check=False)
+        if trusted.returncode == 0:
+            break
+        time.sleep(1)
+    assert trusted.returncode == 0, trusted.stderr
+    changed_image = _kubectl(k3s, changed_patch, check=False)
+    assert (
+        changed_image.returncode != 0 and "exomem-release-image-cloud-cell" in changed_image.stderr
+    ), changed_image.stderr

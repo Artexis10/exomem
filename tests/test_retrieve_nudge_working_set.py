@@ -638,7 +638,7 @@ def test_a_real_rare_term_candidate_from_the_leaf_is_rendered(tmp_path: Path) ->
         "- resource: Quibbleflux Zorbnax Panel [Knowledge Base/Products/panel.md]"
         in block
     )
-    assert hook._WORKING_SET_UNRESOLVED_LINE in block
+    assert (packet.get("next_action") or {}).get("say", hook._WORKING_SET_UNRESOLVED_LINE) in block
 
 
 def test_at_most_five_candidates_are_rendered() -> None:
@@ -690,24 +690,6 @@ def test_a_candidate_ref_kind_or_title_cannot_forge_a_line() -> None:
 
     assert len(block.splitlines()) == 3, block
     assert block.count("forged") == 3, "the text survives, but only inside its line"
-
-
-def test_the_anchor_instruction_is_the_same_one_in_both_abstentions() -> None:
-    """`ambiguous` says two senses compete; `unresolved` says none resolved. The
-    instruction they end with — the thing the agent has to DO — is one string."""
-    assert hook._WORKING_SET_AMBIGUITY_LINE.endswith(
-        hook._WORKING_SET_ANCHOR_INSTRUCTION
-    )
-    assert hook._WORKING_SET_UNRESOLVED_LINE.endswith(
-        hook._WORKING_SET_ANCHOR_INSTRUCTION
-    )
-    assert hook._WORKING_SET_AMBIGUITY_LINE != hook._WORKING_SET_UNRESOLVED_LINE
-    # The ambiguity line's bytes are a contract already asserted above; the
-    # refactor into a shared instruction must not have moved them.
-    assert hook._WORKING_SET_AMBIGUITY_LINE == (
-        "Two senses match this turn. Call `recall_context` again with `anchor` "
-        "set to the ref you mean."
-    )
 
 
 def test_the_reminder_follows_an_unresolved_block_and_not_the_others() -> None:
@@ -2716,3 +2698,147 @@ def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_
     _run(monkeypatch, capsys, _event(), tmp_path)
     assert len(calls) == 7, "Unmarked anchors must make only one call."
     assert int(calls[6][0][calls[6][0].index("--max-chars") + 1]) == 4000
+
+
+# --------------------------------------------------------------------------- #
+# New vocabulary, handed over by the server once
+# --------------------------------------------------------------------------- #
+
+_DELTA = {
+    "entries": [
+        {"registry": "relations", "key": "vault.hosts", "label": "Hosts",
+         "description": "A venue hosts an event.", "parent": "relates_to"},
+        {"registry": "entity-types", "key": "venue", "label": "venue", "description": "A recurring place."},
+    ],
+    "more": 3,
+}
+
+
+def _shaped_packet(shape: str, delta: dict | None) -> dict:
+    """An anchors packet or a map packet, both with a body long enough to press on a small ceiling."""
+    if shape == "anchors":
+        packet = _packet(units=[{
+            "ref": f"Knowledge Base/Products/Cargo Sled.md#u{number}", "role": "resources",
+            "text": f"Unit {number} " + "x" * 200, "lifecycle": "active",
+            "provenance": {"path": "Knowledge Base/Products/Cargo Sled.md"},
+        } for number in range(8)])
+    else:
+        packet = {
+            "map": {"ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.", "items": [
+                {"title": f"Depot Ledger {number}", "ref": f"exomem://memory/depot-{number}", "description": "y" * 200}
+                for number in range(8)
+            ]},
+            "continuity": "opaque-token", "abstained": False,
+        }
+    if delta is not None:
+        packet["vocabulary_delta"] = delta
+    return packet
+
+
+@pytest.fixture
+def every_prompt(monkeypatch: pytest.MonkeyPatch, working_set_mode) -> None:
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+
+
+@pytest.mark.parametrize("shape", ["anchors", "map"])
+def test_new_vocabulary_is_rendered_whole_and_the_body_is_cut_around_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None, shape: str,
+) -> None:
+    """The server marks the delta delivered when it sends it, so a ceiling must cut the body, never the delta."""
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "1100")
+    _serve(monkeypatch, _shaped_packet(shape, _DELTA))
+
+    context = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert len(context) <= 1100
+    assert "- relations: vault.hosts (Hosts) — A venue hosts an event.; parent relates_to" in context
+    assert "- entity-types: venue — A recurring place." in context
+    assert "3 more added, not shown" in context
+    assert ("Unit 7" if shape == "anchors" else "Depot Ledger 7") not in context, "the body was cut, so the ceiling bit"
+
+
+def test_new_vocabulary_is_shown_again_once_after_a_compaction(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    """The server sends the delta once; a compaction rewrites the context that held it."""
+    _serve(monkeypatch, _shaped_packet("anchors", _DELTA))
+    marker = "vault.hosts (Hosts)"
+
+    assert marker in _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    _serve(monkeypatch, _shaped_packet("anchors", None))
+    assert marker not in _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    compact = {"hook_event_name": "SessionStart", "source": "compact", "session_id": SESSION}
+    checkpoint.dispatch_event("claude", compact, environ={"EXOMEM_HOOK_HOME": str(tmp_path)})
+    assert marker in _context(_run(monkeypatch, capsys, _event(), tmp_path)), "the first prompt after the compaction"
+    assert marker not in _context(_run(monkeypatch, capsys, _event(), tmp_path)), "and only that one"
+
+    checkpoint.dispatch_event("claude", compact, environ={"EXOMEM_HOOK_HOME": str(tmp_path)})
+    assert marker not in _context(_run(monkeypatch, capsys, _event(), tmp_path)), "a second compaction shows nothing stale"
+
+
+def test_a_session_that_was_never_told_shows_nothing_after_a_compaction(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    _serve(monkeypatch, _shaped_packet("anchors", None))
+    checkpoint.dispatch_event(
+        "claude", {"hook_event_name": "SessionStart", "source": "resume", "session_id": SESSION},
+        environ={"EXOMEM_HOOK_HOME": str(tmp_path)},
+    )
+
+    context = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert hook._VOCABULARY_DELTA_HEADER not in context
+
+
+def test_a_whole_stance_is_held_when_vocabulary_forces_the_map_to_be_cut(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "1100")
+    packet = _shaped_packet("map", _DELTA)
+    packet["stance"] = {"state": "ready", "generation": "stance-one", "items": [
+        {"ref": "sample.md#rule", "text": "Keep the source for each claim."},
+    ]}
+    values = {}
+    monkeypatch.setattr(hook, "_read_activation_token", lambda _session: "opaque-token")
+    monkeypatch.setattr(hook, "_write_activation_token", lambda *_args: None)
+    monkeypatch.setattr(hook, "_read_activation_value", lambda path: values.get(path, ""))
+    monkeypatch.setattr(hook, "_write_activation_value", lambda path, value: values.__setitem__(path, value))
+    _serve(monkeypatch, packet)
+
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert "Keep the source for each claim." in first
+    assert "Depot Ledger 7" not in first
+    assert "Keep the source for each claim." not in second
+    assert "already held" in second
+    assert "map unchanged" not in second
+    assert max(len(first), len(second)) <= 1100
+
+
+def test_an_undelivered_method_reset_does_not_advance_hook_continuity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    """A tiny render retries stale-method invalidation instead of acknowledging an unseen reset."""
+    packet = {
+        "map": {"ref": "exomem://map", "generation": "map", "items": []},
+        "task_context": {"methods": {"reset": True, "items": []}},
+        "continuity": "refreshed-token", "abstained": False,
+    }
+    seen = _serve(monkeypatch, packet)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "20")
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert hook._METHOD_RESET_LINE not in first
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "500")
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert hook._METHOD_RESET_LINE in second
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert [request["continuity"] for request in seen] == ["", "", "refreshed-token"]

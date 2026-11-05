@@ -54,6 +54,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
+from datetime import date
 from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
@@ -304,6 +305,8 @@ def cache_key(
 
     """
     return (
+        # Currency and weak-state ages change at midnight without a vault write.
+        date.today().isoformat(),
         tuple(freshness_key) if isinstance(freshness_key, (list, tuple)) else str(freshness_key),
         int(index_generation),
         str(roles_hash),
@@ -398,6 +401,7 @@ def encode_continuity(
     thread_ns: int | None = None,
     salt: str = "",
     map_generation: str | None = None,
+    method_versions: Sequence[Mapping[str, str]] = (),
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -438,6 +442,8 @@ def encode_continuity(
     }
     if map_generation is not None:
         payload["map_generation"] = str(map_generation)
+    if method_versions:
+        payload["method_versions"] = [dict(item) for item in method_versions]
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -543,6 +549,16 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     }
     if isinstance(payload.get("map_generation"), str):
         decoded["map_generation"] = payload["map_generation"]
+    methods = payload.get("method_versions")
+    decoded["method_versions"] = []
+    if isinstance(methods, list) and len(methods) + len(refs) <= CONTINUITY_MAX_REFS:
+        # These fixed field names define read hints, never semantic vocabulary or anchor evidence.
+        for item in methods:
+            if isinstance(item, dict) and all(
+                isinstance(item.get(key), str) and item[key] and len(item[key]) <= CONTINUITY_MAX_CHARS
+                for key in ("ref", "source_ref", "source_version")
+            ):
+                decoded["method_versions"].append({key: item[key] for key in ("ref", "source_ref", "source_version")})
     return decoded
 
 
@@ -1157,22 +1173,56 @@ def pin_lexical_checkpoint(
 
 @contextmanager
 def lexical_selection_scope(
-    vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None
-) -> Iterator[None]:
-    """Retain optional lexical reads while deferring lag repair until activation ends."""
+    vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None,
+    *, restricted: bool = False, purpose: str | None = None,
+) -> Iterator[freshness.RecallFreshnessCheckpoint | None]:
+    """Retain lexical reads, bridging only changes withheld from the current caller."""
     from . import lexstore
 
     if (
         recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
         or lexstore.backend() == "python"
     ):
-        yield
+        yield recall_checkpoint
         return
     with (
         lexstore.admitted_catalog_scope(vault_root),
-        lexstore.catalog_selection_scope(vault_root, lag_dispatch=_defer_lexical_repair),
+        lexstore.catalog_selection_scope(
+            vault_root, lag_dispatch=_defer_lexical_repair,
+        ) as selection,
     ):
-        yield
+        captured = None if selection is None else selection.checkpoints.get("kb")
+        if not restricted or captured is None or (
+            captured.instance_id == recall_checkpoint.instance_id
+            and captured.generation <= recall_checkpoint.generation
+        ):
+            # Equal or older catalogues keep their existing readiness and partial-lane outcomes.
+            yield recall_checkpoint
+            return
+        from . import find as find_module
+        from .governance import egress, policy
+
+        def prove() -> None:
+            # Re-prove both views on live authority; earlier verdicts cannot authorize a rebase.
+            with policy.outside_request_policy_snapshot():
+                visible = egress.visible_page_filter(
+                    vault_root, purpose=purpose, withheld=frozenset(),
+                )
+                request_held = captured_held = None
+                if visible is not None:
+                    request_held = view_lag.recall_withheld_lag(
+                        vault_root, "kb", recall_checkpoint, visible,
+                    )
+                    captured_held = view_lag.recall_withheld_lag(
+                        vault_root, "kb", captured, visible,
+                    )
+                if (request_held is None or captured_held is None
+                        or not egress.pin_proven_withheld(request_held | captured_held)):
+                    raise find_module.RetrievalIndexWarming(site="catalog_outcome")
+
+        prove()
+        yield captured
+        prove()
 
 
 def lexical_evidence(
@@ -2534,7 +2584,8 @@ def serve(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
-    limit = working_set.clamp_budget(max_chars)
+    # The public leaf clamps requests; internal budgets may already reserve carrier prose.
+    limit = working_set.clamp_budget(max_chars, minimum=0)
     registry = context_roles.load_roles(root)
     conventions_registry = activation_conventions.load_conventions(root)
     stamp = _key_text(freshness_key)

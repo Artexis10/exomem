@@ -56,7 +56,7 @@ def _spy(
 
     def fake(
         vault_root, *, today, now, principal=None, purpose=None,
-        payload=None, review_payload=None, sources=None,
+        payload=None, review_payload=None, sources=None, role_state=None,
     ):
         calls.append({"today": today, "now": now, "purpose": purpose, "payload": payload})
         rows = [{"ref": f"exomem://memory/{len(calls)}", "kind": "open", "path": PAGE}]
@@ -274,7 +274,10 @@ def test_artifact_role_findings_are_served_again_on_a_hit_and_a_change_rebuilds(
     _persist(tmp_path)
     calls = _spy(monkeypatch, role_token="findings-v1")
     live = {"token": "findings-v1"}
-    monkeypatch.setattr(due_state, "_role_token", lambda *_a, **_k: live["token"])
+    monkeypatch.setattr(
+        due_state, "_read_role_state",
+        lambda _root, keep: due_state._ServedRoleState([], live["token"], keep, {}),
+    )
     now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
     due_state.served_entries(tmp_path, now=now, principal=_principal())
     due_state.served_entries(tmp_path, now=now, principal=_principal())

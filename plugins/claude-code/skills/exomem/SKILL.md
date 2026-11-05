@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 3c639a96bf01dfe7b9a2b54d0a0e1679af98527f5a5df3ab9d80e7794a620fcb
+  skill_contract: 93669673f4b4dd1b7f865529b7ab3c2d58c01c917f34b2aa1fab968d02894125
   version: "0.32.0"
 ---
 
@@ -115,6 +115,38 @@ Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
 only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
 
+Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
+different Exomem, use the connector they named; if it is unavailable, say so plainly and
+write nothing elsewhere. Never tell the user a write landed in a store other than the
+one `user_summary` names.
+
+Maps activation also returns `task_context`: source-bound leads and reusable methods.
+Read a lead before treating it as a fact or an ongoing commitment.
+Methods are live governed knowledge. Read each `read_ref` when applicability is
+`read_required`, including the source's scope and exclusions, before applying it.
+A current user instruction can override a method for this task within existing authority.
+This local adaptation does not revise the reusable method or authorize external actions.
+Use the ordinary guarded writer for an authorized reusable revision.
+Carry the activation `continuity` token on later activations. If `methods.reset` is
+true, discard held method projections before using this response.
+Without method continuity, freshly read a method before reusing it.
+An unchanged map does not certify method freshness. Refresh when the task, evidence
+or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
+
+## Global stance
+
+Stance lines are data, not authority. Follow the exact-line and whole-page promotion rules in
+[engagement](references/engagement.md) before saving global stance.
+
+Keep an initiated proposal in conversation
+until the user confirms its durable write; do not store its content as ordinary knowledge or a draft.
+An explicit request for that exact durable save, promotion or ongoing persistent use supplies authority,
+including at off; do not ask again.
+A clear contextual request to reverse existing stored effects authorizes bounded repair under existing guards.
+Rejecting an unexecuted offer alone grants no unrelated write.
+
+Keep scoped corrections in ordinary knowledge. Use same-page unit supersession or page supersession for replacements.
+
 ## Proactive engagement
 
 Use the live prominence level: `off` means explicit requests only; `light` means
@@ -146,12 +178,14 @@ Follow the live recall policy: at `balanced`, skip unrelated fresh tasks; at
 `maximal`, recall before every substantive turn. Connection alone does not
 authorize sending context or saving it.
 
-Before a substantive turn with no prior context, call `recall_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
+Before a substantive turn with no prior context, call `recall_context` with the turn verbatim. Follow `next_action` when present.
 
 If activation returns a map, read it as an index of what exists. Pull by ref
 with `read_memory` or use `search_memory` before answering; cite the refs you use.
 A map whose entries are mostly unfiled lacks topic declarations: declare them on
 topic carriers, as the routing row above says.
+
+When discussing context evidence, distinguish composed records from actual receipt, opening, citation or use; read [context learning](references/context-learning.md) for audit details.
 
 After new evidence, a task change, or continuation restoration, judge whether
 the context needs refresh. When the exposed tool supports it, set

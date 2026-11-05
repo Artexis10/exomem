@@ -380,19 +380,41 @@ def _replace_by_type_section(
     return _replace_section(text, SOURCES_BY_TYPE_HEADER, new_block, next_h2_or_end=True)
 
 
+def _capped(bullets: list[str]) -> tuple[list[str], list[str]]:
+    """The newest `RECENT_ACTIVITY_CAP` bullets of a recent list, and the ones that drop off."""
+    return bullets[:RECENT_ACTIVITY_CAP], bullets[RECENT_ACTIVITY_CAP:]
+
+
 def _prepend_recent_capture(text: str, *, date_iso: str, rel_source_path: str) -> str:
-    """Insert a new bullet at the top of the Recent captures list."""
+    """Insert a new bullet at the top of the Recent captures list, keeping the newest `RECENT_ACTIVITY_CAP`.
+
+    An uncapped list grew with every Source, and each write re-read and re-parsed all of it.
+    """
     entry = f"- {date_iso} — [[{rel_source_path}]]"
     header_idx = text.find(SOURCES_RECENT_HEADER)
     if header_idx == -1:
         # No Recent captures section — append one at the end.
         return text.rstrip() + "\n\n" + SOURCES_RECENT_HEADER + "\n\n" + entry + "\n"
-    # Find the blank line after the header.
-    body_start = text.find("\n\n", header_idx)
+    section_end = text.find("\n## ", header_idx + len(SOURCES_RECENT_HEADER))
+    if section_end == -1:
+        section_end = len(text)
+    # Find the blank line after the header, inside this section only.
+    body_start = text.find("\n\n", header_idx, section_end)
     if body_start == -1:
-        return text + "\n\n" + entry + "\n"
-    body_start += 2
-    return text[:body_start] + entry + "\n" + text[body_start:]
+        body_start = text.find("\n", header_idx, section_end)
+        if body_start == -1:
+            return text.rstrip() + "\n\n" + entry + "\n"
+        body_start += 1
+    else:
+        body_start += 2
+    # The section is generated here: its list is the lines that start with "- ", as in Recent activity.
+    lines = text[body_start:section_end].splitlines()
+    if entry in lines:
+        return text
+    kept, _dropped = _capped([entry, *(line for line in lines if line.startswith("- "))])
+    rest = [line for line in lines if not line.startswith("- ")]
+    body = "\n".join(kept) + "\n" + ("\n".join(rest) + "\n" if rest else "")
+    return text[:body_start] + body + text[section_end:]
 
 
 def _update_top_index(
@@ -443,9 +465,8 @@ def _prepend_recent_activity(
     bullets.insert(0, new_bullet)
 
     trim_note: str | None = None
-    if len(bullets) > RECENT_ACTIVITY_CAP:
-        dropped = bullets[RECENT_ACTIVITY_CAP:]
-        bullets = bullets[:RECENT_ACTIVITY_CAP]
+    bullets, dropped = _capped(bullets)
+    if dropped:
         bottom_excerpt = dropped[0]
         # Pull just the date + first chunk of the dropped bullet for the note.
         trim_note = (
@@ -838,7 +859,11 @@ def compute_subindex_writes(
 
     Writes are only included for files that exist. Missing sub-indexes
     are silently skipped — not every machine maintains the full hierarchy.
+    A sub-index that a restricted writer may not write is skipped the same way.
     """
+    from .governance import connector_boundary
+
+    admitted = connector_boundary.effect_admission(vault_root)
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = []
     planned_bases = {
@@ -903,7 +928,7 @@ def compute_subindex_writes(
 
     # Sources/index.md refresh.
     sources_index = sources_index_path(vault_root)
-    if sources_index.exists():
+    if sources_index.exists() and admitted(sources_index):
         try:
             current, guard = read_guarded_text(vault_root, sources_index)
         except OSError:
@@ -934,7 +959,7 @@ def compute_subindex_writes(
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
-    if notes_index.exists():
+    if notes_index.exists() and admitted(notes_index):
         try:
             current, guard = read_guarded_text(vault_root, notes_index)
         except OSError:
@@ -961,7 +986,7 @@ def compute_subindex_writes(
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
-    if entities_index.exists():
+    if entities_index.exists() and admitted(entities_index):
         try:
             current, guard = read_guarded_text(vault_root, entities_index)
         except OSError:

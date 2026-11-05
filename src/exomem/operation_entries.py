@@ -592,7 +592,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes")),
+        _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes", "view", "offset", "limit", "revision")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
@@ -640,7 +640,7 @@ _REMAINING = {
         _row("inbound-links", "read_connections", ("target", "path")),
         _row("resolve-entity", "read_connections", ("name", "entity_type", "entity_family", "limit"), ("name",)),
         _row("resolve-relation", "read_connections", ("path", "target", "query", "requested_relation", "limit", "continuation")),
-        _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations"), ("name",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations", "ref"), ("name",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb and the `ref` field changed.
         _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("ref", "expected_hash", "expected_fingerprint", "why"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "observe_memory": ("operation", (

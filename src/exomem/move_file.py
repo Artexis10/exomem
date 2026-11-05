@@ -27,18 +27,22 @@ from typing import Any
 
 from . import (
     call_spans,
+    graph_sync,
     originals,
+    recap_folder,
     reserved_paths,
     semantic_index,
     semantic_writes,
     source_taxonomy,
     trash_metadata,
     working_set_heat,
+    writer_lease,
 )
 from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
+    BatchWriteError,
     ContentHashMismatchError,
     FrontmatterError,
     InboundLink,
@@ -106,14 +110,16 @@ class MoveFileValidation:
     atomic_supported: bool
 
 
-def _in_episode_folder(rel: str) -> bool:
-    """Whether `rel` lies anywhere under `Sources/Episodes/`, case-insensitively.
+def _in_episode_folder(vault_root: Path, rel: str) -> bool:
+    """Whether `rel` lies anywhere under `Sources/Episodes/` or a capture path's `Episodes/`, case-insensitively.
 
     A recap's revisions are found by one listing of that one folder, by a
     filename token. A move into it plants a page that listing may take for a
     recap; a move out of it, into a subfolder or by a rename that strips the
     token hides a live revision from it, so the next record leaves two live.
     """
+    if recap_folder.in_inbox(vault_root, rel, casefold=True):
+        return True
     parts = rel.replace("\\", "/").split("/")
     if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
         parts = parts[1:]
@@ -406,8 +412,12 @@ def move_file(
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> MoveFileResult | MoveFileValidation:
-    with ExitStack() as originals_context:
-        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context)
+    manager = writer_lease.active_manager()
+    boundary = manager.consistency_guard if validate_only else manager.mutation_guard
+    # Protect semantic creation and rollback, then release before standalone index fan-out.
+    with ExitStack() as mutation_context, ExitStack() as originals_context:
+        mutation_context.enter_context(boundary(vault_root, operation="move_file"))
+        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context)
 
 
 def _evicted_source(vault_root: Path, old_path: str) -> tuple[Path, str, originals.OriginalSnapshot] | None:
@@ -448,6 +458,7 @@ def _move_file_local(
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     originals_context: ExitStack,
+    mutation_context: ExitStack,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -575,7 +586,7 @@ def _move_file_local(
     _admit_destination(vault_root, new_rel)
     # Decided before any destination existence check, so it cannot tell a withheld view from none.
     collection_authority.refuse_view_paths(vault_root, (new_rel,), MoveFileError)
-    if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
+    if _in_episode_folder(vault_root, old_rel) or _in_episode_folder(vault_root, new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
             reason=(
@@ -823,11 +834,19 @@ def _move_file_local(
     writes: list[PlannedWrite] = []
     batch_index_reports: list[object] = []
     batch_fanout_paths: list[Path] = []
+    left_unchanged: list[str] = []
+    writable_page = connector_boundary.effect_admission(vault_root)
     if update_wikilinks and inbound:
         for item in plan_inbound_rewrites(vault_root, old_rel, new_rel, inbound):
             if not item.changes:
                 continue
             rel = item.path
+            if not writable_page(rel):
+                # A page the mover may not write keeps its link and the move commits. Only a page
+                # the mover may see is counted, so a withheld page leaves the answer as it is without it.
+                if visible is None or visible(rel):
+                    left_unchanged.append(rel)
+                continue
             if visible is not None and not visible(rel):
                 if item.append_only:
                     continue
@@ -850,6 +869,10 @@ def _move_file_local(
             if visible is None or visible(rel):
                 reported_touched.append(rel)
                 reported_updated += item.changes
+
+    if left_unchanged:
+        # No path in the sentence: a restricted caller's response drops a warning that embeds one.
+        warnings.append(f"{len(left_unchanged)} visible linking page(s) outside your write scope keep their link to the old path")
 
     def validation_result(
         *, source_hash: str, destination_hash: str
@@ -1090,6 +1113,14 @@ def _move_file_local(
                 _materialize_originals(vault_root, originals_context, old_rel)
                 heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
                 try:
+                    move_epoch = graph_sync.prepare_rename_epoch(
+                        vault_root,
+                        [(old_rel, new_rel), *([paired_binary] if paired_binary is not None else [])],
+                    )
+                except BaseException:
+                    working_set_heat.abandon_commit(heat_move)
+                    raise
+                try:
                     _held_rename(vault_root, old_rel, new_rel)
                     # The bytes follow the page inside the same transaction.
                     # A rollback below undoes both, so a failure can never
@@ -1110,11 +1141,18 @@ def _move_file_local(
                             raise
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
+                    if move_epoch is not None:
+                        # A held rename can fail after mutation; retain its floor and repair custody.
+                        graph_sync.provision_rename_recovery(move_epoch)
                     raise
+                child_started = False
                 try:
+                    if move_epoch is not None:
+                        graph_sync.publish_rename_epoch(move_epoch)
                     if combined:
                         batch_fanout_paths[:] = [write.path for write in combined]
                         with working_set_heat.primary_paths(()):
+                            child_started = True
                             batch_atomic_write(
                                 combined,
                                 vault_root=vault_root,
@@ -1132,6 +1170,10 @@ def _move_file_local(
                             )
                 except Exception as error:
                     working_set_heat.abandon_commit(heat_move)
+                    if _move_outcome_is_unproved(error, move_epoch, child_started):
+                        if move_epoch is not None:
+                            graph_sync.provision_rename_recovery(move_epoch)
+                        raise
                     log.exception(
                         "move_file: link-update batch failed for %s -> %s",
                         old_rel,
@@ -1144,10 +1186,14 @@ def _move_file_local(
                             _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                         _held_rename(vault_root, new_rel, old_rel, rollback=True)
                     except MoveFileError as rollback_error:
+                        if move_epoch is not None:
+                            graph_sync.provision_rename_recovery(move_epoch)
                         raise RuntimeError(
                             f"move link rewrite failed ({error}); rename rollback also "
                             f"failed: {rollback_error}"
                         ) from error
+                    if move_epoch is not None:
+                        graph_sync.restore_deletion_epoch(move_epoch)
                     raise
                 heat_moved.append(working_set_heat.observe_commit(heat_move))
 
@@ -1236,30 +1282,49 @@ def _move_file_local(
         if _validate_prepared_bindings is not None:
             _validate_prepared_bindings()
         _materialize_originals(vault_root, originals_context, old_rel)
-        _held_rename(vault_root, old_rel, new_rel)
+        move_epoch = graph_sync.prepare_rename_epoch(vault_root, [(old_rel, new_rel)])
         try:
+            _held_rename(vault_root, old_rel, new_rel)
+        except BaseException:
+            if move_epoch is not None:
+                graph_sync.provision_rename_recovery(move_epoch)
+            raise
+        child_started = False
+        try:
+            if move_epoch is not None:
+                graph_sync.publish_rename_epoch(move_epoch)
             if writes:
                 # Link rewrites are the move's bookkeeping, nobody's work.
                 with working_set_heat.primary_paths(()):
+                    child_started = True
                     batch_atomic_write(
                         writes, vault_root=vault_root,
                         _validate_prepared_bindings=_validate_prepared_bindings,
                     )
         except Exception as e:
+            if _move_outcome_is_unproved(e, move_epoch, child_started):
+                if move_epoch is not None:
+                    graph_sync.provision_rename_recovery(move_epoch)
+                raise
             log.exception(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
             )
             try:
                 _held_rename(vault_root, new_rel, old_rel, rollback=True)
             except MoveFileError as rollback_error:
+                if move_epoch is not None:
+                    graph_sync.provision_rename_recovery(move_epoch)
                 raise RuntimeError(
                     f"move link rewrite failed ({e}); rename rollback also failed: "
                     f"{rollback_error}"
                 ) from e
+            if move_epoch is not None:
+                graph_sync.restore_deletion_epoch(move_epoch)
             raise
 
     # The filesystem transaction succeeded. Only now notify watcher/sidecars;
     # no derived index observes a move that was subsequently rolled back.
+    mutation_context.close()
     from . import file_watcher, index_sync
 
     watcher_failures: list[str] = []
@@ -1377,6 +1442,17 @@ def _move_file_local(
         # than the owner receives none.
         index=index_feedback if visible is None else None,
     )
+
+
+def _move_outcome_is_unproved(
+    error: Exception, epoch: graph_sync.GraphDeletionEpoch | None, child_started: bool
+) -> bool:
+    # A committed or partial batch must retain its rename; erasing its epoch would hide surviving writes.
+    if isinstance(error, BatchWriteError) and (
+        error.committed or error.code == "BATCH_ROLLBACK_INCOMPLETE"
+    ):
+        return True
+    return child_started and epoch is not None and not graph_sync.rename_epoch_is_current(epoch)
 
 
 def _visible_semantic(

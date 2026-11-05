@@ -17,7 +17,7 @@ LLMs are welcome as instruments. The matrix's deterministic measurements keep th
 - **R1 — Generative instruments are admitted.** An instrument uses a versioned template, with vault text only in delimited data slots. Its output is logits or probabilities over a closed label set plus abstain, never sampled text. This amends `openspec/specs/frozen-verifiers/spec.md:29`.
 - **R2 — Readings may originate sensed families.** They never suppress, reorder or alter structural families. They never enter canon except through a write the agent authors (the existing relation writer, citing the reading id). This replaces close-memory-loop `design.md:212` condition 4 and its scenario "Verifier labels do not reach upkeep" (`specs/adaptive-memory-maintenance/spec.md:250-253`).
 - **R3 — The ledger is durable.** It is an append-only, per-vault readings ledger in the state root. It is not in the vault and not in the disposable `dreamer.sqlite`, and it is included in backup and export.
-- **R4 — Cloud runs the dreamer.** The dreamer runs in cells, reversing close-memory-loop `design.md:705`. Each cell senses with its own local instruments on shared read-only model weights. No third-party API sees vault text by default. `docs/hosted-inference-boundary.md` keeps its thresholds, rewritten as acceptance measures rather than permission gates. In the owner's words: "i dont see why we need to compromise". This slice specifies the Cloud placement and does not build it.
+- **R4 — Cloud runs the dreamer.** The dreamer runs in cells, reversing close-memory-loop `design.md:705`. Each cell senses with its own local instruments on shared read-only model weights. No third-party API sees vault text by default. `docs/hosted-inference-boundary.md` keeps its thresholds, rewritten as acceptance measures rather than permission gates. In the owner's words: "i dont see why we need to compromise". This slice specifies the Cloud placement and does not build it. Cells now start the Dreamer (`run-upkeep-on-a-busy-vault`); cell sensing still waits for the Cloud placement.
 - **R5 — Local GPU waits.** The LLM instrument senses on CPU at idle until `detect-co-tenant-gpu-pressure` ships. That change is not reordered.
 - **R6 — Authored pairs stay unlabelled.** "Asserted pairs carry no model label" (`openspec/specs/contradiction-queue/spec.md:343`) holds for v1.
 - **R7 — Local models are preferred.** Local models are the default. An API instrument is an allowed opt-in placement per vault. Its identity is provider + model id + version or snapshot date, and it is flagged `unpinned_weights`; a vendor retirement triggers the normal instrument-migration re-sense. Personal vaults opt in by the owner. Cloud tenants opt in explicitly per tenant, and are off by default. The same closed-label contract applies. In the owner's words: "i prefer using local models instead of api but whatever works. api can be very cheap … saves on resources".
@@ -61,7 +61,7 @@ Registry, in build order:
 | Question | Labels | Instrument | Slice |
 |---|---|---|---|
 | `pair.relation` | contradicts, refines, restates, neutral, abstain (both directions) | mDeBERTa NLI pin (already admitted) | 1 |
-| `mention.same_referent` | same, different, abstain | open-weight 3–8B instruct model chosen by a fixture spike | 2 |
+| `mention.same_referent` | same, different, abstain | open-weight instruct model chosen by a CPU fixture spike | 2 |
 | `recap.covered_by` | entailed, partial, absent | NLI | 4 |
 | supersession direction, relation typing, `term.same_meaning` | closed per question | chosen per question | 4 |
 
@@ -84,6 +84,18 @@ Registry, in build order:
   These are registry keys, never words matched in text. The text fed in (extractor `unit-text-v1`) is the unit's graph text, NFC-normalised, whitespace-collapsed and stripped. An empty text, or one longer than 2,000 characters, is out of scope.
 
 **Generative instruments (R1, slice 2 onward).** A template is a versioned string with named, delimited data slots. Vault text may appear only inside a slot, escaped so it cannot close its delimiter. The instrument reads the logits of the label tokens at one fixed position and normalises them over the closed set. It never samples, and never returns or stores generated text. A generative instrument's identity also names its template and label-token map.
+
+**CPU candidate scope.** Parameter count alone does not bound the instruct candidates.
+The fixture spike may compare quantized dense models and mixture-of-experts models.
+It records question quality, CPU latency, and memory cost against the deployment budget.
+Active parameter counts and weight-file sizes do not establish CPU speed or peak memory.
+
+The memory account is per node.
+Processes may share clean pages only when they map the same read-only weight artifact.
+Count those shared pages once, then add each process's private activations, cache, and runtime buffers.
+A mapped file alone does not prove that several workers share resident pages.
+A production choice needs measured sharing and contention under its configured node budget.
+The spike does not choose a new numeric production memory ceiling.
 
 **Input contract for the next instruments.** `mention.same_referent` compares two explicit mention contexts, with labels `same`, `different`, and `abstain`.
 `relation.applies` measures one proposed relation from source to target, with labels `fits`, `does_not_fit`, and `abstain`.
@@ -137,6 +149,78 @@ The ledger is `<vault state dir>/sensing/readings.sqlite` (WAL). The dreamer's p
 - **What the ledger never holds.** It never stores vault text. Hashes and refs identify the inputs, and the texts stay in the vault.
 - **Durability.** The ledger is durable user state (R3). Wiping the dreamer sidecar never touches it. Losing it costs re-sensing, never correctness. It is named in the state-root backup guidance (`docs/ARCHITECTURE.md`). It becomes a registered portable-derived export family with the Cloud placement (task 9.3; the reason is under Rulings).
 
+### D2a. Versioned requests and the shared queue
+
+`InputSlot` records a slot name, reference, path, extractor, input hash, and optional occurrence anchor or registry key.
+`SenseRequest` holds the question, input version, ordered slots, and matching private input texts.
+An owned request adds its stable candidate key, priority, and order key.
+Question contracts validate their own slot names, extractors, and input shapes.
+A producer cannot define an arbitrary new question through a request.
+
+Legacy `pair.relation` unit requests retain their existing identity and output bytes.
+Version 2 binds the question to each ordered slot name, extractor, text hash, and occurrence anchor.
+Paths and references record provenance; they do not define content identity.
+The registry-definition slot hashes that definition and canonical key, without hashing unrelated entries.
+New instrument identities also bind the label-token map that determines their vector columns.
+Threshold-only changes still rederive verdicts without sensing.
+
+Keep ledger SQL schema 1 and its append-only records.
+Version 2 output JSON records its version, columns, vectors, and verdict.
+NLI vectors use `ab` and `ba`; instruct vectors use `answer`.
+An absent output version and legacy `directions` decode as version 1.
+Readers validate vector names, widths, columns, and finite values before deriving a verdict.
+Current-reading lookup selects active identities for the request's question.
+It returns reading and instrument provenance without another request's stored page references.
+The consumer renders references from its own current inputs.
+
+Projection schema 4 has one `sense_jobs` queue for all questions.
+The dreamer continues to own pages, units, and pair presentation.
+Pair selection writes its current requests in the same transaction.
+Audit and later producers use a narrow writer that opens an existing compatible projection only.
+That writer never initializes, rebuilds, or wipes a projection.
+An absent, busy, seeding, or incompatible projection yields a named unavailable result.
+The producer resubmits later.
+
+Queue ownership is `(owner, scope_key, request_key)`.
+A stable scope uses the existing published-admission identity from its actual release predicate, plus the sweep configuration.
+It never invents a serialization of the request principal.
+The unrestricted owner path keeps its established release semantics.
+An unstable release view uses invocation-local ownership without pruning another invocation's work.
+Before extraction, a producer captures the projection incarnation and the scope revision.
+A completed replacement commits only if both still match; a concurrent loser defers without deleting requests.
+The incarnation stays fixed for the projection file and differs from its per-write generation.
+This prevents a slow earlier sweep from erasing fresh work without holding a lease across parsing.
+Replacing one producer's completed scope removes its obsolete requests atomically.
+A stable request key identifies a candidate independently of its current input content.
+Partial sweeps do not erase a completed request set.
+Producers own current extraction, invalidation, and resubmission after rebuilds or instrument changes.
+A historical reading produced during an edit race stays durable but cannot satisfy a different current input.
+Workers deduplicate identical inference through the reading identity.
+They scan with keyset pagination until runnable work is found or the queue is exhausted.
+Completed or refused jobs ahead of another question cannot starve that question.
+The worker only reads queue rows and appends ledger readings; it never acknowledges work in the projection.
+Dreamer ingestion retires satisfied jobs for every owner, including jobs without pair presentation rows.
+It also removes empty invocation-local scope metadata.
+Before launching a child, the supervisor excludes ledger-completed and question-refused jobs from runnable work.
+Admission and refusal backoff bind the question, identity, and current admission evidence.
+Restoring missing weights can therefore clear that question's refusal without changing its pin.
+Ledger incompatibility remains a worker-wide failure.
+
+Mention producers select explicit half-open Unicode code-point offsets in the extractor's exact context.
+A constructor validates the range and constructs `before`, `mention`, and `after` data for the selected occurrence.
+It never guesses between repeated occurrences.
+A unique literal match may supply missing development offsets; absent or repeated matches are invalid input.
+This contract adds no candidate discovery.
+
+Audit extracts `page-claim-v1` from the same parsed pages that establish the finding's signal version.
+It does not use an unverified cached claim or load a model in the request.
+The sensing setting controls this ledger path.
+Legacy claim flags no longer enable inline audit inference; no synchronous fallback remains.
+Missing current evidence queues a request and leaves the finding unlabelled.
+A valid ledger lookup continues while the disposable projection is unavailable; only missing-work submission defers.
+An admitted non-abstaining reading adds its reading identity beside the existing polarity metadata.
+Audit jobs create no pair presentation rows and change no structural rank, cap, signal version, or triage state.
+
 ### D3. Invalidation and migration
 
 Consumption is by content, never by reading age. For a proposed pair, the dreamer computes the current text hash of each unit and looks up readings by `input_key`:
@@ -163,10 +247,11 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
 - **Supervision.** The dreamer loop drives the supervisor once per poll. While a child is alive, the loop re-reads the gate every 2 seconds between ticks, without running a tick, so the dreamer's own schedule and CPU budget are unchanged.
 - **Launch.** The supervisor launches a child only when all of these hold:
   - the sensing setting is `on`;
-  - the dreamer's gate would run a tick (`dreamer_policy.decide`: setting, standby, quiet mode, pressure, foreground idle, freshness, settle, graph debt, index backlog, the dreamer's own budget and backoff);
+  - the child's own gate is open (`dreamer_policy.sensor_gate`: setting on and not in standby), and the service is not a Cloud cell;
   - the sense queue is not empty;
-  - the worker's own hourly budgets have room.
-- **Termination.** The supervisor terminates the child when any gate closes, with a 5-second grace before a kill. Quiet mode, auto-quiet pressure and standby kill it, so its RAM returns to the host.
+  - the worker's own hourly budgets have room;
+  - the host's available memory is above the peak resident memory the last child recorded for the active instrument (the action `memory`). With no such peak the first child launches and records one.
+- **Termination.** The supervisor terminates the child when its own gate closes, with a 5-second grace before a kill. The setting off or paused and standby stop it, so its RAM returns to the host. A Cloud cell never launches it until the Cloud placement (task 9.3). Quiet mode, foreground activity and the dreamer's tick holds do not, and a running child is never killed for memory. `run-upkeep-on-a-busy-vault` amended this.
 - **Budgets.**
   - 300 CPU-seconds per rolling hour (about 8% of one core), counting model load.
   - 600 judgements per rolling hour.
@@ -176,7 +261,7 @@ Inference runs only in a supervised, disposable child process: `python -m exomem
   - A child the supervisor terminates is charged its last report plus the wall time since, which bounds a one-thread child's CPU. A child that dies without reporting is charged its whole allotment.
 - **What the child reads.** Only the projection's sense queue (read-only, non-waiting) and the ledger. It never reads or writes the vault, takes no lease and schedules no index work.
 - **What the child inherits.** An allowlisted environment only: `PATH`, `HOME`, user and locale (`LANG`, `LC_*`, `TZ`), temp dirs, `PYTHONPATH` and `VIRTUAL_ENV`, the XDG dirs, the Hugging Face and torch cache locations, and the state-root and logging variables it needs to find the ledger. A variable whose name contains `TOKEN`, `SECRET`, `KEY`, `PASSWORD`, `CREDENTIAL`, `COOKIE` or `AUTH` never passes, whatever the allowlist says. The parent forces `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, an empty `CUDA_VISIBLE_DEVICES` and one thread for every math library.
-- **Soft failure.** A child that cannot admit its instrument exits with a named refusal, and the supervisor reports it without relaunching until the setting or the pin changes. Refusal causes: no pin, label map unknown, weights missing, digest mismatch, dependency missing, fixtures failed, and a ledger this build cannot use. A batch with non-finite output records no reading and the child carries on.
+- **Soft failure.** Admission refusal names its question, identity, and admission evidence. The worker skips that question and continues other runnable questions. Relevant evidence changes, including restored weights, clear its backoff. Ledger incompatibility stops the worker. A batch with non-finite output records no reading and the child carries on.
 - **Sensing off.** Byte-identical to a build without sensing. The setting reads `EXOMEM_SENSING` first; only when it is unset does a request consult the config file, through a five-second per-process memo keyed by `EXOMEM_CONFIG_PATH`, so an ordinary read with sensing off does no per-read file I/O.
 
 ### D5. Pair proposers
@@ -284,12 +369,12 @@ What slice 1 serves (review of slice 1, 2026-09-28):
   - the supervisor's gates, budgets and kill.
 
   The real pin runs only in the dedicated `nli` lane (`EXOMEM_RUN_REAL_NLI=1`), as the stance verifier's gate does.
-- **Resource probes.** A supervised child's CPU seconds per judgement, peak RSS and kill-to-exit time are measured and recorded below. Quiet mode must end the child within one supervisor poll.
+- **Resource probes.** A supervised child's CPU seconds per judgement, peak RSS and kill-to-exit time are measured and recorded below. Standby or the setting off must end the child within one supervisor poll.
 - LongMemEval is not used.
 
 ## Slices
 
-1. Ledger and reading record; invalidation and migration; the sensor worker with gates, budgets and the quiet kill; `pair.relation` on the admitted NLI pin; the proposers; contradiction components and refinement/supersession chains; the status line on read and activation; egress twins, replay reproducibility and fixtures. Close close-memory-loop 8.4.
+1. Ledger and reading record; invalidation and migration; the sensor worker with its gate, budgets and memory admission; `pair.relation` on the admitted NLI pin; the proposers; contradiction components and refinement/supersession chains; the status line on read and activation; egress twins, replay reproducibility and fixtures. Close close-memory-loop 8.4.
 2. `mention.same_referent` on an instruct model chosen by a fixture spike; the generative template runtime (R1); local GPU placement after co-tenant pressure detection ships (R5).
 3. Tensions through the upkeep block as sensed families (R2), with reading-id citation in the relation writer; the audit's NLI enrichment moves onto the ledger.
 4. `recap.covered_by`; supersession direction, relation typing, `term.same_meaning`; convergence and emerging-connection projections.

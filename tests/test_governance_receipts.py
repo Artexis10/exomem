@@ -37,6 +37,7 @@ from exomem import (
 )
 from exomem import reconcile as reconcile_module
 from exomem.governance import egress, receipts, store
+from exomem.governance.principal import library_scope
 
 #: How long a deadlock valve waits before declaring a thread stuck.
 #:
@@ -1867,7 +1868,8 @@ def test_governed_file_delete_records_lifecycle_before_terminal_and_keeps_lineag
     target.write_text(plaintext, encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/governed-delete.md")
 
-    result = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        result = delete_file.delete_file(vault, path=rel, confirm=True)
 
     records = _receipt_records(vault)
     phases = [(item["event_type"], item["phase"]) for item in records]
@@ -1944,7 +1946,8 @@ def test_deleting_a_restricted_item_tombstones_it_however_the_restriction_is_wri
     )
     _write_restriction_shape(vault, "Notes/Insights/restricted-delete.md", shape=shape)
 
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
 
     tombstones = list(
         (vault / "Knowledge Base" / "_Governance" / "deletion-tombstones").glob("*.json")
@@ -1964,7 +1967,8 @@ def test_a_tombstoned_path_stays_withheld_after_the_policy_is_removed(
     body = "---\ntype: insight\n---\n# Restricted stale\n"
     (vault / rel).write_text(body, encoding="utf-8")
     _write_restriction_shape(vault, "Notes/Insights/restricted-stale.md", shape=shape)
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
     governance = vault / "Knowledge Base" / "_Governance"
     shutil.rmtree(governance / "scopes")
     if (governance / "rules").exists():
@@ -1994,7 +1998,8 @@ def test_restoring_a_restricted_item_is_governed_however_the_restriction_is_writ
     assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
     _write_restriction_shape(vault, "Notes/Insights/restricted-restore.md", shape=shape)
 
-    recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+    with library_scope():
+        recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
 
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
 
@@ -2008,7 +2013,8 @@ def test_tombstone_suppresses_stale_page_before_empty_policy_and_not_same_hash_s
     (vault / doomed_rel).write_text(body, encoding="utf-8")
     (vault / sibling_rel).write_text(body, encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/doomed.md")
-    delete_file.delete_file(vault, path=doomed_rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=doomed_rel, confirm=True)
     governance = vault / "Knowledge Base" / "_Governance"
     shutil.rmtree(governance / "scopes")
     shutil.rmtree(governance / "rules")
@@ -2036,7 +2042,8 @@ def test_recovery_uses_committed_deletion_lineage_after_policy_disappears(
         encoding="utf-8",
     )
     _write_restricting_policy(vault, "Notes/Insights/recover-lineage.md")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
     governance = vault / "Knowledge Base" / "_Governance"
     shutil.rmtree(governance / "scopes")
     shutil.rmtree(governance / "rules")
@@ -2046,9 +2053,10 @@ def test_recovery_uses_committed_deletion_lineage_after_policy_disappears(
     membership.clear_memo()
     egress.clear_decision_memo()
 
-    recovered = recover_from_trash.recover_from_trash(
-        vault, trash_path=deleted.trash_path
-    )
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(
+            vault, trash_path=deleted.trash_path
+        )
 
     assert recovered.restored_path == rel
     assert target.exists()
@@ -2073,7 +2081,7 @@ def test_governed_directory_over_receipt_bound_refuses_before_any_evidence_or_mo
         (root / f"{index:03}.md").write_text(f"# {index}\n", encoding="utf-8")
     _write_restricting_policy(vault, "Scratch/too-many/**")
 
-    with pytest.raises(delete_directory.DeleteDirectoryError) as error:
+    with library_scope(), pytest.raises(delete_directory.DeleteDirectoryError) as error:
         delete_directory.delete_directory(
             vault, path=rel, confirm=True, recursive=True, force_orphan=True
         )
@@ -2142,14 +2150,15 @@ def test_recovery_terminal_crash_is_finalized_from_marker_without_replaying_move
         encoding="utf-8",
     )
     _write_restricting_policy(vault, "Notes/Insights/recovery-crash.md")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
 
     def crash(point: str) -> None:
         if point == "recovery_terminal":
             raise RuntimeError("simulated crash")
 
     monkeypatch.setattr(lifecycle, "_checkpoint", crash)
-    with pytest.raises(RuntimeError, match="simulated crash"):
+    with library_scope(), pytest.raises(RuntimeError, match="simulated crash"):
         recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
     assert target.exists()
     before = _semantic_snapshot(vault)
@@ -2159,7 +2168,8 @@ def test_recovery_terminal_crash_is_finalized_from_marker_without_replaying_move
     assert _semantic_snapshot(vault) == before
     assert preview["repairs"] == [{"kind": "recovery_finalize", "event_id": preview["repairs"][0]["event_id"]}]
     monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
-    applied = lifecycle.reconcile(vault, dry_run=False)
+    with library_scope():
+        applied = lifecycle.reconcile(vault, dry_run=False)
     assert applied["repairs"] == preview["repairs"]
     assert target.exists()
     assert not list(
@@ -2191,7 +2201,8 @@ def test_direct_residue_probe_blocks_terminal_even_when_fanout_claims_success(
         lambda _vault, paths: index_sync.observed_delete_report(paths, degraded=False),
     )
 
-    result = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        result = delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert any("remains tombstoned" in warning for warning in result.warnings)
     records = _receipt_records(vault)
@@ -2205,7 +2216,8 @@ def test_direct_residue_probe_blocks_terminal_even_when_fanout_claims_success(
 
     preview = lifecycle.reconcile(vault, dry_run=True)
     assert preview["repairs"][0]["kind"] == "deletion_commit"
-    lifecycle.reconcile(vault, dry_run=False)
+    with library_scope():
+        lifecycle.reconcile(vault, dry_run=False)
     phases = [(item["event_type"], item["phase"]) for item in _receipt_records(vault)]
     assert phases.index(("deletion", "recorded")) < phases.index(("critical", "committed"))
 
@@ -2299,7 +2311,7 @@ def test_atomic_delete_refuses_cross_device_before_moving_content(
     devices = iter((10, 11))
     monkeypatch.setattr(lifecycle, "_device", lambda _path: next(devices))
 
-    with pytest.raises(delete_file.DeleteFileError) as error:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert error.value.code == "CROSS_DEVICE_MOVE"
@@ -2329,7 +2341,7 @@ def test_directory_census_drift_after_tombstone_refuses_atomic_move(
             (root / "late.md").write_text("# late\n", encoding="utf-8")
 
     monkeypatch.setattr(lifecycle, "_checkpoint", drift)
-    with pytest.raises(delete_directory.DeleteDirectoryError) as error:
+    with library_scope(), pytest.raises(delete_directory.DeleteDirectoryError) as error:
         delete_directory.delete_directory(
             vault,
             path=rel,
@@ -2350,7 +2362,8 @@ def test_tombstone_gates_registered_and_explicit_routes_without_policy(
     target = vault / rel
     target.write_text("# stale derivative\n", encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/all-routes.md")
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
     governance = vault / "Knowledge Base" / "_Governance"
     shutil.rmtree(governance / "scopes")
     shutil.rmtree(governance / "rules")
@@ -2392,9 +2405,10 @@ def test_repeat_delete_recover_delete_cycles_have_distinct_persisted_identity(
     )
     _write_restricting_policy(vault, "Notes/Insights/repeat-cycle.md")
 
-    first = delete_file.delete_file(vault, path=rel, confirm=True)
-    recover_from_trash.recover_from_trash(vault, trash_path=first.trash_path)
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        first = delete_file.delete_file(vault, path=rel, confirm=True)
+        recover_from_trash.recover_from_trash(vault, trash_path=first.trash_path)
+        delete_file.delete_file(vault, path=rel, confirm=True)
 
     deletion_records = [
         item for item in _receipt_records(vault) if item["event_type"] == "deletion"
@@ -2421,7 +2435,8 @@ def test_governed_delete_retains_tombstone_when_graph_failure_handle_is_returned
     )
     monkeypatch.setattr(index_sync, "delete_after_remove", lambda *_args, **_kwargs: failed)
 
-    result = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        result = delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert any("remains tombstoned" in warning for warning in result.warnings)
     markers = list((vault / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json"))
@@ -2438,7 +2453,8 @@ def test_governed_recovery_retains_markers_when_graph_failure_handle_is_returned
     target = vault / rel
     target.write_text("---\ntype: insight\nstatus: draft\n---\n# Hold recovery evidence\n", encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/failed-graph-recovery.md")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
     failed = index_sync.IndexSyncReport(
         "upsert",
         (rel,),
@@ -2447,7 +2463,8 @@ def test_governed_recovery_retains_markers_when_graph_failure_handle_is_returned
     )
     monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: failed)
 
-    result = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+    with library_scope():
+        result = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
 
     assert target.exists()
     assert any("remains tombstoned" in warning for warning in result.warnings)
@@ -2498,7 +2515,8 @@ def test_governed_delete_keeps_tombstone_for_legacy_void_index_callbacks(
     _write_restricting_policy(vault, "Notes/Insights/unverified-legacy-delete.md")
     _coerce_legacy_void_index_callbacks(monkeypatch)
 
-    result = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        result = delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert any("remains tombstoned" in warning for warning in result.warnings)
     assert result.index is not None
@@ -2528,11 +2546,13 @@ def test_governed_recovery_keeps_markers_for_legacy_void_index_callbacks(
             (index_sync.IndexComponentOutcome("epistemic_graph", "registered", "graph_rebuild_registered"),),
         ),
     )
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
     assert any(item["event_type"] == "deletion" for item in _receipt_records(vault))
     _coerce_legacy_void_index_callbacks(monkeypatch)
 
-    result = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+    with library_scope():
+        result = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
 
     assert target.exists()
     assert any("remains tombstoned" in warning for warning in result.warnings)
@@ -2630,7 +2650,7 @@ def test_deletion_crash_windows_reconcile_once_in_receipt_order(
             raise RuntimeError("simulated lifecycle crash")
 
     monkeypatch.setattr(lifecycle, "_checkpoint", crash)
-    with pytest.raises(RuntimeError, match="simulated lifecycle crash"):
+    with library_scope(), pytest.raises(RuntimeError, match="simulated lifecycle crash"):
         delete_file.delete_file(vault, path=rel, confirm=True)
     monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
 
@@ -2677,21 +2697,23 @@ def test_recovery_crash_windows_reconcile_without_replaying_restore(
         encoding="utf-8",
     )
     _write_restricting_policy(vault, f"Notes/Insights/crash-{crash_point}.md")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
 
     def crash(point: str) -> None:
         if point == crash_point:
             raise RuntimeError("simulated recovery crash")
 
     monkeypatch.setattr(lifecycle, "_checkpoint", crash)
-    with pytest.raises(RuntimeError, match="simulated recovery crash"):
+    with library_scope(), pytest.raises(RuntimeError, match="simulated recovery crash"):
         recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
     monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
 
     if crash_point == "recovery_moved":
         # The semantic move happened but derived rebuild did not. The product
         # reconcile route heals ordinary indexes before receipt classification.
-        first = reconcile_module.reconcile(vault, dry_run=False).receipt_reconcile
+        with library_scope():
+            first = reconcile_module.reconcile(vault, dry_run=False).receipt_reconcile
     else:
         first = receipts.reconcile(vault, dry_run=False)
     placement_after_first = (target.exists(), (vault / deleted.trash_path).exists())
@@ -2735,9 +2757,10 @@ def test_governed_multi_item_directory_delete_and_inverse_recovery(vault: Path) 
         )
     _write_restricting_policy(vault, "Notes/Insights/governed-tree/**")
 
-    deleted = delete_directory.delete_directory(
-        vault, path=rel, confirm=True, recursive=True, force_orphan=True
-    )
+    with library_scope():
+        deleted = delete_directory.delete_directory(
+            vault, path=rel, confirm=True, recursive=True, force_orphan=True
+        )
     deletion = next(
         item for item in _receipt_records(vault) if item["event_type"] == "deletion"
     )
@@ -2750,9 +2773,10 @@ def test_governed_multi_item_directory_delete_and_inverse_recovery(vault: Path) 
     policy._CACHE.clear()
     membership.clear_memo()
 
-    recovered = recover_from_trash.recover_from_trash(
-        vault, trash_path=deleted.trash_path
-    )
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(
+            vault, trash_path=deleted.trash_path
+        )
 
     assert recovered.kind == "directory"
     assert (root / "one.md").exists()
@@ -2792,7 +2816,8 @@ def test_hypothetical_restore_frontmatter_can_govern_without_deletion_lineage(
     policy._CACHE.clear()
     membership.clear_memo()
 
-    recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+    with library_scope():
+        recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
 
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
 
@@ -2809,7 +2834,8 @@ def test_explicit_l6_only_material_is_an_ungoverned_lifecycle_noop(vault: Path) 
     policy._CACHE.clear()
     membership.clear_memo()
 
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert _receipt_records(vault) == []
     assert not (
@@ -2828,7 +2854,8 @@ def test_blocked_policy_treats_deleted_material_as_governed(vault: Path) -> None
     policy._CACHE.clear()
     membership.clear_memo()
 
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert any(item["event_type"] == "deletion" for item in _receipt_records(vault))
 
@@ -2841,7 +2868,8 @@ def test_stable_memory_ref_remains_tombstoned_after_source_disappears(vault: Pat
         encoding="utf-8",
     )
     _write_restricting_policy(vault, "Notes/Insights/stable-ref.md")
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
     deletion = next(
         item for item in _receipt_records(vault) if item["event_type"] == "deletion"
     )
@@ -2864,11 +2892,13 @@ def test_media_recovery_stays_hidden_until_clip_is_rebuilt(
     target = vault / rel
     target.write_bytes(b"not-a-real-image-but-an-exact-artifact")
     _write_restricting_policy(vault, "Notes/Insights/recover-image.png")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
 
-    recovered = recover_from_trash.recover_from_trash(
-        vault, trash_path=deleted.trash_path
-    )
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(
+            vault, trash_path=deleted.trash_path
+        )
 
     assert any("remains tombstoned" in warning for warning in recovered.warnings)
     assert not any(item["event_type"] == "recovery" for item in _receipt_records(vault))
@@ -2883,11 +2913,13 @@ def test_media_recovery_can_activate_when_clip_is_explicitly_disabled(
     target = vault / rel
     target.write_bytes(b"exact-disabled-artifact")
     _write_restricting_policy(vault, "Notes/Insights/recover-disabled-image.png")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
 
-    recovered = recover_from_trash.recover_from_trash(
-        vault, trash_path=deleted.trash_path
-    )
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(
+            vault, trash_path=deleted.trash_path
+        )
 
     assert not any("remains tombstoned" in warning for warning in recovered.warnings)
     assert recovered.index == {
@@ -2911,14 +2943,16 @@ def test_staged_recovery_tombstones_a_custom_restore_path(
         encoding="utf-8",
     )
     _write_restricting_policy(vault, "Notes/Insights/custom-origin.md")
-    deleted = delete_file.delete_file(vault, path=original, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=original, confirm=True)
     monkeypatch.setattr(lifecycle, "_restored_derivatives_exact", lambda _operation: False)
 
-    recovered = recover_from_trash.recover_from_trash(
-        vault,
-        trash_path=deleted.trash_path,
-        restore_path=custom,
-    )
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(
+            vault,
+            trash_path=deleted.trash_path,
+            restore_path=custom,
+        )
 
     assert any("remains tombstoned" in warning for warning in recovered.warnings)
     assert lifecycle.is_tombstoned(vault, custom) is True
@@ -2948,13 +2982,14 @@ def test_directory_target_with_uncaptured_extra_file_is_not_exact(
         (moved / "uncaptured.md").write_text("# uncaptured\n", encoding="utf-8")
 
     monkeypatch.setattr(lifecycle, "_checkpoint", add_uncaptured_target)
-    deleted = delete_directory.delete_directory(
-        vault,
-        path=rel,
-        confirm=True,
-        recursive=True,
-        force_orphan=True,
-    )
+    with library_scope():
+        deleted = delete_directory.delete_directory(
+            vault,
+            path=rel,
+            confirm=True,
+            recursive=True,
+            force_orphan=True,
+        )
 
     assert any("remains tombstoned" in warning for warning in deleted.warnings)
     assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
@@ -2971,10 +3006,11 @@ def test_scene_enabled_video_recovery_finalizes_after_exact_scene_rebuild(
     rel = "Knowledge Base/Notes/Insights/recover-video.mp4"
     (vault / rel).write_bytes(b"video-recovery-artifact")
     _write_restricting_policy(vault, "Notes/Insights/recover-video.mp4")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
-    recovered = recover_from_trash.recover_from_trash(
-        vault, trash_path=deleted.trash_path
-    )
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+        recovered = recover_from_trash.recover_from_trash(
+            vault, trash_path=deleted.trash_path
+        )
     assert any("remains tombstoned" in warning for warning in recovered.warnings)
 
     embeddings.ClipIndex(vault).upsert_frames(
@@ -2991,7 +3027,8 @@ def test_scene_enabled_video_recovery_finalizes_after_exact_scene_rebuild(
         encoding="utf-8",
     )
 
-    report = lifecycle.reconcile(vault)
+    with library_scope():
+        report = lifecycle.reconcile(vault)
 
     assert report["repairs"][0]["kind"] == "recovery_finalize"
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
@@ -3004,7 +3041,8 @@ def test_corrupt_lifecycle_marker_fails_closed_for_stale_egress(vault: Path) -> 
     rel = "Knowledge Base/Notes/Insights/corrupt-marker.md"
     (vault / rel).write_text("# Corrupt marker secret\n", encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/corrupt-marker.md")
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
     tombstone = next(
         (
             vault
@@ -3035,7 +3073,8 @@ def test_redirected_lifecycle_marker_manifest_fails_closed(vault: Path) -> None:
     rel = "Knowledge Base/Notes/Insights/redirected-marker.md"
     (vault / rel).write_text("# Redirected marker secret\n", encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/redirected-marker.md")
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
     tombstone = next(
         (
             vault
@@ -3078,7 +3117,7 @@ def test_lifecycle_tombstone_root_symlink_is_refused_before_intent_or_move(
     )
     tombstone_root.symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(delete_file.DeleteFileError) as error:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert error.value.code == "LIFECYCLE_PATH_UNSAFE"
@@ -3095,7 +3134,8 @@ def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
     rel = "Knowledge Base/Notes/Insights/snapshot-cache.md"
     (vault / rel).write_text("# Snapshot cache\n", encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/snapshot-cache.md")
-    delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
     original = receipts.event_records
     calls = 0
 
@@ -3134,7 +3174,7 @@ def test_reconcile_refuses_marker_redirected_away_from_original_source(
             raise RuntimeError("simulated crash")
 
     monkeypatch.setattr(lifecycle, "_checkpoint", crash)
-    with pytest.raises(RuntimeError, match="simulated crash"):
+    with library_scope(), pytest.raises(RuntimeError, match="simulated crash"):
         delete_file.delete_file(vault, path=rel, confirm=True)
     tombstone = next(
         (
@@ -3157,7 +3197,8 @@ def test_reconcile_refuses_marker_redirected_away_from_original_source(
     tombstone.write_text(json.dumps(marker), encoding="utf-8")
     monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
 
-    report = lifecycle.reconcile(vault)
+    with library_scope():
+        report = lifecycle.reconcile(vault)
 
     assert report["repairs"] == []
     assert original.exists()
@@ -3205,7 +3246,8 @@ def test_video_deletion_proves_scene_child_sidecar_residue_absent(
         return 2
 
     monkeypatch.setattr(scene_frames, "clear_scene_frames", clear_without_index_proof)
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
 
     assert any("remains tombstoned" in warning for warning in deleted.warnings)
     assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
@@ -3223,11 +3265,13 @@ def test_scene_recovery_is_explicitly_disabled_with_clip(
     rel = "Knowledge Base/Notes/Insights/recover-video-disabled.mp4"
     (vault / rel).write_bytes(b"disabled-video-recovery")
     _write_restricting_policy(vault, "Notes/Insights/recover-video-disabled.mp4")
-    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(vault, path=rel, confirm=True)
 
-    recovered = recover_from_trash.recover_from_trash(
-        vault, trash_path=deleted.trash_path
-    )
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(
+            vault, trash_path=deleted.trash_path
+        )
 
     assert not any("remains tombstoned" in warning for warning in recovered.warnings)
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
@@ -3255,3 +3299,27 @@ def test_sync_conflict_evidence_fails_the_append_closed(vault: Path) -> None:
         item["code"] == "evidence_conflict"
         for item in receipts.verify_chain(vault)["issues"]
     )
+
+
+def test_a_trashed_video_folder_with_scene_frames_recovers_in_a_governed_vault(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Projects/demo/media"
+    frames = vault / rel / "clip.mp4.frames"
+    frames.mkdir(parents=True)
+    (vault / rel / "clip.mp4.md").write_text("---\ntype: source\n---\n# Clip\n", encoding="utf-8")
+    (frames / "scene-001.jpg.md").write_text(
+        "---\ntype: source\nparent_media: Knowledge Base/Projects/demo/media/clip.mp4\n---\nWhiteboard text\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Private/**")
+    with library_scope():
+        deleted = delete_directory.delete_directory(
+            vault, path=rel, confirm=True, recursive=True, force_orphan=True
+        )
+
+    with library_scope():
+        recovered = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+
+    assert recovered.restored_path == rel
+    assert (frames / "scene-001.jpg.md").exists()

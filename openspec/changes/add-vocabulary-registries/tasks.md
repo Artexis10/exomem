@@ -89,7 +89,8 @@ Evidence: PR A supplies registry tolerance, shadowing, admitted-instance resolut
 
 ## S12. Vocabulary at authoring time (organisation PR B)
 
-- [ ] 12.1 Add one bounded vocabulary-delta carrier: at most 5 entries added since the session last received the caller's admitted effective digest, read from registry history, acknowledged through the due-state emission ledger and riding activation and mutating responses; the hook renders it and resets it on compact or resume. Check: one emission per session per digest change; admitted instances only; counted inside `limit_chars`.
+- [x] 12.1 Add one bounded vocabulary-delta carrier: at most 5 entries added since the session last received the caller's admitted effective digest, read from registry history, acknowledged through the due-state emission ledger and riding activation and mutating responses; the hook renders it and resets it on compact or resume. Check: one emission per session per digest change; admitted instances only; counted inside `limit_chars`.
+  Evidence: `tests/test_vocabulary_delta.py` (`test_another_session_is_told_once_per_door_and_a_new_promotion_tells_it_again`, `test_the_delta_is_cut_to_five_entries_and_counted_inside_limit_chars`, `test_the_delta_in_a_real_activation_updates_the_serialized_length`, `test_a_restricted_session_learns_nothing_of_a_private_promotion`, `test_the_hook_door_is_one_conversation_by_the_session_it_sends`). Commit `c527f8cb7`.
 
 ## Closure
 

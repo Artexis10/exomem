@@ -3,7 +3,8 @@
 `paired` times one shard of the generated public fixture on both arms and writes a
 fragment. `aggregate` joins the fragments into per-group verdicts. `private` times
 a prepared private vault the same way and also reports each store group against its
-p95 target. Both arms run the real managed worker and every call is timed by
+p95 target. `private-absolute` times one prepared arm without pausing its worker.
+The arms run the real managed worker and every call is timed by
 `recall_canary.measure_call`; nothing in this file times a call.
 """
 
@@ -201,9 +202,9 @@ def group_row(group: str, setting: dict, *, gating: bool, medians: list[float], 
         row["allowance_ms"] = setting["allowance_ms"]
         row["verdict"] = judge(row, setting["allowance_ms"])
     if private and "p95_target_ms" in setting and row["head_p95_ms"] is not None:
+        # Pausing workers changes lease and maintenance timing, so paired percentiles cannot prove an absolute target.
         row["target"] = {"p95_target_ms": setting["p95_target_ms"],
-                         "result": "meets target" if row["head_p95_ms"] <= setting["p95_target_ms"]
-                         else "misses target"}
+                         "result": "unverified", "reason": "paused-worker-comparison"}
     return row
 
 
@@ -316,7 +317,7 @@ class Arm:
     """One release: its interpreter, a private root and the managed worker serving that root."""
 
     def __init__(self, name: str, python: Path | str, root: Path, socket_dir: Path, *,
-                 worker_settings: dict[str, str]):
+                 worker_settings: dict[str, str], file_watcher: bool = False):
         self.name, self.python, self.root = name, str(python), root
         self.vault, self.state, self.lease, self.logs = root / "vault", root / "state", root / "lease", root / "logs"
         self.socket = socket_dir / f"{name}.sock"
@@ -329,6 +330,7 @@ class Arm:
         self.coordinator_token, self.operator_token = secrets.token_hex(32), secrets.token_hex(32)
         self.ingress_key = secrets.token_urlsafe(32)
         self.worker_settings = worker_settings
+        self.file_watcher = file_watcher
         # One environment per arm: its tokens, ports and signing key must not change between steps.
         self.env = self.environment()
         self.worker: subprocess.Popen | None = None
@@ -341,7 +343,7 @@ class Arm:
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(_HOST_PREFIXES) and not key.endswith(_HOST_SUFFIXES)}
         root = self.root
-        # Unlike the service, the arms run without the file watcher: with it, each fixture write cost about
+        # Paired arms run without the file watcher: with it, each fixture write cost about
         # two more CPU-seconds on the reference corpus and activation still abstained as warming when timed.
         environment.update({
             "EXOMEM_VAULT_PATH": str(self.vault), "EXOMEM_STATE_ROOT": str(self.state),
@@ -361,6 +363,9 @@ class Arm:
             "XDG_STATE_HOME": str(root / "xdg"), "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_DATA_HOME": str(root / "data"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
             **self.worker_settings})
+        if self.file_watcher:
+            # The product treats every nonempty value, including '0', as disabled.
+            environment.pop("EXOMEM_DISABLE_FILE_WATCHER", None)
         return environment
 
     def run_python(self, code: str, *arguments: str) -> str:
@@ -964,6 +969,203 @@ async def warm(arms: dict[str, Arm]) -> None:
         await stop_arms(arms)
 
 
+# --- Private absolute runs: one continuously runnable prepared arm ------------
+
+# Closed measurement protocol defaults: host CPU PSI some avg60 must stay below 10%.
+ABSOLUTE_PRESSURE_THRESHOLD = 10.0
+ABSOLUTE_PRESSURE_CADENCE = 1.0
+
+
+def absolute_bindings(cases: list, bindings: dict | None, *, reference: dict = REFERENCE) -> dict[str, str]:
+    """Project source labels for reporting without changing the observer's case objects."""
+    sources = {case.group for case in cases}
+    settings = {**reference["gating_groups"], **reference["non_gating_groups"]}
+    if None in sources:
+        raise MeasurementRefused("case-group-missing", phase="cases")
+    if bindings is not None and (not isinstance(bindings, dict) or any(
+            not isinstance(source, str) or not isinstance(target, str) or target not in settings
+            for source, target in bindings.items())):
+        raise MeasurementRefused("group-bindings-invalid", phase="cases")
+    resolved = {source: source if bindings is None else bindings.get(source) for source in sources}
+    if any(target not in settings for target in resolved.values()):
+        raise MeasurementRefused("group-binding-undeclared", phase="cases")
+    if len(set(resolved.values())) != len(sources):
+        raise MeasurementRefused("group-binding-merges-sources", phase="cases")
+    if any("p95_target_ms" in setting and name not in resolved.values() for name, setting in settings.items()):
+        raise MeasurementRefused("target-group-missing", phase="cases")
+    return resolved
+
+
+def pressure_observation() -> dict:
+    """Keep unreadable and invalid kernel pressure unknown, including sampler exceptions."""
+    try:
+        value = cpu_pressure()
+        valid = type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 100
+        error = None if valid else "pressure-unavailable"
+    except Exception:  # noqa: BLE001 - no host error text enters the report
+        value, valid, error = None, False, "pressure-read-failed"
+    return {"monotonic_s": time.monotonic(), "avg60": value if valid else None, "error": error}
+
+
+async def measure_absolute(arm: Arm, cases: list, *, repeats: int, pressure_wait_seconds: float = 300,
+                           cadence_seconds: float = ABSOLUTE_PRESSURE_CADENCE) -> dict:
+    """Warm all cases, wait boundedly for quiet, then time rounds without pausing the worker."""
+    from exomem.recall_canary import measure_call
+
+    samples, observations, waiting = [], [], []
+
+    async def attempt(case, phase: str, repeat: int) -> None:
+        measured = await measure_call(arm.client, case, 120)
+        elapsed = measured.elapsed_ms
+        valid = math.isfinite(elapsed) and elapsed >= 0
+        samples.append({"case": case.id, "group": case.group, "phase": phase, "repeat": repeat,
+                        "elapsed_ms": elapsed if valid else None, "outcome": measured.outcome,
+                        "failure": measured.failure if valid else "invalid-elapsed-time",
+                        "terminal_received": measured.terminal_received})
+
+    async def observe() -> None:
+        try:
+            while True:
+                await asyncio.sleep(cadence_seconds)
+                observations.append(pressure_observation())
+        except Exception:  # noqa: BLE001 - a broken sampler invalidates eligibility
+            observations.append({"monotonic_s": time.monotonic(), "avg60": None, "error": "sampler-failed"})
+
+    try:
+        timings = await arm.start(quiescence_limit=900)
+        arm.require_timeable()
+        # This interpreter reports its imported module; a checkout SHA alone cannot attest served bytes under -I.
+        runtime = json.loads(arm.run_python(
+            "import json, sys, exomem; from importlib.metadata import version; "
+            "print(json.dumps({'python': sys.executable, 'python_version': sys.version.split()[0], "
+            "'module_origin': exomem.__file__, 'version': version('exomem')}))"))
+        for case in cases:
+            await attempt(case, "warmup", 0)
+        deadline = time.monotonic() + pressure_wait_seconds
+        while True:
+            waiting.append(pressure_observation())
+            if waiting[-1]["avg60"] is not None and waiting[-1]["avg60"] < ABSOLUTE_PRESSURE_THRESHOLD:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(cadence_seconds, remaining))
+        observations.append(pressure_observation())
+        sampler = asyncio.create_task(observe())
+        try:
+            for repeat in range(repeats):
+                for case in cases:
+                    await attempt(case, "timed", repeat)
+        finally:
+            sampler.cancel()
+            try:
+                await sampler
+            except asyncio.CancelledError:
+                pass
+            observations.append(pressure_observation())
+        gaps = [right["monotonic_s"] - left["monotonic_s"]
+                for left, right in zip(observations, observations[1:], strict=False)]
+        return {"samples": samples, "runtime": runtime, "environment": {
+            "timings": timings, "pressure_wait_observations": waiting,
+            "pressure_observations": observations, "pressure_cadence_seconds": cadence_seconds,
+            "pressure_max_gap_seconds": max(gaps, default=None),
+            "pressure_threshold_avg60": ABSOLUTE_PRESSURE_THRESHOLD}}
+    finally:
+        await arm.stop()
+
+
+def summarize_absolute(result: dict, cases: list, bindings: dict[str, str], *, repeats: int,
+                       reference: dict = REFERENCE) -> dict:
+    """Report numeric targets only for complete successful series under observed quiet pressure."""
+    expected = {(case.id, phase, repeat): case.group for phase, count in (("warmup", 1), ("timed", repeats))
+                for repeat in range(count) for case in cases}
+    seen, failures = set(), []
+    for sample in result["samples"]:
+        key = (sample["case"], sample["phase"], sample["repeat"])
+        if key not in expected or sample["group"] != expected[key]:
+            failures.append({"code": "attempt-unexpected", "case": sample["case"]})
+        if key in seen:
+            failures.append({"code": "attempt-duplicate", "case": sample["case"]})
+        seen.add(key)
+        elapsed = sample["elapsed_ms"]
+        if sample["failure"] or not sample["terminal_received"] or type(elapsed) not in (int, float) or (
+                not math.isfinite(elapsed) or elapsed < 0):
+            failures.append({"code": "attempt-failed", "case": sample["case"], "phase": sample["phase"]})
+    failures += [{"code": "attempt-missing", "case": key[0], "phase": key[1], "repeat": key[2]}
+                 for key in sorted(expected.keys() - seen)]
+    environment = result["environment"]
+    observations = environment["pressure_observations"]
+    quiet = len(observations) >= 2 and all(
+        observation["error"] is None and type(observation["avg60"]) in (int, float)
+        and math.isfinite(observation["avg60"]) and 0 <= observation["avg60"] < ABSOLUTE_PRESSURE_THRESHOLD
+        for observation in observations)
+    if environment["pressure_wait_observations"]:
+        last_wait = environment["pressure_wait_observations"][-1]
+        quiet = quiet and last_wait["error"] is None and last_wait["avg60"] is not None and (
+            last_wait["avg60"] < ABSOLUTE_PRESSURE_THRESHOLD)
+    groups = []
+    settings = {**reference["gating_groups"], **reference["non_gating_groups"]}
+    for name, setting in settings.items():
+        assigned = [case for case in cases if bindings[case.group] == name]
+        if not assigned:
+            continue
+        timed = [sample for sample in result["samples"]
+                 if sample["phase"] == "timed" and bindings.get(sample["group"]) == name]
+        times = [sample["elapsed_ms"] for sample in timed
+                 if type(sample["elapsed_ms"]) in (int, float) and math.isfinite(sample["elapsed_ms"])
+                 and sample["elapsed_ms"] >= 0]
+        p95 = percentile(times, 95)
+        row = {"group": name, "cases": len(assigned), "attempts": len(timed),
+               "p50_ms": percentile(times, 50), "p95_ms": p95}
+        if "p95_target_ms" in setting:
+            row["target"] = {"p95_target_ms": setting["p95_target_ms"], "result": "unverified"}
+            if not failures and quiet and p95 is not None:
+                row["target"]["result"] = "below-target" if p95 < setting["p95_target_ms"] else "at-or-above-target"
+        groups.append(row)
+    return {"schema_version": SCHEMA_VERSION, "mode": "private-absolute",
+            "state": "failed" if failures else "measured" if quiet else "unverified",
+            "acceptance": "unverified", "unverified_proofs": [
+                "corpus-freeze", "watcher-active", "runtime-served-bytes", "sandbox-isolation"],
+            "groups": groups, "failures": failures, "samples": result["samples"],
+            "environment": environment, "runtime": result["runtime"], "repeats": repeats,
+            "group_bindings": bindings, "watcher_requested": True}
+
+
+def run_private_absolute(args: argparse.Namespace) -> dict:
+    """Consume one fixed prepared root and private inputs without copying or preparing state."""
+    from exomem.recall_canary import load_cases
+
+    raw = args.cases.read_bytes()
+    cases = load_cases(raw)
+    binding_raw = args.group_bindings.read_bytes() if args.group_bindings is not None else None
+    bindings = absolute_bindings(cases, json.loads(binding_raw) if binding_raw is not None else None)
+    if not (args.arm_root / "prepared.json").is_file():
+        raise MeasurementRefused("arm-not-prepared", phase="arm-preparation")
+    with tempfile.TemporaryDirectory(prefix="mra-", dir="/tmp") as sockets:
+        arm = Arm("head", sys.executable, args.arm_root, Path(sockets), file_watcher=True,
+                  worker_settings=worker_settings(embeddings=args.embeddings, passthrough=json.loads(
+                      (RECALL_BENCHMARK / "profile.json").read_text())["worker_environment"]))
+        result = asyncio.run(measure_absolute(arm, cases, repeats=REFERENCE["repeats"],
+                                              pressure_wait_seconds=args.pressure_wait_seconds))
+    summary = summarize_absolute(result, cases, bindings, repeats=REFERENCE["repeats"])
+    return {**summary, "contract_revision": CONTRACT.revision, "contract_sha256": contract_sha256(),
+            "cases_sha256": hashlib.sha256(raw).hexdigest(), "boundary": BOUNDARY,
+            "group_bindings_sha256": hashlib.sha256(binding_raw).hexdigest() if binding_raw is not None else None,
+            "source_commit": resolve_commit("HEAD")}
+
+
+def private_absolute_cli(args: argparse.Namespace) -> int:
+    try:
+        summary = run_private_absolute(args)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        refusal = refused_fragment(error, shard=0, phase="preparation")
+        summary = {"schema_version": SCHEMA_VERSION, "mode": "private-absolute", "state": "refused",
+                   "acceptance": "unverified", "failures": [{"code": refusal["reason"], "phase": refusal["phase"]}]}
+    write_document(args.output, summary)
+    print(json.dumps({"state": summary["state"], "acceptance": summary["acceptance"], "groups": summary.get("groups", [])}))
+    return 1 if summary["state"] in ("failed", "refused") else 2 if summary["state"] == "unverified" else 0
+
+
 # --- Commands -------------------------------------------------------------------
 
 
@@ -1060,6 +1262,14 @@ def main(argv: list[str] | None = None) -> int:
     choice.add_argument("--prepare", action="store_true", help="copy the golden into both roots and warm them")
     choice.add_argument("--reuse", action="store_true", help="time the roots as prepared; never rebuild them")
     private.set_defaults(run=lambda a: measured_cli(run_private, a))
+    absolute = commands.add_parser("private-absolute", help="time one prepared arm without pausing its worker")
+    absolute.add_argument("--arm-root", type=Path, required=True)
+    absolute.add_argument("--cases", type=Path, required=True)
+    absolute.add_argument("--group-bindings", type=Path)
+    absolute.add_argument("--embeddings", action="store_true")
+    absolute.add_argument("--pressure-wait-seconds", type=float, default=300)
+    absolute.add_argument("--output", type=Path, required=True)
+    absolute.set_defaults(run=private_absolute_cli)
     aggregate = commands.add_parser("aggregate", help="join fragments into per-group verdicts")
     aggregate.add_argument("fragments", type=Path, nargs="+")
     aggregate.add_argument("--output", type=Path, default=Path("mcp-read-latency-summary.json"))
@@ -1072,6 +1282,9 @@ def main(argv: list[str] | None = None) -> int:
         args.arm_roots = [Path(part) for part in args.arm_roots.split(",")]
         if len(args.arm_roots) != 2:
             parser.error("--arm-roots takes BASE,HEAD")
+    if args.mode == "private-absolute" and (
+            not math.isfinite(args.pressure_wait_seconds) or args.pressure_wait_seconds < 0):
+        parser.error("--pressure-wait-seconds must be finite and nonnegative")
     return args.run(args)
 
 

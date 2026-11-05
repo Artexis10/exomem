@@ -192,6 +192,11 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
         ):
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         roles[claim.path] = claim.role
+        if claim.role == "registry-history":
+            from . import registry_history
+
+            if not (root / claim.path).is_relative_to(registry_history.history_dir(root, "")):
+                raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         if claim.role == "compiled-history":
             from . import compiled_history, vault
 
@@ -299,9 +304,10 @@ def primary_admission(
         elif current_hash != proposed_hash:
             primary_guard.recheck(root)
             raise ValueError("WRITE_REFUSED: target is unavailable")
+        # An auxiliary inherits its classified primary's admission; relocating its metadata does not make it unclassified.
         return (
             not access.refuse_if_excluded(root, path)
-            and all(not denied.intersection(membership.evaluate_metadata(replace(subject, path=path), compiled))
+            and all(not denied.intersection(membership.evaluate_metadata_selectors(replace(subject, path=path), compiled))
                     for subject in subjects)
         )
 

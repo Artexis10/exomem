@@ -531,6 +531,9 @@ def test_entity_type_registry_load_is_bounded_at_scale(
         find_module.clear_cache()
         entity_types.clear_cache()
         _seed_freshness_live(vault)
+        # Settle fixture-created garbage first; collection triggered by the
+        # find's own allocations remains timed.
+        gc.collect()
         started = time.perf_counter()
         commands.op_find(
             vault,
@@ -554,6 +557,14 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             registry_path.unlink(missing_ok=True)
             measurement_order.append("without")
         return cold_find_ms()
+
+    # The first find with the registry pays one-time process work that later
+    # finds reuse (about a second on a CI runner). Warm both arms before the
+    # paired samples, so that one pass is not one of the median's three inputs.
+    registry_path.write_text(registry_text, encoding="utf-8")
+    cold_find_ms()
+    registry_path.unlink()
+    cold_find_ms()
 
     for index in range(_REPEAT):
         if index % 2 == 0:
@@ -1030,26 +1041,32 @@ def _paired_median_interval(differences: list[float], *, resamples: int = 2000, 
 
 @pytest.mark.timeout(900)
 def test_the_turn_slice_adds_a_bounded_paired_cost_to_a_maps_activation(
-    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
 ) -> None:
     """Each pair is one maps activation with the slice off and one with it on, on the same turn and caller,
     both from cold packet caches, in alternating order so drift cancels. The slice runs the anchors compile
     for the user turn, so it is measured for a turn that reaches an anchor and for one that reaches nothing,
     for the owner's rebuilt map and for a restricted caller's, and for the resolving turn with the conversation
-    that the hook sends. The test gates the upper bound of the median paired difference's 95% interval at
-    `SLICE_ADDED_MS_CEILING`, and reports the stage split and the target."""
+    that the hook sends. It runs under the managed runtime the server declares, so the compile reads through
+    one retained view as it does in service. The test gates the upper bound of the median paired difference's
+    95% interval at `SLICE_ADDED_MS_CEILING`, and reports the stage split and the target."""
     from synth_vault import gen_entity_overlay
     from test_governance_egress import _external
 
-    from exomem import commands, context_views, working_set_runtime
+    from exomem import commands, context_views, readiness, working_set_runtime
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     vault = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(vault, 125, seed=23)
     _prepare_working_set_vault(vault)
-    for setting in ("off", "on"):
-        monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
-        commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup of each path
+    for caller in (principal.owner_principal(surface="library"), _external()):
+        with principal.request_scope(caller):
+            for setting in ("off", "on"):
+                monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)
+                commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup of each path and caller
+    # After the unmanaged warm-up, which builds the identity inventory that a managed request only schedules.
+    readiness.manage_runtime()
+    request.addfinalizer(readiness.reset)
 
     def call(mode: str, turn: str, setting: str, conversation: dict | None) -> dict:
         monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", setting)

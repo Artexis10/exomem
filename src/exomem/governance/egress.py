@@ -831,6 +831,8 @@ _UNIT_FIELDS: frozenset[str] = frozenset(
         "context",
         "verdict",
         "check_by",
+        "as_of",
+        "until",
         "relations",
         "source_anchor",
         "source_span",
@@ -3813,6 +3815,7 @@ def guard_working_set(
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
         guarded.pop("turn_slice", None)
+        guarded.pop("task_context", None)
     if "map" in guarded:
         from .. import context_views
 
@@ -3840,7 +3843,19 @@ def guard_working_set(
                         release_gate_active=release_gate_active, who=who, purpose=purpose,
                     )
                 guarded["turn_slice"] = slice_block
-            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block)
+            if "task_context" in guarded:
+                from .. import context_task
+
+                guarded["task_context"] = context_task.guarded(
+                    vault_root, caller, guarded["task_context"], limit=guarded["budget"]["limit_chars"],
+                )
+            if "stance" in guarded:
+                from .. import stance
+
+                guarded["stance"] = stance.guard_block(vault_root, caller, guarded["stance"])
+            guarded["budget"]["used_chars"] = context_views.packet_chars(
+                map_block, slice_block, guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+            )
 
     ctx = _packet_release(
         vault_root,
@@ -5824,15 +5839,17 @@ def is_vault_root(value: Any) -> bool:
     return isinstance(value, (str, os.PathLike))
 
 
-def _current_read_parent_binding(vault_root: Path, parent: Mapping[str, Any]) -> tuple[str, str] | None:
-    """Bind only this current read's stable parent ref to its guarded page."""
-    path = parent.get("path")
-    if not isinstance(path, str):
+def _bind_current_parent(
+    vault_root: Path, *, path: str, content_hash: str, expected_ref: str | None = None,
+) -> tuple[str, str] | None:
+    """Bind a current stable parent ref only after its exact guarded bytes prove it."""
+    if not isinstance(path, str) or not isinstance(content_hash, str):
         return None
     try:
         source, guard = vault.read_guarded_text(vault_root, vault_root / path)
         reference = memory_refs.ref_from_markdown(source)
-        if reference is None or reference != parent.get("ref") or vault.content_hash(source) != parent.get("content_hash"):
+        if (reference is None or expected_ref is not None and reference != expected_ref
+                or vault.content_hash(source) != content_hash):
             return None
         guard.recheck(vault_root)
     except (OSError, ValueError):
@@ -5899,13 +5916,25 @@ def postfilter(
         return cleaned
     vault_root = Path(vault_root)
     parent_binding = None
-    if command_name == "read_memory" and isinstance(result, Mapping) and "revision_history" in result:
+    if (command_name == "read_memory" and isinstance(result, Mapping)
+            and ("unit_ref" in result or "revision_history" in result)):
         parent = result if "path" in result else result.get("parent")
         if isinstance(parent, Mapping) and memory_refs.parse_memory_ref(parent.get("ref")) is not None:
-            parent_binding = _current_read_parent_binding(vault_root, parent)
-            if parent_binding is None:
-                result = dict(result)
-                result.pop("revision_history")
+            parent_binding = _bind_current_parent(
+                vault_root, path=parent.get("path"), content_hash=parent.get("content_hash"),
+                expected_ref=parent["ref"],
+            )
+        if parent_binding is None and "revision_history" in result:
+            result = dict(result)
+            result.pop("revision_history")
+    # The public terminal schema fixes these state and unit-reference fields.
+    if (isinstance(result, Mapping) and result.get("ok") is True
+            and result.get("state") == "committed" and result.get("status") == "committed"
+            and result.get("terminal") is True and result.get("mutated") is True
+            and ("unit_ref" in result or "removed_unit_ref" in result)):
+        parent_binding = _bind_current_parent(
+            vault_root, path=result.get("path"), content_hash=result.get("after_hash"),
+        )
     view_purpose = None
     if command_name == "read_memory" and isinstance(result, Mapping):
         from .. import context_views
@@ -5956,6 +5985,16 @@ def postfilter(
         and cleaned != evidence_projection
     ):
         cleaned.pop("evidence_version", None)
+    if command_name == "activate_context" and isinstance(cleaned, dict):
+        from .. import context_views, served_context
+
+        with call_spans.span("working_set.served_context"):
+            served_context.finalize(
+                vault_root, cleaned, session=(request_kwargs or {}).get("session"),
+                purpose=(request_kwargs or {}).get("purpose"),
+            )
+        if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
+            cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
             if metadata_evidence is not None else cleaned)
 
@@ -6216,6 +6255,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # what it emits is refs and short provenance-bearing excerpts naming vault
     # items, which is exactly what the structure backstop filters.
     "activate_context": "structure",
+    "served_context": "structure",
     # `inspect` names the caller's own recap by ref; `record` names the page
     # the caller just wrote. Both go through the dispatcher cross-check.
     "episode_memory": "structure",
@@ -6249,6 +6289,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "plan_memory": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
+    "served_context": "structure",
     "episode_memory": "structure",
 }
 
@@ -7788,15 +7829,27 @@ def page_filter_over(
         # A page that left is no page to the check below, which would keep it.
         if rel in held:
             return False, False
-        if not lifecycle.is_tombstoned_in(tombstones, rel):
+        tombstoned = lifecycle.is_tombstoned_in(tombstones, rel)
+        if offered is None:
+            # A path `keep` admits is kept whether or not it is a file, so only a refused, live path
+            # needs the stat that tells a non-page reference (kept) from a page; a ranking decides
+            # every catalogue page, and that stat was most of its cost. A stat error therefore no
+            # longer withholds a page `keep` admits: `keep` is this branch's whole release decision.
+            if keep(rel):
+                return True, False
+            if tombstoned:
+                return False, False
+            try:
+                return not (root / rel).is_file(), False
+            except OSError:
+                return False, False
+        if not tombstoned:
             try:
                 if not (root / rel).is_file():
                     return True, False
             except OSError:
                 return False, False
-        if offered is not None:
-            return offered.decide(rel, publish)
-        return keep(rel), False
+        return offered.decide(rel, publish)
 
     if offered is None:
         return lambda rel_path: decide(rel_path)[0]
@@ -7965,6 +8018,7 @@ def release_allows_frames(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
     """True only at full disclosure.
 
@@ -7974,7 +8028,7 @@ def release_allows_frames(
     return partial pixels.
     """
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who, derived=True):
+    if not content_permits(vault_root, rel_path, who, derived=True, artifact_copy=artifact_copy):
         return False
     return _binary_boundary(
         vault_root,
@@ -7983,6 +8037,7 @@ def release_allows_frames(
         minimum_level=LEVEL_FULL,
         principal=principal,
         purpose=purpose,
+        artifact_copy=artifact_copy,
     )
 
 

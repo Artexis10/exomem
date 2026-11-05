@@ -190,8 +190,10 @@ def test_install_crash_reopens_without_foreign_divergence(store, monkeypatch, af
     target = replica.replica_path(root)
     filesystem_type = _filesystem_type(root)
     original = filesystem_type.rename
+    rename_calls = []
 
     def interrupted(filesystem, source, parent, leaf, **kwargs):
+        rename_calls.append((type(filesystem).__name__, leaf))
         if leaf == target.name and not after_install:
             raise SystemExit("crash before install")
         result = original(filesystem, source, parent, leaf, **kwargs)
@@ -201,8 +203,18 @@ def test_install_crash_reopens_without_foreign_divergence(store, monkeypatch, af
 
     with monkeypatch.context() as injection:
         injection.setattr(filesystem_type, "rename", interrupted)
+        started = time.monotonic()
         with pytest.raises(SystemExit):
-            _publish(root, writer)
+            result = _publish(root, writer)
+            pending = json.loads(
+                _metadata(writer).get(schema.META_PENDING_REPLICA_PUBLICATION, "{}")
+            )
+            pytest.fail(
+                f"Publication returned before the injected crash: {result!r}; "
+                f"elapsed={time.monotonic() - started:.3f}s; "
+                f"patched_class={filesystem_type.__name__}; renames={rename_calls!r}; "
+                f"pending_phase={pending.get('phase')!r}"
+            )
     metadata = _metadata(writer)
     assert schema.META_PENDING_REPLICA_PUBLICATION in metadata
     assert schema.META_LAST_PUBLISHED_REPLICA_SHA256 not in metadata

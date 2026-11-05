@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 from collections.abc import Iterable
@@ -2560,6 +2561,29 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
+def _copy_live_sqlite_files(sources: tuple[Path, ...], directory: Path) -> None:
+    """Copy live SQLite files byte for byte and leave this process's locks alone."""
+    if os.name == "nt":
+        # A LockFileEx byte-range lock belongs to the handle that took it, so
+        # closing these copy handles leaves every SQLite lock in place.
+        for source in sources:
+            shutil.copyfile(source, directory / source.name)
+        return
+    # Closing any descriptor for a file drops every POSIX lock that this
+    # process holds on it, such as its own SQLite connections' locks. A child
+    # process reads the bytes, so the descriptors it closes are not ours.
+    try:
+        subprocess.run(
+            ["cp", "--", *(os.fspath(source) for source in sources), os.fspath(directory)],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as error:
+        raise OSError("live SQLite files could not be copied") from error
+
+
 def _sidecar_state(sidecar: Path) -> tuple[tuple[bool, tuple[int, int, int, int] | None], ...]:
     paths = (
         sidecar,
@@ -2635,15 +2659,10 @@ def inspect_embedding_freshness(
                 prefix="exomem-embedding-read-"
             )
             query_sidecar = Path(snapshot_dir.name) / sidecar.name
-            for source in (
-                sidecar,
-                Path(f"{sidecar}-wal"),
-                Path(f"{sidecar}-shm"),
-            ):
-                shutil.copyfile(
-                    source,
-                    Path(snapshot_dir.name) / source.name,
-                )
+            _copy_live_sqlite_files(
+                (sidecar, Path(f"{sidecar}-wal"), Path(f"{sidecar}-shm")),
+                Path(snapshot_dir.name),
+            )
             query = "mode=ro"
         conn = _sqlite_connect(
             f"{query_sidecar.resolve().as_uri()}?{query}",

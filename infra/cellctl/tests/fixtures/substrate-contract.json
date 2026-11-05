@@ -5,5 +5,11 @@
   "grants": "scripts/exomem-cloud-grants.sql",
   "exports_migration": "migrations/0066_exomem_cloud_home_and_exports.sql",
   "imports_migration": "migrations/0079_exomem_cloud_import_limits.sql",
-  "custody_migration": "migrations/0080_exomem_cloud_key_custody.sql"
+  "custody_migration": "migrations/0080_exomem_cloud_key_custody.sql",
+  "access_migration": "migrations/0083_exomem_cloud_access_record.sql",
+  "access_grants": "scripts/exomem-cloud-access-grants.sql",
+  "artifact_refs": {
+    "access_migration": "8d296fd65d720420b8d268a4e066d0672014342f",
+    "access_grants": "cd2dedd6b02e2fe49f92c5f12a27a9d7d58aa8fe"
+  }
 }

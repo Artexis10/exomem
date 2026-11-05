@@ -20,6 +20,7 @@ from exomem import (
     writer_lease,
 )
 from exomem.governance import lifecycle
+from exomem.governance.principal import library_scope
 
 
 def _note(vault: Path, name: str = "transition.md") -> tuple[str, Path]:
@@ -51,7 +52,7 @@ def _isolated_graph_state(
     writer_lease.reset_managers_for_tests()
 
 
-def test_relocated_deletion_epoch_uses_the_canonical_content_prefix(
+def test_deletion_epoch_covers_resolver_inputs_outside_the_content_prefix(
     monkeypatch: pytest.MonkeyPatch,
     _isolated_graph_state: Path,
 ) -> None:
@@ -64,11 +65,11 @@ def test_relocated_deletion_epoch_uses_the_canonical_content_prefix(
     )
 
     assert epoch is not None
-    assert epoch.checkpoint.paths == ((relative, None),)
+    assert epoch.checkpoint.scope == "full"
     graph_sync.restore_deletion_epoch(epoch)
 
 
-def test_relocated_recovery_epoch_uses_the_canonical_content_prefix(
+def test_recovery_epoch_covers_resolver_inputs_outside_the_content_prefix(
     _isolated_graph_state: Path,
 ) -> None:
     relative, _source = _note(_isolated_graph_state, "relocated-recovery.md")
@@ -80,8 +81,7 @@ def test_relocated_recovery_epoch_uses_the_canonical_content_prefix(
     )
 
     assert epoch is not None
-    assert epoch.checkpoint.paths == ((relative, "a" * 64),)
-    assert epoch.checkpoint.created_paths == (relative,)
+    assert epoch.checkpoint.scope == "full"
     graph_sync.restore_deletion_epoch(epoch)
 
 
@@ -353,7 +353,8 @@ def test_oversized_prior_artifact_aborts_recovery_marker_before_epoch_staging(
     relative, source = _note(tmp_path, f"oversized-recovery-{artifact}.md")
     source.write_text("---\ntype: insight\nstatus: draft\n---\n# transition\n", encoding="utf-8")
     _govern(tmp_path, relative)
-    deleted = delete_file.delete_file(tmp_path, path=relative, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(tmp_path, path=relative, confirm=True)
     path = graph_sync.floor_path(tmp_path) if artifact == "floor" else graph_sync.checkpoint_path(tmp_path)
     limit = graph_sync._FLOOR_READ_LIMIT if artifact == "floor" else graph_sync._CHECKPOINT_READ_LIMIT
     with path.open("wb") as stream:
@@ -405,7 +406,8 @@ def test_malformed_non_utf8_prior_artifact_aborts_recovery_before_rename(
     relative, source = _note(tmp_path, f"malformed-recovery-{artifact}.md")
     source.write_text("---\ntype: insight\nstatus: draft\n---\n# transition\n", encoding="utf-8")
     _govern(tmp_path, relative)
-    deleted = delete_file.delete_file(tmp_path, path=relative, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(tmp_path, path=relative, confirm=True)
     path = graph_sync.floor_path(tmp_path) if artifact == "floor" else graph_sync.checkpoint_path(tmp_path)
     prior_bytes = b"\xffmalformed epoch artifact"
     path.write_bytes(prior_bytes)
@@ -547,12 +549,13 @@ def test_lease_graph_wait_does_not_finalize_a_degraded_governed_delete(
         calls.append(1)
         return delete_file.delete_file(root, path=relative, confirm=True).as_dict()
 
-    result = _lease_manager(tmp_path).invoke(
-        SimpleNamespace(name="delete_file", read_only=False, leaf=leaf),
-        (tmp_path,),
-        {"response_detail": "full"},
-        idempotency_key="mixed-component-delete",
-    )
+    with library_scope():
+        result = _lease_manager(tmp_path).invoke(
+            SimpleNamespace(name="delete_file", read_only=False, leaf=leaf),
+            (tmp_path,),
+            {"response_detail": "full"},
+            idempotency_key="mixed-component-delete",
+        )
 
     tombstones = list(
         (tmp_path / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json")
@@ -575,7 +578,8 @@ def test_governed_delete_stays_pending_for_an_unverified_legacy_fanout(
     _govern(tmp_path, relative)
     monkeypatch.setattr(index_sync, "delete_after_remove", lambda *_args: True)
 
-    result = delete_file.delete_file(tmp_path, path=relative, confirm=True)
+    with library_scope():
+        result = delete_file.delete_file(tmp_path, path=relative, confirm=True)
 
     tombstones = list(
         (tmp_path / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json")
@@ -591,10 +595,12 @@ def test_governed_recovery_stays_pending_for_an_unverified_legacy_fanout(
     relative, source = _note(tmp_path, "legacy-recovery.md")
     source.write_text("---\ntype: insight\nstatus: draft\n---\n# transition\n", encoding="utf-8")
     _govern(tmp_path, relative)
-    deleted = delete_file.delete_file(tmp_path, path=relative, confirm=True)
+    with library_scope():
+        deleted = delete_file.delete_file(tmp_path, path=relative, confirm=True)
     monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: True)
 
-    result = recover_from_trash.recover_from_trash(tmp_path, trash_path=deleted.trash_path)
+    with library_scope():
+        result = recover_from_trash.recover_from_trash(tmp_path, trash_path=deleted.trash_path)
 
     recovery = list(
         (tmp_path / "Knowledge Base/_Governance/deletion-tombstones/recovery").glob("*.json")

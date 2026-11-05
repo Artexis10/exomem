@@ -30,7 +30,6 @@ import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext, suppress
-from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
@@ -57,6 +56,7 @@ from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
+from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
 from . import context_roles as context_roles_module
@@ -144,6 +144,7 @@ from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import vocabulary_delta as vocabulary_delta_module
 from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
@@ -184,17 +185,17 @@ from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
 from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
-from .kbdir import kb_dirname
+from .kbdir import kb_dirname, kb_page_target
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
+    admit_write_target,
+    latest_operation_id,
     resolve_under_vault,
 )
 from .viewer_map import op_viewer_map
 
 log = logging.getLogger(__name__)
-
-_legacy_selected_relation = ContextVar("legacy_selected_relation", default=False)
 
 _link_summary = link_summary_module.link_summary
 _QueryFilters = _public_filter_annotation()
@@ -851,7 +852,7 @@ def op_bootstrap(
     Reads no vault content. Full includes the public reference index.
 
     Args:
-        profile: compact (default), full, diagnostics, or session (needs installed skill digest).
+        profile: compact, full, diagnostics, or session (needs installed skill digest).
         workflow: Context label only.
         skill_contract: Session digest; missing/stale returns compact plus session_profile_unavailable.
         section: Compact block name; index lists available blocks.
@@ -1172,12 +1173,13 @@ def op_bootstrap(
         "extension_count": len(relation_registry.extensions),
         "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
-            "Resolve truthfully: specific, relates_to or no edge. Propose durable recurring "
-            "meaning, never automatically from questions. Hash-guard saves. New meaning uses a "
-            "new canonical key; deprecate replaced key."
+            "Resolve truthfully: a specific relation first; relates_to only for a real generic "
+            "link, with a reason when it joins an entity where a specific one fits; else no edge. "
+            "Propose durable recurring meaning, never automatically from questions. Hash-guard "
+            "saves. New meaning uses a new canonical key; deprecate replaced key."
             if profile == "compact" else
             (
-                "resolve: specific truthful, relates_to generic/no edge. "
+                "resolve: specific truthful first; relates_to generic (reason on an entity edge where a specific fits)/no edge. "
                 "propose-relation only for durable recurring meaning; explicit question is "
                 "consideration, never automatic type. Hash guard save-relations; new canonical "
                 "key deprecates old"
@@ -1578,11 +1580,15 @@ def op_bootstrap(
                 "the claim. A due date, not an expiry: nothing is removed, decayed, or "
                 "downranked when it passes; it becomes findable as overdue."
             ),
+            "as_of": "ISO calendar date (YYYY-MM-DD) dating the unit's view.",
+            "until": (
+                "Last current date (YYYY-MM-DD); activation marks it expired afterward "
+                "and omits it from stance."
+            ),
             "metadata_form": (
-                "verdict and check_by are `- key: value` rows under a rich `## Heading` "
-                "unit; a compact `- [category] ...` observation carries no metadata. "
-                "Both survive an edit to the unit's wording, so fixing a typo never "
-                "costs a verdict."
+                f"{', '.join(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS)} use "
+                "`- key: value` rows in rich `## Heading` units. Compact `- [category] ...` "
+                "units have no metadata. Governed rows survive an edit to unit text."
             ),
             "kinds": {
                 "open_question": "a question this store has not answered yet",
@@ -1628,6 +1634,8 @@ def op_bootstrap(
             },
             "compute_policy": compute_policy,
         },
+        # Which Exomem this connector reaches: two connectors can share a display name.
+        "store": cloud_cell_module.store_identity(),
         "active_capabilities": active_descriptor.as_metadata(),
         # How much Exomem should participate, as a behavioural contract the client can
         # follow directly. Deliberately tool-agnostic: `_filter_bootstrap_payload`
@@ -1797,10 +1805,7 @@ def op_bootstrap(
                 "and reusable patterns as compiled notes; keep raw artifacts in "
                 "Sources and case-bound proof in Evidence."
             ),
-            "miss_rule": (
-                "Empty recall means not found in that query/scope. Try related terms or "
-                "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections."
-            ),
+            "next_action": "Follow `next_action` when present.",
         },
         "workflow_skills": workflow_skills_module.bootstrap_entries(),
         "authoring_contract": {
@@ -2015,6 +2020,13 @@ def op_bootstrap(
                     "relation_review_hash, and an explicit bounded relation_review_reason; "
                     "never fabricate a none decision or infer review from missing relations"
                 ),
+                "generic": (
+                    "a new generic edge to an entity, where a specific relation fits, is refused "
+                    "with GENERIC_RELATION_NEEDS_REASON and up to four options: write one, or "
+                    'commit with relation_disposition="generic", the returned '
+                    "relation_review_hash and a bounded relation_review_reason; a create-entity "
+                    "relations item takes reason"
+                ),
                 "adoption_handoff": (
                     f"{call_text('adopt_vault', {'mode': 'compile-selected'})} returns a proposal only; review "
                     "it, then call create_note() so normal semantic precommit still applies"
@@ -2025,7 +2037,8 @@ def op_bootstrap(
                     "rule": (
                         "validate the exact edit; retain transition_token and "
                         "relation_review_hash; commit that edit unchanged with an explicit "
-                        "reviewed_none reason only when no truthful relation applies"
+                        "reviewed_none reason only when no truthful relation applies, or "
+                        "relation_disposition generic with a reason for a generic entity edge"
                     )
                 }
                 if profile == "compact"
@@ -2064,7 +2077,8 @@ def op_bootstrap(
                     "rule": (
                         "retain semantic.transition_token and "
                         "semantic.relation_review_hash from validation; commit the "
-                        "identical proposed edit with a bounded reason"
+                        "identical proposed edit with a bounded reason: reviewed_none, or "
+                        "generic for a generic entity edge"
                     ),
                 }
             ),
@@ -4682,7 +4696,7 @@ def op_edit(
         relation_disposition: Reviewed relation outcome for the commit.
         relation_review_hash: Exact `relation_review_hash` returned by the
             validate-only semantic preflight.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
 
     Returns:
         Shape varies by mode (take-row -> {path, row, warnings};
@@ -4883,7 +4897,7 @@ def op_replace(
         draft_token: Opaque destination/date token returned by validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
         vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
             returned by an experiment-domain vocabulary preparation.
 
@@ -5018,6 +5032,11 @@ def op_replace(
 
 def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
     unavailable = f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
+    try:
+        # A restricted writer's predecessor is decided before it is read.
+        admit_write_target(vault_root, kb_page_target(vault_root, old_path)[1])
+    except VaultPathError as refusal:
+        raise ValueError(f"{refusal.code}: {refusal.reason}") from None
     # A predecessor the caller may not see is unavailable exactly as a missing
     # one is, and is never read.
     if egress_module.write_target_withheld(vault_root, old_path):
@@ -5072,9 +5091,13 @@ def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None]
             path = resolved
     except Exception:  # noqa: BLE001 - what cannot be read is an unknown origin, whatever the cause
         path = None
-    from .writer_lease import active_mutation_request_id
-
-    operation_id = active_mutation_request_id() if path else None
+    operation_id: str | None = None
+    if path:
+        try:
+            # The originating write's own logged id, not this creation's request id.
+            operation_id = latest_operation_id(vault_root, path)
+        except Exception:  # noqa: BLE001 - an unreadable log leaves the origin path without an id
+            operation_id = None
     return {"path": path, "operation_id": operation_id}
 
 
@@ -5133,9 +5156,10 @@ def op_link(
         connections: List of vault-relative wikilink targets to put under
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
-        relations: `{kind, target}` objects written under `## Relations` as
-            `- kind [[target]]`; kind is a registered relation key, target
-            follows `connections` conventions.
+        relations: `{kind, target, reason?}` objects written under `## Relations`
+            as `- kind [[target]]`; kind is a registered relation key, target
+            follows `connections` conventions. A generic kind (`relates_to`) to
+            an entity needs a `reason` when a specific relation fits.
         (per-type fields): see the bullet list above.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
             the name already denotes other active entities and this is a
@@ -5531,7 +5555,7 @@ def op_note(
         relation_disposition: Reviewed relation outcome for commit, usually
             reviewed_none when no honest relation exists.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
         vocabulary_decision: After a vocabulary_preparation response, submit its
             evidence_fingerprint with outcome reuse, create, or defer and the
             reviewed canonical value. The response is bound to that evidence.
@@ -5772,7 +5796,7 @@ def op_create_file(
         draft_token: Opaque destination/date token returned by validate_only.
         relation_disposition: Reviewed relation outcome for semantic file creation.
         relation_review_hash: Draft hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
 
     Returns: {path, warnings} for files; {path, created, warnings} for dirs.
     Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
@@ -6141,8 +6165,13 @@ def op_delete(
     path = _resolve_memory_identifier(vault_root, path)
     try:
         abs_path, rel = resolve_under_vault(vault_root, path)
+        # A restricted writer's path is decided before it is probed, so a folder it may not
+        # write answers as an absent path does.
+        admit_write_target(vault_root, rel)
         is_dir = abs_path.is_dir()
-    except VaultPathError:
+    except VaultPathError as refusal:
+        if refusal.code == "WRITE_REFUSED":
+            raise ValueError(f"{refusal.code}: {refusal.reason}") from None
         is_dir = False  # let the file backend raise the precise path error
     if restricted and is_dir:
         from . import list_directory as list_directory_module
@@ -6209,7 +6238,7 @@ def op_append_to_file(
         semantic_transition_token: Opaque transition token returned by validate_only.
         relation_disposition: Reviewed relation outcome for a semantic append.
         relation_review_hash: Transition hash covered by the relation review.
-        relation_review_reason: Audit reason for a reviewed-none disposition.
+        relation_review_reason: Audit reason for a reviewed-none or generic disposition.
 
     Returns: {path, bytes_appended, warnings}.
     Errors: INVALID_APPEND; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
@@ -6467,11 +6496,9 @@ def op_get_video_frames(
         NO_DECODABLE_FRAMES (corrupt/streamless video, or a window on a
         video of unknown duration).
     """
-    # Release gate BEFORE extraction: frames are the item's content in image
-    # form, so a sub-floor decision must refuse rather than render — and it
-    # must refuse indistinguishably from a missing path, exactly as `op_get`
-    # does. Decided first so a withheld video is never even decoded.
-    if not egress_module.release_allows_frames(vault_root, path):
+    # Local reads gate before extraction. Cloud's preparation handshake supplies
+    # the exact retained source proof before the worker decodes anything.
+    if not cloud_cell_module.cloud_mode_enabled() and not egress_module.release_allows_frames(vault_root, path):
         raise ValueError(f"NOT_FOUND: file does not exist: {path}")
     video_frames_module = _video_frames_module()
     try:
@@ -6546,7 +6573,7 @@ def op_ask_memory(
     """Search compiled knowledge and originals for an evidence gap.
 
     Reuse recall_context; read_memory opens selected refs. deep=true packs context.
-    Results are bounded; a miss covers only this query/scope. Evidence is not an answer.
+    A miss covers only this query/scope. Follow `next_action`. Evidence is not an answer.
     Help: bootstrap(profile="full").
 
     Args:
@@ -6625,7 +6652,26 @@ def op_ask_memory(
                 purpose=purpose,
             )
             result = _with_due_state(vault_root, result, purpose=purpose)
+    from . import read_next_action
+
+    if isinstance(result, list):
+        if not result:
+            result = {"hits": result}
+    if isinstance(result, dict):
+        read_next_action.attach(result, search=True)
     return recall_timing_module.completed(result, trace)
+
+
+def op_served_context(vault_root: Path, *, served_context_id: str | None = None) -> dict:
+    """Inspect retained composed response metadata with verified owner authority.
+
+    Omit served_context_id for retained-row counts and unknown usage.
+    Args:
+        served_context_id: Exact row id from a maps response; grants no authority.
+    """
+    from . import served_context
+
+    return served_context.read(vault_root, served_context_id=served_context_id)
 
 
 def _with_due_state(
@@ -6726,12 +6772,11 @@ def op_activate_context(
 ) -> dict:
     """Recall authorized context; abstain if uncertain.
 
-    Reuse held context; conversation supplies excerpts, not attachment reads.
-    focus is agent-authored, not human intent; clarify ambiguity.
-    Keep source identity/scope. Due/refresh grants no writes.
-    Pull map refs with read_memory.
-    Optional epistemic_status has counts/completeness; read_memory gives
-    items/reading provenance.
+    Reuse held context; conversation gives excerpts. Agent focus is not human intent.
+    Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
+    Read map/task_context refs and method scope/exclusions with read_memory.
+    Discard held methods on methods.reset. Follow next_action.
+    epistemic_status: counts/completeness; read_memory: provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -6789,6 +6834,9 @@ def op_activate_context(
     # packet exists — the session as a vault-keyed hash, the workspace not at
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
+    from . import read_next_action
+
+    requested_chars = working_set_module.clamp_budget(max_chars)
     started = time.perf_counter()
     bounded = None
     # The maintained collector also feeds host-local observations. Payloads remain opt-in.
@@ -6828,7 +6876,7 @@ def op_activate_context(
                         packet = _op_activate_context_body(
                             vault_root,
                             turn,
-                            max_chars,
+                            requested_chars,
                             purpose=purpose,
                             continuity=continuity,
                             anchor=anchor,
@@ -6841,6 +6889,10 @@ def op_activate_context(
                             trigger=trigger,
                             intent_resolution=intent_resolution,
                         )
+                        # Spend the reserved move before optional carriers share the public ceiling.
+                        if isinstance(packet.get("budget"), dict):
+                            packet["budget"]["limit_chars"] = requested_chars
+                        read_next_action.attach(packet)
                         # After the guard and outside the packet cache, like `continuity`:
                         # at a caller's session start, at most one upkeep item, and only in
                         # the process whose background worker proposed it. Never raises.
@@ -6854,6 +6906,9 @@ def op_activate_context(
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
                         due_state_module.for_activation(vault_root, packet, purpose=purpose)
+                        # Vocabulary added since this conversation was last told, once per admitted
+                        # digest change and counted inside the packet's own `limit_chars`.
+                        vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:
@@ -6877,6 +6932,8 @@ def op_activate_context(
                         block = active_budget.as_response_block() if active_budget is not None else None
                         if block is not None:
                             packet["request_budget"] = block
+                    if "map" in packet and isinstance(packet.get("budget"), dict):
+                        packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
                     return packet
             finally:
                 egress_module.emit_boundary_receipt(collector)
@@ -7256,7 +7313,9 @@ def _op_activate_context_body(
     wrapper just bound). Kept separate so the wrapper's `try/finally` never
     has to wrap this function's many early returns."""
     timings = observation_timings or (find_types.FindTimings() if include_timings else None)
-    budget = working_set_module.clamp_budget(max_chars)
+    from . import read_next_action
+
+    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS
     turn = str(turn or "")
     anchor = str(anchor or "").strip() or None
 
@@ -7547,6 +7606,18 @@ def _op_activate_context_body(
         # The map generation the caller holds. A token from anchors mode, an older one or a malformed one
         # carries none, and the caller then gets the whole map.
         held_map = working_set_runtime_module.decode_continuity(continuity)
+
+        def task_context(caller, catalogue, allowance, prepare_slice):
+            from . import context_task
+
+            return context_task.compile_context(
+                vault_root, caller=caller, catalogue=catalogue, turn=turn,
+                conversation=working_set_conversation_module.bound(conversation), snapshot=snapshot,
+                held=(held_map or {}).get("method_versions", ()), max_chars=allowance, timings=timings,
+                index_token=evidence_token,
+                prepare_slice=prepare_slice,
+            )
+
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
@@ -7559,6 +7630,8 @@ def _op_activate_context_body(
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                     known_generation=(held_map or {}).get("map_generation"),
+                    task_context=task_context,
+                    packet_limit=working_set_module.clamp_budget(max_chars),
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
@@ -7583,10 +7656,17 @@ def _op_activate_context_body(
         map_generation = packet["generation"].get("map_generation")
         if map_generation is not None and not packet.get("abstained"):
             # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
-            packet["continuity"] = working_set_runtime_module.encode_continuity(
+            from . import context_task
+
+            packet["continuity"] = context_task.continuity_token(
+                packet, held=(held_map or {}).get("method_versions", ()),
                 identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
+            )
+            packet["task_context"] = context_task.pin(
+                vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),
+                packet["task_context"], limit=working_set_module.clamp_budget(max_chars),
             )
         if packet.get("abstained") is False:
             # A map whose turn slice yielded to the deadline names the skipped stage, as a served packet does.
@@ -8153,13 +8233,13 @@ def op_remember(
             insight, failure or pattern only warns.
         bridge_of: Source paths or stable refs for a cross-domain bridge;
             requires bridge_scope and bridge_review.
-        suggestions: Off by default. `suggestions=true` also returns pages to link
+        suggestions: `suggestions=true` also returns pages to link
             (read under `response_detail='full'`); costs one retrieval pass.
         validate_only: Return an immutable creation draft without writing.
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         vocabulary_decision: Answers a vocabulary_preparation response.
     """
     return op_note(
@@ -8340,6 +8420,8 @@ def op_observe_memory(
     relations: list[dict] | None = None,
     verdict: str | None = None,
     check_by: str | None = None,
+    as_of: str | None = None,
+    until: str | None = None,
     id: str | None = None,
     unit_ref: str | None = None,
     expected_fingerprint: str | None = None,
@@ -8353,32 +8435,31 @@ def op_observe_memory(
 ) -> dict:
     """Check or edit one semantic unit on a compiled note.
 
-    Default: compact observation; other governed kinds use rich form and typed
-    relations. Validate first when semantic review is required.
+    Defaults to compact; governed kinds use rich form and typed relations.
+    Validate when semantic review is required.
 
     Args:
-        path: Parent page path or memory reference.
-        operation: add, update, remove, or validate.
+        path: Parent path or memory ref.
+        operation: add/update/remove/validate.
         kind: Governed rich kind; omitted means compact observation.
         tags: Replaces on update.
         context: Replaces on update.
         relations: {kind, target} objects. Replaces on update.
-        verdict: Rich-only: abandoned, confirmed, inconclusive, qualified, or
-            refuted. Empty string clears it on update.
-        check_by: Rich-only ISO revisit date. Empty string clears it on update.
-        id: Unique anchor within the parent; derived on add if omitted.
-        unit_ref: Exact unit reference for update/remove or previewing an existing unit.
-            Without it, validate previews an addition.
-        expected_fingerprint: Current unit fingerprint; required for update/remove.
-            Echo it when previewing an existing unit.
-        expected_hash: Current parent-page content hash; required for update/remove.
+        verdict: Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears.
+        check_by: Rich ISO revisit date; '' clears.
+        as_of: Rich ISO start date; '' clears.
+        until: Rich ISO last valid date; '' clears.
+        id: Parent-unique anchor; derived on add if omitted.
+        unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
+        expected_fingerprint: Current fingerprint for update/remove and existing-unit preview.
+        expected_hash: Current parent hash for update/remove.
         transition_token: From validate.
         relation_disposition: Semantic review disposition (existing page).
         relation_review_hash: Transition hash the reviewed-none covers.
-        relation_review_reason: Audit reason for reviewed-none.
-        reason: Optional rationale retained with the prior interpretation.
-        target_fingerprints: Exact corrective target refs and current fingerprints.
-            Omit for ordinary page or heading relations; episode unit leaves echo them.
+        relation_review_reason: Audit reason for reviewed-none or generic.
+        reason: Rationale kept with the prior interpretation.
+        target_fingerprints: Exact corrective refs/current fingerprints.
+            Omit for page/heading links; echo for episode unit leaves.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -8428,6 +8509,8 @@ def op_observe_memory(
             relations=relations,
             verdict=verdict,
             check_by=check_by,
+            as_of=as_of,
+            until=until,
             id=id,
             unit_ref=unit_ref,
             expected_fingerprint=expected_fingerprint,
@@ -8513,7 +8596,7 @@ def op_replace_memory(
         draft_token: From validate_only.
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         vocabulary_decision: Answers an experiment-domain vocabulary preparation.
     """
     return op_replace(
@@ -9312,7 +9395,7 @@ def _process_media(
                 continue
             row: dict[str, object] = {
                 "path": relative,
-                "outcome": _MEDIA_OUTCOMES[operation],
+                "outcome": mutation_terminal_module.MEDIA_OUTCOMES[operation],
                 "state": state,
                 "media_type": result.media_type,
                 "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
@@ -9398,14 +9481,11 @@ def _process_media(
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
-    if operation in {"retry", "reprocess"}:
+    if operation in mutation_terminal_module.MEDIA_REQUEUE_OPERATIONS:
         payload["requeued"] = result.requeued
     payload["index_refreshed"] = 0
     payload["index_refresh_remaining"] = _index_refresh_remaining()
     return payload
-
-
-_MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
 
 
 def _run_media_operation(
@@ -10016,15 +10096,42 @@ def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
     return {**result, "capture_sweep": block}
 
 
-def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
-    """Both post-batch advisories, in one place, for every operation leaf.
+def _carrying_undeclared_referents(vault_root: Path, result: Any) -> Any:
+    """Attach the names a batch's pages newly linked with no page behind them, each once.
 
-    One seam rather than two call chains: the two carriers answer different
+    Inside `due_state.batch_scope` the page seam holds these names rather than delivering
+    them (`capture_sweep.undeclared_referents`), so a name that several pages link is listed
+    once, here. Gated on an actual commit like the carriers beside it.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "undeclared_referents" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import capture_sweep as capture_sweep_module
+
+        block = capture_sweep_module.batch_referents(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("undeclared-referents batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "undeclared_referents": block}
+
+
+def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
+    """The post-batch advisories, in one place, for every operation leaf.
+
+    One seam rather than several call chains: the carriers answer different
     questions but they attach at exactly the same moment — after the batch scope
     has exited and the deltas have been applied — and a leaf that acquired one
     but not the other would be a silent coverage gap rather than a visible one.
     """
-    return _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    return _carrying_undeclared_referents(
+        vault_root, _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    )
 
 
 def _set_family_disposition(
@@ -10523,7 +10630,7 @@ def op_connect_memory(
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
-        relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
+        relations: create-entity only. {kind, target, reason?} edges; relates_to needs a reason.
     """
     if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
         raise ValueError(
@@ -10624,7 +10731,7 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
-        if requested_relation is not None and not _legacy_selected_relation.get() and (
+        if requested_relation is not None and (
             vocabulary_ref is None or vocabulary_fingerprint is None
         ):
             raise ValueError(
@@ -10866,6 +10973,10 @@ def op_adoption_studio(
     next_window_bytes: int | None = None,
     import_id: str | None = None,
     paths: list[str] | None = None,
+    view: adoption_run_module.StatusView = "summary",
+    offset: Annotated[int, Field(ge=0)] = 0,
+    limit: Annotated[int, Field(ge=1, le=adoption_run_module.STATUS_PAGE_ITEMS)] = adoption_run_module.STATUS_PAGE_ITEMS,
+    revision: str | None = None,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -10914,6 +11025,11 @@ def op_adoption_studio(
         paths: For `acknowledge`: only paths the person confirmed they need no
             longer keep. Ends their keep-source warning; no tool undoes it. A call
             with none is refused.
+        view: For run `status`, summary by default; inventory, selection, plan,
+            outcomes or stale pages. Full is the explicit browser compatibility view.
+        offset: For status pages, a zero-based row offset.
+        limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
+        revision: For status pages, the preceding summary's revision; restart paging if it changed.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -10931,7 +11047,8 @@ def op_adoption_studio(
             if run_id and (after is not None or series_id is not None or next_window_bytes is not None):
                 raise adoption_run_module.AdoptionRunError(
                     "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
-            listing = adoption_run_module.status(vault_root, run_id=run_id, path=path)
+            listing = adoption_run_module.status(
+                vault_root, run_id=run_id, path=path, view=view, offset=offset, limit=limit, revision=revision)
             if run_id:
                 return listing
             return {**listing, **import_windows_module.report(
@@ -11977,6 +12094,7 @@ def op_schema_memory(
                 "target_kinds",
                 "projects",
                 "page_types",
+                "endpoints",
                 "query",
             }
             if set(proposal) - allowed_proposal_fields:
@@ -12028,6 +12146,13 @@ def op_schema_memory(
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: proposal text fields must be strings"
                 )
+            if proposal.get("endpoints") is not None and not isinstance(
+                proposal["endpoints"], dict
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal.endpoints must be an object with "
+                    "subject and object lists"
+                )
             if (
                 why is not None
                 or save
@@ -12068,10 +12193,20 @@ def op_schema_memory(
                 target_kinds=proposal.get("target_kinds"),
                 projects=proposal.get("projects"),
                 page_types=proposal.get("page_types"),
+                endpoints=proposal.get("endpoints"),
                 query=proposal.get("query"),
                 limit=limit,
                 observations=observations if observations is not None else (),
                 continuation=continuation,
+            )
+            # The entity types an endpoint names are vault data, so the vault checks them.
+            candidate = relation_registry_module.load_registry(
+                proposal={"schema_version": 1, "extensions": result["delta"]["upsert"]}
+            )
+            result["findings"].extend(
+                relation_registry_module.endpoint_findings(
+                    vault_root, candidate, candidate.extensions
+                )
             )
             return {
                 "subject": "relations",
@@ -12997,7 +13132,7 @@ def op_manage_memory_file(
         semantic_transition_token: The append transition token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create/append.
         relation_review_hash: Draft or transition hash the review covers.
-        relation_review_reason: Audit reason for reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none or generic.
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
     """
     creation_review_requested = any(
@@ -13763,6 +13898,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("served_context", op_served_context, 2, False, False, None, _RC),
     ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
@@ -13854,6 +13990,8 @@ def _build_commands() -> tuple[Command, ...]:
 
 # Preferred spellings are closed API tokens; execution names keep receipts and policies stable.
 _PRODUCT_SPEC: tuple[tuple, ...] = (
+    ("served_context", op_served_context, 2, False, False, None, _RC, ("served_context",),
+     {"public_title": "Inspect composed response metadata", "surface": "advanced", "actions": (), "first_run_safe": False}),
     (
         "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
         ("configure_memory",),
@@ -14582,10 +14720,9 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="read_media",
                 reason=(
-                    "Sampling video frames needs video decoding, which the "
-                    "cloud image does not ship."
+                    "This cell has not selected the on-demand frame engine."
                 ),
-                lifted_when="the cloud image ships video decoding",
+                lifted_when="the cell selects the frame engine",
             ),
         )
     }
@@ -14597,12 +14734,21 @@ def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, .
     return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
 
 
+def _cloud_frames_selected() -> bool:
+    from . import media_engines
+
+    return media_engines.FRAMES in media_engines.enabled_engines(
+        {**os.environ, cloud_cell_module.CLOUD_MODE_ENV: "1"}
+    )
+
+
 def cloud_surface_exclusions(*, upload_bridge: bool = False) -> tuple[SurfaceExclusion, ...]:
     """The exclusions in force on a cell, with or without gateway upload handoffs."""
     return tuple(
         exclusion
         for exclusion in CLOUD_SURFACE_EXCLUSIONS.values()
         if not (upload_bridge and exclusion.lifted_by_upload_bridge)
+        and not (exclusion.command == "read_media" and _cloud_frames_selected())
     )
 
 

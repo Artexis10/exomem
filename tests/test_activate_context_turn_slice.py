@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from conversation_vault import seed as seed_conversation_vault
-from test_activate_context_maps import _activate
+from test_activate_context_maps import _activate, _without_response_id
 from test_context_catalogue import INSIGHTS, _built, _seed, _write
 from test_context_views import OWNER, _cold, _second_vault
 from test_governance_egress import _external
@@ -80,7 +80,13 @@ def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path) ->
     for packet in (irrelevant, blank):
         assert packet["turn_slice"]["state"] == "empty"
         assert packet["turn_slice"]["items"] == []
-        assert "description" not in packet["turn_slice"]
+        assert packet["turn_slice"]["description"]
+        # Independent catalogue leads can remain available when anchor-derived slice evidence is empty.
+        if packet["task_context"]["candidates"]:
+            assert packet["next_action"]["state"] == "task_read"
+            assert packet["next_action"]["tool"] == "read_memory"
+        else:
+            assert packet["next_action"]["state"] == "slice_empty"
         assert packet["map"] == resolving["map"]
         assert packet["continuity"] == resolving["continuity"]
         assert packet["generation"]["map_generation"] == resolving["generation"]["map_generation"]
@@ -102,7 +108,7 @@ def test_a_withheld_namesake_and_titled_page_change_no_byte_for_a_restricted_cal
         _cold()
         owners.append(_activate(root, OWNER, turn=NAMING_TURN))  # fills the owner caches before a restricted read
         guests.append(_activate(root, _external(), turn=NAMING_TURN))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     visible = [item["ref"] for item in guests[0]["turn_slice"]["items"]]
     assert visible == [CARGO_SLED]  # the control: the guest does reach the anchor that it may see
     assert owners[0]["turn_slice"] != owners[1]["turn_slice"]  # the control: the owner's slice does see the extra pages
@@ -147,7 +153,7 @@ def test_withheld_pages_move_no_lexical_statistic_of_a_restricted_callers_slice(
     for root in (vault, twin):
         _cold()
         guests.append(_activate(root, _external(), turn=LONG_TURN))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     # The control: leads whose evidence the statistics decide.
     assert any("retrieval" in item["evidence"] for item in guests[0]["turn_slice"]["items"])
 
@@ -275,7 +281,9 @@ def test_a_slice_with_no_record_is_replaced_and_leaves_the_map(vault: Path) -> N
     assert guarded is not None
     assert guarded["turn_slice"] == {"state": "unavailable", "items": []}
     assert guarded["map"] == compiled_map and not guarded.get("abstained")
-    assert guarded["budget"]["used_chars"] == context_views.map_packet_chars(compiled_map)
+    assert guarded["budget"]["used_chars"] == context_views.packet_chars(
+        compiled_map, guarded.get("turn_slice"), guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+    )
 
 
 def test_a_slice_compiled_for_a_larger_packet_is_never_served(vault: Path) -> None:
@@ -320,7 +328,7 @@ def test_a_slice_that_cannot_be_built_keeps_the_map(vault: Path, monkeypatch: py
     assert failed["turn_slice"]["state"] == "unavailable" and failed["turn_slice"]["items"] == []
     assert failed["map"] == expected["map"]
     assert failed["continuity"] == expected["continuity"]
-    assert failed["budget"]["used_chars"] == context_views.map_packet_chars(failed["map"])
+    assert failed["budget"]["used_chars"] == context_views.packet_chars(failed["map"], failed.get("turn_slice"), failed.get("task_context"), failed.get("stance"), failed.get("next_action"))
 
 
 def test_a_compile_that_abstains_inside_serve_is_an_unavailable_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -552,11 +560,11 @@ def test_the_packet_stays_within_its_limit_at_every_budget(vault: Path, max_char
         packet = _activate(vault, caller, turn=NAMING_TURN, max_chars=max_chars)
         used, limit = packet["budget"]["used_chars"], packet["budget"]["limit_chars"]
         assert limit == max_chars and used <= limit
-        assert used == context_views.packet_chars(packet["map"], packet["turn_slice"])
+        assert used == context_views.packet_chars(packet["map"], packet["turn_slice"], packet.get("task_context"), packet.get("stance"), packet.get("next_action"))
 
 
-def test_the_setting_off_restores_the_map_alone(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    """`off` is the rollback: no slice, no resolver, and the map compiles at the whole limit."""
+def test_the_setting_off_preserves_independent_task_context(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """`off` removes the slice and resolver while task context shares the same fixed map allowance."""
     _structured(vault)
     with_slice = _activate(vault, turn=SLED_TURN)
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
@@ -564,8 +572,8 @@ def test_the_setting_off_restores_the_map_alone(vault: Path, monkeypatch: pytest
     off = _activate(vault, turn=SLED_TURN, include_timings=True)
     assert "turn_slice" not in off
     assert not any(stage.startswith("working_set.lexical") for stage in off["timings"]["stages"])
-    assert off["budget"]["used_chars"] == context_views.map_packet_chars(off["map"])
-    assert len(off["map"]["items"]) >= len(with_slice["map"]["items"])
+    assert off["budget"]["used_chars"] == context_views.packet_chars(off["map"], None, off.get("task_context"), off.get("stance"), off.get("next_action"))
+    assert off["map"] == with_slice["map"]
     # An invalid value is not the rollback: it serves the slice and says so once.
     monkeypatch.setattr(working_set_runtime, "_SLICE_WARNING_EMITTED", False)
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "maybe")
@@ -713,7 +721,7 @@ def test_a_conversation_naming_withheld_pages_changes_no_byte_for_a_restricted_c
         _cold()
         owners.append(_activate(root, OWNER, turn=turn, conversation=WITHHELD_THREAD))  # fills the owner caches first
         guests.append(_activate(root, _external(), turn=turn, conversation=WITHHELD_THREAD))
-    assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
+    assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     assert guests[0]["turn_slice"]["items"]  # the control: the guest does reach what it may see through the thread
     assert owners[0]["turn_slice"] != owners[1]["turn_slice"]  # the control: the owner's slice does see the extra pages
     assert LEDGER in json.dumps(owners[0]["turn_slice"])

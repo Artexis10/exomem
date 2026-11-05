@@ -315,7 +315,11 @@ def test_batch_write_refuses_binary_stage_rewritten_between_last_check_and_copy(
         real_hook(path, restoring=restoring)
         if path == binary and not restoring and rewrites == 0:
             rewrites += 1
-            (stage,) = binary.parent.glob(".exomem-batch-*/stage-1.tmp")
+            # Epoch auxiliaries can change stage order; tamper with the reviewed payload itself.
+            (stage,) = (
+                candidate for candidate in binary.parent.glob(".exomem-batch-*/stage-*.tmp")
+                if candidate.read_bytes() == payload
+            )
             with stage.open("r+b") as handle:
                 handle.write(rewritten)
 
@@ -1049,20 +1053,20 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
     pending_dir = tmp_path / "pending"
     first_dir.mkdir()
     pending_dir.mkdir()
-    first = first_dir / "one.md"
-    pending = pending_dir / "two.md"
+    first = first_dir / "one.txt"
+    pending = pending_dir / "two.txt"
     writes = [
         vault.PlannedWrite(
             first,
             "one",
             create_only=True,
-            guard=vault.PathGuard.capture(tmp_path, "first/one.md", leaf_policy="absent"),
+            guard=vault.PathGuard.capture(tmp_path, "first/one.txt", leaf_policy="absent"),
         ),
         vault.PlannedWrite(
             pending,
             "two",
             create_only=True,
-            guard=vault.PathGuard.capture(tmp_path, "pending/two.md", leaf_policy="absent"),
+            guard=vault.PathGuard.capture(tmp_path, "pending/two.txt", leaf_policy="absent"),
         ),
     ]
     real_publish = held_fs.publish_bytes
@@ -1089,7 +1093,7 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
         "committed": False,
         "incomplete": True,
         "affected_count": 2,
-        "targets": ["first/one.md", "pending/two.md"],
+        "targets": ["first/one.txt", "pending/two.txt"],
         "omitted_target_count": 0,
     }
     assert isinstance(incomplete.value.__cause__, vault.PathGuardError)

@@ -24,6 +24,7 @@ Three properties are load-bearing and each is tested directly:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import posixpath
@@ -42,9 +43,9 @@ from . import (
     context_intents,
     context_roles,
     lifecycle_statuses,
+    recap_folder,
     request_budget,
     semantic_units,
-    source_taxonomy,
     working_set_conversation,
     working_set_currency,
     working_set_heat,
@@ -53,6 +54,7 @@ from . import (
     working_set_state,
 )
 from .governance import policy as governance_policy
+from .runtime_resources import SEMANTIC_PREPARATION_BYTES as TASK_CORPUS_MAX_BYTES
 
 if TYPE_CHECKING:
     from .find import UnitParentReads
@@ -372,7 +374,7 @@ class LaneResult(NamedTuple):
     task_truncated: bool = False
 
 
-def clamp_budget(value: object) -> int:
+def clamp_budget(value: object, *, minimum: int = MIN_BUDGET_CHARS) -> int:
     """Clamp a requested budget into the declared range; `None` takes the default."""
     if value is None:
         return DEFAULT_BUDGET_CHARS
@@ -380,7 +382,7 @@ def clamp_budget(value: object) -> int:
         requested = int(value)
     except (TypeError, ValueError):
         return DEFAULT_BUDGET_CHARS
-    return max(MIN_BUDGET_CHARS, min(MAX_BUDGET_CHARS, requested))
+    return max(minimum, min(MAX_BUDGET_CHARS, requested))
 
 
 def bounded_text(text: str) -> str:
@@ -586,7 +588,7 @@ def build_packet(
                 key: incoming[item.ref].provenance[key] for key in ("corrects", "relation", "family")
             }}) if item.ref in incoming else item for item in items
         ) + tuple(item for ref, item in incoming.items() if ref not in seeds)
-    limit = clamp_budget(max_chars)
+    limit = clamp_budget(max_chars, minimum=0)
     promoted_share = limit // PROMOTED_SHARE_DIVISOR
     promoted_used = 0
     order = _role_order(roles)
@@ -616,7 +618,7 @@ def build_packet(
             item.relevance_order,
             0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
-            _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
+            1 if working_set_currency.state(item, status_basis=status_basis)[0] else _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
             item.task_order,
             -_date_rank(item.updated),
             # Most units author no time of their own; their page's time orders
@@ -845,9 +847,11 @@ def build_packet(
             if used + cost > ceiling or not text:
                 _defer(item, "budget")
                 continue
-            ordering = status_basis.ordering(item.lifecycle, path=item.path or None)
-            if ordering is not None and ordering.historical:
+            history, review_due = working_set_currency.state(item, status_basis=status_basis)
+            if history:
                 unit["history"] = True
+            if review_due:
+                unit["review_due"] = review_due
             if promoted and promoted_used + cost > promoted_share:
                 _defer(item, "budget")
                 continue
@@ -985,7 +989,7 @@ def abstained_packet(
     thing a fresh session opening on "ok continue" has to be told.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(None)
-    limit = clamp_budget(max_chars)
+    limit = clamp_budget(max_chars, minimum=0)
     if conversation_inferred or generation.get("carried_by") == "conversation":
         return build_packet(
             items=(),
@@ -1332,6 +1336,161 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
             item = replace(item, provenance={**item.provenance, "standing": True})
         items.append(item)
     return result._replace(items=tuple(items))
+
+
+@governance_policy.request_policy_snapshot()
+def task_candidates(
+    vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
+    snapshot: Any, limit: int,
+    index_token: tuple[int, int, int] | None = None, projections: dict | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Independent bounded recall over catalogue carriers, never anchor evidence."""
+    from . import (
+        bm25,
+        collection_claims,
+        context_task,
+        context_views,
+        epistemic_graph,
+        lexstore,
+        record_governance,
+    )
+    from .governance import egress
+
+    page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+    entries = [entry for entry in catalogue.entries() if entry.path
+               and context_views._admits(entry, caller.visible)
+               and (page_visible is None or page_visible(entry.path))]
+    by_path = {entry.path: entry for entry in entries}
+    from . import working_set_runtime
+
+    allowed = set(by_path)
+    fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
+    registry = context_roles.load_roles(vault_root)
+    categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
+    found: dict[str, dict[str, Any]] = {}
+    missing: list[dict[str, str]] = []
+    restricted = not context_task.full_source_access(vault_root, caller)
+    token_corpus = None
+    statistics = None
+    metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
+    if restricted:
+        projections = projections if projections is not None else {}
+        token_corpus = {}
+        corpus_bytes = 0
+        for path in sorted(allowed):
+            context_task._deadline_check()
+            source = context_task.project_source(vault_root, path, caller, cache=projections)
+            if source is None:
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+                continue
+            text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
+            # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
+            charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
+            if charge > TASK_CORPUS_MAX_BYTES:
+                raise RuntimeError("released task corpus preparation allowance exceeded")
+            tokens = bm25.tokenize(text)
+            charge += 64 * len(tokens)
+            if charge > TASK_CORPUS_MAX_BYTES:
+                raise RuntimeError("released task corpus preparation allowance exceeded")
+            corpus_bytes = charge
+            token_corpus[path] = tokens
+        # The complete released corpus owns N/DF, term selection and result slots.
+        context_task._deadline_check()
+        statistics = bm25.CorpusStatistics.of(token_corpus)
+        context_task._deadline_check()
+        allowed = set(token_corpus)
+
+    def add(path: str, origin: str) -> None:
+        if path not in by_path or path not in allowed:
+            return
+        if path not in found:
+            entry = by_path[path]
+            found[path] = {"ref": entry.ref or path, "source_ref": path, "origins": []}
+        if origin not in found[path]["origins"]:
+            found[path]["origins"].append(origin)
+
+    # Origin values name the two request input segments, not inferred intent.
+    for origin, query in (("turn", turn), ("focus", focus)):
+        if not query.strip():
+            continue
+        query_text = working_set_runtime.content_words(query)
+        if index_token is not None:
+            targets = _routing_targets(
+                vault_root, index_token[1], index_token=index_token,
+                visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
+            )
+            route = collection_claims.route(working_set_index.terms_of(query), targets)
+            if route is not None:
+                add(str(route["collection"]), origin)
+        if restricted:
+            selected, _counted, _dropped = lexstore.select_query_units(
+                bm25.token_units(query_text, query=True), statistics.document_frequency,
+                statistics.pages, working_set_runtime.material_term_budget(),
+            )
+            tokens = list(dict.fromkeys(stem for unit in selected for stem in unit.stems))
+            context_task._deadline_check()
+            hits = statistics.score(token_corpus, tokens, limit + 1) if tokens else []
+            context_task._deadline_check()
+            if len(hits) > limit:
+                missing.append({"role": "task_context", "reason": "lane_truncated"})
+            for path, _score in hits[:limit]:
+                add(path, origin)
+            continue
+        result = lexstore.search_bm25_result(
+            vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
+            allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
+            exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
+        )
+        if not result.readiness.complete:
+            missing.append({"role": "task_context", "reason": "lane_failed"})
+            continue
+        hits = result.value or []
+        if len(hits) > limit:
+            missing.append({"role": "task_context", "reason": "lane_truncated"})
+        for path, _score in hits[:limit]:
+            add(path, origin)
+        if categories:
+            methods = lexstore.get_store(vault_root).search_semantic_units_result(
+                [], limit + 1, categories, (), "kb", fresh,
+                allowed_parent_paths=allowed,
+                admitted_parent_paths=allowed,
+                query_units=bm25.token_units(query_text, query=True),
+                term_budget=working_set_runtime.material_term_budget(),
+                recall_checkpoint=checkpoint, allow_delta=False,
+            )
+            if not methods.readiness.complete:
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+            else:
+                for hit in (methods.value or [])[:limit]:
+                    add(hit.parent_path, origin)
+    if restricted:
+        # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
+        missing.append({"role": "task_context", "reason": "lane_failed"})
+    if found and not restricted:
+        nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
+        try:
+            for path in list(found)[:MAX_ITEMS_PER_ROLE]:
+                graph = epistemic_graph.graph_context(
+                    vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
+                    traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
+                )
+                if not graph.get("available", True):
+                    missing.append({"role": "task_context", "reason": "lane_failed"})
+                    break
+                for node in graph.get("nodes", ()):
+                    add(str(node.get("path") or ""), "graph")
+                nodes_left -= len(graph.get("nodes", ()))
+                edges_left -= len(graph.get("edges", ()))
+                if graph.get("truncation"):
+                    missing.append({"role": "task_context", "reason": "lane_truncated"})
+                if nodes_left <= 0 or edges_left <= 0:
+                    break
+        except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
+            log.debug("task-context graph unavailable", exc_info=True)
+            missing.append({"role": "task_context", "reason": "lane_failed"})
+    if len(found) > limit:
+        missing.append({"role": "task_context", "reason": "lane_truncated"})
+    return list(found.values())[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
 
 
 def _conclusion_pages(
@@ -1782,14 +1941,14 @@ def _unit_items(
                 # with none is served undated: the page changed when ANY unit
                 # on it did. The page's time orders it (`page_updated`,
                 # internal, never published).
-                updated=working_set_currency.own_time(getattr(hit, "context", None)),
+                updated=getattr(hit, "as_of", None) or working_set_currency.own_time(getattr(hit, "context", None)),
                 anchor=parent,
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
                     "kind": str(getattr(hit, "kind", "") or ""),
                     "source_hash": str(getattr(hit, "source_hash", "") or ""),
                     **({"verdict": hit.verdict} if getattr(hit, "verdict", None) else {}),
-                    **({"check_by": hit.check_by} if getattr(hit, "check_by", None) else {}),
+                    **({key: getattr(hit, key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS if getattr(hit, key, None)}),
                     "superseded_by": superseded_by,
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),
@@ -2346,7 +2505,8 @@ def signature_evidence(
 
 
 def _is_current_page(
-    vault_root: Path, rel_path: str, *, status_basis: lifecycle_statuses.Basis | None = None
+    vault_root: Path, rel_path: str, *, status_basis: lifecycle_statuses.Basis | None = None,
+    page: Any = None,
 ) -> bool:
     """Is `rel_path` a page the vault still stands behind?
 
@@ -2375,7 +2535,8 @@ def _is_current_page(
         from . import find_corpus
 
         root = Path(vault_root)
-        page = find_corpus.CACHE.get(root / text, root)
+        if page is None:
+            page = find_corpus.CACHE.get(root / text, root)
     except Exception:  # noqa: BLE001 - an unreadable page is simply not a candidate
         log.debug("activation carry lifecycle read failed for %s", text, exc_info=True)
         return False
@@ -4057,7 +4218,7 @@ def _compile_packet(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     task_refresh = trigger == "task_refresh"
     root = Path(vault_root)
-    limit = clamp_budget(max_chars)
+    limit = clamp_budget(max_chars, minimum=0)
     index = index or working_set_index.WorkingSetIndex(root)
     registry = context_roles.load_roles(root)
     # The WHOLE sidecar token, in place of the generation read this used to
@@ -4159,11 +4320,13 @@ def _compile_packet(
     if freshness_snapshot is not None:
         from . import working_set_runtime
 
-        _selection_stack.enter_context(
+        lexical_checkpoint = _selection_stack.enter_context(
             working_set_runtime.lexical_selection_scope(
-                root, freshness_snapshot.lexical_checkpoint("kb")
+                root, freshness_snapshot.lexical_checkpoint("kb"),
+                restricted=visible is not None, purpose=purpose,
             )
         )
+        freshness_snapshot = freshness_snapshot.lexical_view("kb", lexical_checkpoint)
     with _span(timings, "working_set.resolve"):
         # `analysis` is needed on BOTH branches. The override replaces which
         # anchor the turn is about; it does not replace which lenses the turn asks
@@ -5334,6 +5497,7 @@ def _referent_filters(
         str(getattr(row, "path", "") or ""): row for row in rows if getattr(row, "path", "")
     }
     collections = _recent_collection_dirs((*by_path, *heat.all_rows))
+    inboxes = recap_folder.inbox_folders(root)
     retired = {
         path
         for path, row in by_path.items()
@@ -5341,7 +5505,10 @@ def _referent_filters(
     }
 
     def admissible(path: str) -> bool:
-        return path not in retired and _recent_reason_for(path, collections=collections) == "edited"
+        return (
+            path not in retired
+            and _recent_reason_for(path, collections=collections, inboxes=inboxes) == "edited"
+        )
 
     def eligible(path: str) -> bool:
         if path in by_path:
@@ -5592,6 +5759,7 @@ def _recent_context(
     # left the exclusion inert on exactly the path where the other is all
     # there is.
     collections = _recent_collection_dirs((*by_path, *heat.all_rows))
+    inboxes = recap_folder.inbox_folders(vault_root)
     order = {contact.path: position for position, contact in enumerate(contacts)}
     times = {contact.path: contact.ts_ns for contact in contacts}
     offered: dict[str, str] = {}
@@ -5600,12 +5768,12 @@ def _recent_context(
     for contact in contacts:
         if contact.reason == "episode":
             # A recap page's only contact is its own `episode_page` event.
-            if _recent_reason_for(contact.path) == "episode":
+            if _recent_reason_for(contact.path, inboxes=inboxes) == "episode":
                 episode_times[contact.path] = contact.ts_ns
             continue
         if min(taken.values()) >= limit:
             continue
-        kind = _recent_reason_for(contact.path, collections=collections)
+        kind = _recent_reason_for(contact.path, collections=collections, inboxes=inboxes)
         if not kind or kind == "episode":
             continue
         # A captured session stays `captured` whoever touched it last: its
@@ -5623,7 +5791,7 @@ def _recent_context(
         offered.setdefault(rel, "planning")
     # An episode is offered once per conversation, its newest revision, never
     # per file.
-    for rel in _recent_episodes(episode_times, limit=RECENT_EPISODES_MAX):
+    for rel in _recent_episodes(episode_times, limit=RECENT_EPISODES_MAX, inboxes=inboxes):
         offered[rel] = "episode"
     # Retired state is never offered, as the hot profile never offers it: a
     # retired status or a `superseded_by` pointer, read from the request's
@@ -5731,10 +5899,12 @@ def _recent_collection_dirs(paths: Iterable[str]) -> frozenset[str]:
     return frozenset(rel[: -len(marker)] for rel in paths if rel.endswith(marker))
 
 
-_EPISODE_PREFIX = f"Sources/{source_taxonomy.EPISODE_PATH_LABEL}/"
+_EPISODE_PREFIX = recap_folder.SHARED_INNER
 
 
-def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -> str:
+def _recent_reason_for(
+    rel: str, *, collections: frozenset[str] = frozenset(), inboxes: tuple[str, ...] = (),
+) -> str:
     """`edited`, `captured`, `episode`, or `""` for a page that is not working context.
 
     Raw material and operational state are excluded by the SAME path rules the
@@ -5748,6 +5918,9 @@ def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -
     activity log is rewritten by every confirmed write, so without excluding it
     it would be the most recently edited page on every turn and this block
     would say nothing else.
+
+    A restricted writer's recaps live in its inbox, not the shared folder; `inboxes`
+    names the recap folder of each configured capture path (`recap_folder.inbox_folders`).
     """
     from . import find_corpus
     from .kbdir import kb_prefix
@@ -5763,7 +5936,7 @@ def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -
         return ""
     if inner.startswith("Evidence/"):
         return ""
-    if inner.startswith(_EPISODE_PREFIX):
+    if inner.startswith(_EPISODE_PREFIX) or recap_folder.under(inboxes, rel):
         return "episode"
     if inner.startswith("Sources/"):
         return "captured" if inner.startswith("Sources/Sessions/") else ""
@@ -5861,7 +6034,9 @@ def _recent_planning(
     return tuple(plans[:limit])
 
 
-def _recent_episodes(times: Mapping[str, int], *, limit: int) -> tuple[str, ...]:
+def _recent_episodes(
+    times: Mapping[str, int], *, limit: int, inboxes: tuple[str, ...] = (),
+) -> tuple[str, ...]:
     """The newest revision of each of the most recent episodes, newest first.
 
     String work over the recap pages' heat contacts (`times`): no read, no
@@ -5876,7 +6051,7 @@ def _recent_episodes(times: Mapping[str, int], *, limit: int) -> tuple[str, ...]
 
     newest: dict[str, tuple[str, str]] = {}
     for rel in times:
-        if _recent_reason_for(rel) != "episode":
+        if _recent_reason_for(rel, inboxes=inboxes) != "episode":
             continue
         parts = episode_capture.filename_parts(rel.rsplit("/", 1)[-1])
         group, order = (parts[0], parts[1]) if parts is not None else (rel, "")

@@ -41,7 +41,7 @@
                   "type": "string"
                 },
                 "profile": {
-                  "description": "compact (default), full, diagnostics, or session (needs installed skill digest).",
+                  "description": "compact, full, diagnostics, or session (needs installed skill digest).",
                   "type": "string",
                   "default": "compact"
                 },
@@ -76,7 +76,7 @@
     }
   },
   "browse_memory": {
-    "description": "Browse folders, list files or trash, or preview file reclassification without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: browse_memory create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Browse folders, list files or trash, or preview file reclassification without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: browse_memory create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -344,7 +344,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none."
+              "description": "Audit reason for reviewed-none or generic."
             },
             "promotion_reason": {
               "type": "string",
@@ -633,6 +633,7 @@
                   },
                   "type": "array"
                 },
+                "ref": {},
                 "identity_decision": {
                   "additionalProperties": false,
                   "properties": {
@@ -684,7 +685,7 @@
                     "type": "object"
                   },
                   "type": "array",
-                  "description": "create-entity only. Typed {kind, target} edges; connections stay relates_to."
+                  "description": "create-entity only. {kind, target, reason?} edges; relates_to needs a reason."
                 }
               },
               "required": [
@@ -706,9 +707,7 @@
                 "requested_relation": {
                   "type": "string"
                 },
-                "ref": {
-                  "type": "string"
-                },
+                "ref": {},
                 "expected_hash": {
                   "description": "Target `content_hash`; required for accept-relation.",
                   "type": "string"
@@ -740,6 +739,11 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
           }
         },
         "response_detail": {
@@ -760,7 +764,7 @@
     }
   },
   "change_files": {
-    "description": "Create, append, move, delete, recover or reclassify governed files. Preview reclassification through browse_memory. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Create, append, move, delete, recover or reclassify governed files. Preview reclassification through browse_memory. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1034,7 +1038,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none."
+              "description": "Audit reason for reviewed-none or generic."
             },
             "promotion_reason": {
               "type": "string",
@@ -1438,7 +1442,7 @@
     }
   },
   "change_observations": {
-    "description": "Add, update or remove a semantic unit with the existing review and fingerprint guards. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Updates rebuild the unit: omitted verdict/check_by/id persist; tags/context/relations clear unless resent. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Add, update or remove a semantic unit with the existing review and fingerprint guards. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Updates rebuild the unit: omitted governed metadata and id persist; tags/context/relations clear unless resent. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1461,6 +1465,8 @@
                 "relations": {},
                 "verdict": {},
                 "check_by": {},
+                "as_of": {},
+                "until": {},
                 "id": {},
                 "unit_ref": {},
                 "expected_fingerprint": {},
@@ -1496,6 +1502,8 @@
                 "relations": {},
                 "verdict": {},
                 "check_by": {},
+                "as_of": {},
+                "until": {},
                 "id": {},
                 "unit_ref": {},
                 "expected_fingerprint": {},
@@ -1544,7 +1552,7 @@
           },
           "properties": {
             "path": {
-              "description": "Parent page path or memory reference.",
+              "description": "Parent path or memory ref.",
               "type": "string"
             },
             "category": {
@@ -1578,27 +1586,35 @@
             },
             "verdict": {
               "type": "string",
-              "description": "Rich-only: abandoned, confirmed, inconclusive, qualified, or refuted. Empty string clears it on update."
+              "description": "Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears."
             },
             "check_by": {
               "type": "string",
-              "description": "Rich-only ISO revisit date. Empty string clears it on update."
+              "description": "Rich ISO revisit date; '' clears."
+            },
+            "as_of": {
+              "type": "string",
+              "description": "Rich ISO start date; '' clears."
+            },
+            "until": {
+              "type": "string",
+              "description": "Rich ISO last valid date; '' clears."
             },
             "id": {
               "type": "string",
-              "description": "Unique anchor within the parent; derived on add if omitted."
+              "description": "Parent-unique anchor; derived on add if omitted."
             },
             "unit_ref": {
               "type": "string",
-              "description": "Exact unit reference for update/remove or previewing an existing unit. Without it, validate previews an addition."
+              "description": "Unit ref for update/remove or existing-unit preview; otherwise validate previews an add."
             },
             "expected_fingerprint": {
               "type": "string",
-              "description": "Current unit fingerprint; required for update/remove. Echo it when previewing an existing unit."
+              "description": "Current fingerprint for update/remove and existing-unit preview."
             },
             "expected_hash": {
               "type": "string",
-              "description": "Current parent-page content hash; required for update/remove."
+              "description": "Current parent hash for update/remove."
             },
             "transition_token": {
               "type": "string",
@@ -1614,18 +1630,18 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none."
+              "description": "Audit reason for reviewed-none or generic."
             },
             "reason": {
               "type": "string",
-              "description": "Optional rationale retained with the prior interpretation."
+              "description": "Rationale kept with the prior interpretation."
             },
             "target_fingerprints": {
               "additionalProperties": {
                 "type": "string"
               },
               "type": "object",
-              "description": "Exact corrective target refs and current fingerprints. Omit for ordinary page or heading relations; episode unit leaves echo them."
+              "description": "Exact corrective refs/current fingerprints. Omit for page/heading links; echo for episode unit leaves."
             }
           }
         },
@@ -3493,7 +3509,7 @@
     }
   },
   "create_note": {
-    "description": "Save a durable conclusion as compiled knowledge.\n\nDistill decisions, findings, failures, patterns, experiments and production logs.\nRaw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Save a durable conclusion as compiled knowledge.\n\nDistill decisions, findings, failures, patterns, experiments and production logs.\nRaw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3593,7 +3609,7 @@
         },
         "suggestions": {
           "default": false,
-          "description": "Off by default. `suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
+          "description": "`suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
           "type": "boolean"
         },
         "project_category": {
@@ -3624,7 +3640,7 @@
         },
         "relation_review_reason": {
           "type": "string",
-          "description": "Audit reason for reviewed-none."
+          "description": "Audit reason for reviewed-none or generic."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -3696,7 +3712,7 @@
     }
   },
   "edit_note": {
-    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use supersede_note.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\nAuthor typed relations under `## Relations`, for example\n`- supports [[Knowledge Base/Notes/Research/example-target]]`.\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use supersede_note.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\nAuthor typed relations under `## Relations`, for example\n`- supports [[Knowledge Base/Notes/Research/example-target]]`.\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4724,7 +4740,7 @@
     }
   },
   "prepare_note": {
-    "description": "Prepare a sourced compilation draft or validate an observation without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Updates rebuild the unit: omitted verdict/check_by/id persist; tags/context/relations clear unless resent. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Prepare a sourced compilation draft or validate an observation without writing. Select one operation.kind. Semantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Updates rebuild the unit: omitted governed metadata and id persist; tags/context/relations clear unless resent. Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition=\"reviewed_none\" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -4739,7 +4755,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "Parent page path or memory reference.",
+                  "description": "Parent path or memory ref.",
                   "type": "string"
                 },
                 "category": {
@@ -4773,27 +4789,35 @@
                 },
                 "verdict": {
                   "type": "string",
-                  "description": "Rich-only: abandoned, confirmed, inconclusive, qualified, or refuted. Empty string clears it on update."
+                  "description": "Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears."
                 },
                 "check_by": {
                   "type": "string",
-                  "description": "Rich-only ISO revisit date. Empty string clears it on update."
+                  "description": "Rich ISO revisit date; '' clears."
+                },
+                "as_of": {
+                  "type": "string",
+                  "description": "Rich ISO start date; '' clears."
+                },
+                "until": {
+                  "type": "string",
+                  "description": "Rich ISO last valid date; '' clears."
                 },
                 "id": {
                   "type": "string",
-                  "description": "Unique anchor within the parent; derived on add if omitted."
+                  "description": "Parent-unique anchor; derived on add if omitted."
                 },
                 "unit_ref": {
                   "type": "string",
-                  "description": "Exact unit reference for update/remove or previewing an existing unit. Without it, validate previews an addition."
+                  "description": "Unit ref for update/remove or existing-unit preview; otherwise validate previews an add."
                 },
                 "expected_fingerprint": {
                   "type": "string",
-                  "description": "Current unit fingerprint; required for update/remove. Echo it when previewing an existing unit."
+                  "description": "Current fingerprint for update/remove and existing-unit preview."
                 },
                 "expected_hash": {
                   "type": "string",
-                  "description": "Current parent-page content hash; required for update/remove."
+                  "description": "Current parent hash for update/remove."
                 },
                 "transition_token": {
                   "type": "string",
@@ -4809,18 +4833,18 @@
                 },
                 "relation_review_reason": {
                   "type": "string",
-                  "description": "Audit reason for reviewed-none."
+                  "description": "Audit reason for reviewed-none or generic."
                 },
                 "reason": {
                   "type": "string",
-                  "description": "Optional rationale retained with the prior interpretation."
+                  "description": "Rationale kept with the prior interpretation."
                 },
                 "target_fingerprints": {
                   "additionalProperties": {
                     "type": "string"
                   },
                   "type": "object",
-                  "description": "Exact corrective target refs and current fingerprints. Omit for ordinary page or heading relations; episode unit leaves echo them."
+                  "description": "Exact corrective refs/current fingerprints. Omit for page/heading links; echo for episode unit leaves."
                 }
               },
               "required": [
@@ -5575,6 +5599,35 @@
                 "next_window_bytes": {
                   "type": "integer",
                   "description": "Sender only: that window's bytes."
+                },
+                "view": {
+                  "description": "For run `status`, summary by default; inventory, selection, plan, outcomes or stale pages. Full is the explicit browser compatibility view.",
+                  "enum": [
+                    "summary",
+                    "inventory",
+                    "selection",
+                    "plan",
+                    "outcomes",
+                    "stale",
+                    "full"
+                  ],
+                  "type": "string",
+                  "default": "summary"
+                },
+                "offset": {
+                  "minimum": 0,
+                  "type": "integer",
+                  "default": 0
+                },
+                "limit": {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer",
+                  "default": 100
+                },
+                "revision": {
+                  "type": "string",
+                  "description": "For status pages, the preceding summary's revision; restart paging if it changed."
                 }
               },
               "required": [
@@ -5787,18 +5840,18 @@
                   "type": "string"
                 },
                 "max_nodes": {
-                  "description": "Drawing cap, from 1 to 200. Default 200.",
+                  "description": "Drawing cap, from 1 to 200.",
                   "type": "integer",
                   "default": 200
                 },
                 "max_edges": {
-                  "description": "Drawing cap, from 0 to 400. Default 400.",
+                  "description": "Drawing cap, from 0 to 400.",
                   "type": "integer",
                   "default": 400
                 },
                 "purpose": {
                   "type": "string",
-                  "description": "Optional declared purpose under the existing disclosure policy."
+                  "description": "Declared purpose under the existing disclosure policy."
                 }
               },
               "required": [
@@ -7788,7 +7841,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation supplies excerpts, not attachment reads.\nfocus is agent-authored, not human intent; clarify ambiguity.\nKeep source identity/scope. Due/refresh grants no writes.\nPull map refs with read_memory.\nOptional epistemic_status has counts/completeness; read_memory gives\nitems/reading provenance.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nRead map/task_context refs and method scope/exclusions with read_memory.\nDiscard held methods on methods.reset. Follow next_action.\nepistemic_status: counts/completeness; read_memory: provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -8601,7 +8654,7 @@
     }
   },
   "search_memory": {
-    "description": "Search compiled knowledge and originals for an evidence gap.\n\nReuse recall_context; read_memory opens selected refs. deep=true packs context.\nResults are bounded; a miss covers only this query/scope. Evidence is not an answer.\nHelp: bootstrap(profile=\"full\").",
+    "description": "Search compiled knowledge and originals for an evidence gap.\n\nReuse recall_context; read_memory opens selected refs. deep=true packs context.\nA miss covers only this query/scope. Follow `next_action`. Evidence is not an answer.\nHelp: bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -8793,7 +8846,7 @@
     }
   },
   "supersede_note": {
-    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_note`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
+    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_note`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap with operation.kind=\"instructions\", profile=\"full\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -8925,7 +8978,7 @@
         },
         "relation_review_reason": {
           "type": "string",
-          "description": "Audit reason for reviewed-none."
+          "description": "Audit reason for reviewed-none or generic."
         },
         "vocabulary_decision": {
           "additionalProperties": false,

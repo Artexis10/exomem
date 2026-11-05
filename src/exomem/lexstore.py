@@ -852,8 +852,9 @@ _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
 _PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
 # A promoted standby adopts its detached catalogue inside the promotion request,
-# which the supervisor caps at ten seconds; a busier barrier leaves the live
-# catalogue to the ordinary repair instead of timing that request out.
+# which the supervisor caps (`service_manager.PROMOTE_REQUEST_SECONDS`, ten
+# seconds on an older supervisor); a busier barrier leaves the live catalogue to
+# the ordinary repair instead of timing that request out.
 _PUBLICATION_TIMEOUT_ADOPT = 5.0
 
 
@@ -1024,6 +1025,10 @@ class RepairCause(enum.StrEnum):
     # registry, or a bounded apply met a source that moved before its commit.
     CATALOGUE_LAG = "catalogue_lag"
     SOURCE_MOVED = "source_moved"
+    # A strict recall resolver refused: no admitted checkpoint names its
+    # request, or the catalogue holds no rows for the checkpoint it names.
+    RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
+    RESOLVER_ENTRIES_UNAVAILABLE = "resolver_entries_unavailable"
 
 
 class DeclineCause(enum.StrEnum):
@@ -2188,6 +2193,11 @@ def live_catalog_compatible(vault_root: Path) -> bool:
     return get_store(vault_root).live_catalog_compatible()
 
 
+def live_catalog_release_current(vault_root: Path) -> bool | None:
+    """Whether the running release built the live catalogue, or None when unknown."""
+    return get_store(vault_root).live_catalog_release_current()
+
+
 def assess_live_catalog(
     vault_root: Path, *, require_live_projection: bool = True
 ) -> CatalogAssessment:
@@ -2210,9 +2220,14 @@ def build_detached_catalog(
     return get_store(vault_root).build_detached_catalog(cancel=cancel)
 
 
-def adopt_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> bool:
-    """Publish a catalogue this process built detached over the live one."""
-    return get_store(vault_root).adopt_detached_catalog(detached)
+def adopt_detached_catalog(
+    vault_root: Path, detached: DetachedCatalog, *, timeout: float | None = None
+) -> bool:
+    """Publish a catalogue this process built detached over the live one.
+
+    `timeout` caps the publication barrier wait below its usual bound.
+    """
+    return get_store(vault_root).adopt_detached_catalog(detached, timeout=timeout)
 
 
 def discard_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> None:
@@ -2293,14 +2308,18 @@ def request_repair(
     vault_root: Path,
     *,
     deferred_paths: list[Path] | None = None,
+    lag_only: bool = False,
     cause: RepairCause | None = None,
 ) -> None:
     """Non-walking retry seam for a request refused by runtime admission.
 
     `deferred_paths` narrows the repair to a targeted retry of those paths (see
-    `_schedule_repair`); `cause` is the token the worker logs. A narrow
-    request that names nothing the catalogue indexes is dropped, never widened
-    into the whole-catalogue pass that an empty path list would request.
+    `_schedule_repair`); `lag_only` asks for the catch-up of the registry delta,
+    which moves up to the full pass on any decline; `cause` is the token the
+    worker logs. A narrow request that names nothing the catalogue indexes is
+    dropped, never widened into the whole-catalogue pass that an empty path
+    list would request. Unlike `request_lag_repair`, this seam leaves runtime
+    admission as it is: a refused request proves nothing about the catalogue.
     """
     if not maintained_content_index_enabled():
         return
@@ -2308,7 +2327,7 @@ def request_repair(
         deferred_paths = _lexical_markdown(deferred_paths)
         if not deferred_paths:
             return
-    _schedule_repair(vault_root, deferred_paths=deferred_paths, cause=cause)
+    _schedule_repair(vault_root, deferred_paths=deferred_paths, lag_only=lag_only, cause=cause)
 
 
 def request_lag_repair(vault_root: Path) -> None:
@@ -3209,6 +3228,7 @@ class _AdmittedRecallRows:
 
     entries: tuple[tuple[str, str | None], ...]
     paths: frozenset[str]
+    emitted_parents: Mapping[str, str | None]
     carry_candidates: tuple[str, ...]
     outside_carry: tuple[str, ...]
 
@@ -6071,6 +6091,11 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _catalog_release_current(self, conn: sqlite3.Connection) -> bool:
+        """Whether the running release built the rows behind `conn` (see `_stamp_whole_build`)."""
+        row = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
+        return row is not None and row[0] == __version__
+
     def _stamp_whole_build(self, conn: sqlite3.Connection) -> None:
         """Record the schema and the release that derived every page row (caller owns the txn).
 
@@ -8366,8 +8391,7 @@ class LexicalStore:
             return "schema"
         if self._meta_catalog_identity(conn) != identity:
             return "identity"
-        release = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
-        if release is None or release[0] != __version__:
+        if not self._catalog_release_current(conn):
             return "release"
         # A whole-corpus build reads nothing from the live file; a copy would
         # carry its damage into every later repair, so check the copy once.
@@ -8598,6 +8622,26 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
+    def live_catalog_release_current(self) -> bool | None:
+        """Whether the running release built the live catalogue, or None when unknown.
+
+        Read-only and O(1), like `live_catalog_compatible`. False means another
+        release's whole build derived every row, so `_seed_from_live` would not
+        reuse them; None (no maintained store, no file, a failed read) decides
+        nothing.
+        """
+        if backend() == "python" or self._failed or not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            return self._catalog_release_current(conn)
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
     def assess_live_catalog(
         self, *, require_live_projection: bool = True
     ) -> CatalogAssessment:
@@ -8775,7 +8819,9 @@ class LexicalStore:
             finally:
                 detached.finished.set()
 
-    def adopt_detached_catalog(self, detached: DetachedCatalog) -> bool:
+    def adopt_detached_catalog(
+        self, detached: DetachedCatalog, *, timeout: float | None = None
+    ) -> bool:
         """Publish a catalogue this process built detached, replacing the live one.
 
         Called by a promoted standby that now owns the vault. Under the
@@ -8788,7 +8834,12 @@ class LexicalStore:
 
         published = False
         try:
-            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_ADOPT):
+            wait = (
+                _PUBLICATION_TIMEOUT_ADOPT
+                if timeout is None
+                else max(0.0, min(_PUBLICATION_TIMEOUT_ADOPT, timeout))
+            )
+            with self._publication_lock(timeout=wait):
                 if self._detached_catalog_current(detached.path):
                     published = self._replace_live_catalog(detached.path)
                 else:
@@ -10180,16 +10231,16 @@ class LexicalStore:
                 counted = postings.counted_from_page_terms(missing, document_frequency)
             else:
                 rows = conn.execute(
-                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1 "
-                    "AND p.path IN (SELECT value FROM json_each(?))",
-                    (
-                        " OR ".join('"' + word.replace('"', '""') + '"' for word in missing),
-                        json.dumps(sorted(admitted_paths), ensure_ascii=False),
-                    ),
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} WHERE fts MATCH ? AND p.{col} = 1",
+                    (" OR ".join('"' + word.replace('"', '""') + '"' for word in missing),),
                 )
-                counted = postings.counted(
-                    ((path, stemmed.split()) for path, stemmed in rows), missing, document_frequency,
-                )
+                try:
+                    counted = postings.counted(
+                        ((path, stemmed.split()) for path, stemmed in rows if path in admitted_paths),
+                        missing, document_frequency,
+                    )
+                finally:
+                    rows.close()
             if counted is None:
                 return None
             held.update(counted)
@@ -10336,7 +10387,7 @@ class LexicalStore:
         col = "in_vault" if scope == "vault" else "in_kb"
         allowed_clause = ""
         params: list[object] = [match]
-        if allowed_paths is not None:
+        if allowed_paths is not None and admitted is None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         groups = [group for group in (corroboration_groups or []) if group]
@@ -10421,15 +10472,15 @@ class LexicalStore:
             if narrowing is not None:
                 # This branch scores in Python, so the MATCH only selects rows.
                 params[0] = f"({match}) AND ({narrowing})"
-            # SQL admits before scoring or cap. The scorer then corroborates
-            # with the same Counter it needs for each document's score.
-            ranking_clause += (
-                " AND p.path IN (SELECT value FROM json_each(?))" + excluded_clause
-            )
+            # Like carry statistics, filter MATCH rows before scoring; never serialize the whole admission set.
+            ranking_clause += excluded_clause
             ranking_params = [
                 params[0], *params[1:corroboration_at],
-                json.dumps(sorted(admitted_paths), ensure_ascii=False), *excluded_params,
+                *excluded_params,
             ]
+            def admitted_candidate(path: str) -> bool:
+                return path in admitted_paths and (allowed_paths is None or path in allowed_paths)
+
             filters = {
                 "min_matched_terms": min_matched_terms, "term_units": term_units,
                 "corroboration_tokens": corroboration_tokens, "corroboration_groups": groups,
@@ -10451,20 +10502,23 @@ class LexicalStore:
                         ),
                     )
                 )
-                if postings is None:
-                    # Rows newer than the corpus figures, or a word the index cannot
-                    # vouch for: score each candidate's own text.
-                    candidates = {
-                        path: stemmed.split()
-                        for path, stemmed in conn.execute("SELECT p.path, fts.stemmed " + ranked_rows, ranking_params)
-                    }
-                    call_spans.measure(call_spans.CANDIDATES, len(candidates))
-                    return admitted.score(candidates, tokens, k, **filters)
-                paths = [path for (path,) in conn.execute("SELECT p.path " + ranked_rows, ranking_params)]
-                call_spans.measure(call_spans.CANDIDATES, len(paths))
-                return admitted.score_counts(
-                    admitted_entry.postings.documents(paths, postings), tokens, k, **filters,
-                )
+                columns = "p.path, fts.stemmed" if postings is None else "p.path"
+                rows = conn.execute("SELECT " + columns + " " + ranked_rows, ranking_params)
+                try:
+                    if postings is None:
+                        # Unproved postings retain text scoring, over admitted matches alone.
+                        candidates = {
+                            path: stemmed.split() for path, stemmed in rows if admitted_candidate(path)
+                        }
+                        call_spans.measure(call_spans.CANDIDATES, len(candidates))
+                        return admitted.score(candidates, tokens, k, **filters)
+                    paths = [path for (path,) in rows if admitted_candidate(path)]
+                    call_spans.measure(call_spans.CANDIDATES, len(paths))
+                    return admitted.score_counts(
+                        admitted_entry.postings.documents(paths, postings), tokens, k, **filters,
+                    )
+                finally:
+                    rows.close()
             finally:
                 if owns_snapshot:
                     conn.rollback()
@@ -11037,6 +11091,16 @@ class LexicalStore:
         rows = self._admitted_recall_rows_for(scope, checkpoint)
         return None if rows is None else rows.paths
 
+    def recall_emitted_parents(
+        self, scope: str, checkpoint: Any | None
+    ) -> Mapping[str, str | None] | None:
+        """Structural parent links from the same proven rows as recall paths.
+
+        These links carry no release verdict; callers still authorize parents.
+        """
+        rows = self._admitted_recall_rows_for(scope, checkpoint)
+        return None if rows is None else rows.emitted_parents
+
     def published_admitted_paths(
         self,
         scope: str,
@@ -11300,18 +11364,20 @@ class LexicalStore:
                     raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
                     with call_spans.span("lexical.resolver_entries", {}) as measured:
                         entries, candidates, outside = [], [], []
+                        parents = {}
                         # Cache the SQL partitions, then decide visibility anew for each request.
-                        for path, title, in_scope, carry in conn.execute(
-                            f"SELECT p.path, p.title, p.{col}, (p.{col} = 1{raw_clause}) "
+                        for path, title, parent, in_scope, carry in conn.execute(
+                            f"SELECT p.path, p.title, p.emitted_parent_path, p.{col}, (p.{col} = 1{raw_clause}) "
                             "FROM pages p ORDER BY p.path", raw_params,
                         ):
                             path = str(path)
                             if in_scope == 1:
                                 entries.append((path, title))
+                                parents[path] = parent
                             (candidates if carry else outside).append(path)
                         rows = _AdmittedRecallRows(
                             tuple(entries), frozenset(path for path, _title in entries),
-                            tuple(candidates), tuple(outside),
+                            MappingProxyType(parents), tuple(candidates), tuple(outside),
                         )
                         measured["rows"] = len(entries)
                     with self._term_frequency_cache_lock:
@@ -12088,7 +12154,6 @@ class LexicalStore:
     @staticmethod
     def _substring_predicate(
         tokens: list[str], scope: str,
-        allowed_paths: set[str] | None = None,
     ) -> tuple[list[str], list[object]]:
         """The shared trigram accelerator and exact all-token substring predicate."""
         col = "in_vault" if scope == "vault" else "in_kb"
@@ -12102,24 +12167,41 @@ class LexicalStore:
         for t in tokens:
             clauses.append("(instr(tri.title_lower, ?) > 0 OR instr(tri.body_lower, ?) > 0)")
             params.extend((t, t))
-        if allowed_paths is not None:
-            clauses.append("p.path IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         return clauses, params
+
+    def _matched_substring_paths(
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, allowed_paths: Set[str],
+    ) -> list[str]:
+        """Intersect exact matches without enumerating the allowed corpus or sorting hidden rows."""
+        clauses, params = self._substring_predicate(tokens, scope)
+        rows = conn.execute(
+            "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
+            + " AND ".join(clauses), params,
+        )
+        try:
+            return [path for (path,) in rows if path in allowed_paths]
+        finally:
+            rows.close()
 
     def _substring_query(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,
         allowed_paths: set[str] | None = None,
     ) -> list[str]:
         """Return the recency-ordered exact substring matches, capped after ordering."""
-        clauses, params = self._substring_predicate(tokens, scope, allowed_paths)
+        if allowed_paths is None:
+            clauses, params = self._substring_predicate(tokens, scope)
+            source = "FROM tri JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses)
+        else:
+            # The surrounding catalogue callback pins both statements to one proven snapshot.
+            matched = self._matched_substring_paths(conn, tokens, scope, allowed_paths)
+            source = "FROM json_each(?) matched CROSS JOIN pages p ON p.path = matched.value"
+            params = [json.dumps(matched, ensure_ascii=False)]
         limit = ""
         if k is not None:
             limit = " LIMIT ?"
             params.append(max(0, int(k)))
         rows = conn.execute(
-            "SELECT p.path FROM tri JOIN pages p ON p.rowid = tri.rowid "
-            "WHERE " + " AND ".join(clauses) + " "
+            "SELECT p.path " + source + " "
             "ORDER BY p.updated DESC, p.path DESC" + limit,
             params,
         ).fetchall()
@@ -12130,7 +12212,14 @@ class LexicalStore:
         allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
     ) -> list[KeywordGroup]:
         """Merge every frozen pending parent before grouping and capping matching sources."""
-        clauses, params = self._substring_predicate(tokens, scope, allowed_paths)
+        if allowed_paths is None:
+            clauses, params = self._substring_predicate(tokens, scope)
+            source = "FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid"
+        else:
+            matched = self._matched_substring_paths(conn, tokens, scope, allowed_paths)
+            source = "FROM json_each(?) matched CROSS JOIN pages p ON p.path = matched.value"
+            clauses = []
+            params = [json.dumps(matched, ensure_ascii=False)]
         clauses.extend((
             "p.eligibility_view_json IS NOT NULL", "p.content_hash IS NOT NULL",
             "p.ranking_json IS NOT NULL", "NOT EXISTS (SELECT 1 FROM pending WHERE path = p.path)",
@@ -12146,7 +12235,7 @@ class LexicalStore:
             "json_extract(value, '$.parseable') AS parseable FROM json_each(?)), "
             "matched AS (SELECT p.path, p.emitted_parent_path AS parent, p.updated, p.content_hash AS hash, "
             "json_extract(p.eligibility_view_json, '$.media_file') AS media_file, 1 AS priority, 0 AS ordinal "
-            "FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
+            + source + " WHERE " + " AND ".join(clauses) + " "
             "UNION ALL SELECT path, parent, updated, hash, media_file, 0, ordinal "
             "FROM pending WHERE matches = 1 AND parseable = 1), "
             "parents AS (SELECT m.*, CASE WHEN overlay.path IS NOT NULL THEN overlay.parseable "

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -30,8 +30,8 @@ _MEMO_MAX = 4096
 #: The frontmatter fields `_evaluate_markdown_scopes` reads, through `ParsedPage`
 #: and `find_corpus.all_projects`. A stored summary keeps these for membership.
 FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_refs.ID_FIELD)  # nosemgrep: ep-word-set -- the closed frontmatter fields this kernel reads
-_MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str]], frozenset[str]] = OrderedDict()
-_SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str, str, frozenset[str]], frozenset[str]] = OrderedDict()
+_MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
+_SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
 _PATH_MEMO: OrderedDict[
     tuple[str, str, tuple[companions.BoundSnapshot, ...], tuple[companions.StoredOriginalProof, ...], frozenset[str] | None], MembershipOutcome
 ] = OrderedDict()
@@ -84,6 +84,7 @@ def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
     _PATH_MEMO.clear()
+    _PARENT_MEMO.clear()
     _normalized_refs.cache_clear()
 
 
@@ -162,9 +163,30 @@ def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
     return not excluded
 
 
-def evaluate_metadata(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
-    """The shared selector kernel over already established identity metadata."""
+def evaluate_metadata_selectors(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
+    """The scopes whose selectors match `subject`; the residual scope selects nothing here."""
     return frozenset(key for key, scope in policy.scopes.items() if _scope_matches(scope, subject))
+
+
+def _complete(
+    policy: Policy, matched: frozenset[str], *, classified: bool = False,
+    directory: Callable[[], bool] | None = None,
+) -> frozenset[str]:
+    """Assign the residual scope to an item that nothing else selects.
+
+    The one place the residual scope is assigned. `classified` marks an item a
+    vocabulary registry binding classifies, which stays unscoped; `directory`
+    is asked last, so a vault without a residual scope never pays it.
+    """
+    residual = policy.residual_scope_id
+    if residual is None or matched or classified or (directory is not None and directory()):
+        return matched
+    return frozenset((residual,))
+
+
+def evaluate_metadata(subject: MetadataSubject, policy: Policy) -> frozenset[str]:
+    """An item's membership from established identity metadata, including residual completion."""
+    return _complete(policy, evaluate_metadata_selectors(subject, policy))
 
 
 def _path_ref_excludes(scope: Scope, rel_path: str) -> bool:
@@ -183,15 +205,45 @@ def _needs_frontmatter(scope: Scope) -> bool:
     return bool(scope.projects or scope.tags or scope.types or scope.classes)
 
 
-def _registry_scopes(vault_root: Path | None, rel_path: str, policy: Policy) -> frozenset[str]:
+def _registry_assignment(vault_root: Path | None, rel_path: str, policy: Policy) -> frozenset[str] | None:
+    """The scopes a registry binding assigns, or `None` when no binding classifies the path."""
     from ..vocabulary import instances
 
     if vault_root is None:
-        return frozenset()
+        return None
     try:
-        return instances.bound_scopes(vault_root, rel_path, policy) or frozenset()
+        return instances.bound_scopes(vault_root, rel_path, policy)
     except ValueError as error:
         raise MembershipUnresolved("registry binding is unavailable") from error
+
+
+def _classified_by_registry(
+    vault_root: Path | None, rel_path: str, assigned: frozenset[str] | None, policy: Policy,
+) -> bool:
+    """Whether a vocabulary registry classifies the path: a binding, or the public instance's storage."""
+    from ..vocabulary import instances
+
+    return assigned is not None or (
+        policy.residual_scope_id is not None and vault_root is not None
+        and instances.public_storage(vault_root, rel_path)
+    )
+
+
+def _is_directory(vault_root: Path | None, rel_path: str) -> bool:
+    return vault_root is not None and (Path(vault_root) / rel_path).is_dir()
+
+
+def _page_membership(
+    page: ParsedPage, policy: Policy, assigned: frozenset[str] | None,
+) -> frozenset[str]:
+    """A page's own scopes, its registry assignment, and the residual scope when nothing else applies."""
+    matched = _evaluate_markdown_scopes(page, policy) | (assigned or frozenset())
+    if policy.residual_scope_id is None or matched:
+        return matched
+    return _complete(
+        policy, matched,
+        classified=_classified_by_registry(page.vault_root, page.rel_path, assigned, policy),
+    )
 
 
 def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
@@ -205,7 +257,7 @@ def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str
             # Only identity selectors require valid identity; legacy IDs must
             # not block unrelated path or metadata membership.
             raise MembershipUnresolved("malformed governed identity leaves membership unresolved")
-        return evaluate_metadata(
+        return evaluate_metadata_selectors(
             MetadataSubject(
                 path=page.rel_path,
                 refs=(memory_refs.memory_ref(identity),) if identity is not None else (),
@@ -237,6 +289,26 @@ def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str
     return frozenset(matched)
 
 
+def evaluate_path_selectors(vault_root: Path, rel_path: str, policy: Policy) -> frozenset[str]:
+    """The scopes a page at `rel_path` has from its path alone, before any content exists.
+
+    Path and ref selectors, a registry binding, and the residual scope when nothing else
+    applies. A page's content may add scopes; a capture page must add none.
+    """
+    if policy.empty or not policy.scopes:
+        return frozenset()
+    assigned = _registry_assignment(vault_root, rel_path, policy)
+    matched = frozenset(
+        {key for key, scope in policy.scopes.items()
+         if not _path_ref_excludes(scope, rel_path) and _path_ref_matches(scope, rel_path)}
+        | (assigned or frozenset())
+    )
+    return _complete(
+        policy, matched, classified=_classified_by_registry(vault_root, rel_path, assigned, policy),
+        directory=lambda: _is_directory(vault_root, rel_path),
+    )
+
+
 def prospective_scopes(
     vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
 ) -> frozenset[str]:
@@ -256,7 +328,7 @@ def prospective_scopes(
         mtime=0,
         vault_root=Path(vault_root),
     )
-    return _evaluate_markdown_scopes(page, compiled) | _registry_scopes(vault_root, rel_path, compiled)
+    return _page_membership(page, compiled, _registry_assignment(vault_root, rel_path, compiled))
 
 
 def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) -> bool:
@@ -313,6 +385,14 @@ def evaluate_path_only(
         assigned = instances.bound_scopes(vault_root, rel_path, policy)
     except ValueError as error:
         raise MembershipUnresolved("registry binding is unavailable") from error
+
+    def classified(scope_ids: set[str]) -> MembershipOutcome:
+        return MembershipOutcome("classified", _complete(
+            policy, frozenset(scope_ids),
+            classified=_classified_by_registry(vault_root, rel_path, assigned, policy),
+            directory=lambda: _is_directory(vault_root, rel_path),
+        ))
+
     matched: set[str] = set(assigned or ())
     undecided: list[tuple[str, Scope]] = []
     for scope_id, scope in policy.scopes.items():
@@ -354,19 +434,19 @@ def evaluate_path_only(
                     from ..originals import original_state
 
                     if not original_state(vault_root, rel_path).present:
-                        return MembershipOutcome("classified", frozenset(matched))
+                        return classified(matched)
                 else:
                     return MembershipOutcome("unresolved", frozenset(matched), "artifact_unsafe")
                 identity = None
             if identity is not None and identity.kind == "directory":
-                return MembershipOutcome("classified", frozenset(matched))
+                return MembershipOutcome("classified", frozenset(matched))  # a directory never takes the residual scope
         try:
             companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path, artifact_copy=artifact_copy)
         except companions.CompanionClassificationError as error:
             # A portable assignment supplies registry metadata only when no
             # companion exists; malformed or conflicting companion data still refuses.
             if assigned is not None and error.reason == "descriptor_missing":
-                return MembershipOutcome("classified", frozenset(matched))
+                return classified(matched)
             return MembershipOutcome("unresolved", frozenset(matched), error.reason)
         memo_key = (policy.fingerprint, rel_path, companion.identities, companion.stored_originals, assigned)
         cached = _PATH_MEMO.get(memo_key) if proposed_companion is None else None
@@ -376,46 +456,82 @@ def evaluate_path_only(
         for scope_id, scope in undecided:
             if _semantic_scope_matches(scope, companion):
                 matched.add(scope_id)
-        result = MembershipOutcome("classified", frozenset(matched))
+        result = classified(matched)
         if proposed_companion is None:
             _PATH_MEMO[memo_key] = result
             _PATH_MEMO.move_to_end(memo_key)
             while len(_PATH_MEMO) > _MEMO_MAX:
                 _PATH_MEMO.popitem(last=False)
         return result
-    return MembershipOutcome("classified", frozenset(matched))
+    return classified(matched)
 
 
-def _source_of_part(page: ParsedPage) -> ParsedPage | None:
-    """The live Source page when `page` is one of its part pages, else None.
+# Parsed parent pages keyed on path, mtime and size, so the frames of one video parse it once.
+_PARENT_MEMO: OrderedDict[tuple[str, int, int], ParsedPage] = OrderedDict()
+_PARENT_MEMO_MAX = 256
 
-    A part holds more of its Source's extracted text, so its scope membership, and with it the
-    audience that may read it, is its Source's: decided here for every evaluation, from the
-    part's path. A Source page that cannot be read leaves the part's membership unresolved.
-    """
-    # The same rule as search (`ParsedPage.part_of`): a page at a part's path without the
-    # `part_of` field a written part carries is governed as itself, never as its neighbour.
-    source = page.part_of
-    if source is None:
-        return None
+
+def _read_parent(page: ParsedPage, parent: str) -> ParsedPage:
+    """The parsed page at vault-relative `parent`; an unreadable parent leaves `page` unresolved."""
     if page.vault_root is None:
-        raise MembershipUnresolved(f"the Source page of part {page.rel_path!r} has no vault root")
-    path = page.vault_root / source
+        raise MembershipUnresolved(f"the parent page of {page.rel_path!r} has no vault root")
+    path = page.vault_root / parent
     try:
-        parsed = find_corpus.parse_page(path, path.stat().st_mtime, page.vault_root)
+        stat = path.stat()
     except OSError as exc:
-        raise MembershipUnresolved(f"cannot read the Source page of part {page.rel_path!r}: {exc}") from exc
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _PARENT_MEMO.get(key)
+    if cached is not None:
+        _PARENT_MEMO.move_to_end(key)
+        return cached
+    try:
+        parsed = find_corpus.parse_page(path, stat.st_mtime, page.vault_root)
+    except OSError as exc:
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
     if parsed is None:
-        raise MembershipUnresolved(f"cannot read the Source page of part {page.rel_path!r}")
+        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}")
+    _PARENT_MEMO[key] = parsed
+    while len(_PARENT_MEMO) > _PARENT_MEMO_MAX:
+        _PARENT_MEMO.popitem(last=False)
     return parsed
+
+
+def _part_source(page: ParsedPage) -> ParsedPage | None:
+    """The Source page of an extracted-text part, else None.
+
+    A part is hidden text of its Source and never an item of its own, so its scope membership,
+    and with it the audience that may read it, is exactly the Source's.
+    """
+    return None if page.part_of is None else _read_parent(page, page.part_of)
+
+
+def _frame_video(page: ParsedPage) -> ParsedPage | None:
+    """The video page of a scene frame, else None.
+
+    A frame is an item of its own with its own id and tags, and holds text taken from its video,
+    so it belongs to its own scopes and to the video's. Because a decision takes the most
+    restrictive of an item's scopes, the added scopes can only narrow who reads the frame, and a
+    page that claims a parent it does not have gains nothing. A frame needs `parent_media` and
+    to sit in that video's own frames folder.
+    """
+    from .. import scene_frames
+
+    if page.parent_media is None:
+        return None
+    if Path(page.rel_path).parent != scene_frames.frames_dir_for(Path(page.parent_media)):
+        return None
+    return _read_parent(page, page.parent_media + ".md")
 
 
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     """Return the set of scope ids `page` belongs to under `policy`, memoized."""
     if policy.empty or not policy.scopes:
         return frozenset()
-    if (source := _source_of_part(page)) is not None:
+    if (source := _part_source(page)) is not None:
         return evaluate(source, policy)
+    video = _frame_video(page)
+    inherited = frozenset() if video is None else evaluate(video, policy)
     # `st_size` alongside `st_mtime_ns`, not `st_mtime_ns` alone. Two writes
     # in quick succession can share an identical `st_mtime_ns` — the platform
     # timestamp is not always as fine-grained as the field width suggests
@@ -441,25 +557,26 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
         raise MembershipUnresolved(
             f"cannot stat {page.rel_path!r} to resolve scope membership: {exc}"
         ) from exc
-    assigned = _registry_scopes(page.vault_root, page.rel_path, policy)
+    assigned = _registry_assignment(page.vault_root, page.rel_path, policy)
     key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid,
            str(page.vault_root), assigned)
     cached = _MEMO.get(key)
     if cached is not None:
         _MEMO.move_to_end(key)
-        return cached
-    result = _evaluate_markdown_scopes(page, policy) | assigned
+        return cached | inherited
+    # A parent claim may only narrow access; complete the frame's own membership first.
+    result = _page_membership(page, policy, assigned)
     _MEMO[key] = result
     _MEMO.move_to_end(key)
     while len(_MEMO) > _MEMO_MAX:
         _MEMO.popitem(last=False)
-    return result
+    return result | inherited
 
 
 def _snapshot_key(
     vault_root: Path | None, rel_path: str, policy: Policy, content_hash: str,
-) -> tuple[str, str, str, str, frozenset[str]]:
-    assigned = _registry_scopes(vault_root, rel_path, policy)
+) -> tuple[str, str, str, str, frozenset[str] | None]:
+    assigned = _registry_assignment(vault_root, rel_path, policy)
     return (policy.fingerprint, rel_path, content_hash, str(vault_root), assigned)
 
 
@@ -482,20 +599,25 @@ def evaluate_snapshot(
     Direct reads cannot use :func:`evaluate`: its live ``stat`` intentionally
     proves a search candidate still names the on-disk page, but a direct-read
     response must instead bind to the exact representation captured by its
-    open file descriptor.  The content hash is that representation identity;
-    no later path lookup participates in this answer.
+    open file descriptor.  The content hash is that representation identity.
+    A part or a scene frame also takes membership from its parent page, read
+    live, so neither is memoized under its own bytes.
     """
     if policy.empty or not policy.scopes:
         return frozenset()
-    if (source := _source_of_part(page)) is not None:
-        # The part's own bytes do not decide its membership, so nothing is memoized under them.
+    if (source := _part_source(page)) is not None:
         return evaluate(source, policy)
+    if (video := _frame_video(page)) is not None:
+        own = _page_membership(
+            page, policy, _registry_assignment(page.vault_root, page.rel_path, policy)
+        )
+        return own | evaluate(video, policy)
     key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:
         _SNAPSHOT_MEMO.move_to_end(key)
         return cached
-    result = _evaluate_markdown_scopes(page, policy) | key[-1]
+    result = _page_membership(page, policy, key[-1])
     _SNAPSHOT_MEMO[key] = result
     _SNAPSHOT_MEMO.move_to_end(key)
     while len(_SNAPSHOT_MEMO) > _MEMO_MAX:

@@ -543,9 +543,11 @@ A promoted worker runs its own warm-up, and subtracts from it whatever its
 standby already finished in the same process and promotion either re-verified or
 cannot invalidate. `carried_from_standby` on the `cutover` block and on the
 promotion record names what was subtracted, and the worker's `warm complete` log
-line repeats it. The graph handoff is carried only when promotion re-proved the
-snapshot as `current`; an `advanced`, `unproven` or `rebuild-after-promotion`
-verdict leaves it out and the adoption runs again in full. What remains after a
+line repeats it. The graph handoff is carried only when the promotion verdict is
+`current`: the snapshot the standby proved is still on disk, or promotion
+re-proved the one the old worker published after that proof. An `advanced`,
+`unproven` or `rebuild-after-promotion` verdict leaves it out, and the adoption
+runs again in full while the writers' gate refuses writes. What remains after a
 carried promotion is the retrieval catalog check and any model the standby's
 preload policy did not load. When promotion adopted a catalog the standby built
 detached, `carried_from_standby` names `catalogue_handoff` and not `lexical`: the
@@ -645,17 +647,43 @@ precisely the one worth reading closely, so neither value overwrites the other.
 
 `migration.state` is `ran` with the reason (`descriptors_changed`, or the
 manifest state that was not complete) when it runs. `promotion.snapshot` is
-`current` when the checkpoint the standby proved is still the one on disk,
-`advanced` when it moved, and `rebuild-after-promotion` when the re-proof failed
-— in that last case promotion still proceeds and the coalesced rebuild path owns
-the repair.
+`current` when the checkpoint this process adopted is the one on disk,
+`advanced` when it moved and promotion could not re-prove it, and
+`rebuild-after-promotion` when the migrated re-proof failed — in that last case
+promotion still proceeds and the coalesced rebuild path owns the repair.
 
 `promotion.revalidated` says promotion re-checked the snapshot at all;
-`promotion.reproved` says it re-ran the whole source proof, which happens only
-when the migrator ran. Without a migration, promotion compares the checkpoint
-pair instead — a real re-validation against the one writer the sequence has not
-already excluded, and deliberately cheaper, because a full source proof would
-add seconds to the one window this whole sequence exists to shorten.
+`promotion.reproved` says it re-ran the source proof. With a migration it re-runs
+the whole proof, because the migrator may have rewritten what the standby proved.
+Without one, promotion compares the checkpoint pair — a real re-validation
+against the one writer the sequence has not already excluded. A whole source
+proof would add seconds to the one window this sequence exists to shorten.
+
+When the pair moved, the old worker published after the standby's proof, which
+is the usual case under live writes. Promotion then re-proves the snapshot on
+disk from the page reads of the standby's proof. Each of its one or two rounds
+walks the vault once and checks the stat of every page. It reads again only the
+pages that moved since, where the stat generation binds a page's bytes. On
+Windows, and for a page written less than 2 s before its read, the check reads
+the page's bytes again. An adoption records `current` with `reproved: true`.
+
+The supervisor sends the budget of its promotion request as `request_seconds`
+in the request body, at most 30 s. The re-proof may spend 40% of that budget,
+so at most 12 s, and it stops at the first page it reaches after that. A decline
+records `advanced` with the reason in `promotion.reproof_declined`, for example
+`proof_deadline_passed`, and the promoted worker runs the handoff in full. On a
+synthetic 13,000-page vault, on a host at load 8, the re-proof of one moved
+page took 2.2 to 2.6 s.
+
+Requests wait at the supervisor during the re-proof, and none is refused. The
+re-proof adds its own time to `ready_after_ms` and `unavailable_ms`, and up to
+12 s when it declines. Without it, the promoted worker refused every write as
+warming while it ran the handoff in full, about 100 s on a large vault.
+
+The supervisor runs from the launcher venv, so a supervisor that predates
+`request_seconds` stays in place after a seamless upgrade. It caps the request
+at 10 s and sends no budget, and the re-proof then has 4 s. The 12 s bound takes
+effect after the offline maintenance that changes the stable supervisor.
 
 ### A collection store schema change
 

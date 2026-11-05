@@ -422,6 +422,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     if payload is None:
         payload = review_state.empty_state()
     out: dict[str, dict[str, Any]] = {}
+    fit = relation_queue.RelationFit(ctx.vault_root, basis=ctx.type_basis)
     for candidate in relation_queue._page_candidates(
         ctx.vault_root, page, limit_per_page=_LINK_LIMIT_PER_PAGE, snapshot=snapshot
     ):
@@ -448,8 +449,13 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
             state_payload=payload,
             authored=ctx.authored(page),
             exact_refs=refs,
+            fit=fit,
         )
         if reason in {"authored_edge", "placeholder_target"} or enriched is None:
+            continue
+        # A pair that a specific relation fits stays in the queue: the agent chooses its relation,
+        # and this route could only accept the generic one.
+        if enriched.get("options"):
             continue
         evidence = [
             {
@@ -1758,7 +1764,7 @@ _RECAPS_SQL = (
     "SELECT DISTINCT e.source_path, f.updated_date, f.origin_date, f.lifecycle_status "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
-    "WHERE e.dst_page_key = ? AND substr(e.source_path, 1, ?) = ? "
+    "WHERE e.dst_page_key = ? AND ({folders}) "
     "AND {link} "
     f"AND {_NEWER_THAN} "
     "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
@@ -1781,11 +1787,11 @@ _SUMMARY_SECTION = re.compile(r"^##[ \t]+summary[ \t]*$", re.IGNORECASE | re.MUL
 _SECTION_END = re.compile(r"^#{1,2}[ \t]", re.MULTILINE)
 
 
-def _episodes_prefix() -> str:
-    from . import source_taxonomy
-    from .kbdir import kb_dirname
+def _recap_prefixes(vault_root: Path) -> tuple[str, ...]:
+    """The folder of every recap, each with its trailing separator: the shared one, then each inbox."""
+    from . import recap_folder
 
-    return f"{kb_dirname()}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}/"
+    return tuple(f"{folder}/" for folder in recap_folder.recap_folders(vault_root))
 
 
 def _subject_node(ctx: Context, subject: str, keep) -> tuple[Any, ...] | None:
@@ -1880,16 +1886,19 @@ def _fold_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
     if node is None:
         return None
     since = _date(node[1], node[2])
-    prefix = _episodes_prefix()
+    prefixes = _recap_prefixes(ctx.vault_root)
     rows = _released_rows(
         (
             row
             for row in ctx.graph_view().conn.execute(
-                _RECAPS_SQL.format(link=_authored_link("e"), back=_live_edge("b")),
+                _RECAPS_SQL.format(
+                    folders=" OR ".join("substr(e.source_path, 1, ?) = ?" for _ in prefixes),
+                    link=_authored_link("e"),
+                    back=_live_edge("b"),
+                ),
                 (
                     f"file:{subject}",
-                    len(prefix),
-                    prefix,
+                    *(part for prefix in prefixes for part in (len(prefix), prefix)),
                     since,
                     subject,
                 ),
@@ -2037,12 +2046,12 @@ def _subject_family(
     kind: str,
     view: Callable[..., dict[str, Any] | None],
     *,
-    linked_from: Callable[[str], bool],
+    linked_from: Callable[[Context, str], bool],
 ) -> Family:
     """A family whose one proposal per subject page is `view` of that page.
 
     A changed page recomputes its own proposal, and those of the governed
-    pages it links when `linked_from(path)` says it can count toward them.
+    pages it links when `linked_from(ctx, path)` says it can count toward them.
     """
 
     def refresh(ctx: Context, subject: str) -> None:
@@ -2060,7 +2069,7 @@ def _subject_family(
         )
 
     def on_page(ctx: Context, rel_path: str) -> None:
-        subjects = _linked_subjects(ctx, rel_path) if linked_from(rel_path) else [rel_path]
+        subjects = _linked_subjects(ctx, rel_path) if linked_from(ctx, rel_path) else [rel_path]
         for subject in subjects:
             refresh(ctx, subject)
 
@@ -2093,9 +2102,11 @@ FOLD = _subject_family(
     FOLD_FAMILY,
     FOLD_KIND,
     _fold_view,
-    linked_from=lambda path: path.startswith(_episodes_prefix()),
+    linked_from=lambda ctx, path: path.startswith(_recap_prefixes(ctx.vault_root)),
 )
-PROFILE = _subject_family(PROFILE_FAMILY, PROFILE_KIND, _profile_view, linked_from=lambda _p: True)
+PROFILE = _subject_family(
+    PROFILE_FAMILY, PROFILE_KIND, _profile_view, linked_from=lambda _ctx, _path: True,
+)
 
 
 def tick_start(ctx: Context) -> None:

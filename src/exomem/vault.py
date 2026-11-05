@@ -1532,6 +1532,12 @@ def stat_generation(info: os.stat_result) -> tuple[int, int, int]:
 #: callers must keep hashing content.
 STAT_GENERATION_TRUSTED = os.name != "nt"
 
+#: How long both of a leaf's timestamps must have stood still before a read for its
+#: generation to bind the bytes read. Timestamps advance in clock ticks, so a write in
+#: the same tick as the previous one leaves the generation unchanged; git applies the
+#: same rule to its index. Every racy-clean check in the package uses this window.
+GENERATION_RACY_WINDOW_NS = 2_000_000_000
+
 
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
     return (
@@ -4332,6 +4338,62 @@ def read_bounded_guarded_bytes(
     return data, guard
 
 
+def read_bounded_guarded_bytes_with_generation(
+    vault_root: Path, target: str, *, limit: int
+) -> tuple[bytes, PathGuard, PathGuard | None]:
+    """`read_bounded_guarded_bytes`, plus a generation guard bound to the same bytes.
+
+    The generation guard rechecks the leaf's ancestry, identity and `stat_generation`
+    with lstat calls and reads no bytes. Where `STAT_GENERATION_TRUSTED` holds, a match
+    proves the bytes held still: `st_ctime_ns` is the inode change time, which every
+    write moves and no POSIX call can set (`os.utime` puts mtime back and moves ctime).
+    The generation is taken before the read and confirmed after it against the
+    descriptor's identity, so a write during the read cannot hide behind it.
+
+    The third value is None, and the caller keeps the content guard, where a generation
+    does not prove the bytes: on Windows, where ctime is the creation time; when the
+    leaf moved during the read; and when a timestamp was inside
+    `GENERATION_RACY_WINDOW_NS` of the read. A filesystem that does not move ctime on
+    a write (some FUSE or network mounts), or a Windows volume mounted on Linux, whose
+    change time a Windows program can set, defeats the generation, as it does
+    `record_item_cache`. So do a writer through a shared mmap, which moves no timestamp
+    until it syncs, and one write call that runs longer than the racy window.
+    """
+    root = Path(vault_root)
+    if not STAT_GENERATION_TRUSTED:
+        data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+        return data, guard, None
+    _safe_guard_target(target)
+    leaf = os.path.join(os.fspath(root), target)
+    # Taken before the read: a later write cannot then hide inside the racy window.
+    started = time.time_ns()
+    try:
+        before = os.lstat(leaf)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
+    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+    try:
+        after = os.lstat(leaf)
+    except OSError:
+        return data, guard, None
+    generation = stat_generation(before)
+    identity = guard.leaf_identity
+    if (
+        identity is None
+        or not _same_identity(identity, before)
+        or not _same_identity(identity, after)
+        or stat_generation(after) != generation
+        or before.st_size != len(data)
+        or started - max(before.st_mtime_ns, before.st_ctime_ns) <= GENERATION_RACY_WINDOW_NS
+    ):
+        return data, guard, None
+    bound = PathGuard(target, guard.ancestors, guard.missing_parents, identity, "generation", None)
+    object.__setattr__(bound, "expected_generation", generation)
+    return data, guard, bound
+
+
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
     """Read exact UTF-8 text; the returned guard binds the resolved vault root."""
     configured_root = Path(vault_root).absolute()
@@ -5406,7 +5468,12 @@ def _batch_atomic_write_locked(
     # every destination replace so a live `_access.yaml` change cannot race a
     # long staging interval.
     if vault_root is not None:
-        _validate_batch_write_access(Path(vault_root), writes, auxiliary_manifest=_vocabulary_auxiliaries)
+        # A registry change waits for the vocabulary authority's decision (`begin_batch`),
+        # which needs the staged images; gate 2 then admits it or refuses it.
+        _validate_batch_write_access(
+            Path(vault_root), writes, auxiliary_manifest=_vocabulary_auxiliaries,
+            defer_registry=True,
+        )
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
@@ -5788,6 +5855,9 @@ def _batch_atomic_write_locked(
                 root = Path(vault_root)
                 _validate_batch_write_access(
                     root, writes[index:], proposed=writes, auxiliary_manifest=_vocabulary_auxiliaries,
+                    granted_paths=(
+                        additive_guard.effect_paths() if additive_guard is not None else frozenset()
+                    ),
                 )
                 recheck_path_guards(
                     root,
@@ -6119,8 +6189,17 @@ def _validate_batch_write_access(
     *,
     proposed: Iterable[PlannedWrite] | None = None,
     auxiliary_manifest: Any | None = None,
+    defer_registry: bool = False,
+    granted_paths: frozenset[str] = frozenset(),
 ) -> None:
-    """Fail closed when any planned target is outside or newly write-protected."""
+    """Fail closed when any planned target is outside or newly write-protected.
+
+    A vocabulary registry change is decided by the vocabulary authority, not by the
+    caller's writable scopes. `defer_registry` leaves that storage to the later check.
+    `granted_paths` are the paths that the authority's reservation for this exact batch
+    names; the registry storage whose sealed primary is among them skips the writable-scope
+    rule, and every other write keeps it.
+    """
     from . import access, vocabulary_auxiliaries, writer_lease
     from .governance import connector_boundary
 
@@ -6145,6 +6224,12 @@ def _validate_batch_write_access(
             proposed_source=primary.content, primary_guard=auxiliary_manifest.primary_guard,
             require_identity="lifecycle-review" in roles.values(),
         )
+    registry_primary = getattr(auxiliary_manifest, "primary_path", None)
+    registry_storage = (
+        {registry_primary, *(path for path, role in roles.items() if role == "registry-history")}
+        if registry_primary is not None and "registry-history" in roles.values()
+        else set()
+    )
     proposed_by_path = {}
     for write in full_plan:
         try:
@@ -6172,11 +6257,12 @@ def _validate_batch_write_access(
                 if rel in primary_bound_paths and primary_admission is not None:
                     if not primary_admission(rel):
                         raise ValueError("WRITE_REFUSED: target is unavailable")
-                else:
+                elif not (defer_registry and rel in registry_storage):
                     connector_boundary.require_write(
                         vault_root, rel,
                         content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
                         proposed=proposed_by_path,
+                        granted=rel in registry_storage and registry_primary in granted_paths,
                     )
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
@@ -6529,6 +6615,27 @@ def missing_path_reason(path: str) -> str:
     return f"path does not exist: {requested}"
 
 
+def admit_write_target(vault_root: Path, lexical: str, resolved: Path | None = None) -> None:
+    """Decide a restricted writer's target, in both spellings, before any existence check.
+
+    Raises `VaultPathError` with `WRITE_REFUSED`; for any other caller it does nothing.
+    """
+    from .governance import connector_boundary
+
+    forms = {lexical}
+    try:
+        if resolved is None:
+            resolved = (vault_root / lexical).resolve()
+        forms.add(_canonical_kb_segment(resolved.relative_to(vault_root.resolve()).as_posix()))
+    except (ValueError, OSError):
+        pass
+    try:
+        for form in forms:
+            connector_boundary.require_target(vault_root, form)
+    except ValueError:
+        raise VaultPathError(code="WRITE_REFUSED", reason="target is unavailable") from None
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -6553,9 +6660,11 @@ def resolve_under_vault(
     can't sneak a write to a vault-root sibling of KB). Governed content writers
     (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
 
-    `refuse_withheld` is for write doors: with `must_exist`, an existing file
-    the caller may not see (`egress.write_target_withheld`) raises exactly the
-    NOT_FOUND an absent path raises.
+    `refuse_withheld` is for write doors. A restricted writer's target is decided
+    first, from scope sets alone, so a withheld, an absent and a read-only target
+    raise the same `WRITE_REFUSED`. For any other caller, with `must_exist`, an
+    existing file it may not see (`egress.write_target_withheld`) raises exactly
+    the NOT_FOUND an absent path raises.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -6611,6 +6720,8 @@ def resolve_under_vault(
                 ),
             ) from None
 
+    if refuse_withheld:
+        admit_write_target(vault_root, rel, resolved)
     if must_exist and (
         not candidate.exists()
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
@@ -7049,6 +7160,50 @@ def walk_vault_md(vault_root: Path):
                 yield child
 
     yield from walk(vault_root)
+
+
+def walk_vault_md_with_subtree(vault_root: Path, subtree: Path):
+    """Yield `(path, in_vault, in_subtree)` for every page either of two walks yields.
+
+    `in_vault` says `walk_vault_md(vault_root)` yields the path, and `in_subtree`
+    says `find_corpus.walk_md(subtree)` does, where `subtree` lies under
+    `vault_root`. Each flag keeps its own walk's rules, so a folder that one
+    walk prunes is still entered for the other. A caller that needs both lists
+    each shared folder once instead of twice.
+    """
+    from . import foreground_priority, reserved_paths
+    from .find_corpus import _classify_walk_entry
+
+    anchor = Path(subtree)
+    subtree_entered = False
+
+    def walk(d: Path, in_vault: bool, in_subtree: bool):
+        nonlocal subtree_entered
+        foreground_priority.check_cancelled()
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            return
+        for child in children:
+            foreground_priority.check_cancelled()
+            vault_kind = _walk_vault_md_entry(vault_root, child) if in_vault else None
+            subtree_kind = (
+                _classify_walk_entry(anchor, child, reserved_paths)[0] if in_subtree else None
+            )
+            if vault_kind == "dir" and child == anchor:
+                # `walk_md(subtree)` lists the subtree's own children, whatever
+                # the vault walk's rules say about the folder itself.
+                subtree_entered = True
+                yield from walk(child, True, True)
+            elif vault_kind == "dir" or subtree_kind == "dir":
+                yield from walk(child, vault_kind == "dir", subtree_kind == "dir")
+            if vault_kind == "md" or subtree_kind == "md":
+                yield child, vault_kind == "md", subtree_kind == "md"
+
+    yield from walk(Path(vault_root), True, False)
+    if not subtree_entered and anchor.is_dir():
+        # The vault walk pruned the subtree folder or never reached it.
+        yield from walk(anchor, False, True)
 
 
 @dataclass
@@ -7826,21 +7981,27 @@ class AmbiguousWikilinkError(WikilinkError):
     """A bare-name wikilink matches more than one file."""
 
 
-def _discard_from_list(mapping: dict[str, list[str]], key: str, value: str) -> None:
-    """Remove `value` from `mapping[key]`'s list; drop the key if it empties.
+def _discard_from_bucket(mapping: dict[str, tuple[str, ...]], key: str, value: str) -> None:
+    """Remove `value` from `mapping[key]`; drop the key if it empties.
 
     Shared by the resolver's stem/title patch paths — keeps a multi-match
     bucket (e.g. two files with the same stem) correct when only one side is
-    edited or deleted.
+    edited or deleted. Replaces the bucket rather than editing it, so a fork
+    that shares the old bucket keeps it.
     """
-    lst = mapping.get(key)
-    if not lst:
+    bucket = mapping.get(key)
+    if not bucket:
         return
-    remaining = [v for v in lst if v != value]
+    remaining = tuple(v for v in bucket if v != value)
     if remaining:
         mapping[key] = remaining
     else:
         mapping.pop(key, None)
+
+
+def _insert_into_bucket(mapping: dict[str, tuple[str, ...]], key: str, *values: str) -> None:
+    """Add `values` to `mapping[key]` in sorted order, replacing the bucket."""
+    mapping[key] = tuple(sorted((*mapping.get(key, ()), *values)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -7885,9 +8046,9 @@ class WikilinkResolver:
     - `full_paths`: vault-relative POSIX without `.md` (e.g.
       `Knowledge Base/Entities/Concepts/Profile`).
     - `kb_stripped`: same with the leading `Knowledge Base/` removed.
-    - `stems`: filename stem (no path) → list of full paths (multi-match if
+    - `stems`: filename stem (no path) → sorted full paths (multi-match if
       the basename collides across folders).
-    - `titles`: frontmatter `title:` lower-cased → list of full paths. This
+    - `titles`: frontmatter `title:` lower-cased → sorted full paths. This
       lets `[[Test Content Manual]]` resolve to a source file whose
       stem is date-prefixed (`2026-05-15-tu-test-manual`) but
       whose title matches.
@@ -7897,13 +8058,11 @@ class WikilinkResolver:
         self.vault_root = vault_root
         self.full_paths: set[str] = set()
         self.kb_stripped: set[str] = set()
-        self.stems: dict[str, list[str]] = {}
-        self.titles: dict[str, list[str]] = {}
-        self.candidates_by_key: dict[str, list[WikilinkCandidate]] = {}
-        # no_ext rel path -> the (lower-cased) frontmatter title it contributed
-        # to `titles`, so an incremental patch can drop the OLD title edge
-        # before re-adding the new one (a title-only edit still needs fixing).
-        self._title_by_rel: dict[str, str] = {}
+        # Every bucket is a tuple and every patch replaces a bucket instead of
+        # editing it, so a copy of these dicts is an independent resolver.
+        self.stems: dict[str, tuple[str, ...]] = {}
+        self.titles: dict[str, tuple[str, ...]] = {}
+        self.candidates_by_key: dict[str, tuple[WikilinkCandidate, ...]] = {}
         self._build()
 
     @classmethod
@@ -7913,14 +8072,9 @@ class WikilinkResolver:
         entries: Iterable[tuple[str, str | None]],
     ) -> WikilinkResolver:
         """Build resolver maps from already-read paths/titles without I/O."""
-        resolver = cls.__new__(cls)
-        resolver.vault_root = Path(vault_root)
-        resolver.full_paths = set()
-        resolver.kb_stripped = set()
-        resolver.stems = {}
-        resolver.titles = {}
-        resolver.candidates_by_key = {}
-        resolver._title_by_rel = {}
+        resolver = cls.from_maps(
+            vault_root, full_paths=(), kb_stripped=(), stems={}, titles={}, candidates_by_key={}
+        )
         normalized = sorted(
             (
                 str(rel_path).replace("\\", "/").lstrip("/"),
@@ -7941,28 +8095,57 @@ class WikilinkResolver:
                 continue
             self._add_entry(rel, self._read_title_lower(md))
 
+    @classmethod
+    def from_maps(
+        cls,
+        vault_root: Path,
+        *,
+        full_paths: Iterable[str],
+        kb_stripped: Iterable[str],
+        stems: Mapping[str, tuple[str, ...]],
+        titles: Mapping[str, tuple[str, ...]],
+        candidates_by_key: Mapping[str, tuple[WikilinkCandidate, ...]],
+    ) -> WikilinkResolver:
+        """A resolver over copies of another resolver's maps, without I/O.
+
+        The buckets are tuples that no patch edits, so copying each map is
+        enough: patching the result never changes the maps it came from.
+        """
+        resolver = cls.__new__(cls)
+        resolver.vault_root = Path(vault_root)
+        resolver.full_paths = set(full_paths)
+        resolver.kb_stripped = set(kb_stripped)
+        resolver.stems = dict(stems)
+        resolver.titles = dict(titles)
+        resolver.candidates_by_key = dict(candidates_by_key)
+        return resolver
+
     def fork(self) -> WikilinkResolver:
         """Return an I/O-free detached copy suitable for write preparation.
 
         Writers may add their pending primary to the copy without polluting the
         graph lane's process-shared resolver when validation later fails.
         """
-        resolver = self.__class__.__new__(self.__class__)
-        resolver.vault_root = self.vault_root
-        resolver.full_paths = set(self.full_paths)
-        resolver.kb_stripped = set(self.kb_stripped)
-        resolver.stems = {key: list(values) for key, values in self.stems.items()}
-        resolver.titles = {key: list(values) for key, values in self.titles.items()}
-        resolver.candidates_by_key = {
-            key: list(values) for key, values in self.candidates_by_key.items()
-        }
-        resolver._title_by_rel = dict(self._title_by_rel)
-        return resolver
+        return self.from_maps(
+            self.vault_root,
+            full_paths=self.full_paths,
+            kb_stripped=self.kb_stripped,
+            stems=self.stems,
+            titles=self.titles,
+            candidates_by_key=self.candidates_by_key,
+        )
 
     def title_key_for_path(self, rel_path: str) -> str | None:
-        """Return the normalized resolver title contributed by one path."""
-        no_ext = str(rel_path).replace("\\", "/").lstrip("/").removesuffix(".md")
-        return self._title_by_rel.get(no_ext)
+        """Return the normalized resolver title contributed by one path.
+
+        When several files share the path key, the last titled one in path
+        order supplies it.
+        """
+        no_ext = _wikilink_path_key(str(rel_path).replace("\\", "/").lstrip("/"))
+        for candidate in reversed(self.candidates_by_key.get(no_ext, ())):
+            if candidate.title_key:
+                return candidate.title_key
+        return None
 
     # ---- shared add/remove primitives -------------------------------------
     # The full build AND the incremental patch both go through these, so a
@@ -7979,20 +8162,17 @@ class WikilinkResolver:
         """
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
-        candidates = self.candidates_by_key.setdefault(no_ext, [])
-        candidates.append(WikilinkCandidate(rel_path, title_lower))
-        candidates.sort(key=lambda candidate: candidate.path)
+        self.candidates_by_key[no_ext] = tuple(
+            sorted(
+                (*self.candidates_by_key.get(no_ext, ()), WikilinkCandidate(rel_path, title_lower)),
+                key=lambda candidate: candidate.path,
+            )
+        )
         self.full_paths.add(no_ext)
         self.kb_stripped.add(no_ext.removeprefix(kb_prefix()))
-        stem = no_ext.rsplit("/", 1)[-1]
-        self.stems.setdefault(stem, []).append(no_ext)
-        self.stems[stem].sort()
+        _insert_into_bucket(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
         if title_lower:
-            self.titles.setdefault(title_lower, []).append(no_ext)
-            self.titles[title_lower].sort()
-        for candidate in candidates:
-            if candidate.title_key:
-                self._title_by_rel[no_ext] = candidate.title_key
+            _insert_into_bucket(self.titles, title_lower, no_ext)
 
     def _remove_entry(self, rel_path: str) -> None:
         """Drop every edge a file contributed (path, stem, title)."""
@@ -8000,28 +8180,28 @@ class WikilinkResolver:
         previous = self.candidates_by_key.get(no_ext, ())
         if not any(candidate.path == rel_path for candidate in previous):
             return
-        remaining = [candidate for candidate in previous if candidate.path != rel_path]
+        remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining
         else:
             self.candidates_by_key.pop(no_ext, None)
             self.full_paths.discard(no_ext)
             stripped = no_ext.removeprefix(kb_prefix())
-            if stripped not in self.full_paths and kb_prefix() + stripped not in self.full_paths:
+            # Another page still strips to this key: the KB page itself, or the same path outside the KB.
+            still_held = kb_prefix() + stripped in self.full_paths or (
+                stripped in self.full_paths and not stripped.startswith(kb_prefix())
+            )
+            if not still_held:
                 self.kb_stripped.discard(stripped)
         stem = no_ext.rsplit("/", 1)[-1]
-        _discard_from_list(self.stems, stem, no_ext)
+        _discard_from_bucket(self.stems, stem, no_ext)
         if remaining:
-            self.stems.setdefault(stem, []).extend(no_ext for _ in remaining)
-            self.stems[stem].sort()
+            _insert_into_bucket(self.stems, stem, *(no_ext for _ in remaining))
         for title in {candidate.title_key for candidate in previous if candidate.title_key}:
-            _discard_from_list(self.titles, title, no_ext)
-        self._title_by_rel.pop(no_ext, None)
+            _discard_from_bucket(self.titles, title, no_ext)
         for candidate in remaining:
             if candidate.title_key:
-                self.titles.setdefault(candidate.title_key, []).append(no_ext)
-                self.titles[candidate.title_key].sort()
-                self._title_by_rel[no_ext] = candidate.title_key
+                _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
@@ -8773,14 +8953,23 @@ def plan_log_entries(
     *,
     operation_token: str,
     machine_generated: bool = False,
+    required: bool = False,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per item, oldest first.
 
     One read, one rewrite and one rotation decision for the whole batch, so a bulk write
     is a single log publication rather than one per entry. `operation_token` names the
-    whole batch for the deterministic rotation archive.
+    whole batch for the deterministic rotation archive. A `required` entry belongs to a
+    door whose contract needs it (a Records transition's audit), so it is planned whatever
+    the caller's ceiling and the write gate refuses a caller who may not write the log.
     """
     log_file = kb_root(vault_root) / "log.md"
+    from .governance import connector_boundary
+
+    if not required and not connector_boundary.effect_admission(vault_root)(log_file):
+        # A restricted writer's entry is skipped like every effect outside its ceiling, so the
+        # plan neither reads the log nor reports a rotation that would not happen.
+        return LogWritePlan(())
     if not log_file.is_file():
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
@@ -8823,6 +9012,7 @@ def plan_log_writes(
     operation_token: str,
     provenance: Mapping[str, Any] | None = None,
     machine_generated: bool = False,
+    required: bool = False,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
     return plan_log_entries(
@@ -8830,15 +9020,50 @@ def plan_log_writes(
         [LogEntry(date_iso, op, rel_path_no_ext, body, operation_token, provenance)],
         operation_token=operation_token,
         machine_generated=machine_generated,
+        required=required,
     )
+
+
+def _operation_log_paths(vault_root: Path) -> list[Path]:
+    """The live log, then the rotated archives oldest first."""
+    root = kb_root(vault_root)
+    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
+    return [root / "log.md", *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+
+
+def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]]:
+    """The activity sections of one log file, with the provenance fence each carries."""
+    tokens = parser.parse(text)
+    sections = [i for i, token in enumerate(tokens)
+                if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
+    entries: list[dict[str, Any]] = []
+    for index, at in enumerate(sections):
+        header = tokens[at + 1].content
+        stamp, separator, rest = header.removeprefix("[").partition("] ")
+        op, bar, title = rest.partition(" | ")
+        if not header.startswith("[") or not separator or not bar:
+            continue
+        stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
+        entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
+        for token in tokens[at:stop]:
+            if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
+                continue
+            try:
+                value = json.loads(token.content)
+            except (ValueError, TypeError):
+                entry["provenance_invalid"] = True
+                continue
+            if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+                entry["provenance"] = value
+            else:
+                entry["provenance_invalid"] = True
+        entries.append(entry)
+    return entries
 
 
 def read_operation_log(vault_root: Path) -> dict[str, Any]:
     """Read activity sections and structured provenance from live and rotated logs."""
-    root = kb_root(vault_root)
-    live = root / "log.md"
-    # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
-    paths = [live, *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    paths = _operation_log_paths(vault_root)
     entries: list[dict[str, Any]] = []
     failed = 0
     read = 0
@@ -8850,36 +9075,42 @@ def read_operation_log(vault_root: Path) -> dict[str, Any]:
             failed += 1
             continue
         read += 1
-        tokens = parser.parse(text)
-        sections = [i for i, token in enumerate(tokens)
-                    if token.type == "heading_open" and token.tag == "h2" and token.level == 0]
-        for index, at in enumerate(sections):
-            header = tokens[at + 1].content
-            stamp, separator, rest = header.removeprefix("[").partition("] ")
-            op, bar, title = rest.partition(" | ")
-            if not header.startswith("[") or not separator or not bar:
-                continue
-            stop = sections[index + 1] if index + 1 < len(sections) else len(tokens)
-            entry: dict[str, Any] = {"date": stamp, "op": op, "path": title}
-            for token in tokens[at:stop]:
-                if token.type != "fence" or token.info != "exomem-operation-v1" or token.level != 0:
-                    continue
-                try:
-                    value = json.loads(token.content)
-                except (ValueError, TypeError):
-                    entry["provenance_invalid"] = True
-                    continue
-                if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
-                    entry["provenance"] = value
-                else:
-                    entry["provenance_invalid"] = True
-            entries.append(entry)
+        entries.extend(_operation_log_entries(text, parser))
     return {
         "entries": entries,
-        "live_log_present": live.is_file(),
+        "live_log_present": paths[0].is_file(),
         "files_read": read,
         "files_unreadable": failed,
     }
+
+
+def latest_operation_id(vault_root: Path, path: str) -> str | None:
+    """The `operation_id` of the newest logged write to `path`, or None when none carries one.
+
+    "Newest" is the largest server time among the provenance fences of the first log file
+    that holds one for `path`. Files are read newest first, the live log and then the
+    archives from the latest down, because rotation moves only the oldest entries out of the
+    live log. The scan stops at that file, so a recent write never reads the archives.
+    """
+    paths = _operation_log_paths(vault_root)
+    parser = MarkdownIt("commonmark")
+    for log_path in (paths[0], *reversed(paths[1:])):
+        try:
+            text, _guard = read_guarded_text(vault_root, log_path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+        newest: tuple[str, str] | None = None
+        for entry in _operation_log_entries(text, parser):
+            data = entry.get("provenance")
+            if not isinstance(data, dict) or data.get("path") != path:
+                continue
+            stamp, operation_id = data.get("server_at"), data.get("operation_id")
+            if isinstance(stamp, str) and isinstance(operation_id, str) and operation_id:
+                if newest is None or stamp > newest[0]:
+                    newest = (stamp, operation_id)
+        if newest is not None:
+            return newest[1]
+    return None
 
 
 def plan_log_writes_many(
@@ -8891,6 +9122,7 @@ def plan_log_writes_many(
     bodies: Iterable[str],
     operation_token: str,
     machine_generated: bool = False,
+    required: bool = False,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per body, oldest first."""
     return plan_log_entries(
@@ -8898,6 +9130,7 @@ def plan_log_writes_many(
         (LogEntry(date_iso, op, rel_path_no_ext, body) for body in bodies),
         operation_token=operation_token,
         machine_generated=machine_generated,
+        required=required,
     )
 
 

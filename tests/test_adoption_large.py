@@ -21,6 +21,7 @@ from exomem import (
     state_migration,
     state_paths,
 )
+from exomem import vault as vault_module
 
 TODAY = dt.date(2026, 10, 27)
 MIB = 1024 * 1024
@@ -250,3 +251,22 @@ def test_a_continuation_that_stopped_before_removing_a_chunk_s_staged_copies_rem
     assert repeated["phase"] == "applied" and repeated["progress"]["failed"] == 0
     assert all(outcome.get("consumed") is True for outcome in repeated["outcomes"].values())
     assert not [path for path in (vault / stage).rglob("*.bin")]
+
+
+def test_an_import_rotates_the_live_log_instead_of_growing_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The import commit wrote its log entry around the rotation, so a 70,000-file import left a log of many MB
+    that every later commit re-read and re-parsed."""
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "4000")
+    monkeypatch.setattr(vault_module, "LOG_ROTATE_KEEP_ENTRIES", 3)
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 5)
+    vault = _vault(tmp_path)
+    stage = _stage(vault, {f"notes/{n:03d}.txt": f"note {n}\n".encode() for n in range(60)})
+    run = adoption_run.start(vault, path=stage, today=TODAY)
+
+    reply = _apply_all(vault, run, _plan(vault, run, stage))
+
+    assert {outcome["status"] for outcome in reply["outcomes"].values()} == {"applied"}
+    kb = vault / "Knowledge Base"
+    assert (kb / "log.md").read_text(encoding="utf-8").count("adopt-copy") <= 3 + 1
+    archived = "".join(path.read_text(encoding="utf-8") for path in (kb / "_archive" / "logs").glob("log-*.md"))
+    assert all(f"notes/{n:03d}.txt" in archived + (kb / "log.md").read_text(encoding="utf-8") for n in range(60))

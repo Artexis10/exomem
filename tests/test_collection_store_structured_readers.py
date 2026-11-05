@@ -257,7 +257,10 @@ def test_claims_census_reads_canonical_rows_without_views(store):
     assert [item["key"] for item in result[manifest_path()]["items"]] == [KEY]
 
 
-def test_occurrence_disposition_returns_runnable_canonical_guards_under_policy(store):
+def test_occurrence_disposition_returns_runnable_canonical_guards_under_policy(store, tmp_path, monkeypatch):
+    from granted_writer import grant_writer
+    from test_governance_egress import SCOPE_ID
+
     from exomem import records_disposition
     from exomem.cli_ops import OpError
     from exomem.record_memory import record_memory
@@ -268,7 +271,9 @@ def test_occurrence_disposition_returns_runnable_canonical_guards_under_policy(s
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
     write_scope(store.root, paths="Unrelated/**")
     write_rule(store.root, ceiling=0)
-    with preview_store(store.root, store.handle), request_scope(_external()):
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
+    with preview_store(store.root, store.handle), request_scope(writer):
         manifest = due_state._load_manifest(store.root, manifest_path())
         call = records_disposition._occurrence_call(store.root, manifest, manifest.path, KEY,
                                                   "exomem://memory/33333333-3333-4333-8333-333333333333",
@@ -312,7 +317,10 @@ def test_occurrence_disposition_withholds_canonical_guards_for_partial_readers(s
             store.root, manifest, manifest.path, KEY, observation, "add occurrence") is not None
 
 
-def test_write_delta_keeps_hidden_log_rows_but_serve_matches_rows_absent(store):
+def test_write_delta_keeps_hidden_log_rows_but_serve_matches_rows_absent(store, tmp_path, monkeypatch):
+    from granted_writer import grant_writer
+    from test_governance_egress import SCOPE_ID
+
     plan_path = manifest_path("planning")
     plan_text = manifest_text("planning").replace(CID, OTHER)
     record_text = _log_manifest(manifest_text().replace("natural_key: [title]", "natural_key: [title, count]"))
@@ -330,18 +338,20 @@ def test_write_delta_keeps_hidden_log_rows_but_serve_matches_rows_absent(store):
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     scope.write_text(scope.read_text() + f"refs: [{collections.record_ref(CID, OTHER)}]\n")
     write_rule(store.root, ceiling=0)
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Planning/**"],
+                          capture_paths=["Knowledge Base/Planning"], protected=[SCOPE_ID])("external")
     row = {"records": manifest_path(), "planning": plan_path, "join": {"title": "title"}}
     due_state.save(store.root, {"version": due_state.SCHEMA_VERSION, "categories": {},
                               "bindings": {plan_path: [row], manifest_path(): [row]}})
     planning = collections.parse_manifest_bytes(store.root, plan_path, plan_text.encode())
-    with preview_store(store.root, store.handle), request_scope(_external()):
+    with preview_store(store.root, store.handle), request_scope(writer):
         due_state.apply_plan_write_delta(store.root, planning, path=added["affected_paths"][0],
                                         key=KEY, values=values)
         absent = due_state.served_entries(store.root, today=dt.date(2026, 10, 1))
     assert len(absent) == 1
     with request_scope(owner_principal()):
         store.append_record(CID, item={"title": "Batch", "count": 2}, item_key=OTHER, why="observe")
-    with preview_store(store.root, store.handle), request_scope(_external()):
+    with preview_store(store.root, store.handle), request_scope(writer):
         projected = due_state.apply_plan_write_delta(
             store.root, planning, path=added["affected_paths"][0], key=KEY, values=values
         )

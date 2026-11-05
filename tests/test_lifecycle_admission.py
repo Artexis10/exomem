@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from test_connector_boundary import configured_boundary as configured_boundary
+from test_connector_boundary import public_matter_writer as public_matter_writer
 
 from exomem import (
     compiled_history,
@@ -20,6 +21,9 @@ from exomem import (
 )
 from exomem import vault as vault_module
 from exomem.governance import principal
+
+# A restricted client writes only its configured scopes, so each case grants `limited` the public matter.
+pytestmark = pytest.mark.usefixtures("public_matter_writer")
 
 PAGE = "Knowledge Base/Notes/Insights/public-round.md"
 IDENTITY = "11111111-1111-4111-8111-111111111111"

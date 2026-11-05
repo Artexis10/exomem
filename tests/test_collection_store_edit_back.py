@@ -1072,15 +1072,21 @@ def test_a_views_tick_publishes_under_the_policy_it_finds_at_the_write(served, m
 def test_back_to_back_reads_never_wait_behind_due_maintenance(served, monkeypatch):
     """Defect: a tick starts between the reads of a busy client, or after every request, or never
     starts once the reads stop."""
+    from types import SimpleNamespace
+
     from exomem import foreground_priority
     from exomem.collection_store import runtime
 
     server = runtime._server(served.root)
     ticks, running = [], threading.Event()
+    entered, release = threading.Event(), threading.Event()
 
     def slow_tick(current):
         running.set()
         started = time.monotonic()
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10), "the first tick was not released"
         time.sleep(0.1)
         ticks.append((started, time.monotonic()))
         running.clear()
@@ -1088,17 +1094,27 @@ def test_back_to_back_reads_never_wait_behind_due_maintenance(served, monkeypatc
 
     monkeypatch.setattr(runtime.StoreServer, "_views_tick", slow_tick)
     monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 10.0)
-    until(lambda: ticks)  # the stand-in is due at once, so the first quiet gap runs it
-    with foreground_priority.foreground():  # a client between its calls: the gate stays shut
-        until(lambda: not running.is_set())
-        burst_start = time.monotonic()
-        for _ in range(30):
-            server.call(lambda: None, read_only=True, wake_maintenance=False)
-            time.sleep(0.005)
-        burst_end = time.monotonic()
-    assert [tick for tick in ticks if tick[0] < burst_end and burst_start < tick[1]] == []
-    until(lambda: ticks[-1][0] > burst_end)
-    assert ticks[-1][0] - burst_end < runtime.FOREGROUND_GRACE_SECONDS + 0.5
+    try:
+        assert entered.wait(10), "the first quiet tick did not start"
+        # A thread pause is not a quiet gap in this continuous-demand scenario.
+        clock = [time.monotonic()]
+        scheduler_time = SimpleNamespace(monotonic=lambda: clock[0], sleep=time.sleep)
+        with monkeypatch.context() as scheduling:
+            scheduling.setattr(runtime, "time", scheduler_time)
+            scheduling.setattr(foreground_priority, "time", scheduler_time)
+            with foreground_priority.foreground():
+                release.set()  # Drain the tick admitted before the client became busy.
+                until(lambda: not running.is_set())
+                burst_start = time.monotonic()
+                for _ in range(30):
+                    server.call(lambda: None, read_only=True, wake_maintenance=False)
+                    time.sleep(0.005)
+                burst_end = time.monotonic()
+            assert [tick for tick in ticks if tick[0] < burst_end and burst_start < tick[1]] == []
+            clock[0] += 2 * runtime.FOREGROUND_GRACE_SECONDS
+            until(lambda: ticks[-1][0] > burst_end)
+    finally:
+        release.set()
 
 
 @pytest.mark.parametrize("demand", ["queued_requests", "foreground_mark"])
@@ -1431,6 +1447,7 @@ def test_an_unreleased_route_takes_no_view_edit(quick_service, monkeypatch, rele
 
     root, view = quick_service.root, quick_service.root / manifest_path()
     until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state!='current'") == [(0,)])
+    runtime.flush_for_export(root)
     monkeypatch.setattr(capability, "RELEASED", released)
     view.write_bytes(view.read_bytes().replace(b"title: Work", b"title: Renamed"))
     before, txns_before = vault_bytes(root), store_rows(root, "SELECT COUNT(*) FROM txns")

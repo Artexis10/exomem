@@ -40,6 +40,7 @@ from . import (
     freshness,
     lifecycle_statuses,
     note_types,
+    recap_folder,
     sidecar_store,
     source_taxonomy,
     topic_carriers,
@@ -56,7 +57,8 @@ from .working_set_runtime import READY
 log = logging.getLogger(__name__)
 
 #: 2: titles and descriptions are stored without their wikilinks.
-SCHEMA_VERSION = 2
+#: 3: the raw boolean stance mark narrows global-unit reads without a corpus walk.
+SCHEMA_VERSION = 3
 SIDECAR_NAME = ".context-catalogue.sqlite"
 
 # The catalogue's entry kinds. A closed set the schema declares; topics are the
@@ -108,7 +110,7 @@ FOLD_DEFER = "defer"
 FOLD_BACKGROUND = "background"
 FOLD_MODES = (FOLD_INLINE, FOLD_DEFER, FOLD_BACKGROUND)
 
-#: `_graph_token` when another reader's proof of the graph sidecar is running.
+#: `_graph_token` when another reader's proof of the graph sidecar is running, or a managed request has handed it to the background.
 GRAPH_UNPROVEN = "unproven"
 
 
@@ -135,6 +137,7 @@ class Entry:
     sources: tuple[str, ...] = ()
     #: The page's frontmatter tags in carrier form (`topic_carriers.tag_form`).
     tags: tuple[str, ...] = ()
+    stance: bool = False
 
     def digest(self) -> str:
         """Identity of everything this entry stores, to diff a stored row without loading it."""
@@ -143,7 +146,7 @@ class Entry:
                 self.kind, self.anchor_kind, self.path, self.ref, self.title, self.description,
                 self.description_origin, self.status, self.lifecycle_class, self.activity,
                 self.thread_key, self.thread_order, self.source_signature,
-                self.topics, self.projects, self.sources, self.tags,
+                self.topics, self.projects, self.sources, self.tags, self.stance,
             ],
             separators=(",", ":"),
         )
@@ -266,11 +269,15 @@ class ContextCatalogue:
                 thread_key TEXT NOT NULL,
                 thread_order TEXT NOT NULL,
                 source_signature TEXT NOT NULL,
+                stance INTEGER NOT NULL DEFAULT 0,
                 entry_digest TEXT NOT NULL
             )
             """
         )
+        if "stance" not in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}:
+            conn.execute("ALTER TABLE entries ADD COLUMN stance INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_thread ON entries(thread_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS entries_stance ON entries(stance) WHERE stance = 1")
         for table, column in (
             ("declared_topics_raw", "raw"),
             ("entry_projects", "project_key"),
@@ -366,6 +373,11 @@ class ContextCatalogue:
         """Every entry with its raw declarations, ordered by id."""
         conn = self._connect()
         return () if conn is None else _load(conn, kind=kind)
+
+    def stance_ids(self) -> list[str]:
+        """Only entries with the schema boolean mark, without loading declarations."""
+        conn = self._connect()
+        return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE stance = 1")]
 
     def reached_ids(self, kind: str, match: str) -> list[str]:
         """The ids of the entries one carrier reaches: a project key, a folder (by `folder_reaches`) or a tag form."""
@@ -606,8 +618,8 @@ class ContextCatalogue:
         many pages and leaves the rest in `pending`. `fill_tags` runs one full fold when the
         entries' tags were never stored: only a background pass sets it, since a full fold ignores `limit`.
         `prove` is the graph's cold-proof mode: a request passes `SINGLE_FLIGHT`, so a graph
-        proof another reader is running leaves the stored edges as they are and the
-        catalogue reports them `warming`.
+        proof another reader is running, or one a managed request starts in the background,
+        leaves the stored edges as they are and the catalogue reports them `warming`.
         """
         return self._write(
             full=False,
@@ -679,7 +691,7 @@ class ContextCatalogue:
 
 _ENTRY_COLUMNS = (
     "entry_id", "kind", "anchor_kind", "path", "ref", "title", "description", "description_origin",
-    "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature",
+    "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature", "stance",
 )
 
 
@@ -735,6 +747,7 @@ def _load(
     out = []
     for row in rows:
         values = dict(zip(columns, row, strict=True))
+        values["stance"] = bool(values["stance"])
         entry_id = values["entry_id"]
         out.append(
             Entry(
@@ -773,7 +786,7 @@ class _Fold:
         self.page_anchors = {row.path: row for row in anchors if row.anchor_id == row.path and row.kind != "collection"}
         self.other_anchors = [row for row in anchors if row.anchor_id != row.path and row.kind != "collection"]
         self.collections = _collections(vault_root, self.activation_token)
-        self.thread_folder = f"{self.kb}/{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}"
+        self.thread_folders = recap_folder.recap_folders(vault_root)
         self.stored = {row.entry_id: row for row in _stored(conn)}
         self.stored_pending = {str(path) for (path,) in conn.execute("SELECT path FROM pending")}
         self.meta = {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM catalogue_meta")}
@@ -870,7 +883,7 @@ class _Fold:
     def _pull_edges(self) -> None:
         token = _graph_token(self.root, self.prove)
         if token == GRAPH_UNPROVEN:
-            # Another reader's proof of the graph sidecar is running: keep the stored edges and pull at the next fold.
+            # Another reader's proof, or the background proof a managed request started, is running: keep the stored edges and pull at the next fold.
             self.edge_state, self.graph_token = EDGES_WARMING, ""
             return
         new_source = any(entry_id == entry.path and entry_id not in self.stored for entry_id, entry in self.new.items())
@@ -965,7 +978,7 @@ class _Fold:
         if rel in self.collections:
             return KIND_COLLECTION, ""
         folder, _, name = rel.rpartition("/")
-        if folder == self.thread_folder:
+        if folder in self.thread_folders:
             return (KIND_THREAD, "") if episode_capture.filename_parts(name) is not None else None
         from . import recall_policy
 
@@ -1053,6 +1066,7 @@ class _Fold:
             projects=tuple(sorted(find_corpus.all_projects(frontmatter))),
             sources=_sorted_values(frontmatter.get("sources")),
             tags=_tags(frontmatter.get("tags")),
+            stance=frontmatter.get("stance") is True,
         )
 
     def _mirror_other_anchors(self) -> None:
@@ -1251,7 +1265,7 @@ def _collections(vault_root: Path, token: tuple[int, int, int]) -> dict[str, tup
 
 
 def _graph_token(vault_root: Path, prove: bool | str = True) -> str:
-    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader proves it, or "" when it has none to read."""
+    """The graph sidecar's content generation as a string, `GRAPH_UNPROVEN` while another reader or the background proves it, or "" when it has none to read."""
     from . import epistemic_graph
 
     try:

@@ -65,7 +65,13 @@ from .manifests import (
     snapshot_backup_name,
 )
 from .media_edge import ACTIVE_SET_NAME, read_generation
-from .state import INIT_REFUSAL_CODES, SNAPSHOT_BACKUP, ClusterObservation, MediaCensus
+from .state import (
+    INIT_REFUSAL_CODES,
+    SNAPSHOT_BACKUP,
+    ClusterObservation,
+    MediaCensus,
+    PodPlacement,
+)
 from .storage.topolvm import FamilyRequest, LocalVolumeState, LogicalVolume
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
@@ -474,6 +480,33 @@ class ClusterClient:
         return {ns.metadata.name: (ns.metadata.labels or {}).get(CELL_LABEL, "") for ns in namespaces}
 
     # -- observation (D4: pods/events/namespaces get+list only) --
+
+    def observe_access_placements(self, cells: set[str]) -> dict[str, tuple[PodPlacement, ...]]:
+        """Read workload evidence independently of reconcile admission and row retirement."""
+        namespaces = self.list_cell_namespaces()
+        owners = {
+            (item.metadata.namespace, item.metadata.uid): item.kind or kind
+            # Kubernetes fixes these controller kinds; tenant vocabularies do not define them.
+            for kind, items in (
+                ("StatefulSet", self._apps.list_stateful_set_for_all_namespaces().items),
+                ("Job", self._batch.list_job_for_all_namespaces().items),
+            )
+            for item in items
+        }
+        placements: dict[str, list[PodPlacement]] = {}
+        for pod in self._core.list_pod_for_all_namespaces().items:
+            cell_id = namespaces.get(pod.metadata.namespace)
+            if cell_id not in cells or pod.metadata.namespace != namespace_name(cell_id):
+                continue
+            owner = next((owner for owner in (pod.metadata.owner_references or [])
+                          if owner.controller and owners.get((pod.metadata.namespace, owner.uid)) == owner.kind), None)
+            if owner is None or not pod.metadata.uid or not pod.spec.node_name:
+                continue
+            placements.setdefault(cell_id, []).append(PodPlacement(
+                pod.metadata.uid, pod.spec.node_name, pod.metadata.creation_timestamp,
+                pod.metadata.deletion_timestamp, owner.kind, owner.uid, pod.status.phase,
+            ))
+        return {cell_id: tuple(pods) for cell_id, pods in placements.items()}
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
         result = self.observe_cells({cell_id: namespace})[cell_id]
