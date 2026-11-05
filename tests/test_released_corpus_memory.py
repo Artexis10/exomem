@@ -6,12 +6,18 @@ import random
 import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from test_connector_boundary import (
+    configured_boundary,  # noqa: F401 - use the maintained binding fixture
+)
 from test_latency_gate import model_free  # noqa: F401 - reuse the maintained model-free fixture
+from test_private_vocabulary_instances import (
+    private_instances,  # noqa: F401 - canonical assigned registries
+)
 
 from exomem import bm25, context_views, lexstore, runtime_resources
 from exomem.governance import principal
@@ -149,13 +155,16 @@ def test_failed_reverse_allocation_rolls_back_the_unregistered_row(tmp_path: Pat
 
 @pytest.mark.usefixtures("model_free")
 def test_warm_validation_reads_each_directory_once_per_fresh_phase(tmp_path: Path, monkeypatch) -> None:
-    """Sibling sources must share directory facts while final validation reads a fresh phase."""
+    """Sibling sources share physical facts; each fresh phase closes its registry observations."""
     import inspect
     import os
     from collections import Counter
 
     from test_governance_egress import _external
     from test_latency_gate import _build_dense_vault
+
+    from exomem.governance import source_release
+    from exomem.vocabulary import registry
 
     root = _build_dense_vault(tmp_path, 4)
     paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
@@ -165,15 +174,34 @@ def test_warm_validation_reads_each_directory_once_per_fresh_phase(tmp_path: Pat
         with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
             assert result[0].pages == len(paths)
         reads = []
+        registries = []
         scandir = os.scandir
+        load = registry.load
         def observed(path):
             if inspect.currentframe().f_back.f_code.co_filename.endswith("/governance/source_release.py"):
                 reads.append(Path(path).relative_to(root).as_posix())
             return scandir(path)
+        def loaded(spec, *args, **kwargs):
+            if inspect.currentframe().f_back.f_code.co_filename.endswith("/governance/source_release.py"):
+                registries.append((spec.name, spec.instance_id))
+            return load(spec, *args, **kwargs)
         monkeypatch.setattr(os, "scandir", observed)
+        monkeypatch.setattr(registry, "load", loaded)
         with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
             assert result[0].pages == len(paths)
     assert reads and set(Counter(reads).values()) == {2}
+    assert registries and set(Counter(registries).values()) == {4}
+    build = next(iter(store._released_corpus_builds.values()))
+    proof = build.rows[paths[0]].proof
+    changed_expectation = replace(proof, registries=tuple(
+        (*fact[:3], "0" * 64, fact[4]) for fact in proof.registries
+    ))
+    facts = source_release._ValidationFacts()
+    assert source_release.validate_source_release_proofs(
+        root, build.basis, (proof, changed_expectation), check_paths=False,
+        directory_facts=facts, memory=lambda extra=0: None,
+    ) == (True, False)
+    facts.clear()
 
 
 def test_phase_directory_facts_preserve_canonical_matching_and_charge_shared_names(tmp_path: Path) -> None:
@@ -182,18 +210,108 @@ def test_phase_directory_facts_preserve_canonical_matching_and_charge_shared_nam
 
     for name in ("Case", "case", "Straße", "A", "a"):
         (tmp_path / name).touch()
-    facts = source_release._DirectoryFacts()
+    facts = source_release._ValidationFacts()
     admitted = []
     def reserve(extra=0):
-        admitted.append(facts.retained_bytes + extra)
+        assert extra >= facts.retained_bytes
+        admitted.append(extra)
     for name in ("Case", "case", "CASE", "STRASSE", "absent"):
         names = dict.fromkeys(path.name for path in tmp_path.iterdir())
         assert facts.match(tmp_path, ".", name, memory=reserve) == egress._physical_directory_match(names, name)
-    actual = _independent_bytes([facts.directories]) + sys.getsizeof(facts) + sys.getsizeof(facts.retained_bytes)
-    assert actual <= facts.retained_bytes <= actual + 64
+    from exomem.vocabulary import instances, registry, registry_spec
+
+    spec = instances.select(tmp_path, registry_spec("relations"))
+    current = registry.load(spec, tmp_path)
+    expected = spec.binding_revision, current.content_hash, current.effective_digest
+    assert facts.registry_tuple(tmp_path, "relations", None, memory=reserve) == expected
+    assert facts.registries_current(tmp_path, memory=reserve)
+    actual = (_independent_bytes([facts.directories, facts.registries])
+              + sys.getsizeof(facts) + sys.getsizeof(facts.retained_bytes))
+    assert actual <= facts.retained_bytes
     assert max(admitted) >= actual
     facts.clear()
-    assert not facts.directories
+    assert not facts.directories and not facts.registries
+
+
+def test_registry_phase_refuses_growth_before_reading_or_retaining_the_tuple(tmp_path: Path, monkeypatch) -> None:
+    """Admission must precede the canonical miss read and leave no partially retained observation."""
+    from exomem.governance import source_release
+
+    facts = source_release._ValidationFacts()
+    before = facts.retained_bytes
+    def refused(extra=0):
+        assert extra >= before
+        raise runtime_resources.PreparationBudgetExceeded("registry facts do not fit")
+    def read(*args, **kwargs):
+        pytest.fail("the refused owner tuple must not be read")
+    monkeypatch.setattr(source_release, "_current_registry_tuple", read)
+    with pytest.raises(runtime_resources.PreparationBudgetExceeded):
+        facts.registry_tuple(tmp_path, "relations", None, memory=refused)
+    assert not facts.registries and facts.retained_bytes == before
+
+
+@pytest.mark.usefixtures("private_instances")
+def test_phase_close_detects_a_canonical_registry_binding_change(vault: Path, request) -> None:
+    """An assigned instance must not close under the storage binding that preceded a rearm."""
+    from exomem import state_migration
+    from exomem.governance import source_release
+
+    with principal.library_scope():
+        config, _authenticate = request.getfixturevalue("configured_boundary")
+        facts = source_release._ValidationFacts()
+        before = facts.registry_tuple(vault, "relations", None, memory=lambda extra=0: None)
+        document = json.loads(config.read_text())
+        document["vocabulary"]["public"]["namespace"] = "Knowledge Base/_Schema/public-next"
+        config.write_text(json.dumps(document))
+        authority = state_migration.assert_offline_migration_authority(source="disposable registry binding race")
+        state_migration.arm_connector_boundary_offline(vault, authority=authority)
+        assert not facts.registries_current(vault, memory=lambda extra=0: None)
+        assert facts.registries["relations", None] is before
+        facts.clear()
+
+
+@pytest.mark.usefixtures("model_free")
+def test_final_registry_close_withdraws_an_overlay_edit_without_a_basis_change(tmp_path: Path, monkeypatch) -> None:
+    """An overlay edited after its observed proof must prevent publication until dependent rows reproject."""
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    from exomem import relation_registry
+    from exomem.governance import egress, source_release
+    from exomem.vocabulary import registry
+
+    root = _build_dense_vault(tmp_path, 3)
+    overlay = relation_registry.SPEC.overlay(root)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nrelations: {}\n")
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    store = lexstore.get_store(root)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pass
+        build = next(iter(store._released_corpus_builds.values()))
+        before = build.rows[paths[0]]
+        basis = egress.current_source_release_basis(root)
+        close = source_release._ValidationFacts.registries_current
+        closes = []
+        def edited(self, root, **kwargs):
+            closes.append(self)
+            if len(closes) == 2:
+                overlay.write_text(overlay.read_text() + "\n# A later overlay revision.\n")
+                registry.invalidate(root)
+                assert egress.current_source_release_basis(root) == basis
+            return close(self, root, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(source_release._ValidationFacts, "registries_current", edited)
+            with pytest.raises(RuntimeError, match="changed during preparation"), store.released_task_corpus(
+                    paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+                pytest.fail("a changed registry phase must not publish")
+        assert build.result is None and build.rows[paths[0]] is before
+        assert all(not phase.registries and not phase.directories for phase in closes)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            assert result[0].pages == len(paths)
+        assert build.rows[paths[0]].proof.registries != before.proof.registries
 
 
 @pytest.mark.parametrize("phase", ["names", "folded"])
@@ -202,12 +320,12 @@ def test_phase_directory_allocation_refusal_keeps_only_admitted_facts(tmp_path: 
     from exomem.governance import source_release
 
     (tmp_path / "Visible").touch()
-    facts = source_release._DirectoryFacts()
+    facts = source_release._ValidationFacts()
     if phase == "folded":
         assert facts.match(tmp_path, ".", "Visible", memory=lambda extra=0: None) == "Visible"
     before = facts.retained_bytes
     def refuse(extra=0):
-        if extra > 256:
+        if extra > facts.retained_bytes + 256:
             raise runtime_resources.PreparationBudgetExceeded("directory facts do not fit")
     with pytest.raises(runtime_resources.PreparationBudgetExceeded):
         facts.match(tmp_path, ".", "VISIBLE", memory=refuse)
@@ -218,7 +336,7 @@ def test_phase_directory_allocation_refusal_keeps_only_admitted_facts(tmp_path: 
 
 @pytest.mark.usefixtures("model_free")
 @pytest.mark.parametrize("failure", [TimeoutError, runtime_resources.PreparationBudgetExceeded,
-                                      runtime_resources.PreparationCapacityBusy])
+                                      runtime_resources.PreparationCapacityBusy, MemoryError, OSError])
 def test_validation_failures_clear_phase_facts_without_canonical_rebuild(tmp_path: Path, monkeypatch, failure) -> None:
     """Cancellation and admission failure must propagate instead of becoming an invalid-proof cache miss."""
     from test_governance_egress import _external
@@ -235,7 +353,7 @@ def test_validation_failures_clear_phase_facts_without_canonical_rebuild(tmp_pat
         with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
             pass
         phases = []
-        initialize = source_release._DirectoryFacts.__init__
+        initialize = source_release._ValidationFacts.__init__
         def initialized(self):
             initialize(self)
             phases.append(self)
@@ -243,13 +361,24 @@ def test_validation_failures_clear_phase_facts_without_canonical_rebuild(tmp_pat
             raise failure("proof validation ended")
         def rebuilt(*args, **kwargs):
             pytest.fail("a preparation failure must not reproject a source")
-        monkeypatch.setattr(source_release._DirectoryFacts, "__init__", initialized)
-        monkeypatch.setattr(vault.PathGuard, "recheck", refused)
+        monkeypatch.setattr(source_release._ValidationFacts, "__init__", initialized)
+        if failure is TimeoutError:
+            monkeypatch.setattr(vault.PathGuard, "recheck", refused)
+        else:
+            import inspect
+
+            read = source_release._current_registry_tuple
+            def current(*args, **kwargs):
+                if inspect.currentframe().f_back.f_code.co_name == "registries_current":
+                    return refused()
+                return read(*args, **kwargs)
+            monkeypatch.setattr(source_release, "_current_registry_tuple", current)
         monkeypatch.setattr(context_task, "project_source", rebuilt)
-        with pytest.raises(failure), store.released_task_corpus(
+        expected = RuntimeError if failure is OSError else failure
+        with pytest.raises(expected), store.released_task_corpus(
                 paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
             pytest.fail("failed validation must not publish")
-    assert phases and all(not phase.directories for phase in phases)
+    assert phases and all(not phase.directories and not phase.registries for phase in phases)
     assert runtime_resources._preparation_bytes == 0
 
 

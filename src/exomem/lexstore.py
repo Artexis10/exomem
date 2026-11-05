@@ -5632,12 +5632,12 @@ class LexicalStore:
                     workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
                     build.validation = tuple(path for path in candidates if path in build.rows or path in build.omissions)
                     build.validation_cursor = 0
-                from .governance.source_release import _DirectoryFacts
+                from .governance.source_release import _ValidationFacts
 
                 def validation_memory(extra=0):
                     workspace.reserve(workspace.floor_bytes + extra + 65536)
 
-                directory_facts = _DirectoryFacts()
+                directory_facts = _ValidationFacts()
                 try:
                     # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
                     for path in candidates:
@@ -5657,6 +5657,9 @@ class LexicalStore:
                             build.discard(path)
                         build.validation_cursor += 1
                     row = None
+                    if not directory_facts.registries_current(root, memory=validation_memory):
+                        build.result = None
+                        raise RuntimeError("released task corpus changed during preparation")
                 finally:
                     directory_facts.clear()
                     directory_facts = None
@@ -5694,7 +5697,7 @@ class LexicalStore:
                         or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
                     build.result = None
                     raise RuntimeError("released task corpus changed during preparation")
-                directory_facts = _DirectoryFacts()
+                directory_facts = _ValidationFacts()
                 try:
                     invalid_proof = False
                     for path in candidates:
@@ -5705,6 +5708,9 @@ class LexicalStore:
                             build.discard(path)
                             invalid_proof = True
                     row = None
+                    if not directory_facts.registries_current(root, memory=validation_memory):
+                        build.result = None
+                        raise RuntimeError("released task corpus changed during preparation")
                 finally:
                     directory_facts.clear()
                     directory_facts = None

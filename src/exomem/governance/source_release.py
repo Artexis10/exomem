@@ -311,20 +311,71 @@ def references_dependency(root: Path, snapshot, resolved) -> None:
             unsupported()
 
 
-class _DirectoryFacts:
-    """Admitted names for one validation phase; never retain guards or caller state."""
+def _current_registry_tuple(root, subject, scope):
+    """Read only the physical identities through their canonical selection and loader."""
+    from ..vocabulary import instances, registry, registry_spec
 
-    __slots__ = ("directories", "retained_bytes")
+    spec = current = None
+    try:
+        spec = instances.select(root, registry_spec(subject), scope)
+        current = registry.load(spec, root)
+        return spec.binding_revision, current.content_hash, current.effective_digest
+    finally:
+        spec = current = None
+
+
+class _ValidationFacts:
+    """Admitted physical observations for one phase; never guards, verdicts or caller state."""
+
+    __slots__ = ("directories", "registries", "retained_bytes")
 
     def __init__(self):
         self.directories = {}
+        self.registries = {}
         self.retained_bytes = (sys.getsizeof(self) + sys.getsizeof(self.directories)
-                               + sys.getsizeof(0) + sys.getsizeof(None))
+                               + sys.getsizeof(self.registries) + sys.getsizeof(0) + sys.getsizeof(None))
 
     def clear(self):
         self.directories.clear()
+        self.registries.clear()
         self.retained_bytes = (sys.getsizeof(self) + sys.getsizeof(self.directories)
-                               + sys.getsizeof(0) + sys.getsizeof(None))
+                               + sys.getsizeof(self.registries) + sys.getsizeof(0) + sys.getsizeof(None))
+
+    def registry_tuple(self, root, subject, scope, *, memory):
+        key = current = None
+        try:
+            key = subject, scope
+            if key not in self.registries:
+                before = sys.getsizeof(self.registries)
+                # The reader returns three SHA-256 identities or their absent markers.
+                memory(extra=self.retained_bytes + 3 * before + 1024
+                       + sys.getsizeof(subject) + sys.getsizeof(scope))
+                current = _current_registry_tuple(root, subject, scope)
+                retained = (sys.getsizeof(key) + sys.getsizeof(current)
+                            + sum(sys.getsizeof(part) for part in (*key, *current) if part is not None))
+                memory(extra=self.retained_bytes + retained + 3 * before + 256)
+                self.registries[key] = current
+                self.retained_bytes += retained + sys.getsizeof(self.registries) - before
+                memory(extra=self.retained_bytes)
+            return self.registries[key]
+        finally:
+            key = current = None
+
+    def registries_current(self, root, *, memory):
+        try:
+            for (subject, scope), observed in self.registries.items():
+                # The fresh fixed-width tuple overlaps all original observations until comparison ends.
+                memory(extra=self.retained_bytes + 1024)
+                if _current_registry_tuple(root, subject, scope) != observed:
+                    return False
+            return True
+        except (TimeoutError, runtime_resources.PreparationBudgetExceeded,
+                runtime_resources.PreparationCapacityBusy, MemoryError):
+            raise
+        except Exception:  # noqa: BLE001 - an unavailable owner withdraws this phase without replacing its facts
+            return False
+        finally:
+            observed = subject = scope = None
 
     def match(self, root, relative, name, *, memory):
         from .egress import _physical_directory_match
@@ -333,46 +384,46 @@ class _DirectoryFacts:
         try:
             entry = self.directories.get(relative)
             if entry is None:
-                memory(extra=256)
+                memory(extra=self.retained_bytes + 256)
                 names = {}
                 name_bytes = 0
                 with os.scandir(root / relative) as scanned:
                     for child in scanned:
                         # scandir owns the bounded entry; admit its name before retaining it.
-                        memory(extra=4 * sys.getsizeof(names) + name_bytes
+                        memory(extra=self.retained_bytes + 4 * sys.getsizeof(names) + name_bytes
                                + sys.getsizeof(child.name) + 256)
                         if child.name not in names:
                             names[child.name] = child.name
                             name_bytes += sys.getsizeof(child.name)
                 before = sys.getsizeof(self.directories)
-                memory(extra=sys.getsizeof(names) + name_bytes + 3 * before
+                memory(extra=self.retained_bytes + sys.getsizeof(names) + name_bytes + 3 * before
                        + sys.getsizeof(relative) + 256)
                 entry = names, None
                 self.directories[relative] = entry
                 self.retained_bytes += (sys.getsizeof(self.directories) - before + sys.getsizeof(relative)
                                         + sys.getsizeof(entry) + sys.getsizeof(names) + name_bytes)
-                memory()
+                memory(extra=self.retained_bytes)
             names, folded = entry
             if name not in names and folded is None:
-                memory(extra=256)
+                memory(extra=self.retained_bytes + 256)
                 folded = {}
                 key_bytes = 0
                 for original in names:
                     folded_length = sum(len(scalar.casefold()) for scalar in original)
-                    memory(extra=4 * sys.getsizeof(folded) + key_bytes
+                    memory(extra=self.retained_bytes + 4 * sys.getsizeof(folded) + key_bytes
                            + 16 * len(original) + 4 * folded_length + 256)
                     key = original.casefold()
                     if key not in folded:
                         folded[key] = original
                         # An exact name can already own this same string object.
                         key_bytes += sys.getsizeof(key) if key is not names.get(key) else 0
-                memory(extra=sys.getsizeof(folded) + key_bytes + 256)
+                memory(extra=self.retained_bytes + sys.getsizeof(folded) + key_bytes + 256)
                 self.directories[relative] = names, folded
                 self.retained_bytes += sys.getsizeof(folded) + key_bytes
-                memory()
+                memory(extra=self.retained_bytes)
             if name not in names:
                 folded_length = sum(len(scalar.casefold()) for scalar in name)
-                memory(extra=16 * len(name) + 4 * folded_length + 256)
+                memory(extra=self.retained_bytes + 16 * len(name) + 4 * folded_length + 256)
             return _physical_directory_match(names, name, folded)
         finally:
             entry = names = folded = None
@@ -381,11 +432,10 @@ class _DirectoryFacts:
 def validate_source_release_proofs(
     root: Path, basis: SourceReleaseBasis, proofs: Iterable[SourceReleaseProof], *, memo: dict | None = None,
     check_paths: bool = True, preparation_owner=None, memory=None,
-    directory_facts: _DirectoryFacts | None = None,
+    directory_facts: _ValidationFacts | None = None,
 ) -> tuple[bool, ...]:
     """Validate owner facts under the incoming request's freshly verified authority."""
     from .. import semantic_contract, working_set_index
-    from ..vocabulary import instances, registry, registry_spec
     from .egress import _physical_directory_match
 
     memo = memo if memo is not None else {}
@@ -399,14 +449,14 @@ def validate_source_release_proofs(
         local_facts = (sum(len(guard.ancestors) + 1 for guard in proof.paths)
                        + len(proof.directories) + len(proof.names) + len(proof.registries) + len(proof.references))
         def admit_phase(extra=0, local_bytes=512 + 256 * local_facts):
-            amount = directory_facts.retained_bytes + local_bytes + extra
+            amount = local_bytes + extra
             if memory is not None:
                 memory(extra=amount)
             elif preparation_owner is not None:
                 preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + amount)
 
         if directory_facts is not None:
-            admit_phase()
+            admit_phase(extra=directory_facts.retained_bytes)
         elif memory is not None:
             memory(extra=256 * local_facts)
         elif preparation_owner is not None:
@@ -455,11 +505,13 @@ def validate_source_release_proofs(
                     memo[key] = names
                 valid = valid and _physical_directory_match(memo[key], name) == resolved
             for subject, scope, binding, content, digest in proof.registries if valid else ():
+                if directory_facts is not None:
+                    current = directory_facts.registry_tuple(root, subject, scope, memory=admit_phase)
+                    valid = valid and current == (binding, content, digest)
+                    continue
                 key = "registry", subject, scope
                 if key not in memo:
-                    spec = instances.select(root, registry_spec(subject), scope)
-                    current = registry.load(spec, root)
-                    memo[key] = spec.binding_revision, current.content_hash, current.effective_digest
+                    memo[key] = _current_registry_tuple(root, subject, scope)
                 valid = valid and memo[key] == (binding, content, digest)
             if valid and proof.names:
                 names = tuple(name for name, _paths in proof.names)
@@ -485,12 +537,12 @@ def validate_source_release_proofs(
                     memo["pending"] = _pending_identity(memory_refs._pending_reference_projection(root))
                 valid = memo["pending"] == proof.pending
         except (TimeoutError, runtime_resources.PreparationBudgetExceeded,
-                runtime_resources.PreparationCapacityBusy):
+                runtime_resources.PreparationCapacityBusy, MemoryError):
             raise
         except Exception:  # noqa: BLE001 - unsupported or unknown owner proof requires canonical preparation
             valid = False
         if directory_facts is not None:
-            admit_phase()
+            admit_phase(extra=directory_facts.retained_bytes)
         elif memory is not None:
             memory()
         results.append(valid)
