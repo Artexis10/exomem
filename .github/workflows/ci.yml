@@ -37,8 +37,16 @@ jobs:
     outputs:
       full: ${{ steps.scope.outputs.full }}
       release: ${{ steps.scope.outputs.release }}
+      docs_only: ${{ steps.docs-scope.outputs.docs_only }}
+      pytest_args: ${{ steps.docs-scope.outputs.pytest_args }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: docs-scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_change_scope.py "unmarked test cases and empty core/harness shard jobs"
       - id: scope
         run: python3 scripts/release_evidence.py scope
 
@@ -154,7 +162,8 @@ jobs:
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path.
         # Shorter batches limit the tail when a full run queues core work behind other jobs.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        # These shard IDs match --splits; docs-only coverage runs once without allocating empty jobs.
+        shard: ${{ needs.scope.outputs.docs_only == 'true' && fromJSON('[1]') || fromJSON('[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -162,13 +171,6 @@ jobs:
           # introduction/amendment ancestry. A shallow PR merge checkout
           # cannot prove that history and must not silently weaken the gate.
           fetch-depth: 0
-      - name: Select test scope
-        # A docs-only pull request runs only the tests that read docs
-        # (scripts/ci_change_scope.py); every other event runs the whole tier.
-        id: scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
         with:
@@ -200,7 +202,6 @@ jobs:
             "$RUNNER_TEMP/previous-schema" "$EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256" EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON
       - *prepare-duration-snapshot
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
-        if: &run-scoped-tests ${{ steps.scope.outputs.docs_only != 'true' || matrix.shard == 1 }}
         env: *core-test-env
         # Full runs replace the scratch snapshot with measured cases and upload it.
         # Refreshing the baseline stays a reviewed change through scripts/refresh_test_durations.py.
@@ -228,10 +229,10 @@ jobs:
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
-          ${{ steps.scope.outputs.pytest_args }}
+          ${{ needs.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
-        if: &upload-scoped-results ${{ always() && (steps.scope.outputs.docs_only != 'true' || matrix.shard == 1) }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: core-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
@@ -302,7 +303,8 @@ jobs:
       fail-fast: false
       matrix:
         python-version: *test-python-versions
-        shard: [1, 2, 3, 4, 5, 6]
+        # These shard IDs match --splits; docs-only coverage runs once without allocating empty jobs.
+        shard: ${{ needs.scope.outputs.docs_only == 'true' && fromJSON('[1]') || fromJSON('[1,2,3,4,5,6]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -310,13 +312,6 @@ jobs:
           # introduction/amendment ancestry — this tier is where those tests
           # live, so the full history is non-negotiable here.
           fetch-depth: 0
-      - name: Select test scope
-        # A docs-only pull request runs only the tests that read docs
-        # (scripts/ci_change_scope.py); every other event runs the whole tier.
-        id: scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
         with:
@@ -344,7 +339,6 @@ jobs:
           python -m compileall -q src/exomem
       - *prepare-duration-snapshot
       - name: Run tests (harness tier — benchmark-importing modules)
-        if: *run-scoped-tests
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
@@ -370,10 +364,10 @@ jobs:
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
-          ${{ steps.scope.outputs.pytest_args }}
+          ${{ needs.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
-        if: *upload-scoped-results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: harness-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
