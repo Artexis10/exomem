@@ -34,6 +34,8 @@ from . import (
     entity_types,
     foreground_priority,
     freshness,
+    graph_publication,
+    graph_read_publication,
     graph_sync,
     lifecycle_statuses,
     markdown_relations,
@@ -90,7 +92,7 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
@@ -2086,6 +2088,7 @@ class _GraphPublicationTicket:
     metadata: tuple[tuple[str, str], ...]
     temporary: Path
     temporary_identity: tuple[int, int, int, int, int]
+    read_publication: graph_read_publication.PreparedPublication | None = None
 
 
 @dataclass(frozen=True)
@@ -2240,6 +2243,7 @@ def _resolver_topology_fingerprint(
 class EpistemicGraphIndex:
     #: Set by `_rebuild_all_locked` when its pass returns `behind`.
     _behind_build: _BehindBuild | None = None
+    _publication_resolver: vault_module.WikilinkResolver | None = None
 
     def __init__(
         self,
@@ -2581,6 +2585,7 @@ class EpistemicGraphIndex:
         ).fetchall():
             if "dependency_proof" in name and name not in current:
                 conn.execute(f'DROP TRIGGER "{name}"')
+        graph_publication.install(conn)
 
     def _connect_existing(
         self,
@@ -2619,6 +2624,120 @@ class EpistemicGraphIndex:
             conn.close()
             return "available"
         return "unproven" if outcome else "unavailable"
+
+    def _open_published_read(
+        self, visible: Callable[[str], bool], *, deadline: float,
+    ) -> tuple[sqlite3.Connection, graph_read_publication.Publication] | None:
+        """Open an independent complete publication without cold proof or writer wait.
+
+        A missed proof costs optional correction context, as on the current
+        path. Admitting unexplained rows could disclose a withheld mutation.
+        The canonical hold ends before query or source hydration starts.
+        """
+        publication = graph_read_publication.published(self.vault_root)
+        if publication is None or not graph_enabled() or time.monotonic() >= deadline:
+            return None
+        registry_key = _sidecar_registry_key(self.path)
+        conn = None
+        try:
+            with graph_read_publication.read_boundary(
+                self.vault_root, operation="epistemic_graph_published_read",
+                deadline=deadline, coordinator=self._mutation_coordinator,
+            ) as held:
+                if not held:
+                    return None
+                with _SIDECAR_READERS_CHANGED:
+                    if registry_key in _SIDECAR_PUBLICATION_HOLDS:
+                        return None
+                conn = self._connect_existing(
+                    readonly=True, factory=_TrackedSidecarConnection,
+                    check_same_thread=False, timeout=0.0,
+                )
+                conn.__dict__["_exomem_registry_key"] = registry_key
+                _register_sidecar_reader(registry_key, conn)
+                graph_sync.limit_graph_row_read(conn)
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                conn.execute("BEGIN")
+                values = graph_publication.open_view(conn)
+                if (
+                    values is None
+                    or tuple(sorted(values.items())) != publication.token
+                    or not self._snapshot_metadata_current(values)
+                    or _AVAILABILITY_FRESHNESS_KEY not in values
+                    or _READ_BARRIER_KEY in values
+                ):
+                    conn.close()
+                    return None
+            if (
+                not self._published_read_is_current(publication, visible, deadline=deadline)
+                or time.monotonic() >= deadline
+            ):
+                conn.close()
+                return None
+            return conn, publication
+        except (OSError, sqlite3.Error, graph_sync.GraphEpochIncoherent):
+            if conn is not None:
+                conn.close()
+            return None
+
+    def _snapshot_instance_is_current(
+        self, instance: str | None, *, deadline: float, retained: bool = False,
+    ) -> bool:
+        """Check integrity withdrawal through a fresh connection, outside the old snapshot.
+
+        A purge changes the existing incarnation token. Missing this proof
+        costs optional context; accepting a purged snapshot serves invalid rows.
+        """
+        if not instance or time.monotonic() >= deadline:
+            return False
+        boundary = (
+            graph_read_publication.read_boundary(
+                self.vault_root, operation="epistemic_graph_read_instance",
+                deadline=deadline, coordinator=self._mutation_coordinator,
+            ) if retained else self._mutation_coordinator.try_hold(
+                operation="epistemic_graph_read_instance", holder_kind="graph",
+            )
+        )
+        try:
+            with boundary as held:
+                if not held or time.monotonic() >= deadline:
+                    return False
+                conn = self._connect_existing(readonly=True, timeout=0.0)
+                try:
+                    current = conn.execute(
+                        "SELECT value FROM main.graph_meta WHERE key = 'instance'"
+                    ).fetchone()
+                    return (
+                        current is not None and current[0] == instance
+                        and time.monotonic() < deadline
+                    )
+                finally:
+                    conn.close()
+        except (OSError, sqlite3.Error):
+            return False
+
+    def _published_read_is_current(
+        self, publication: graph_read_publication.Publication,
+        visible: Callable[[str], bool], *, deadline: float,
+    ) -> bool:
+        return graph_read_publication.admissible(
+            self.vault_root, publication, visible, deadline=deadline,
+        ) and self._snapshot_instance_is_current(
+            dict(publication.token).get("instance"), deadline=deadline, retained=True,
+        )
+
+    def _snapshot_metadata_current(self, values: Mapping[str, str]) -> bool:
+        policy_version, access_fingerprint = recall_policy.recall_policy_identity(self.vault_root)
+        checkpoint = values.get(_RECALL_CHECKPOINT_KEY)
+        return (
+            values.get("schema_version") == str(SCHEMA_VERSION)
+            and values.get("core_registry_version") == str(self.registry.core_version)
+            and values.get("extension_registry_hash") == self.registry.extension_hash
+            and values.get("recall_policy_version") == policy_version
+            and values.get("recall_access_fingerprint") == access_fingerprint
+            and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
+            and (checkpoint is None or _checkpoint_from_value(checkpoint) is not None)
+        )
 
     def _open_read_snapshot(
         self,
@@ -2776,22 +2895,10 @@ class EpistemicGraphIndex:
             if conn is not None:
                 conn.close()
             return None
-        policy_version, access_fingerprint = recall_policy.recall_policy_identity(self.vault_root)
         stored_projection = values.get(_AVAILABILITY_FRESHNESS_KEY)
         stored_checkpoint_value = values.get(_RECALL_CHECKPOINT_KEY)
         stored_checkpoint = _checkpoint_from_value(stored_checkpoint_value)
-        current = (
-            values.get("schema_version") == str(SCHEMA_VERSION)
-            and values.get("core_registry_version") == str(self.registry.core_version)
-            and values.get("extension_registry_hash") == self.registry.extension_hash
-            and values.get("recall_policy_version") == policy_version
-            and values.get("recall_access_fingerprint") == access_fingerprint
-            and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
-            # A present-but-corrupt checkpoint must fail closed.  No checkpoint
-            # is valid for a sidecar published from a direct-disk rebuild while
-            # the event registry was cold or known stale.
-            and (stored_checkpoint_value is None or stored_checkpoint is not None)
-        )
+        current = self._snapshot_metadata_current(values)
         if require_current_projection:
             # The availability marker is a *reader's* claim that the stored
             # projection is current, and its absence is what every deferral
@@ -3110,6 +3217,7 @@ class EpistemicGraphIndex:
             if snapshot is None:
                 return False
             seals: list[_SnapshotSourceSeal] = []
+            resolvers: list[vault_module.WikilinkResolver] = []
             try:
                 stored_checkpoint = self._stored_recall_checkpoint(snapshot)
                 metadata = self._availability_metadata(snapshot)
@@ -3119,6 +3227,7 @@ class EpistemicGraphIndex:
                     snapshot,
                     resolver_fingerprint=metadata.get(_RESOLVER_TOPOLOGY_KEY),
                     seal_out=seals,
+                    resolver_out=resolvers,
                     # Folds a page saved with the same bytes, and stops at the
                     # first page that differs from its row: this caller
                     # publishes only a sidecar that matches disk exactly.
@@ -3165,9 +3274,18 @@ class EpistemicGraphIndex:
                 ) or not still_current():
                     return False
                 defer_to_foreground()
+                local = freshness.live_recall_checkpoint(self.vault_root, "vault")
+                if local is not None and (
+                    local.triple, local.policy_version, local.access_policy_fingerprint
+                ) != (recall.triple, recall.policy_version, recall.access_policy_fingerprint):
+                    return False
                 self._publish_available_marker(
                     (recall.triple, recall.policy_version, recall.access_policy_fingerprint),
-                    checkpoint=stored_checkpoint,
+                    checkpoint=local or stored_checkpoint,
+                    graph_checkpoint=epoch.checkpoint,
+                )
+                self._record_complete_read_publication(
+                    resolvers[0] if resolvers else None, full_source_proof=True,
                 )
         except _RepublicationDeferred:
             return None
@@ -3397,6 +3515,7 @@ class EpistemicGraphIndex:
         residue_out: set[str] | None = None,
         reason_out: list[str] | None = None,
         seal_out: list[_SnapshotSourceSeal] | None = None,
+        resolver_out: list[vault_module.WikilinkResolver] | None = None,
         fold: bool = False,
         prior_reads: _ProofReads | None = None,
         reads_out: list[_ProofReads] | None = None,
@@ -3669,6 +3788,8 @@ class EpistemicGraphIndex:
                 residue_out.update(residue)
             if seal_out is not None:
                 seal_out.append(seal)
+            if resolver_out is not None and not residue:
+                resolver_out.append(resolver)
             if reads_out is not None:
                 reads_out.append(
                     _ProofReads(
@@ -4264,6 +4385,7 @@ class EpistemicGraphIndex:
                         required=required,
                         prior_acknowledgement=prior_acknowledgement,
                         accept_stabilized_build=False,
+                        resolver=temporary_index._publication_resolver,
                     )
                     if ticket is None:
                         self._reconcile_recall_publication()
@@ -4281,6 +4403,7 @@ class EpistemicGraphIndex:
                             required=required,
                             prior_acknowledgement=prior_acknowledgement,
                             accept_stabilized_build=accept_stabilized_build,
+                            resolver=temporary_index._publication_resolver,
                         )
                         if ticket is None:
                             continue
@@ -4328,6 +4451,8 @@ class EpistemicGraphIndex:
                             note_publication_refusal(self.vault_root)
                             raise
                         clear_publication_refusal(self.vault_root)
+                        if ticket is not None and ticket.read_publication is not None:
+                            graph_read_publication.install_prepared(ticket.read_publication)
                         if behind_ticket is not None:
                             # Content-free: counts only. The line an operator
                             # counts behind publications by, and times to the
@@ -4457,6 +4582,7 @@ class EpistemicGraphIndex:
         required: graph_sync.GraphSyncCheckpoint | None,
         prior_acknowledgement: graph_sync.GraphSyncCheckpoint | None,
         accept_stabilized_build: bool,
+        resolver: vault_module.WikilinkResolver | None = None,
     ) -> _GraphPublicationTicket | None:
         """Finish and verify every temp-sidecar proof before canonical authority."""
         try:
@@ -4550,6 +4676,18 @@ class EpistemicGraphIndex:
             # Every write to the rebuild is done and every proof above has read
             # it back, so this is the last uncontended moment to settle its
             # journal mode -- and it must precede the identity captured below.
+            read_publication = None
+            if resolver is not None:
+                check = self._connect_existing(temporary, readonly=True)
+                try:
+                    graph_sync.limit_graph_row_read(check)
+                    published = dict(check.execute("SELECT key, value FROM main.graph_publication_meta"))
+                finally:
+                    check.close()
+                read_publication = graph_read_publication.prepare_complete(
+                    self.vault_root, published, resolver, full_source_proof=True,
+                    coordinator=self._mutation_coordinator,
+                )
             _seal_graph_rebuild_as_wal(self.vault_root, temporary)
             return _GraphPublicationTicket(
                 epoch,
@@ -4560,6 +4698,7 @@ class EpistemicGraphIndex:
                 tuple(sorted(metadata.items())),
                 temporary,
                 self._temporary_identity(temporary),
+                read_publication,
             )
         except (OSError, sqlite3.Error):
             return None
@@ -4572,6 +4711,10 @@ class EpistemicGraphIndex:
         try:
             if acknowledgement is not None:
                 self._write_graph_sync_acknowledgement(conn, acknowledgement)
+            if conn.execute(
+                "SELECT 1 FROM graph_meta WHERE key = ?", (_AVAILABILITY_FRESHNESS_KEY,)
+            ).fetchone() is not None:
+                graph_publication.publish(conn)
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -4905,6 +5048,7 @@ class EpistemicGraphIndex:
         return _acquire_publication_hold(live)
 
     def _rebuild_all_locked(self) -> dict[str, int]:
+        self._publication_resolver = None
         pass_started = False
         stable = False
         # Contract section 1 / deliverable D2. `projection_moved` may be set
@@ -5059,6 +5203,7 @@ class EpistemicGraphIndex:
                         if self._recall_membership() == resolver_membership and (
                             self._source_versions_current(resolver_versions)
                         ):
+                            self._publication_resolver = resolver
                             stable = True
                             return report
                         # The projection moved between writing the availability
@@ -5464,6 +5609,8 @@ class EpistemicGraphIndex:
         conn = self._connect()
         try:
             with conn:
+                # A full rebuild starts a new proof; it must not retain invalid old rows.
+                graph_publication.withdraw(conn)
                 conn.execute("DELETE FROM graph_edges")
                 conn.execute("DELETE FROM graph_nodes")
                 conn.execute("DELETE FROM graph_parent_refs")
@@ -5789,6 +5936,49 @@ class EpistemicGraphIndex:
         if self.path == sidecar_path(self.vault_root):
             vocabulary_recovery.note_graph_published(self.vault_root)
 
+    def _record_complete_read_publication(
+        self, resolver: vault_module.WikilinkResolver | None = None, *, full_source_proof: bool = False,
+    ) -> None:
+        """Pair only a committed, finally checked publication with its resolver.
+
+        Full-source callers may establish a new baseline. Incremental callers
+        may advance an existing bridge, but cannot explain missing history.
+        """
+        if self.path != sidecar_path(self.vault_root):
+            return
+        try:
+            with self._mutation_coordinator.try_hold(
+                operation="epistemic_graph_retain_publication", holder_kind="graph",
+            ) as held:
+                if not held:
+                    return
+                conn = self._connect_existing(readonly=True, timeout=0.0)
+                try:
+                    graph_sync.limit_graph_row_read(conn)
+                    values = dict(conn.execute("SELECT key, value FROM main.graph_publication_meta"))
+                finally:
+                    conn.close()
+                previous = graph_read_publication.published(self.vault_root)
+                reuse = previous is not None and (
+                    previous.topology, previous.recall.policy_version,
+                    previous.recall.access_policy_fingerprint,
+                ) == (
+                    values.get(_RESOLVER_TOPOLOGY_KEY), values.get("recall_policy_version"),
+                    values.get("recall_access_fingerprint"),
+                )
+                if not reuse and resolver is not None and not full_source_proof:
+                    # Incremental maintenance can borrow mutable maps; retain a detached existing resolver.
+                    with find_module._RESOLVER_LOCK:
+                        resolver = resolver.fork()
+                graph_read_publication.record_complete(
+                    self.vault_root, values, None if reuse else resolver,
+                    full_source_proof=full_source_proof,
+                    coordinator=self._mutation_coordinator,
+                )
+        except (OSError, ValueError, sqlite3.Error, graph_sync.GraphEpochIncoherent):
+            # Optional retention must not change a successful publication's result.
+            log.debug("graph read publication could not be retained", exc_info=True)
+
     def _publish_available_marker_in_transaction(
         self,
         conn: sqlite3.Connection,
@@ -5824,6 +6014,7 @@ class EpistemicGraphIndex:
             )
         if graph_checkpoint is not None:
             self._write_graph_sync_acknowledgement(conn, graph_checkpoint)
+        graph_publication.publish(conn)
         # No publication signal here: this transaction may be writing a private
         # rebuild that is swapped into place later, or refused. Each caller
         # signals once its commit or swap has made the marker readable.
@@ -5866,6 +6057,7 @@ class EpistemicGraphIndex:
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
         source_versions: dict[str, GraphSourceSignature] | None = None,
+        resolver: vault_module.WikilinkResolver | None = None,
     ) -> bool:
         expected_sources = source_versions or {}
         if freshness.external_pending(self.vault_root):
@@ -5890,10 +6082,13 @@ class EpistemicGraphIndex:
             return False
         if _incremental_projection_identity(self.vault_root) != identity:
             return False
-        return (
+        available = (
             checkpoint is None
             or freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
         )
+        if available:
+            self._record_complete_read_publication(resolver)
+        return available
 
     def _source_versions_current(
         self,
@@ -7301,11 +7496,18 @@ class EpistemicGraphIndex:
             )
             if graph_checkpoint is not None:
                 self._note_graph_published()
+                if (
+                    self._source_versions_current(indexed_versions)
+                    and registry_describes_affected()
+                    and freshness.live_recall_checkpoint(self.vault_root, "vault") == checkpoint
+                ):
+                    self._record_complete_read_publication(resolver)
             if graph_checkpoint is None:
                 if registry_describes_affected() and self._mark_incremental_available(
                     before,
                     checkpoint=checkpoint,
                     source_versions=indexed_versions,
+                    resolver=resolver,
                 ):
                     stable = True
                     return report
@@ -7887,6 +8089,11 @@ class EpistemicGraphIndex:
                 return {**report, "moved": 1}
             if published:
                 self._note_graph_published()
+                if (
+                    self._source_versions_current(indexed_versions)
+                    and freshness.live_recall_checkpoint(self.vault_root, "vault") == checkpoint
+                ):
+                    self._record_complete_read_publication(resolver)
             if coverage is not None:
                 _log_drain_outcome(len(paths), withheld, coverage)
         return {
@@ -8008,7 +8215,22 @@ class EpistemicGraphIndex:
                             (source_path,),
                         ).rowcount
                     if changed:
+                        # Integrity repair must not expose quarantined rows through a predecessor.
+                        graph_publication.withdraw(conn)
+                        conn.execute(
+                            "UPDATE graph_meta SET value = ? WHERE key = 'instance'",
+                            (secrets.token_hex(16),),
+                        )
+                        conn.execute(
+                            "DELETE FROM graph_meta WHERE key = ?", (_AVAILABILITY_FRESHNESS_KEY,),
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                            (_READ_BARRIER_KEY, "unavailable"),
+                        )
                         _bump_generation(conn)
+                if changed and target == sidecar_path(self.vault_root):
+                    graph_read_publication.forget(self.vault_root)
                 return int(changed)
             finally:
                 conn.close()

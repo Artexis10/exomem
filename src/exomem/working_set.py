@@ -4159,11 +4159,13 @@ def _compile_packet(
     if freshness_snapshot is not None:
         from . import working_set_runtime
 
-        _selection_stack.enter_context(
+        lexical_checkpoint = _selection_stack.enter_context(
             working_set_runtime.lexical_selection_scope(
-                root, freshness_snapshot.lexical_checkpoint("kb")
+                root, freshness_snapshot.lexical_checkpoint("kb"),
+                restricted=visible is not None, purpose=purpose,
             )
         )
+        freshness_snapshot = freshness_snapshot.lexical_view("kb", lexical_checkpoint)
     with _span(timings, "working_set.resolve"):
         # `analysis` is needed on BOTH branches. The override replaces which
         # anchor the turn is about; it does not replace which lenses the turn asks

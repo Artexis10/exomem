@@ -273,6 +273,90 @@ For deleted pages, the selection retains references to existing verdict maps tha
 The maps remain immutable, so another request can replace the shared cache entry without changing this selection's proof.
 Finalization builds the current release predicate outside the cached policy snapshot and checks its identity before using those retained verdicts.
 
+An activation can cross a catalogue publication between its initial lexical pass and compilation.
+Compilation may use its captured SQL checkpoint when both checkpoints bridge to the current state through changes withheld from the caller.
+Both proofs use current authority, including purpose and grants, and remain subject to the existing decision bound.
+Compilation owns that checkpoint and its exact verdicts; earlier selections keep their original checkpoints and proofs.
+Finalization repeats both lag proofs and preserves the existing selected-source checks.
+A visible change or missing proof keeps the existing incomplete or unavailable outcome.
+
+#### Graph publications remain coherent during repair
+
+An old graph checkpoint describes repair lineage after partial drains, not necessarily the current rows.
+Restricted graph reads therefore need a coherent published view while maintenance keeps partial progress.
+Each request keeps its own SQLite connection, transaction, progress handler and deadline.
+Short reader proofs use one process-local mutex before the existing canonical boundary probe.
+A reader may wait for another reader's proof within its deadline; it never waits for a canonical writer.
+Both locks release before queries, hydration and release decisions.
+The mutex survives publication changes, while a retired lineage invalidates its pending readers.
+A canonical holder reenters directly, so it never queues behind a reader that probes that holder.
+This introduces no writer fairness guarantee or shared query connection.
+
+Integrity purge rotates the existing graph incarnation and withdraws availability in its transaction.
+Admission and finalization compare the captured incarnation through a fresh connection under a short canonical hold.
+This check also covers the strict fallback without retained process state.
+An intervening recovery cannot make the purged incarnation valid again.
+Ordinary incremental publication keeps the incarnation, so withheld repair can preserve an open read.
+
+Retain the first predecessor of each changed row in five saved tables:
+`graph_saved_nodes`, `graph_saved_edges`, `graph_saved_parent_refs`, `graph_saved_dependencies` and `graph_saved_dependency_coverage`.
+`graph_publication_meta` holds the metadata of the complete publication that those predecessors preserve.
+Derive saved columns and primary keys from the existing schema, and retain each predecessor's explicit `rowid` for authoring order.
+An absence marker hides a row created after publication; it carries the primary key without a predecessor row.
+
+SQLite triggers capture each row before insertion, replacement, update or deletion, in the transaction that changes it.
+Preserve the first image with a guarded `INSERT ... SELECT ... WHERE NOT EXISTS`.
+An outer `REPLACE` must not replace that image through its conflict policy.
+Remove an absence marker when its row no longer exists, and restore it after replacement when necessary.
+This must hold with recursive triggers enabled or disabled.
+Repeated create-delete cycles must not accumulate marker history.
+Incoming-edge deletion captures the affected edges, without copying their authors' unrelated rows.
+
+Connection-local views combine unchanged main rows with their saved predecessors and exclude new rows marked absent.
+Maintenance keeps using the main tables.
+A complete publication updates its metadata and acknowledgement and clears saved rows in the same transaction.
+Integrity repair withdraws invalid publication proof instead of retaining suspect rows.
+Schema migration initializes this state through the existing complete rebuild; it never captions mixed rows as a complete publication.
+
+A warm worker pairs the publication with an immutable existing resolver and its topology fingerprint.
+Body-only publications reuse that resolver when its topology and policy remain unchanged.
+A worker without the matching resolver keeps the existing unavailable outcome until recovery supplies it.
+There is no second persisted resolver or resolution algorithm.
+
+Row coherence does not prove that a local watcher has observed every committed write.
+Governed publication associates the canonical graph generation and digest with its known local recall checkpoint.
+Only contiguous known canonical generations advance that association.
+A complete corpus callback can prove one paths-scoped epoch without a trusted callback origin.
+Two short canonical holds surround corpus publication; the corpus work runs outside those holds.
+The second hold compares the exact prior association, durable floor and checkpoint, and current policy.
+The consumer delta must name every epoch endpoint with its exact changed or deleted classification.
+Current guarded bytes and target signatures must match that delta and the epoch.
+A subset does not suffice: a changed endpoint can retain its previous stat signature.
+Full checkpoints, gaps and incomplete histories require the existing full-source recovery.
+Duplicate callbacks cannot attach a newer local checkpoint to the same canonical epoch.
+The canonical epoch must cover the whole resolver source domain, including Markdown outside the KB.
+This coverage includes creation, body changes, deletion, restoration and both endpoints of a rename.
+A rename stages its floor before moving bytes and publishes its exact endpoint checkpoint before a later rewrite batch.
+The destination digest describes the bytes installed by the rename, before any content transformation.
+The move queues that checkpoint without starting acknowledgement during its rollback window.
+The existing mutation boundary covers the compound move and precedes the semantic creation lock.
+Direct callers retain the existing repair handoff after that boundary releases.
+Only proved child rollback and successful inverse renames permit restoration of the earlier epoch.
+Committed, partial or unknown outcomes retain their epoch or floor and existing full repair custody.
+A complete callback origin cannot explain an earlier foreign commit that the epoch did not record.
+A process counter whose proof lasts only one invocation cannot attest a retained publication.
+When epoch coverage is incomplete, only the existing complete-source proof may establish a new baseline.
+Admission and finalization check the durable checkpoint and generation floor under the mutation coordinator.
+A foreign advance without a complete local bridge keeps the existing unavailable outcome.
+Both boundaries retain the caller-relative lag proof, current authority and selected-source checks.
+The existing 16-path bound and unknown-deletion behavior remain unchanged.
+Only successful source-proved replacement or sealed republication establishes a new baseline and detached resolver pair.
+An incremental publication advances an existing association after its final checks; a notification alone proves nothing.
+
+The supported Python SQLite interface does not expose historic snapshots; its [backup API](https://docs.python.org/3.12/library/sqlite3.html#sqlite3.Connection.backup) copies the whole database.
+The saved rows add custom versioning and trigger maintenance, but their work follows actual row changes.
+The proof must cover repeated replacements, high-fan-in deletion, independent readers, marker retirement and foreign writes before watcher delivery.
+
 For a deleted path, missing verdicts, changed authority or unbridgeable history leave the lag visible.
 A failed optional metadata read discards that retention attempt; selected rows still serve.
 The selection creates no historical verdict and copies no corpus map.

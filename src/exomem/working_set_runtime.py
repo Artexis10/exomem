@@ -1157,22 +1157,56 @@ def pin_lexical_checkpoint(
 
 @contextmanager
 def lexical_selection_scope(
-    vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None
-) -> Iterator[None]:
-    """Retain optional lexical reads while deferring lag repair until activation ends."""
+    vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None,
+    *, restricted: bool = False, purpose: str | None = None,
+) -> Iterator[freshness.RecallFreshnessCheckpoint | None]:
+    """Retain lexical reads, bridging only changes withheld from the current caller."""
     from . import lexstore
 
     if (
         recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
         or lexstore.backend() == "python"
     ):
-        yield
+        yield recall_checkpoint
         return
     with (
         lexstore.admitted_catalog_scope(vault_root),
-        lexstore.catalog_selection_scope(vault_root, lag_dispatch=_defer_lexical_repair),
+        lexstore.catalog_selection_scope(
+            vault_root, lag_dispatch=_defer_lexical_repair,
+        ) as selection,
     ):
-        yield
+        captured = None if selection is None else selection.checkpoints.get("kb")
+        if not restricted or captured is None or (
+            captured.instance_id == recall_checkpoint.instance_id
+            and captured.generation <= recall_checkpoint.generation
+        ):
+            # Equal or older catalogues keep their existing readiness and partial-lane outcomes.
+            yield recall_checkpoint
+            return
+        from . import find as find_module
+        from .governance import egress, policy
+
+        def prove() -> None:
+            # Re-prove both views on live authority; earlier verdicts cannot authorize a rebase.
+            with policy.outside_request_policy_snapshot():
+                visible = egress.visible_page_filter(
+                    vault_root, purpose=purpose, withheld=frozenset(),
+                )
+                request_held = captured_held = None
+                if visible is not None:
+                    request_held = view_lag.recall_withheld_lag(
+                        vault_root, "kb", recall_checkpoint, visible,
+                    )
+                    captured_held = view_lag.recall_withheld_lag(
+                        vault_root, "kb", captured, visible,
+                    )
+                if (request_held is None or captured_held is None
+                        or not egress.pin_proven_withheld(request_held | captured_held)):
+                    raise find_module.RetrievalIndexWarming(site="catalog_outcome")
+
+        prove()
+        yield captured
+        prove()
 
 
 def lexical_evidence(
