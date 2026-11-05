@@ -24,7 +24,7 @@ In `maps` mode, the turn slice's anchors compile SHALL receive the request's `co
 
 #### Scenario: The slice compile writes nothing
 - **WHEN** a `maps` request carries a `conversation` and a continuity token
-- **THEN** activation writes no session, heat or learning record
+- **THEN** the slice compile writes no session, heat or learning record; the final maps response may append private composed metadata under served-context-record
 
 ### Requirement: A maps packet reports its continuity inputs
 In a served `maps` packet, `generation.conversation` SHALL be the state that the turn slice's compile computed for the request's `conversation`. When no slice compile reads the conversation, it SHALL be `absent`. `generation.continuity` SHALL be `absent` when the request carries no token, `applied` when the token carries a map generation and was minted under the serving role registry and conventions, and `stale` for any other token. `generation.continuity_thread` SHALL be `absent`.

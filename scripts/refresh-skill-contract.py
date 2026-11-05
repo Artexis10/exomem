@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Refresh generated authoring projections and canonical skill-contract stamps."""
+"""Refresh shared portable rules, authoring projections and skill-contract stamps."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from exomem import semantic_authoring, workflow_skills  # noqa: E402
+from exomem import read_next_action, semantic_authoring, workflow_skills  # noqa: E402
 
 
 def main() -> None:
@@ -21,6 +21,9 @@ def main() -> None:
     args = parser.parse_args()
     concise = semantic_authoring.render_concise()
     schema = workflow_skills.WORKFLOW_SKILLS_DIR.parent
+    # These headings bound the canonical portable contract in shipped skills.
+    portable_heading = "## Portable operating rules\n"
+    portable = (schema / "SKILL.md").read_text(encoding="utf-8").split(portable_heading, 1)[1].split("\n## ", 1)[0].strip()
     targets = [schema / "references" / "semantic-authoring.md"]
     targets.extend(
         source
@@ -31,6 +34,10 @@ def main() -> None:
     changes = {}
     for target in targets:
         text = target.read_text(encoding="utf-8")
+        if target.name == "SKILL.md":
+            before, remaining = text.split(portable_heading, 1)
+            _, after = remaining.split("\n## ", 1)
+            text = before + portable_heading + "\n" + portable + "\n\n## " + after
         start = text.index("<!-- exomem-semantic-authoring:")
         changes[target] = text[:start] + concise
     doc = REPO_ROOT / "docs" / "semantic-language.md"
@@ -40,6 +47,16 @@ def main() -> None:
     before, block = text.split(start, 1)
     _, after = block.split(end, 1)
     changes[doc] = before + start + concise + end + after
+    import pprint
+
+    hook = REPO_ROOT / "src/exomem/_hooks/exomem_retrieve_nudge.py"
+    text = hook.read_text(encoding="utf-8")
+    start = "# BEGIN GENERATED NEXT ACTION COMPATIBILITY\n"
+    end = "# END GENERATED NEXT ACTION COMPATIBILITY"
+    before, rest = text.split(start, 1)
+    _, after = rest.split(end, 1)
+    moves = read_next_action.templates("`recall_context`", "`read_memory`", "`search_memory`")
+    changes[hook] = before + start + "_COMPAT_NEXT_ACTION = " + pprint.pformat(moves, width=100) + "\n" + end + after
     stale = [path for path, text in changes.items() if path.read_text(encoding="utf-8") != text]
     if args.check:
         if stale:

@@ -5846,6 +5846,13 @@ def _raw_findings(
     structure_finding = compiled_structure_finding(page)
     if structure_finding is not None:
         findings.append(structure_finding)
+    if "stance" in page.frontmatter and type(page.frontmatter["stance"]) is not bool:
+        findings.append(ContractFinding(
+            code="INVALID_STANCE", severity="error", path=page.path, span=None,
+            detail="stance must be a boolean", remediation="Set stance to true or false.",
+            governed_element_identity=("frontmatter", "stance"),
+            resolved_rule=("semantic_contract", "stance", "boolean"),
+        ))
     findings.extend(_diagnostic_findings(page))
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:

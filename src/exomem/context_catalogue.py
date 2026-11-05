@@ -57,7 +57,8 @@ from .working_set_runtime import READY
 log = logging.getLogger(__name__)
 
 #: 2: titles and descriptions are stored without their wikilinks.
-SCHEMA_VERSION = 2
+#: 3: the raw boolean stance mark narrows global-unit reads without a corpus walk.
+SCHEMA_VERSION = 3
 SIDECAR_NAME = ".context-catalogue.sqlite"
 
 # The catalogue's entry kinds. A closed set the schema declares; topics are the
@@ -136,6 +137,7 @@ class Entry:
     sources: tuple[str, ...] = ()
     #: The page's frontmatter tags in carrier form (`topic_carriers.tag_form`).
     tags: tuple[str, ...] = ()
+    stance: bool = False
 
     def digest(self) -> str:
         """Identity of everything this entry stores, to diff a stored row without loading it."""
@@ -144,7 +146,7 @@ class Entry:
                 self.kind, self.anchor_kind, self.path, self.ref, self.title, self.description,
                 self.description_origin, self.status, self.lifecycle_class, self.activity,
                 self.thread_key, self.thread_order, self.source_signature,
-                self.topics, self.projects, self.sources, self.tags,
+                self.topics, self.projects, self.sources, self.tags, self.stance,
             ],
             separators=(",", ":"),
         )
@@ -267,11 +269,15 @@ class ContextCatalogue:
                 thread_key TEXT NOT NULL,
                 thread_order TEXT NOT NULL,
                 source_signature TEXT NOT NULL,
+                stance INTEGER NOT NULL DEFAULT 0,
                 entry_digest TEXT NOT NULL
             )
             """
         )
+        if "stance" not in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}:
+            conn.execute("ALTER TABLE entries ADD COLUMN stance INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_thread ON entries(thread_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS entries_stance ON entries(stance) WHERE stance = 1")
         for table, column in (
             ("declared_topics_raw", "raw"),
             ("entry_projects", "project_key"),
@@ -367,6 +373,11 @@ class ContextCatalogue:
         """Every entry with its raw declarations, ordered by id."""
         conn = self._connect()
         return () if conn is None else _load(conn, kind=kind)
+
+    def stance_ids(self) -> list[str]:
+        """Only entries with the schema boolean mark, without loading declarations."""
+        conn = self._connect()
+        return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE stance = 1")]
 
     def reached_ids(self, kind: str, match: str) -> list[str]:
         """The ids of the entries one carrier reaches: a project key, a folder (by `folder_reaches`) or a tag form."""
@@ -680,7 +691,7 @@ class ContextCatalogue:
 
 _ENTRY_COLUMNS = (
     "entry_id", "kind", "anchor_kind", "path", "ref", "title", "description", "description_origin",
-    "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature",
+    "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature", "stance",
 )
 
 
@@ -736,6 +747,7 @@ def _load(
     out = []
     for row in rows:
         values = dict(zip(columns, row, strict=True))
+        values["stance"] = bool(values["stance"])
         entry_id = values["entry_id"]
         out.append(
             Entry(
@@ -1054,6 +1066,7 @@ class _Fold:
             projects=tuple(sorted(find_corpus.all_projects(frontmatter))),
             sources=_sorted_values(frontmatter.get("sources")),
             tags=_tags(frontmatter.get("tags")),
+            stance=frontmatter.get("stance") is True,
         )
 
     def _mirror_other_anchors(self) -> None:

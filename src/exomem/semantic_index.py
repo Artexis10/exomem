@@ -25,7 +25,8 @@ from . import (
 from .vocabulary import instances
 
 # Matching source bytes must not reuse an older parser's interpretation.
-PARSER_VERSION = 6
+# v7 reserves typed validity rows and projects their calendar dates.
+PARSER_VERSION = 7
 _GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v5"
 _ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = ContextVar(
     "exomem_semantic_parent_states", default=None

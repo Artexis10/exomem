@@ -1417,3 +1417,23 @@ def test_hierarchy_migration_keeps_authored_anchor_but_requires_current_fingerpr
     )
     assert stale.status == "stale"
     assert stale.unit is None
+
+
+@pytest.mark.parametrize("key", ["as_of", "until"])
+@pytest.mark.parametrize("value", ["2026-2-01", "2026-02-30", "2026-12-31T23:59:00Z"])
+def test_typed_currency_dates_reject_non_calendar_values(key, value):
+    document = parse_semantic_units(f"## Claim\n- {key}: {value}\n\nKeep the source.\n", path="sample.md")
+    error = next(error for error in document.errors if error.code == f"invalid_rich_{key}")
+    assert error.span.start_line == 2
+
+
+def test_typed_currency_dates_project_and_reject_reversed_order():
+    source = "## Claim\n- as_of: 2026-05-01\n- until: 2026-12-31\n\nKeep the source.\n"
+    document = parse_semantic_units(source)
+    assert not document.errors
+    assert document.units[0].to_dict()["as_of"] == "2026-05-01"
+    assert document.units[0].until == "2026-12-31"
+    reversed_dates = parse_semantic_units(source.replace("2026-12-31", "2026-04-01"))
+    assert "invalid_rich_date_order" in {error.code for error in reversed_dates.errors}
+    empty = parse_semantic_units("## Claim\n- as_of: 2026-05-01\n- until: 2026-12-31\n")
+    assert "empty_rich_unit" in {error.code for error in empty.errors}

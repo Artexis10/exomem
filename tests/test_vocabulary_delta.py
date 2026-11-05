@@ -149,6 +149,34 @@ def test_the_delta_in_a_real_activation_updates_the_serialized_length(
     assert budget["serialized_chars"] == context_views.serialized_chars(without_field)
 
 
+
+def test_optional_vocabulary_keeps_the_required_move_inside_the_public_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_recent_promotions import _save_relation
+
+    _as(monkeypatch, "session-a")
+    for key in ("vault.a", "vault.b"):
+        _save_relation(vault, key, parent="relates_to")
+    _as(monkeypatch, "session-b")
+    # The bounded compiler leaves room for the required move; later vocabulary must share that ceiling.
+    packet = {
+        "abstained": False, "map": {"generation": "sample-map", "block": "x" * 3680},
+        "stance": {"items": [{"review_due": "2026-01-01"}]},
+        "budget": {"limit_chars": 4000, "used_chars": 3680},
+    }
+    monkeypatch.setattr(commands, "_op_activate_context_body", lambda *args, **kwargs: packet)
+    with library_scope():
+        result = commands.op_activate_context(vault, "Check the current operating rule.", max_chars=4000)
+
+    assert result["next_action"]["state"] == "review_due"
+    assert len(result["vocabulary_delta"]["entries"]) == 1
+    assert result["budget"]["used_chars"] == (
+        3680 + len(result["next_action"]["say"]) + vocabulary_delta.size(result["vocabulary_delta"])
+    )
+    assert result["budget"]["used_chars"] <= result["budget"]["limit_chars"] == 4000
+
+
 def test_the_hook_door_is_one_conversation_by_the_session_it_sends(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

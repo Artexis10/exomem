@@ -13,7 +13,7 @@ def test_the_instructions_still_ask_for_the_message_verbatim() -> None:
     text = server.SERVER_INSTRUCTIONS
     assert "verbatim" in text
     assert "a turn whose Exomem working set a hook already injected" in text
-    assert "`anchor`" in text and "`conversation.focus`" in text
+    assert "Follow `next_action` when present" in text
 
 
 def test_the_instructions_point_at_the_tool_and_stay_within_the_length_bound() -> None:
@@ -75,5 +75,5 @@ def test_the_scaffold_line_names_conversation_and_attachments_generically() -> N
     text = SCAFFOLD_SKILL.read_text(encoding="utf-8")
     line = next(line for line in text.splitlines() if "also pass `conversation`" in line)
     assert "focus" in line and "attachment" in line and "never rewrite the turn" in line
-    # The carrier line itself is untouched: it is pinned byte for byte elsewhere.
-    assert "call `recall_context` with the turn verbatim; on `ambiguous`, call again with `anchor`." in text
+    assert "call `recall_context` with the turn verbatim" in text
+    assert "Follow `next_action`" in text

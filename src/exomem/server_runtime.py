@@ -457,6 +457,9 @@ class LocalRuntimeActivation:
         from . import maintenance_jobs
 
         maintenance_jobs.sweep_dead(vault_root)
+        from . import served_context
+
+        served_context.sweep(vault_root)
 
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)

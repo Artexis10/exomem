@@ -263,7 +263,7 @@ def test_the_governed_key_list_agrees_across_the_language_and_the_writer() -> No
     """One declaration, so a future key cannot be reserved but not preserved."""
     governed = set(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
 
-    assert governed == {"verdict", "check_by"}
+    assert governed == {"verdict", "check_by", "as_of", "until"}
     assert governed <= semantic_blocks._RESERVED_METADATA_KEYS
     assert governed <= observe_module._OWNED_METADATA_KEYS
 
@@ -933,13 +933,13 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
     update = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "update")
     properties = {**update["properties"], **operation.get("properties", {})}
 
-    assert "omitted verdict/check_by/id persist" in description
+    assert "omitted governed metadata and id persist" in description
     assert "tags/context/relations clear unless resent" in description
     assert "never discards an authored metadata row" not in description
     for replaced in ("tags", "context", "relations"):
         assert "Replaces on update" in properties[replaced]["description"]
-    for preserved in ("verdict", "check_by"):
-        assert "Empty string clears it on update" in properties[preserved]["description"]
+    for preserved in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
+        assert "'' clears" in properties[preserved]["description"]
 
 
 # --------------------------------------------------------------------------
@@ -1496,3 +1496,20 @@ def test_the_shipped_prediction_example_actually_parses_clean() -> None:
     prediction = next(unit for unit in document.units if unit.kind == "prediction")
     assert prediction.verdict == "refuted"
     assert prediction.check_by == "2026-08-01"
+
+
+def test_content_update_preserves_typed_validity_and_explicit_clear(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, "# Loop primitives\n\nExisting prose.\n")
+    added = _add_prediction(tmp_path, as_of="2026-05-01", until="2026-12-31")
+    updated = commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="update", category="reliability", content="Retry budgets still hold.",
+        unit_ref=added["unit_ref"], expected_fingerprint=added["unit"]["fingerprint"], expected_hash=added["after_hash"],
+    )
+    assert updated["unit"]["as_of"] == "2026-05-01"
+    assert updated["unit"]["until"] == "2026-12-31"
+    assert "- until: 2026-12-31" in page.read_text(encoding="utf-8")
+    cleared = commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="update", category="reliability", content="Retry budgets still hold.",
+        unit_ref=updated["unit_ref"], expected_fingerprint=updated["unit"]["fingerprint"], expected_hash=updated["after_hash"], until="",
+    )
+    assert cleared["unit"]["until"] is None
