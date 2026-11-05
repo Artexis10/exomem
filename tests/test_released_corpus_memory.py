@@ -434,6 +434,15 @@ def test_proof_memory_callback_keeps_the_whole_returned_source_live(tmp_path: Pa
     paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
     project, scope, validate = context_task.project_source, source_release.source_release_proof, source_release.validate_source_release_proofs
     observed = {}
+    measure = lexstore._released_size
+    validating = False
+    walks = 0
+    checkpoints = []
+    def measured(*args, **kwargs):
+        nonlocal walks
+        if validating:
+            walks += 1
+        return measure(*args, **kwargs)
     def projected(*args, **kwargs):
         result = project(*args, **kwargs)
         observed["source"] = result
@@ -444,6 +453,7 @@ def test_proof_memory_callback_keeps_the_whole_returned_source_live(tmp_path: Pa
             observed["capture"] = capture
             yield capture
     def validated(root, basis, proofs, **kwargs):
+        nonlocal validating
         if kwargs.get("memory") is not None:
             kwargs["memory"](extra=20000)
             build = next(iter(lexstore.get_store(root)._released_corpus_builds.values()))
@@ -451,7 +461,14 @@ def test_proof_memory_callback_keeps_the_whole_returned_source_live(tmp_path: Pa
             _independent_bytes([build.basis, build.candidates, *build.rows.keys(), *build.rows.values()], forest)
             expected = _independent_bytes([observed["source"], observed["capture"], observed["capture"].memo, *proofs], forest)
             assert kwargs["preparation_owner"].floor_bytes >= expected
-        return validate(root, basis, proofs, **kwargs)
+        before = walks
+        validating = True
+        try:
+            return validate(root, basis, proofs, **kwargs)
+        finally:
+            validating = False
+            checkpoints.append(walks - before)
+    monkeypatch.setattr(lexstore, "_released_size", measured)
     monkeypatch.setattr(context_task, "project_source", projected)
     monkeypatch.setattr(source_release, "source_release_proof", captured)
     monkeypatch.setattr(source_release, "validate_source_release_proofs", validated)
@@ -462,6 +479,81 @@ def test_proof_memory_callback_keeps_the_whole_returned_source_live(tmp_path: Pa
         caller = context_views.CallerView.current(root)
         with lexstore.get_store(root).released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
             pass
+    assert checkpoints and all(count == 2 for count in checkpoints)
+
+
+@pytest.mark.parametrize("proofs", [(), (object(),)])
+def test_empty_or_invalid_proof_validation_still_admits_its_result(tmp_path: Path, proofs) -> None:
+    """Coalescing supported-proof work must preserve admission when no supported proof is present."""
+    from exomem.governance import source_release
+
+    def refused(extra=0):
+        raise runtime_resources.PreparationBudgetExceeded("validation result does not fit")
+    with pytest.raises(runtime_resources.PreparationBudgetExceeded):
+        source_release.validate_source_release_proofs(tmp_path, None, proofs, memory=refused)
+
+
+def test_legacy_directory_growth_reserves_the_sum_before_retaining_every_name(vault: Path, monkeypatch) -> None:
+    """Several directory snapshots must refuse during growth instead of after all names enter the memo."""
+    import os
+
+    from test_context_catalogue import _page
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem.governance import egress, source_release
+
+    hidden = _page(vault, "hidden", body="Private source.\n")
+    _withhold(vault, hidden, ceiling=0)
+    directories = []
+    for number in range(3):
+        directory = vault / "Knowledge Base/Notes" / f"long-names-{number}"
+        directory.mkdir(parents=True, exist_ok=True)
+        for entry in range(180):
+            (directory / ("x" * 180 + f"-{entry:03d}.txt")).touch()
+        directories.append(directory)
+    with principal.request_scope(_external()):
+        basis = egress.current_source_release_basis(vault)
+        with source_release.source_release_proof(vault, basis) as capture:
+            egress.filter_withheld_entries(vault, [
+                {"path": directory.relative_to(vault).as_posix() + "/absent.md"}
+                for directory in directories
+            ])
+        proof = capture.finish()
+    assert proof is not None and all(
+        any(relative == directory.relative_to(vault).as_posix() for relative, _name, _resolved in proof.directories)
+        for directory in directories
+    )
+    capture.memo.clear()
+    memo = {}
+    seen_names = 0
+    scan = os.scandir
+    @contextmanager
+    def scanned(path):
+        nonlocal seen_names
+        with scan(path) as entries:
+            def counted():
+                nonlocal seen_names
+                for entry in entries:
+                    if Path(path) in directories:
+                        seen_names += 1
+                    yield entry
+            yield counted()
+    monkeypatch.setattr(os, "scandir", scanned)
+    with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=192 * 1024) as owner:
+        def memory(extra=0):
+            live = _independent_bytes([proof, memo])
+            owner.reserve(live + extra + 65536)
+            owner.floor_bytes = live
+        try:
+            with pytest.raises(runtime_resources.PreparationBudgetExceeded):
+                source_release.validate_source_release_proofs(
+                    vault, basis, (proof,), memo=memo, preparation_owner=owner, memory=memory,
+                )
+            assert seen_names < 180 * len(directories)
+            assert any(("directory", directory.relative_to(vault).as_posix()) in memo for directory in directories)
+        finally:
+            memo.clear()
 
 
 @pytest.mark.usefixtures("model_free")

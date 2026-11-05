@@ -440,10 +440,10 @@ def validate_source_release_proofs(
 
     memo = memo if memo is not None else {}
     results = []
-    if memory is not None and directory_facts is None:
-        memory(extra=512)
     for proof in proofs:
         if type(proof) is not SourceReleaseProof:
+            if not results and memory is not None and directory_facts is None:
+                memory(extra=512)
             results.append(False)
             continue
         local_facts = (sum(len(guard.ancestors) + 1 for guard in proof.paths)
@@ -458,9 +458,19 @@ def validate_source_release_proofs(
         if directory_facts is not None:
             admit_phase(extra=directory_facts.retained_bytes)
         elif memory is not None:
-            memory(extra=256 * local_facts)
+            memory(extra=512 + 256 * local_facts)
         elif preparation_owner is not None:
-            preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + 256 * local_facts)
+            preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + 512 + 256 * local_facts)
+        new_directory_bytes = 0  # Completed snapshots added since this proof's full checkpoint.
+        if directory_facts is None:
+            def reserve_directory(added_bytes, extra, allowance=512 + 256 * local_facts):
+                amount = allowance + added_bytes + extra
+                if preparation_owner is not None:
+                    preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + amount)
+                elif memory is not None:
+                    memory(extra=amount)
+                    return 0  # This full checkpoint now owns the completed snapshots in the memo.
+                return added_bytes
         valid = type(proof) is SourceReleaseProof and proof.basis == basis
         try:
             if valid and proof.namespace is not None:
@@ -492,17 +502,29 @@ def validate_source_release_proofs(
                     continue
                 key = "directory", relative
                 if key not in memo:
+                    new_directory_bytes = reserve_directory(
+                        new_directory_bytes, 3 * sys.getsizeof(memo) + sys.getsizeof(key) + 256,
+                    )
                     names = {}
                     name_bytes = 0
                     with os.scandir(root / relative) as scanned:
                         for entry in scanned:
-                            if preparation_owner is not None:
-                                preparation_owner.reserve(preparation_owner.floor_bytes + 65536
-                                                          + 3 * sys.getsizeof(names)
-                                                          + name_bytes + sys.getsizeof(entry.name) + 256)
-                            names[entry.name] = None
-                            name_bytes += sys.getsizeof(entry.name)
+                            new_directory_bytes = reserve_directory(
+                                new_directory_bytes, 4 * sys.getsizeof(names) + name_bytes
+                                + sys.getsizeof(entry.name) + 3 * sys.getsizeof(memo)
+                                + sys.getsizeof(key) + 256,
+                            )
+                            if entry.name not in names:
+                                names[entry.name] = None
+                                name_bytes += sys.getsizeof(entry.name)
+                    new_directory_bytes = reserve_directory(
+                        new_directory_bytes, sys.getsizeof(names) + name_bytes
+                        + 3 * sys.getsizeof(memo) + sys.getsizeof(key) + 256,
+                    )
+                    before = sys.getsizeof(memo)
                     memo[key] = names
+                    new_directory_bytes += (sys.getsizeof(names) + name_bytes + sys.getsizeof(key)
+                                            + sys.getsizeof(memo) - before)
                 valid = valid and _physical_directory_match(memo[key], name) == resolved
             for subject, scope, binding, content, digest in proof.registries if valid else ():
                 if directory_facts is not None:
@@ -538,6 +560,7 @@ def validate_source_release_proofs(
                 valid = memo["pending"] == proof.pending
         except (TimeoutError, runtime_resources.PreparationBudgetExceeded,
                 runtime_resources.PreparationCapacityBusy, MemoryError):
+            names = entry = scanned = None
             raise
         except Exception:  # noqa: BLE001 - unsupported or unknown owner proof requires canonical preparation
             valid = False
@@ -546,6 +569,8 @@ def validate_source_release_proofs(
         elif memory is not None:
             memory()
         results.append(valid)
+    if not results and memory is not None and directory_facts is None:
+        memory(extra=512)
     return tuple(results)
 
 
