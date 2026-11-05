@@ -10,6 +10,7 @@ one of the two committed transactions can disappear.
 
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import subprocess
@@ -23,7 +24,7 @@ from exomem import audit, claims, deferred_index, held_fs, index_paths
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
-    reason="reads this process's POSIX locks from /proc/locks, which only Linux provides",
+    reason="reads this process's POSIX locks from /proc/self/fdinfo, which only Linux provides",
 )
 
 # Another process, as an online-upgrade standby would be: it writes, checkpoints and closes.
@@ -38,15 +39,33 @@ writer.close()
 
 
 def _locks_held_here(path: Path) -> set[str]:
-    """The process's lock coverage; duplicate proc records add no protection."""
+    """Read lock coverage without opening the inode or walking the global lock list."""
     info = path.stat()
     file_id = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
     held = set()
-    for line in Path("/proc/locks").read_text().splitlines():
-        # "7: POSIX  ADVISORY  READ 4242 08:30:1234 128 128"; a blocked waiter's line adds "->".
-        fields = line.split()
-        if fields[1] == "POSIX" and fields[4] == str(os.getpid()) and fields[5] == file_id:
-            held.add(" ".join((fields[3], *fields[6:8])))
+    # fdinfo walks this inode's locks under its lock; unrelated /proc/locks churn can skip rows.
+    for descriptor in os.listdir("/proc/self/fd"):
+        try:
+            opened = os.fstat(int(descriptor))
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                continue
+            contents = Path("/proc/self/fdinfo", descriptor).read_text()
+        except OSError as error:
+            # Directory enumeration can include its own descriptor after that descriptor closes.
+            if error.errno not in (errno.EBADF, errno.ENOENT):
+                raise
+            continue
+        for line in contents.splitlines():
+            fields = line.split()
+            # These field positions and tokens are the fixed Linux fdinfo lock protocol.
+            if (
+                len(fields) == 9
+                and fields[0] == "lock:"
+                and fields[2] == "POSIX"
+                and fields[5] == str(os.getpid())
+                and fields[6] == file_id
+            ):
+                held.add(" ".join((fields[4], *fields[7:9])))
     return held
 
 
@@ -63,6 +82,24 @@ def _wal_reader(database: Path) -> sqlite3.Connection:
     assert reader.execute("SELECT count(*) FROM chunks").fetchone() == (1,)
     setup.close()
     return reader
+
+
+def test_lock_observer_detects_actual_shm_lock_loss(tmp_path: Path) -> None:
+    database = tmp_path / "reader.sqlite"
+    reader = _wal_reader(database)
+    shm = Path(f"{database}-shm")
+    try:
+        before = {path: _locks_held_here(path) for path in (database, shm)}
+        assert all(before.values())
+
+        # Closing an ordinary SHM descriptor drops this process's locks, even with a live reader.
+        descriptor = os.open(shm, os.O_RDONLY)
+        os.close(descriptor)
+
+        assert _locks_held_here(shm) == set()
+        assert _locks_held_here(database) == before[database]
+    finally:
+        reader.close()
 
 
 def test_owner_bound_connect_keeps_an_open_readers_snapshot(tmp_path: Path) -> None:
