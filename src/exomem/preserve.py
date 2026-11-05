@@ -209,6 +209,7 @@ class PreserveResult:
     media_id: str | None = None
     content_type: str | None = None
     adoption: dict[str, object] | None = None
+    document_container: dict | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -231,6 +232,8 @@ class PreserveResult:
             "media_id": self.media_id,
             "content_type": self.content_type,
         }
+        if self.document_container is not None:
+            out["document_container"] = self.document_container
         if self.adoption is not None:
             out["adoption"] = self.adoption
         return out
@@ -675,6 +678,12 @@ def preserve(
         else mimetypes.guess_type(filename_safe)[0]
     )
 
+    from contextlib import ExitStack
+
+    from . import document_containers
+
+    container_stack = ExitStack()
+    container_metadata = None
     artifact_stage = tempfile.SpooledTemporaryFile(
         max_size=min(max(max_decoded_bytes, 1), 8 * 1024 * 1024),
         mode="w+b",
@@ -820,6 +829,14 @@ def preserve(
                 sidecar_md = raw_guard.protect(
                     sidecar_md, artifact_path=rel_artifact, digest=artifact_hash
                 )
+            if document_containers.is_container(filename_safe):
+                container_plan = container_stack.enter_context(document_containers.plan(
+                    vault_root, parent=rel_artifact, parent_page=sidecar_rel,
+                    digest=artifact_hash, size=artifact_size, stream=artifact_stage, date_iso=stamp_iso,
+                ))
+                container_metadata = container_plan.metadata()
+                sidecar_md = document_containers.annotate(sidecar_md, "document_container", container_metadata)
+                writes.extend(container_plan.writes)
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
             writes.insert(
                 0 if raw_protection else len(writes),
@@ -953,6 +970,7 @@ def preserve(
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
     finally:
+        container_stack.close()
         artifact_stage.close()
 
     from .media_store import enqueue_offload
@@ -969,6 +987,7 @@ def preserve(
         media_id=f"sha256:{artifact_hash}" if artifact_hash else None,
         content_type=content_type_effective,
         adoption=adoption_receipt,
+        document_container=container_metadata,
     )
 
 
@@ -1946,6 +1965,7 @@ def commit_media_sidecar_writes(
     defer_graph_completion: bool = False,
     publication_intents_out: list[object] | None = None,
     batch_writer: Callable[..., list[Path] | DeferredGraphCompletion] | None = None,
+    required_guards: tuple = (),
 ) -> list[Path] | DeferredGraphCompletion:
     """Publish machine-owned Markdown through the active catalog tuple."""
 
@@ -1977,6 +1997,8 @@ def commit_media_sidecar_writes(
         "post_commit_fanout": post_commit_fanout,
         "defer_graph_completion": defer_graph_completion,
     }
+    if required_guards:
+        writer_kwargs["required_guards"] = required_guards
     if publication_intents_out is not None:
         writer_kwargs["publication_intents_out"] = publication_intents_out
     written = writer(list(writes), **writer_kwargs)

@@ -2054,8 +2054,17 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
 def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
                     snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
+    from .. import document_containers
+
+    try:
+        dependency = document_containers.parent_for_path(vault_root, path, content=snapshot, artifact_copy=artifact_copy)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return False
+    if dependency is not None and any(not content_permits(vault_root, parent, who) for parent in dependency):
+        return False
     return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
             and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
+
 
 
 def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
@@ -2065,7 +2074,7 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     see `connector_boundary.permits_filter`.
     """
     boundary = connector_boundary.permits_filter(vault_root, who)
-    return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+    return lambda path: boundary(path) and content_permits(vault_root, path, who)
 
 
 def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool:
@@ -2082,9 +2091,11 @@ def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool
     read error the same way they refuse a restricted page, and a refusal that a
     retry could lift must not outlast the retry.
     """
+    from .. import document_containers
     from ..collection_store import ownership
 
     if (not _is_markdown_path(rel_path) or raw_protection.marked(rel_path)
+            or document_containers.in_payload_tree(rel_path)
             or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
         return False
     if withheld:
@@ -2238,6 +2249,22 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
+    from .. import document_containers
+
+    try:
+        dependency = document_containers.parent_for_path(vault_root, rel_path, content=raw, artifact_copy=artifact_copy)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return None
+    if dependency is not None:
+        # Cached child admission cannot prove that its mutable parent still permits disclosure.
+        for parent in dependency:
+            parent_decision = _decide_path(
+                vault_root, parent, policy=policy, audience=audience, purpose=purpose,
+                grants_hash=grants_hash, authorization_session=authorization_session,
+                authorization_context=authorization_context, principal=who,
+            )
+            if parent_decision is None or parent_decision.level < LEVEL_FULL:
+                return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
         authorization_context=authorization_context, content=raw if raw is not None else b"",

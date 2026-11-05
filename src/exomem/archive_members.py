@@ -157,7 +157,7 @@ def extract_member(
 
 
 @dataclass(frozen=True)
-class _Entry:
+class Entry:
     path: str
     info: zipfile.ZipInfo
 
@@ -172,53 +172,66 @@ def _declared_directory(stream: BinaryIO) -> tuple[int, int] | None:
     return record[zipfile._ECD_ENTRIES_TOTAL], record[zipfile._ECD_SIZE]
 
 
-def _open_zip(stream: BinaryIO) -> zipfile.ZipFile:
+def open_zip(stream: BinaryIO, *, max_entries: int | None = None) -> zipfile.ZipFile:
     """Open an uploaded zip once its end records declare a central directory within the limits."""
     try:
         declared = _declared_directory(stream)
-        if declared is not None and declared[0] > MAX_ENTRIES:
-            raise ArchiveError(TOO_LARGE, f"the archive declares more than {MAX_ENTRIES:,} entries")
+        limit = MAX_ENTRIES if max_entries is None else min(MAX_ENTRIES, max_entries)
+        if declared is not None and declared[0] > limit:
+            raise ArchiveError(TOO_LARGE, f"the archive declares more than {limit:,} entries")
         if declared is not None and declared[1] > MAX_DIRECTORY_BYTES:
             raise ArchiveError(TOO_LARGE, "the archive's central directory is too large")
         stream.seek(0)
         return zipfile.ZipFile(stream)
     except (zipfile.BadZipFile, OSError) as exc:
-        raise ArchiveError(INVALID, "archive=members takes a zip archive") from exc
+        raise ArchiveError(INVALID, "the input must be a readable ZIP archive") from exc
     except UnicodeDecodeError as exc:
         raise ArchiveError(INVALID, "an archive entry's name is not valid UTF-8") from exc
 
 
-def _central_directory(zip_file: zipfile.ZipFile) -> list[_Entry]:
+def central_directory(zip_file: zipfile.ZipFile, *, max_entries: int | None = None) -> list[Entry]:
     """Validate every entry before any member is read; members sorted by path."""
     infos = zip_file.infolist()
-    if len(infos) > MAX_ENTRIES:
-        raise ArchiveError(TOO_LARGE, f"the archive declares more than {MAX_ENTRIES:,} entries")
-    entries: dict[str, _Entry] = {}
+    limit = MAX_ENTRIES if max_entries is None else min(MAX_ENTRIES, max_entries)
+    if len(infos) > limit:
+        raise ArchiveError(TOO_LARGE, f"the archive declares more than {limit:,} entries")
+    entries: dict[str, Entry] = {}
+    names: dict[str, bool] = {}
     for info in infos:
-        if info.is_dir():
-            continue
         if info.flag_bits & _ZIP_FLAG_ENCRYPTED:
             raise ArchiveError(INVALID, "the archive has an encrypted entry")
-        if entry_is_symlink(info):
-            raise ArchiveError(INVALID, "the archive has a symlink entry")
+        mode = stat.S_IFMT(info.external_attr >> 16)
+        # ZIP entry modes are closed filesystem protocol values; no device or link is a document.
+        if mode not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise ArchiveError(INVALID, "the archive has an unsupported entry type")
         path = validated_member(info.filename)
+        if path != info.filename.removesuffix("/"):
+            raise ArchiveError(INVALID, "an archive entry uses a path alias")
         if PureWindowsPath(path).drive:
             raise ArchiveError(INVALID, "an archive entry has a drive path")
-        if path in entries:
-            raise ArchiveError(INVALID, "the archive names one member twice")
+        key = path.casefold()
+        if key in names:
+            raise ArchiveError(INVALID, "the archive names one member twice or uses a path alias")
+        names[key] = info.is_dir()
         if info.file_size > MAX_MEMBER_BYTES:
-            raise ArchiveError(TOO_LARGE, "an archive member exceeds 2 GiB")
-        entries[path] = _Entry(path, info)
+            raise ArchiveError(TOO_LARGE, "an archive member exceeds the expanded-byte limit")
+        if not info.is_dir():
+            entries[path] = Entry(path, info)
+    for key in names:
+        if any(names.get(parent.as_posix()) is False for parent in PurePosixPath(key).parents):
+            raise ArchiveError(INVALID, "an archive file aliases a directory")
     return [entries[path] for path in sorted(entries)]
 
 
-def _member_chunks(zip_file: zipfile.ZipFile, entry: _Entry) -> Iterator[bytes]:
+def member_chunks(zip_file: zipfile.ZipFile, entry: Entry) -> Iterator[bytes]:
     """A member's bytes; `zipfile` stops at the declared size and checks the CRC."""
     read = 0
     try:
         with zip_file.open(entry.info) as source:
             while chunk := source.read(COPY_CHUNK_BYTES):
                 read += len(chunk)
+                if read > MAX_MEMBER_BYTES:
+                    raise ArchiveError(TOO_LARGE, "an archive member exceeds the streaming limit")
                 yield chunk
     except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as exc:
         raise ArchiveError(INVALID, "an archive member cannot be read") from exc
@@ -226,14 +239,14 @@ def _member_chunks(zip_file: zipfile.ZipFile, entry: _Entry) -> Iterator[bytes]:
         raise ArchiveError(INVALID, "an archive member does not match its declared size")
 
 
-def _member_digest(zip_file: zipfile.ZipFile, entry: _Entry) -> str:
+def _member_digest(zip_file: zipfile.ZipFile, entry: Entry) -> str:
     digest = hashlib.sha256()
-    for chunk in _member_chunks(zip_file, entry):
+    for chunk in member_chunks(zip_file, entry):
         digest.update(chunk)
     return digest.hexdigest()
 
 
-def _write_blob(zip_file: zipfile.ZipFile, entry: _Entry, blob: Path, sha256: str) -> None:
+def _write_blob(zip_file: zipfile.ZipFile, entry: Entry, blob: Path, sha256: str) -> None:
     """Gzip one member into the pool, landing it only when no blob of its name exists."""
     blob.parent.mkdir(parents=True, exist_ok=True)
     # Checked per blob, so a re-export needs room only for what it adds; a blob is about its member's size.
@@ -246,7 +259,7 @@ def _write_blob(zip_file: zipfile.ZipFile, entry: _Entry, blob: Path, sha256: st
         with os.fdopen(descriptor, "wb") as sink:
             with gzip.GzipFile(filename="", mode="wb", fileobj=sink,
                                compresslevel=_GZIP_LEVEL, mtime=0) as packed:
-                for chunk in _member_chunks(zip_file, entry):
+                for chunk in member_chunks(zip_file, entry):
                     digest.update(chunk)
                     packed.write(chunk)
             sink.flush()
@@ -417,8 +430,8 @@ def _restore(vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[An
             missing[member["path"]] = member["sha256"]
     if not missing:
         return 0
-    with _open_zip(stream) as zip_file:
-        entries = {entry.path: entry for entry in _central_directory(zip_file)}
+    with open_zip(stream) as zip_file:
+        entries = {entry.path: entry for entry in central_directory(zip_file)}
         if any(path not in entries for path in missing):
             raise ArchiveError(INVALID, "the archive lacks a member its manifest records")
         for path, sha256 in sorted(missing.items()):
@@ -492,8 +505,8 @@ def preserve_members(
         # Before any member is read: the same archive into the same family is one fact.
         if (receipt := already_stored()) is not None:
             return receipt
-        with _open_zip(stream) as zip_file:
-            entries = _central_directory(zip_file)
+        with open_zip(stream) as zip_file:
+            entries = central_directory(zip_file)
             # A small check before any member is read; each new blob checks its own room.
             if max((entry.info.file_size for entry in entries), default=0) > _free_bytes(vault_root, folder):
                 raise ArchiveError(NO_SPACE, "the archive's largest member exceeds the free disk space")

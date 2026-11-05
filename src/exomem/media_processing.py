@@ -22,6 +22,7 @@ from pathlib import Path
 from . import (
     access,
     deferred_index,
+    document_containers,
     held_fs,
     media_engines,
     media_jobs,
@@ -129,6 +130,7 @@ class ReconcileResult:
     job_id: int | None
     requeued: int = 0
     attached: bool = False  # the job row carries the request that reconcile_media was given
+    document_container: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -181,7 +183,7 @@ _TIMESTAMP_FIELDS = ("binary_mtime_ns", "binary_ctime_ns")
 
 def classify_media(path: str | Path) -> str | None:
     """Return the canonical extraction kind for ``path``, case-insensitively."""
-    return media_types.media_type_for(path)
+    return "asic-e" if document_containers.is_container(path) else media_types.media_type_for(path)
 
 
 def _preserve_module():
@@ -239,6 +241,76 @@ def _defer_until_terminal(work: Callable[[], list[object]]) -> bool:
     return defer_until_terminal_persisted(work)
 
 
+def process_container(
+    vault_root: Path, binary_path: str | Path, *, retry: bool = False,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
+    """Explicitly inspect an existing original, recover exact payload pairs, then use media jobs."""
+    from . import add, media_store
+    from .vault import PathGuard
+
+    vault = Path(vault_root).resolve()
+    binary = Path(binary_path)
+    binary = Path(os.path.abspath(binary if binary.is_absolute() else vault / binary))
+    try:
+        relative = binary.relative_to(vault).as_posix()
+        _require_media_access(vault, binary)
+        sidecar = originals.sidecar_path(binary)
+        _confine_sidecar(vault, sidecar)
+        before, page_guard = read_guarded_text(vault, sidecar)
+        fm = parse_frontmatter(before, strict=True)[0]
+        with media_store.open_original(vault, binary) as source:
+            digest, size = add.artifact_identity(source.stream)
+            binding = originals.binary_binding(fm)
+            if binding is None or binding != originals.BinaryBinding(relative, digest, size):
+                raise MediaProcessingError("CONTAINER_CONFLICT", "the container companion must bind the current original bytes; restore the exact original or repair its custody companion")
+            with document_containers.plan(
+                vault, parent=relative, parent_page=sidecar.relative_to(vault).as_posix(),
+                digest=digest, size=size, stream=source.stream, date_iso=dt.date.today().isoformat(), existing=True,
+            ) as planned:
+                metadata = planned.metadata()
+                rendered = _preserve_module()._remove_frontmatter_fields(before, lambda key: key == "document_container")
+                rendered = document_containers.annotate(rendered, "document_container", metadata)
+                writes = list(planned.writes)
+                if rendered != before:
+                    writes.append(PlannedWrite(sidecar, rendered, guard=page_guard, expected_hash=content_hash(before)))
+                if writes:
+                    boundary = commit_guard() if commit_guard is not None else nullcontext()
+                    with boundary:
+                        source.require_current()
+                        mutated = {write.path.relative_to(vault).as_posix() for write in writes}
+                        guards = tuple(guard for guard in (page_guard, *planned.guards) if guard.target not in mutated)
+                        guards = (*guards, PathGuard.capture(vault, relative, leaf_policy="content", expected_content_hash=digest))
+                        _preserve_module().commit_media_sidecar_writes(vault, tuple(writes), required_guards=guards)
+                children = list(planned.children)
+    except MediaProcessingError:
+        raise
+    except ValueError as error:
+        raise MediaProcessingError("CONTAINER_CONFLICT", str(error)) from error
+    except (OSError, reserved_paths.ReservedPathLeafError) as error:
+        raise MediaProcessingError("MEDIA_NOT_FOUND", "the container original or custody companion is missing or unsafe; restore its exact bytes, then run media process again") from error
+    results = [
+        retry_media(vault, child, commit_guard=commit_guard) if retry else reconcile_media(vault, child, commit_guard=commit_guard)
+        for child in children
+    ]
+    if metadata["inspection_state"] != "inspected":
+        state = media_jobs.BLOCKED
+    elif results and all(result.state == "completed" for result in results):
+        state = "completed"
+    elif any(result.state == media_jobs.FAILED for result in results):
+        state = media_jobs.FAILED
+    elif any(result.state == media_jobs.BLOCKED for result in results):
+        state = media_jobs.BLOCKED
+    else:
+        state = media_jobs.PENDING
+    metadata["processing"] = [
+        {"path": child, "state": result.state, "job_id": result.job_id}
+        for child, result in zip(children, results, strict=True)
+    ]
+    return ReconcileResult("asic-e", state, sidecar, None,
+                           requeued=sum(result.requeued for result in results), document_container=metadata)
+
+
 def reconcile_media(
     vault_root: Path,
     binary_path: str | Path,
@@ -272,6 +344,30 @@ def reconcile_media(
     binary = Path(os.path.abspath(binary))
     if not explicit and not _is_automatic_media_candidate(vault, binary):
         return None
+
+    if document_containers.is_container(binary):
+        if explicit:
+            return process_container(vault, binary, commit_guard=commit_guard)
+        # Automatic capture processing may consume committed payloads, never repair opaque custody.
+        sidecar = originals.sidecar_path(binary)
+        original = _read_sidecar_text(vault, sidecar)
+        metadata = parse_frontmatter(original)[0].get("document_container") if original is not None else None
+        if not isinstance(metadata, dict) or metadata.get("inspection_state") != "inspected":
+            return None
+        children = metadata.get("payloads")
+        if not isinstance(children, list):
+            return None
+        for child in children:
+            try:
+                dependency = document_containers.parent_for_path(vault, child)
+                if dependency is None or dependency[0] != binary.relative_to(vault).as_posix():
+                    return None
+            except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+                return None
+        for child in children:
+            reconcile_media(vault, child, explicit=False, commit_guard=commit_guard,
+                            defer_fanout_to_terminal=defer_fanout_to_terminal)
+        return ReconcileResult("asic-e", "pending", sidecar, None, document_container=metadata)
 
     media_type = classify_media(binary)
     if media_type is None:
@@ -757,6 +853,8 @@ def awaits_reconciliation(vault: Path, binary: Path, text: str) -> bool:
     Reconciliation renders and queues such a stub itself. A scene frame names its
     parent video: the media worker wrote it, so it is never such a stub.
     """
+    if document_containers.is_container(binary):
+        return False  # The child documents own extraction demand; opaque containers need explicit processing.
     media_type = classify_media(binary)
     frontmatter, _body, raw_frontmatter = parse_frontmatter(text)
     if media_type is None or raw_frontmatter is None or frontmatter.get("parent_media"):
@@ -777,6 +875,8 @@ def _needs_reconciliation(
     if original is None:
         return True
 
+    if document_containers.is_container(binary):
+        return False  # Existing child documents are scanned independently; never auto-repair opaque custody.
     media_type = classify_media(binary)
     if media_type is None:
         return False
@@ -1083,6 +1183,8 @@ def retry_media(
     vault_root: Path, binary_path: str | Path, *,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
+    if document_containers.is_container(binary_path):
+        return process_container(vault_root, binary_path, retry=True, commit_guard=commit_guard)
     from .media_store import open_original
 
     if originals.binding_for(vault_root) is None:
@@ -1525,9 +1627,11 @@ def _render_pending_sidecar(
     existing_id: str | None = None
     preserved_notes: str | None = None
     adoption_receipt: Mapping[str, object] | None = None
+    container_binding = None
     if original is not None:
         frontmatter, body, raw_frontmatter = parse_frontmatter(original)
         existing_id = memory_refs.normalize_id(frontmatter.get("exomem_id"))
+        container_binding = frontmatter.get("container_member")
         candidate_receipt = frontmatter.get("artifact_adoption")
         if isinstance(candidate_receipt, Mapping):
             adoption_receipt = candidate_receipt
@@ -1554,7 +1658,12 @@ def _render_pending_sidecar(
         extracted_by="pending",
         tree=tree,
         adoption_receipt=adoption_receipt,
+        governance_artifact_path=provenance.relative_path if container_binding else None,
+        governance_artifact_sha256=provenance.sha256 if container_binding else None,
+        governance_artifact_size=provenance.size if container_binding else None,
     )
+    if isinstance(container_binding, Mapping):
+        rendered = document_containers.annotate(rendered, "container_member", container_binding)
     if existing_id is not None:
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
     for field, value in _pending_fields(provenance):

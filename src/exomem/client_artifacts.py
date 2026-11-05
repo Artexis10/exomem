@@ -1193,6 +1193,8 @@ def _stored_outcome(
         "warnings": list(payload.get("warnings") or []),
         "adoption": dict(receipt),
     }
+    if isinstance(payload.get("document_container"), Mapping):
+        outcome["document_container"] = dict(payload["document_container"])
     if source:
         outcome.update(
             {
@@ -1619,6 +1621,8 @@ def capture_source_artifacts(
                     "content_type": artifact.content_type,
                     "warnings": list(payload.get("warnings") or []),
                 }
+                if isinstance(payload.get("document_container"), Mapping):
+                    outcomes[index]["document_container"] = dict(payload["document_container"])
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
             except add_module.AddError as error:
@@ -1840,6 +1844,8 @@ def preserve_artifacts(
                     "content_type": payload.get("content_type"),
                     "warnings": warnings,
                 }
+                if isinstance(payload.get("document_container"), Mapping):
+                    outcomes[index]["document_container"] = dict(payload["document_container"])
                 if transcription:
                     outcomes[index]["transcription"] = {
                         "state": "recorded",
