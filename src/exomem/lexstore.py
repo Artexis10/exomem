@@ -60,6 +60,7 @@ import ast
 import contextlib
 import enum
 import functools
+import gc
 import hashlib
 import itertools
 import json
@@ -71,6 +72,7 @@ import threading
 import time
 import uuid
 from array import array
+from bisect import bisect_left
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
@@ -3225,36 +3227,42 @@ def _released_public_terms(public, proof, transient, check):
     """Admit canonical JSON, ordered counts and packing before each allocation."""
     from . import bm25 as bm25_module
 
-    public_bytes = _released_size(public, reserve=transient.reserve)
-    proof_bytes = _released_size(proof, reserve=lambda amount: transient.reserve(public_bytes + amount))
-    # JSON escaping can expand a character sixfold. Cover the public tree,
-    # sorted keys, encoder chunks, writer over-allocation and the joined output.
-    transient.reserve(17 * public_bytes + proof_bytes + 65536)
-    text = json.dumps(public, sort_keys=True, ensure_ascii=False)
-    live_bytes = public_bytes + proof_bytes + sys.getsizeof(text)
-    counted: dict[str, int] = {}
-    counter_bytes = sys.getsizeof(counted)
-    workspace = length = 0
+    text = counted = token = None
+    try:
+        public_bytes = _released_size(public, reserve=transient.reserve)
+        proof_bytes = _released_size(proof, reserve=lambda amount: transient.reserve(public_bytes + amount))
+        # JSON escaping can expand a character sixfold. Cover the public tree,
+        # sorted keys, encoder chunks, writer over-allocation and the joined output.
+        base = max(transient.floor_bytes, public_bytes + proof_bytes)
+        transient.reserve(16 * public_bytes + base + 65536)
+        text = json.dumps(public, sort_keys=True, ensure_ascii=False)
+        live_bytes = base + sys.getsizeof(text)
+        counted: dict[str, int] = {}
+        counter_bytes = sys.getsizeof(counted)
+        workspace = length = 0
 
-    def reserve_tokens(amount):
-        nonlocal workspace
-        workspace = amount
-        transient.reserve(live_bytes + counter_bytes + amount)
+        def reserve_tokens(amount):
+            nonlocal workspace
+            workspace = amount
+            transient.reserve(live_bytes + counter_bytes + amount)
 
-    for token in bm25_module.iter_tokens(text, reserve=reserve_tokens, check=check):
-        count = counted.get(token, 0)
-        if count == 0:
-            growth = 96 + sys.getsizeof(token) + sys.getsizeof(1)
-        else:
-            # Admit a possible new integer digit before incrementing the count.
-            growth = sys.int_info.sizeof_digit if count.bit_length() % sys.int_info.bits_per_digit == 0 else 0
-        transient.reserve(live_bytes + counter_bytes + growth + workspace)
-        counted[token] = count + 1
-        counter_bytes += growth
-        length += 1
-    return _pack_page_counts(
-        counted, length, reserve=lambda amount: transient.reserve(live_bytes + counter_bytes + amount),
-    )
+        for token in bm25_module.iter_tokens(text, reserve=reserve_tokens, check=check):
+            count = counted.get(token, 0)
+            if count == 0:
+                growth = 96 + sys.getsizeof(token) + sys.getsizeof(1)
+            else:
+                # Admit a possible new integer digit before incrementing the count.
+                growth = sys.int_info.sizeof_digit if count.bit_length() % sys.int_info.bits_per_digit == 0 else 0
+            transient.reserve(live_bytes + counter_bytes + growth + workspace)
+            counted[token] = count + 1
+            counter_bytes += growth
+            length += 1
+        return _pack_page_counts(
+            counted, length, reserve=lambda amount: transient.reserve(live_bytes + counter_bytes + amount),
+        )
+
+    finally:
+        public = proof = text = counted = token = None
 
 
 class _AdmittedCorpusBuild:
@@ -3271,7 +3279,7 @@ class _AdmittedCorpusBuild:
         self.statistics = None
         self.result = None
 
-    def advance(self, *, steps: int = 64, check=None, reserve=None) -> bool:
+    def advance(self, *, steps: int = 64, check=None, reserve=None, workspace=None) -> bool:
         from . import bm25 as bm25_module
 
         if self.result is not None:
@@ -3297,8 +3305,10 @@ class _AdmittedCorpusBuild:
                 continue
             path = self.ordered[self.cursor]
             page = self.pages[path]
+            if workspace is not None:
+                workspace(3 * (sys.getsizeof(self.frequency) + sys.getsizeof(self.lengths) + sys.getsizeof(self.terms)))
             if reserve is not None:
-                reserve(512 + 96 * len(page.terms))
+                reserve(512 + 96 * sum(word not in self.frequency for word in page.terms))
             self.cursor += 1
             self.length += page.length
             self.kept_terms += len(page.terms)
@@ -3348,7 +3358,7 @@ class _ReleasedOmission:
     proof: Any
 
 
-@dataclass
+@dataclass(slots=True)
 class ReleasedCorpusBuild:
     """One effective basis's bounded, private progress; never a caller or source body."""
 
@@ -3367,13 +3377,20 @@ class ReleasedCorpusBuild:
     result: Any = None
     fingerprint: bytes | None = None
     retained_bytes: int = 0
-    pending: dict[str, str | None] = field(default_factory=dict)
+    mutable_bytes: int = 0
+    last_accounting_bytes: int = 0
+    reverse_set_bytes: int = 0
+    workspace_peak_bytes: int = 0
+    epoch: Any = None
+    pending: set[str] = field(default_factory=set)
     invalidated: bool = False
     retire_requested: bool = False
     reservation: Any = None
     lock: Any = field(default_factory=threading.Lock, repr=False)
 
     def discard(self, path: str) -> None:
+        if path in self.rows or path in self.omissions:
+            self.epoch = None  # End identity ownership before any registered row can disappear.
         previous = self.rows.pop(path, None) or self.omissions.pop(path, None)
         if isinstance(previous, ReleasedSourceTerms):
             self.retired[path] = previous.public_version, previous.terms
@@ -3381,12 +3398,15 @@ class ReleasedCorpusBuild:
             for guard in previous.proof.paths:
                 dependents = self.reverse.get(guard.target)
                 if dependents is not None:
+                    self.reverse_set_bytes -= sys.getsizeof(dependents)
                     dependents.discard(path)
                     if not dependents:
                         del self.reverse[guard.target]
+                    else:
+                        self.reverse_set_bytes += sys.getsizeof(dependents)
         self.aggregation = self.result = self.fingerprint = None
 
-    def install(self, path: str, row: ReleasedSourceTerms | _ReleasedOmission) -> None:
+    def install(self, path: str, row: ReleasedSourceTerms | _ReleasedOmission):
         self.discard(path)
         previous = self.retired.pop(path, None)
         # Public equivalence permits term sharing only. Dependency custody always moves to the new proof.
@@ -3398,64 +3418,342 @@ class ReleasedCorpusBuild:
             self.omissions[path] = row
         if row.proof is not None:
             for guard in row.proof.paths:
-                self.reverse.setdefault(guard.target, set()).add(path)
+                dependents = self.reverse.get(guard.target)
+                if dependents is None:
+                    dependents = self.reverse[guard.target] = set()
+                else:
+                    self.reverse_set_bytes -= sys.getsizeof(dependents)
+                dependents.add(path)
+                self.reverse_set_bytes += sys.getsizeof(dependents)
+        return row
+
+    def shell_bytes(self):
+        return (sys.getsizeof(self.rows) + sys.getsizeof(self.omissions)
+                + sys.getsizeof(self.reverse) + self.reverse_set_bytes)
+
+    @property
+    def payload_bytes(self):
+        return self.epoch.payload_bytes if self.epoch is not None else 0
+
+    @property
+    def accounting_bytes(self):
+        return self.epoch.metadata_bytes if self.epoch is not None else 0
 
     def release(self) -> None:
+        self.epoch = None
+        self.rows.clear()
+        self.omissions.clear()
+        self.retired.clear()
+        self.reverse.clear()
+        self.pending.clear()
+        self.aggregation = self.result = self.fingerprint = None
+        self.validation = None
+        self.preparation = self.candidates = ()
+        self.basis = None
         if self.reservation is not None:
             self.reservation.release()
             self.reservation = None
 
 
-def _released_size(value: Any, seen: set[int] | None = None, *, reserve=None, resident_bytes: int = 0) -> int:
-    """Charge the actual Python representation, sharing objects only once in this measurement."""
+class _CompactIdentities:
+    """Exact integer identities in fixed 256-slot sorted leaves, split at 128."""
+
+    __slots__ = ("leaves", "maxima", "used", "count", "metadata_bytes")
+
+    def __init__(self):
+        self.leaves = []
+        self.maxima = array("Q")
+        self.used = array("H")
+        self.count = 0
+        self.metadata_bytes = (sys.getsizeof(self) + sys.getsizeof(self.leaves)
+                               + sys.getsizeof(self.maxima) + sys.getsizeof(self.used)
+                               + 2 * sys.getsizeof(0))
+
+    def __contains__(self, value):
+        index = bisect_left(self.maxima, value)
+        if index == len(self.leaves):
+            return False
+        position = bisect_left(self.leaves[index], value, 0, self.used[index])
+        return position < self.used[index] and self.leaves[index][position] == value
+
+    def clear(self):
+        self.leaves.clear()
+        self.maxima = array("Q")
+        self.used = array("H")
+        self.count = 0
+        self.metadata_bytes = (sys.getsizeof(self) + sys.getsizeof(self.leaves)
+                               + sys.getsizeof(self.maxima) + sys.getsizeof(self.used)
+                               + 2 * sys.getsizeof(0))
+
+    def add(self, value, *, reserve=None):
+        index = min(bisect_left(self.maxima, value), len(self.leaves) - 1)
+        if index >= 0:
+            leaf, used = self.leaves[index], self.used[index]
+            position = bisect_left(leaf, value, 0, used)
+            if position < used and leaf[position] == value:
+                return False
+        else:
+            used = 256
+        if used == 256:
+            count = len(self.leaves) + 1
+            # Exact-size directories avoid append reallocations. Old directories
+            # and the bounded 128-scalar copy remain charged until replacement.
+            directory_bytes = (sys.getsizeof([]) + count * (sys.getsizeof([None]) - sys.getsizeof([]))
+                               + sys.getsizeof(array("Q")) + count * array("Q").itemsize
+                               + sys.getsizeof(array("H")) + count * array("H").itemsize)
+            leaf_bytes = sys.getsizeof(array("Q")) + 256 * array("Q").itemsize
+            if reserve is not None:
+                reserve(self.metadata_bytes + directory_bytes + leaf_bytes + 128 * 8 + 256)
+            right = array("Q", [0]) * 256
+            leaves = [None] * count
+            maxima, counts = array("Q", [0]) * count, array("H", [0]) * count
+            if index < 0:
+                index, position = 0, 0
+                leaves[0] = right
+            else:
+                right[:128] = leaf[128:256]
+                for offset in range(count):
+                    if offset <= index:
+                        leaves[offset], maxima[offset], counts[offset] = self.leaves[offset], self.maxima[offset], self.used[offset]
+                    elif offset == index + 1:
+                        leaves[offset], maxima[offset], counts[offset] = right, right[127], 128
+                    else:
+                        leaves[offset], maxima[offset], counts[offset] = self.leaves[offset - 1], self.maxima[offset - 1], self.used[offset - 1]
+                maxima[index], counts[index] = leaf[127], 128
+                if value > maxima[index]:
+                    index += 1
+                position = bisect_left(leaves[index], value, 0, counts[index])
+            old_directories = sys.getsizeof(self.leaves) + sys.getsizeof(self.maxima) + sys.getsizeof(self.used)
+            self.leaves, self.maxima, self.used = leaves, maxima, counts
+            self.metadata_bytes += (sys.getsizeof(leaves) + sys.getsizeof(maxima)
+                                    + sys.getsizeof(counts) + sys.getsizeof(right) - old_directories)
+            leaf, used = leaves[index], counts[index]
+        for offset in range(used, position, -1):
+            leaf[offset] = leaf[offset - 1]
+        leaf[position] = value
+        self.used[index] = used + 1
+        self.maxima[index] = leaf[used]
+        self.count += 1
+        return True
+
+
+def _released_size(value: Any, seen=None, *, skip=None, reserve=None, resident_bytes: int = 0,
+                   metadata_credit: int = 0, roots: bool = False) -> int:
+    """Measure the owned graph with exact compact identities and admitted visitor scratch."""
     from . import bm25 as bm25_module
 
-    seen = seen if seen is not None else set()
-    pending = [value]
+    seen = seen if seen is not None else _CompactIdentities()
+    pending = list(value) if roots else [value]
     size = 0
-    while pending:
-        item = pending.pop()
-        identity = id(item)
-        if identity in seen:
-            continue
+
+    def admit(metadata=0, extra=0):
         if reserve is not None:
-            reserve(max(0, size - resident_bytes) + 128 * (len(seen) + len(pending) + 1) + 65536)
-        seen.add(identity)
-        size += sys.getsizeof(item)
-        if isinstance(item, (str, bytes, int, float, bool, array, type(None))):
-            continue
-        if isinstance(item, Mapping):
-            if not isinstance(item, dict):
-                # Account the hidden backing table without allocating a second dictionary.
-                size += sys.getsizeof({}) + 64 * len(item)
-            if reserve is not None:
-                reserve(max(0, size - resident_bytes) + 128 * (len(seen) + len(pending) + 2 * len(item)) + 65536)
-            pending.extend(item.keys())
-            pending.extend(item.values())
-        elif isinstance(item, (tuple, list, set, frozenset)):
-            if reserve is not None:
-                reserve(max(0, size - resident_bytes) + 128 * (len(seen) + len(pending) + len(item)) + 65536)
-            pending.extend(item)
-        elif is_dataclass(item) and not isinstance(item, type):
-            # Closed implementation fields do not retain corpus content.
-            pending.extend(getattr(item, member.name) for member in fields(item)
-                           if member.name not in {"reservation", "lock"})
-        elif isinstance(item, (_AdmittedCorpusBuild, bm25_module._CorpusStatisticsBuild)):
-            pending.append(vars(item))
-        elif isinstance(item, bm25_module.CorpusPostings):
-            pending.extend((item.lengths, item._page_terms, item._postings))
-    return size
+            reserve(max(0, size - resident_bytes) + max(0, metadata - metadata_credit)
+                    + 2 * sys.getsizeof(pending) + extra + 65536)
+
+    item = None
+    try:
+        while pending:
+            item = pending.pop()
+            identity = id(item)
+            if skip is not None and identity in skip or identity in seen:
+                continue
+            admit(getattr(seen, "metadata_bytes", 0))
+            if isinstance(seen, _CompactIdentities):
+                seen.add(identity, reserve=admit)
+            else:
+                seen.add(identity)
+            size += sys.getsizeof(item)
+            if isinstance(item, (str, bytes, int, float, bool, array, type(None))):
+                continue
+            if isinstance(item, MappingProxyType):
+                pending.extend(gc.get_referents(item))
+            elif isinstance(item, Mapping):
+                admit(getattr(seen, "metadata_bytes", 0), 4 * (len(pending) + 2 * len(item)) * 8)
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, (tuple, list, set, frozenset)):
+                admit(getattr(seen, "metadata_bytes", 0), 4 * (len(pending) + len(item)) * 8)
+                pending.extend(item)
+            elif is_dataclass(item) and not isinstance(item, type):
+                # Row maps hold only registered rows/paths. Reverse sets hold those same paths.
+                shallow = {"rows", "omissions", "reverse"} if isinstance(item, ReleasedCorpusBuild) and skip is not None else set()
+                if shallow:
+                    size += item.shell_bytes()
+                    pending.extend(item.reverse.keys())
+                # Resource owners and accounting containers are charged separately.
+                pending.extend(getattr(item, member.name) for member in fields(item)
+                               if member.name not in {"reservation", "lock", "epoch", "preparation_owner", "memory"} | shallow)
+            elif isinstance(item, (_AdmittedCorpusBuild, bm25_module._CorpusStatisticsBuild, bm25_module.CorpusPostings)):
+                pending.append(vars(item))
+        return size
+    finally:
+        pending.clear()
+        value = item = seen = skip = None
 
 
-def _refresh_released_memory(build, *, transient=None):
-    """Charge visitor scratch alongside resident bytes, transferring only new retained growth."""
+
+class _ReleasedEpoch:
+    """Append only while every registered immutable root remains installed."""
+
+    __slots__ = ("identities", "payload_bytes")
+
+    def __init__(self):
+        self.identities = _CompactIdentities()
+        self.payload_bytes = 0
+
+    @property
+    def metadata_bytes(self):
+        return sys.getsizeof(self) + sys.getsizeof(self.payload_bytes) + self.identities.metadata_bytes
+
+    def register(self, value, reserve, *, payload_credit=0, metadata_credit=None):
+        before = self.payload_bytes
+        credit = self.metadata_bytes if metadata_credit is None else metadata_credit
+        try:
+            added = _released_size(value, self.identities, reserve=reserve,
+                                   resident_bytes=payload_credit, metadata_credit=max(0, credit - sys.getsizeof(self) - 28))
+            self.payload_bytes = before + added
+        except BaseException:
+            # The caller still holds the candidate. Forget its partial identities before it unwinds.
+            self.identities.clear()
+            self.payload_bytes = 0
+            raise
+        finally:
+            value = None
+        return added
+
+
+def _request_floor(build, request_refs, workspace):
+    return _released_size(request_refs, skip=build.epoch.identities if build.epoch is not None else None,
+                          reserve=lambda needed: workspace.reserve(max(workspace.floor_bytes, needed)))
+
+
+def _refresh_released_memory(build, *, transient=None, workspace=None, request_refs=()):
+    """Rebase once after invalidation, then measure mutable state outside the immutable forest."""
     from . import runtime_resources
 
-    resident = build.reservation.reserved + (transient.reserved if transient is not None else 0)
-    with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=build.reservation.limit) as visitor:
-        retained = _released_size(build, reserve=visitor.reserve, resident_bytes=resident)
-        build.reservation.reserve(retained, transient=transient if transient is not None else visitor)
-    build.retained_bytes = retained
+    if workspace is None:
+        with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=build.reservation.limit) as measured:
+            measured.reserve(65536)
+            return _refresh_released_memory(build, transient=transient, workspace=measured, request_refs=request_refs)
+    old_metadata = build.last_accounting_bytes
+    old_payload = max(0, build.retained_bytes - build.mutable_bytes - old_metadata)
+    if build.epoch is None:
+        epoch = _ReleasedEpoch()
+        try:
+            for root in itertools.chain((build.basis, build.candidates), build.rows.keys(), build.omissions.keys(),
+                                        build.rows.values(), build.omissions.values()):
+                before = epoch.payload_bytes
+                epoch.register(root, lambda needed, before=before: workspace.reserve(workspace.floor_bytes + max(0, before - old_payload) + needed),
+                               payload_credit=max(0, old_payload - before), metadata_credit=old_metadata)
+            build.epoch = epoch
+        except BaseException:
+            build.epoch = None
+            raise
+    forest = build.payload_bytes + build.accounting_bytes
+    old_mutable_credit = max(0, build.reservation.reserved - old_metadata - build.payload_bytes)
+    surplus = max(0, transient.reserved - transient.floor_bytes - 65536) if transient is not None else 0
+    added_forest = max(0, forest - build.reservation.reserved - surplus)
+    mutable = _released_size(build, skip=build.epoch.identities, resident_bytes=old_mutable_credit,
+                             metadata_credit=max(0, old_metadata - build.accounting_bytes),
+                             reserve=lambda needed: workspace.reserve(workspace.floor_bytes + added_forest + needed))
+    total = forest + mutable
+    # Keep visitor and request facts owned until their buffers have gone.
+    owner = transient if transient is not None else workspace
+    build.reservation.reserve(total, transient=owner, floor_bytes=owner.floor_bytes + 65536)
+    build.mutable_bytes = mutable
+    build.last_accounting_bytes = build.accounting_bytes
+    build.retained_bytes = total
+    build.workspace_peak_bytes = max(build.workspace_peak_bytes, workspace.reserved + workspace._child_bytes)
+    workspace.replace_phase(_request_floor(build, request_refs, workspace), workspace=65536)
+
+
+def _prepare_released_row(root, build, path, caller, *, check, max_bytes, workspace, request_refs):
+    """Keep one row owner across canonical output, proof completion and resident installation."""
+    from . import context_task, runtime_resources
+    from .governance import egress
+
+    remaining = max_bytes - build.reservation.reserved - workspace.reserved
+    with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=remaining, check=check) as row_memory:
+        row_memory.reserve(65536)
+        capture = source = row = terms = counts = proof = None
+        installed = adopted = registering = False
+        memo = {}
+        try:
+            def capture_memory(current, values, extra):
+                live = _released_size((source, proof, memo, current, *values), roots=True, skip=build.epoch.identities,
+                                      reserve=lambda needed: row_memory.reserve(needed + extra))
+                row_memory.reserve(live + extra + 65536)
+                row_memory.floor_bytes = live
+
+            with egress.source_release_proof(root, build.basis, source_ref=path, memo=memo,
+                                             preparation_owner=row_memory, memory=capture_memory) as capture:
+                source = context_task.project_source(root, path, caller, hydrate=False, check=check,
+                                                     limit_bytes=remaining, preparation_owner=row_memory)
+            live = _released_size((source, capture, memo), roots=True, skip=build.epoch.identities,
+                                  reserve=row_memory.reserve)
+            row_memory.replace_phase(live, workspace=65536)
+            proof = capture.finish()
+            live = _released_size((source, proof, capture, memo), roots=True,
+                                  skip=build.epoch.identities, reserve=row_memory.reserve)
+            row_memory.replace_phase(live, workspace=65536)
+            if source is None:
+                row = _ReleasedOmission(proof)
+            else:
+                length, terms, counts = _released_public_terms(source.public, proof, row_memory, check)
+                row = ReleasedSourceTerms(source.version, source.raw_hash,
+                                          _PageTerms(bytes.fromhex(source.version), length, terms, counts), proof)
+            # Dict/set resize buffers can coexist with the old tables during installation.
+            overlap = 3 * (sys.getsizeof(build.rows) + sys.getsizeof(build.omissions) + sys.getsizeof(build.reverse))
+            for guard in proof.paths if proof else ():
+                overlap += 4 * sys.getsizeof(build.reverse.get(guard.target, set())) + 512
+            row_memory.reserve(row_memory.reserved + overlap)
+            before_shells = build.shell_bytes()
+            retired = path in build.retired
+            shared_dependency = any(guard.target in build.reverse for guard in proof.paths) if proof else False
+            row = build.install(path, row)
+            installed = True
+            # An equivalent retired representation may replace the newly packed candidate.
+            terms = counts = source = None
+            if build.epoch is None:
+                _refresh_released_memory(build, transient=row_memory, workspace=workspace, request_refs=request_refs)
+            else:
+                try:
+                    registering = True
+                    build.epoch.register(row, lambda needed: row_memory.reserve(row_memory.floor_bytes + needed))
+                except BaseException:
+                    build.epoch = None
+                    raise
+                build.mutable_bytes += build.shell_bytes() - before_shells
+                if retired or shared_dependency:
+                    _refresh_released_memory(build, transient=row_memory, workspace=workspace, request_refs=request_refs)
+                else:
+                    total = build.payload_bytes + build.accounting_bytes + build.mutable_bytes
+                    live = _released_size(capture, skip=build.epoch.identities, reserve=row_memory.reserve)
+                    growth = max(0, total - build.reservation.reserved)
+                    row_memory.replace_phase(live, workspace=growth + 65536)
+                    build.reservation.reserve(total, transient=row_memory, floor_bytes=live + 65536)
+                    build.last_accounting_bytes = build.accounting_bytes
+                    build.retained_bytes = total
+            adopted = True
+            build.workspace_peak_bytes = max(build.workspace_peak_bytes, workspace.reserved + row_memory.peak_bytes)
+            return proof is None
+        except BaseException:
+            # Keep the previous resident charge; no partial identities survive a candidate's cleanup.
+            if registering or installed:
+                build.epoch = None
+            if installed and not adopted:
+                build.discard(path)
+                build.retired.pop(path, None)
+            raise
+        finally:
+            memo.clear()
+            if capture is not None:
+                for mapping in (capture.paths, capture.observed_hashes, capture.decisions, capture.names,
+                                capture.directories, capture.registries, capture.references):
+                    mapping.clear()
+                capture.pending = capture.namespace = capture.basis = None
+            capture = source = row = terms = counts = proof = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5014,14 +5312,40 @@ def register_path_custody() -> None:
 
 
 def _released_custody_apply(root, changed, deleted, digests):
+    from . import runtime_resources
+
     with _STORES_LOCK:
         store = _STORES.get(_store_key(root))
     if store is not None:
         with store._term_frequency_cache_lock:
             for build in store._released_corpus_builds.values():
-                for path in (*changed, *deleted):
-                    if path in build.reverse or path in build.rows or path in build.omissions:
-                        build.pending[path] = digests.get(path)
+                if not build.lock.acquire(blocking=False):
+                    build.invalidated = True
+                    continue
+                try:
+                    if build.invalidated or build.reservation is None:
+                        build.invalidated = True
+                        continue
+                    for path in itertools.chain(changed, deleted):
+                        if path in build.pending or not (path in build.reverse or path in build.rows or path in build.omissions):
+                            continue
+                        before = sys.getsizeof(build.pending)
+                        path_bytes = (0 if build.epoch is not None and id(path) in build.epoch.identities
+                                      else sys.getsizeof(path))
+                        old = build.reservation.reserved
+                        try:
+                            # Custody holds the cache lock. Admission must not recurse into eviction.
+                            build.reservation.reserve(old + 4 * before + path_bytes + 256, reclaim=False)
+                            build.pending.add(path)
+                            growth = sys.getsizeof(build.pending) - before + path_bytes
+                            build.reservation.reserve(old + growth, reclaim=False)
+                            build.retained_bytes = old + growth
+                            build.mutable_bytes += growth
+                        except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+                            build.invalidated = True
+                            break
+                finally:
+                    build.lock.release()
 
 
 def _released_custody_verify(root, paths, digests):
@@ -5032,7 +5356,7 @@ def _released_custody_verify(root, paths, digests):
         return ()
     with store._term_frequency_cache_lock:
         return tuple(path for path in paths if any(
-            path in build.rows and path not in build.pending and build.rows[path].raw_hash != digests.get(path)
+            not build.invalidated and path in build.rows and path not in build.pending and build.rows[path].raw_hash != digests.get(path)
             for build in store._released_corpus_builds.values()
         ))
 
@@ -5212,197 +5536,215 @@ class LexicalStore:
     @contextlib.contextmanager
     def released_task_corpus(self, paths, caller, *, check, max_bytes, request_memory=None):
         """Reuse canonical FULL file terms, advancing only private complete-source work."""
-        from . import context_task, freshness, runtime_resources
-        from .governance import artifact_census, egress
+        from . import freshness, runtime_resources
+        from .governance import egress
 
-        root = self.vault_root
-        candidates = tuple(sorted(paths))
-        basis = egress.current_source_release_basis(root, purpose=caller.purpose)
-        checkpoint = freshness.consumer_checkpoint(root, "vault")
-        reusable = basis is not None and checkpoint.triple is not None and not freshness.external_pending(root)
-        # The same owner walk already required by canonical artifact scanning establishes a complete names fence.
-        if artifact_census.current_namespace_proof(root) is None:
-            artifact_census.rebuild_published(root, eager=True, between=check)
-        with self._term_frequency_cache_lock:
-            build = self._released_corpus_builds.get(basis) if reusable else None
-            if build is None:
-                build = ReleasedCorpusBuild(basis, checkpoint, candidates)
-                if reusable:
-                    for key, old in tuple(self._released_corpus_builds.items()):
+        with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=max_bytes, check=check) as workspace:
+            workspace.reserve(65536 + 32 * len(paths))
+            root = self.vault_root
+            candidates = tuple(sorted(paths))
+            basis = egress.current_source_release_basis(root, purpose=caller.purpose)
+            unsupported = set()
+            request_refs = paths, basis, candidates, unsupported
+            checkpoint = freshness.consumer_checkpoint(root, "vault")
+            reusable = basis is not None and checkpoint.triple is not None and not freshness.external_pending(root)
+            with self._term_frequency_cache_lock:
+                build = self._released_corpus_builds.get(basis) if reusable else None
+                if build is None:
+                    build = ReleasedCorpusBuild(basis, checkpoint, candidates)
+                    if reusable:
+                        for key, old in tuple(self._released_corpus_builds.items()):
+                            if len(self._released_corpus_builds) < _ADMITTED_STATISTICS_MAX:
+                                break
+                            if old.lock.acquire(blocking=False):
+                                try:
+                                    del self._released_corpus_builds[key]
+                                    old.release()
+                                finally:
+                                    old.lock.release()
                         if len(self._released_corpus_builds) < _ADMITTED_STATISTICS_MAX:
-                            break
-                        if old.lock.acquire(blocking=False):
-                            try:
-                                del self._released_corpus_builds[key]
-                                old.release()
-                            finally:
-                                old.lock.release()
-                    if len(self._released_corpus_builds) < _ADMITTED_STATISTICS_MAX:
-                        self._released_corpus_builds[basis] = build
-                    else:
-                        reusable = False
-            elif reusable:
-                self._released_corpus_builds.move_to_end(basis)
-        if not build.lock.acquire(blocking=False):
-            # A concurrent request still takes canonical preparation; it cannot borrow an unfinished generation.
-            build = ReleasedCorpusBuild(basis, checkpoint, candidates)
-            reusable = False
-            build.lock.acquire()
-        unsupported = set()
-        previous_result = build.result
-        previous_slots = previous_result[1]._slots if previous_result is not None else 0
-        memory_changed = True
-        try:
-            if build.reservation is None:
-                build.reservation = runtime_resources.ReleasedCorpusMemory(max_bytes)
-                _refresh_released_memory(build)
-            delta = freshness.delta_since(root, "vault", build.checkpoint)
-            with self._term_frequency_cache_lock:
-                pending, build.pending = build.pending, {}
-                invalidated, build.invalidated = build.invalidated, False
-            if not reusable or not delta.complete or invalidated:
-                build.rows.clear()
-                build.omissions.clear()
-                build.retired.clear()
-                build.reverse.clear()
-                build.validation = None
-                build.validation_cursor = 0
-                build.aggregation = build.result = None
-            else:
-                affected = set()
-                for changed in delta.changed | delta.deleted:
-                    relative = Path(changed).relative_to(root).as_posix()
-                    affected.update(build.reverse.get(relative, ()))
-                    affected.add(relative)
-                for relative in pending:
-                    affected.update(build.reverse.get(relative, ()))
-                    affected.add(relative)
-                for path in affected | (set(build.candidates) - set(candidates)):
-                    build.discard(path)
-            build.checkpoint = delta.to if delta.complete else checkpoint
-            if build.candidates != candidates:
-                build.candidates = candidates
-                build.retired = {path: row for path, row in build.retired.items() if path in candidates}
-                build.aggregation = build.result = None
-            if build.result is not None or build.validation is None:
-                build.validation = tuple(sorted(set(build.rows) | set(build.omissions)))
-                build.validation_cursor = 0
-            memo = {}
-            # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
-            for path in (*build.rows, *build.omissions):
-                row = build.rows.get(path) or build.omissions.get(path)
-                if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
-                        root, basis, (row.proof,), memo=memo, check_paths=False)[0]:
-                    build.discard(path)
-            while build.validation_cursor < len(build.validation):
-                check()
-                path = build.validation[build.validation_cursor]
-                row = build.rows.get(path) or build.omissions.get(path)
-                if row is not None and (row.proof is None or not egress.validate_source_release_proofs(
-                        root, basis, (row.proof,), memo=memo)[0]):
-                    build.discard(path)
-                build.validation_cursor += 1
-            build.preparation = tuple(path for path in candidates if path not in build.rows and path not in build.omissions)
-            build.preparation_cursor = 0
-            memory_changed = bool(build.preparation) or build.result is None
-            for path in build.preparation:
-                check()
-                if max_bytes - build.reservation.reserved < 8 * (root / path).stat().st_size + 65536:
-                    _refresh_released_memory(build)
-                with egress.source_release_proof(root, basis, source_ref=path, memo=memo) as capture:
-                    source = context_task.project_source(
-                        root, path, caller, hydrate=False, check=check,
-                        limit_bytes=max_bytes - build.reservation.reserved,
-                    )
-                proof = capture.finish()
-                if source is None:
-                    row = _ReleasedOmission(proof)
-                else:
-                    with runtime_resources.parser_preparation(
-                            (root / path).stat().st_size, limit_bytes=max_bytes, check=check) as transient:
-                        length, terms, counts = _released_public_terms(source.public, proof, transient, check)
-                        row = ReleasedSourceTerms(source.version, source.raw_hash,
-                                                  _PageTerms(bytes.fromhex(source.version), length, terms, counts), proof)
-                        del source
-                        # Transfer the row's charge before the transient lease ends or reverse maps grow.
-                        row_bytes = _released_size((path, row), {id(basis)}) + 256 * len(proof.paths if proof else ())
-                        build.reservation.reserve(build.retained_bytes + row_bytes, transient=transient)
-                if proof is None:
-                    unsupported.add(path)
-                build.install(path, row)
-                build.preparation_cursor += 1
-                # Per-row actual allocations conservatively charge shared strings again until the complete measurement.
-                build.retained_bytes += _released_size((path, row), {id(basis)}) + 256 * len(proof.paths if proof else ())
-                try:
-                    build.reservation.reserve(build.retained_bytes)
-                except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
-                    _refresh_released_memory(build)
-            def reserve_aggregation(amount):
-                build.reservation.reserve(build.reservation.reserved + amount)
-
-            if build.aggregation is None:
-                reserve_aggregation(1024 + 160 * len(build.rows))
-                build.aggregation = _AdmittedCorpusBuild({path: row.terms for path, row in build.rows.items()})
-            while not build.aggregation.advance(check=check, reserve=reserve_aggregation):
-                _refresh_released_memory(build)
-            check()
-            if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
-                    or freshness.external_pending(root)
-                    or build.pending or build.invalidated
-                    or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
-                build.result = None
-                raise RuntimeError("released task corpus changed during preparation")
-            proven = tuple((path, row.proof) for path, row in (*build.rows.items(), *build.omissions.items()) if row.proof is not None)
-            valid = egress.validate_source_release_proofs(root, basis, (proof for _path, proof in proven))
-            if not all(valid):
-                for (path, _proof), current in zip(proven, valid, strict=True):
-                    if not current:
-                        build.discard(path)
-                build.result = None
-                raise RuntimeError("released task corpus proof changed during preparation")
-            check()
-            build.result = build.aggregation.result
-            if memory_changed:
-                build.fingerprint = hashlib.sha256(json.dumps(
-                    [(path, row.public_version) for path, row in sorted(build.rows.items())],
-                    separators=(",", ":"), ensure_ascii=False,
-                ).encode()).digest()
-                _refresh_released_memory(build)
-            statistics, postings, _base = build.result
-            if not postings.keeps_page_terms:
-                raise RuntimeError("released task corpus term allowance exceeded")
-            yield statistics, postings, frozenset(build.rows), bool(build.omissions)
-        except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
-            with self._term_frequency_cache_lock:
-                if self._released_corpus_builds.get(basis) is build:
-                    del self._released_corpus_builds[basis]
-            reusable = False
-            raise
-        finally:
-            try:
-                if build.retire_requested:
-                    with self._term_frequency_cache_lock:
-                        if self._released_corpus_builds.get(basis) is build:
-                            del self._released_corpus_builds[basis]
-                    reusable = False
-                for path in unsupported:
-                    build.discard(path)
-                    build.retired.pop(path, None)
-                if (memory_changed or build.result is not previous_result
-                        or build.result is not None and build.result[1]._slots != previous_slots):
-                    if reusable and build.reservation is not None:
-                        try:
-                            _refresh_released_memory(build, transient=request_memory)
-                        except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
-                            with self._term_frequency_cache_lock:
-                                if self._released_corpus_builds.get(basis) is build:
-                                    del self._released_corpus_builds[basis]
+                            self._released_corpus_builds[basis] = build
+                        else:
                             reusable = False
-                            raise
+                elif reusable:
+                    self._released_corpus_builds.move_to_end(basis)
+            if not build.lock.acquire(blocking=False):
+                # A concurrent request still takes canonical preparation; it cannot borrow an unfinished generation.
+                build = ReleasedCorpusBuild(basis, checkpoint, candidates)
+                reusable = False
+                build.lock.acquire()
+            previous_result = id(build.result)
+            previous_slots = build.result[1]._slots if build.result is not None else 0
+            memory_changed = True
+            try:
+                if build.reservation is None:
+                    build.reservation = runtime_resources.ReleasedCorpusMemory(max_bytes)
+                    _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
+                delta = freshness.delta_since(root, "vault", build.checkpoint)
+                with self._term_frequency_cache_lock:
+                    pending, build.pending = build.pending, set()
+                    invalidated, build.invalidated = build.invalidated, False
+                affected = set()
+                if not reusable or not delta.complete or invalidated:
+                    build.epoch = None
+                    build.rows.clear()
+                    build.omissions.clear()
+                    build.retired.clear()
+                    build.reverse.clear()
+                    build.reverse_set_bytes = 0
+                    build.validation = None
+                    build.validation_cursor = 0
+                    build.aggregation = build.result = None
+                else:
+                    # Relative names and the affected set coexist with the retained generation until rebase.
+                    affected_count = (len(build.rows) + len(build.omissions)
+                                      + len(delta.changed) + len(delta.deleted) + len(pending))
+                    workspace.reserve(workspace.floor_bytes + 65536 + 192 * affected_count
+                                      + sum(4 * len(os.fspath(path)) + 512
+                                            for path in itertools.chain(delta.changed, delta.deleted)))
+                    for changed in itertools.chain(delta.changed, delta.deleted):
+                        relative = Path(changed).relative_to(root).as_posix()
+                        affected.update(build.reverse.get(relative, ()))
+                        affected.add(relative)
+                    for relative in pending:
+                        affected.update(build.reverse.get(relative, ()))
+                        affected.add(relative)
+                    for path in affected:
+                        build.discard(path)
+                    for path in build.candidates:
+                        position = bisect_left(candidates, path)
+                        if position == len(candidates) or candidates[position] != path:
+                            build.discard(path)
+                build.checkpoint = delta.to if delta.complete else checkpoint
+                delta = None
+                pending.clear()
+                pending = None
+                affected.clear()
+                affected = None
+                changed = relative = path = None
+                if build.candidates != candidates:
+                    build.epoch = None
+                    build.candidates = candidates
+                    workspace.reserve(workspace.reserved + 3 * sys.getsizeof(build.retired))
+                    build.retired = {path: row for path, row in build.retired.items() if path in candidates}
+                    build.aggregation = build.result = None
+                if build.result is not None or build.validation is None:
+                    workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
+                    build.validation = tuple(path for path in candidates if path in build.rows or path in build.omissions)
+                    build.validation_cursor = 0
+                # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
+                for path in candidates:
+                    row = build.rows.get(path) or build.omissions.get(path)
+                    if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
+                            root, basis, (row.proof,), memo={}, check_paths=False, preparation_owner=workspace)[0]:
+                        build.discard(path)
+                row = None
+                while build.validation_cursor < len(build.validation):
+                    check()
+                    path = build.validation[build.validation_cursor]
+                    row = build.rows.get(path) or build.omissions.get(path)
+                    if row is not None and (row.proof is None or not egress.validate_source_release_proofs(
+                            root, basis, (row.proof,), memo={}, preparation_owner=workspace)[0]):
+                        build.discard(path)
+                    build.validation_cursor += 1
+                row = None
+                workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
+                build.preparation = tuple(path for path in candidates if path not in build.rows and path not in build.omissions)
+                build.preparation_cursor = 0
+                memory_changed = bool(build.preparation) or build.result is None
+                _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
+                for path in build.preparation:
+                    check()
+                    # The request visitor's buffers have gone; the row owns the next workspace.
+                    workspace.replace_phase(workspace.floor_bytes)
+                    if _prepare_released_row(root, build, path, caller, check=check, max_bytes=max_bytes,
+                                             workspace=workspace, request_refs=request_refs):
+                        workspace.reserve(workspace.floor_bytes + 4 * sys.getsizeof(unsupported) + 65536)
+                        unsupported.add(path)
+                        workspace.replace_phase(_request_floor(build, request_refs, workspace))
+                    build.preparation_cursor += 1
+                workspace.reserve(workspace.floor_bytes + 65536)
+                def reserve_aggregation(amount):
+                    build.reservation.reserve(build.reservation.reserved + amount)
+
+                if build.aggregation is None:
+                    reserve_aggregation(1024 + 160 * len(build.rows))
+                    build.aggregation = _AdmittedCorpusBuild({path: row.terms for path, row in build.rows.items()})
+                while not build.aggregation.advance(
+                        check=check, reserve=reserve_aggregation,
+                        workspace=lambda amount: workspace.reserve(workspace.floor_bytes + amount + 65536)):
+                    _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
+                check()
+                if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
+                        or freshness.external_pending(root)
+                        or build.pending or build.invalidated
+                        or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
+                    build.result = None
+                    raise RuntimeError("released task corpus changed during preparation")
+                invalid_proof = False
+                for path in candidates:
+                    row = build.rows.get(path) or build.omissions.get(path)
+                    if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
+                            root, basis, (row.proof,), preparation_owner=workspace)[0]:
+                        build.discard(path)
+                        invalid_proof = True
+                row = None
+                if invalid_proof:
+                    build.result = None
+                    raise RuntimeError("released task corpus proof changed during preparation")
+                check()
+                build.result = build.aggregation.result
+                if memory_changed:
+                    digest = hashlib.sha256()
+                    digest.update(b"[")
+                    first = True
+                    for path in build.candidates:
+                        row = build.rows.get(path)
+                        if row is None:
+                            continue
+                        workspace.reserve(workspace.floor_bytes + 65536 + 32 * (len(path) + len(row.public_version)))
+                        if not first:
+                            digest.update(b",")
+                        digest.update(json.dumps((path, row.public_version), separators=(",", ":"), ensure_ascii=False).encode())
+                        first = False
+                    digest.update(b"]")
+                    build.fingerprint = digest.digest()
+                    _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
+                statistics, postings, _base = build.result
+                if not postings.keeps_page_terms:
+                    raise RuntimeError("released task corpus term allowance exceeded")
+                yield statistics, postings, frozenset(build.rows), bool(build.omissions)
+            except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+                with self._term_frequency_cache_lock:
+                    if self._released_corpus_builds.get(basis) is build:
+                        del self._released_corpus_builds[basis]
+                reusable = False
+                raise
             finally:
-                if not reusable:
-                    build.release()
-                build.lock.release()
+                try:
+                    if build.retire_requested:
+                        with self._term_frequency_cache_lock:
+                            if self._released_corpus_builds.get(basis) is build:
+                                del self._released_corpus_builds[basis]
+                        reusable = False
+                    for path in unsupported:
+                        build.discard(path)
+                        build.retired.pop(path, None)
+                    if (memory_changed or id(build.result) != previous_result
+                            or build.result is not None and build.result[1]._slots != previous_slots):
+                        if reusable and build.reservation is not None:
+                            try:
+                                _refresh_released_memory(build, transient=request_memory, workspace=workspace, request_refs=request_refs)
+                            except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+                                with self._term_frequency_cache_lock:
+                                    if self._released_corpus_builds.get(basis) is build:
+                                        del self._released_corpus_builds[basis]
+                                reusable = False
+                                raise
+                finally:
+                    if not reusable:
+                        build.release()
+                    build.lock.release()
 
     def _capture_read_view(self) -> _CatalogReadView | None:
         """Capture both published scopes from one already-pinned transaction."""

@@ -55,6 +55,8 @@ Reuse source terms through the existing admitted-corpus statistics and postings 
 A current effective caller basis and complete source-release proof must justify each reused row.
 A raw source hash, caller binding, conversation identifier or earlier grant alone cannot supply that proof.
 The proof binds hashes produced by the exact reads that the release owners classified.
+A namespace or reference proof binds the owner snapshot and resolution that produced the representation.
+It must not certify that representation by reading a different current snapshot afterward.
 A pre-read guard cannot certify a later decision if the source changes and returns to its earlier bytes.
 Conflicting observed hashes decline reuse without changing canonical read order.
 Revalidate the incoming principal and authorization session on every request; never retain a bearer or caller object.
@@ -62,6 +64,7 @@ Revalidate the incoming principal and authorization session on every request; ne
 The egress owner records a closed set of supported release dependencies where it resolves them.
 These include source and target admission, denied targets, unresolved names, path variants, registry state, artifact names and ownership.
 Literal artifact scans require a complete names-namespace fence, including names that did not match previously.
+Proof lookup remains read-only; it does not rebuild a census to make cache reuse possible.
 A row that consults managed origin evidence stays uncacheable until its owner supplies a versioned proof.
 Unsupported or unknown proofs use canonical preparation; a cache miss does not create a new refusal.
 
@@ -77,6 +80,15 @@ Selected candidates and held methods still hydrate through current canonical sou
 
 The existing semantic preparation reservation bounds guarded reads, parsing and retained corpus state.
 Account for terms, proofs, reverse dependencies, transient buffers and overlapping publication generations within the existing allowance.
+Count shared immutable rows once within an accounting epoch, using compact identity metadata that also consumes the allowance.
+End the epoch before removing a registered object, and rebuild accounting after the invalidation batch.
+Register the final installed row; a failed measurement must not leave identities for discarded temporary objects.
+Measure mutable containers, request memos and capture state separately, including their resize overlap and visitor workspace.
+Keep one row reservation through canonical projection, proof completion, packing and transfer to resident state.
+After canonical projection returns, replace completed parser claims with measured live output and capture state before proof completion.
+Measure the whole source projection, capture and memo; include the completed proof before packing.
+Nested live claims add together; an inner preparation cannot release its parent's charge.
+Transfer only credit that no longer protects live transient data, and charge each workspace once.
 The existing read policy snapshot covers candidate assembly only; optional inference and terminal guards run after that scope closes.
 An expired request may retain individually complete rows and private aggregation progress, but must publish no prefix statistics or rankings.
 Under an unchanged effective basis and complete dependency history, resumption must advance validation and aggregation without restarting the retained prefix.

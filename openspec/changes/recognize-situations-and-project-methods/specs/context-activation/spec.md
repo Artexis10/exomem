@@ -88,6 +88,8 @@ Reuse SHALL preserve document frequencies, term order, score floors, scores and 
 The corpus SHALL retain ordered terms and counts rather than source bodies or complete token lists.
 Each reused row SHALL carry a complete current release proof owned by the authorities that resolved its dependencies.
 Proofs SHALL bind the exact bytes that those owners classified, including concurrent changes that later restore earlier bytes.
+Namespace and reference proofs SHALL bind the owner snapshot and resolution that produced the representation.
+Cache proof lookup SHALL NOT start a foreground census rebuild.
 Current incoming principal and session validity SHALL be checked on every request.
 An earlier raw hash, caller binding or session identifier SHALL NOT establish reuse authority.
 Unsupported or unavailable proof types SHALL fall back to canonical preparation without a cache-specific refusal.
@@ -100,6 +102,11 @@ Unchanged public versions MAY reuse statistics.
 Selected sources and held methods SHALL still receive current canonical projection before delivery.
 
 Retained and transient state SHALL fit existing resource bounds, including overlapping publication generations.
+Accounting SHALL include its own metadata, request memos, capture state, visitor workspace and resize overlap.
+Shared immutable objects SHALL be charged once per live accounting epoch, which ends before registered objects can be removed.
+Each row's reservation SHALL cover projection through resident transfer, including simultaneous nested claims and retained transient output.
+Phase changes MAY release dead parser buffers only after canonical projection returns, while the row reservation continues to cover all retained output.
+Resident transfer SHALL preserve the charge for every still-live transient object.
 Canonical token streaming SHALL preserve existing tokens and order while admitting normalization, count growth and packing before allocation.
 An incomplete build MAY retain private progress but SHALL publish no prefix statistics, ranking or absence conclusion.
 With an unchanged effective basis and complete dependency history, resumption SHALL advance validation and aggregation without restarting the retained prefix.
@@ -130,6 +137,19 @@ The existing latency checks SHALL qualify reuse without increasing their limits 
 - **WHEN** an earlier request retained complete rows and private aggregation progress
 - **THEN** a current equivalent caller revalidates changed dependencies and advances the remaining work
 - **AND** no caller observes statistics or ranking from the partial corpus
+
+#### Scenario: An owner publishes a different snapshot during projection
+
+- **WHEN** namespace or reference ownership changes between the consumed snapshot and proof completion
+- **THEN** a proof describes the consumed snapshot or declines reuse
+- **AND** a later snapshot cannot certify an earlier representation
+
+#### Scenario: Shared rows leave room for canonical preparation
+
+- **GIVEN** retained data, accounting metadata, workspace and canonical preparation fit the existing allowance and request budget
+- **WHEN** sources share immutable objects across complete rows
+- **THEN** duplicate charges do not discard the build or deny that canonical preparation
+- **AND** a failed accounting update retains no identities for objects that can be removed
 
 ### Requirement: Candidate context does not manufacture ongoing intent
 

@@ -9,6 +9,109 @@ from exomem import bm25, lexstore
 from exomem.governance import artifact_census
 
 
+def test_source_namespace_proof_binds_the_census_view_consumed_before_publication(vault: Path, monkeypatch) -> None:
+    """A newly published withheld name cannot certify text gated against the earlier names."""
+    from test_context_catalogue import _page
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import context_task, context_views
+    from exomem.governance import egress, principal
+
+    monkeypatch.setattr(artifact_census, "_CENSUS_RACY_NS", 0)
+    source = _page(vault, "public-source", "prompt: Read future specimen.pdf for the guide.\n")
+    target = "Knowledge Base/Notes/Insights/future specimen.pdf"
+    _withhold(vault, target, ceiling=0)
+    artifact_census.rebuild_published(vault, eager=True)
+    request = artifact_census.request_census
+    raced = False
+    def publish_after_view(root):
+        nonlocal raced
+        view = request(root)
+        if not raced:
+            raced = True
+            (root / target).write_bytes(b"opaque artifact")
+            artifact_census.note_created(root, (target,))
+            artifact_census.rebuild_published(root, eager=True)
+        return view
+    monkeypatch.setattr(artifact_census, "request_census", publish_after_view)
+    with principal.request_scope(_external()):
+        basis = egress.current_source_release_basis(vault)
+        caller = context_views.CallerView.current(vault)
+        with egress.source_release_proof(vault, basis, source_ref=source) as capture:
+            projected = context_task.project_source(vault, source, caller, hydrate=False)
+        proof = capture.finish()
+        current = context_task.project_source(vault, source, caller, hydrate=False)
+    assert projected.public["frontmatter"]["prompt"] != current.public["frontmatter"]["prompt"]
+    assert proof is None
+
+
+def test_source_reference_proof_binds_the_actual_resolution_across_restored_ownership(vault: Path, monkeypatch) -> None:
+    """Restoring UUID ownership cannot seal a source resolved while that ownership was absent."""
+    from test_context_catalogue import _page
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import context_task, context_views, freshness, semantic_contract
+    from exomem.governance import egress, principal, source_release
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.setattr(artifact_census, "_CENSUS_RACY_NS", 0)
+    identity = "12345678-1234-4234-8234-123456789abc"
+    target = _page(vault, "identity-target", f"exomem_id: {identity}\n")
+    source = _page(vault, "public-reference-source", f"prompt: Read exomem://memory/{identity} for the guide.\n")
+    _withhold(vault, target, ceiling=0)
+    freshness.rebaseline(vault)
+    semantic_contract.build_corpus_context(vault)
+    artifact_census.rebuild_published(vault, eager=True)
+    original = (vault / target).read_text()
+    snapshot = semantic_contract.current_reference_identity_snapshot
+    raced = False
+    def publish_after_snapshot(root, **kwargs):
+        nonlocal raced
+        selected = snapshot(root, **kwargs)
+        if not raced and selected is not None and source_release._CAPTURE.get() is not None:
+            raced = True
+            token = source_release._CAPTURE.set(None)
+            try:
+                (root / target).write_text(original.replace(f"exomem_id: {identity}\n", ""))
+                freshness.on_files_changed(root, [root / target])
+                semantic_contract.build_corpus_context(root)
+            finally:
+                source_release._CAPTURE.reset(token)
+        return selected
+    monkeypatch.setattr(semantic_contract, "current_reference_identity_snapshot", publish_after_snapshot)
+    with principal.request_scope(_external()):
+        basis = egress.current_source_release_basis(vault)
+        caller = context_views.CallerView.current(vault)
+        with egress.source_release_proof(vault, basis, source_ref=source) as capture:
+            projected = context_task.project_source(vault, source, caller, hydrate=False)
+        (vault / target).write_text(original)
+        freshness.on_files_changed(vault, [vault / target])
+        semantic_contract.build_corpus_context(vault)
+        proof = capture.finish()
+        current = context_task.project_source(vault, source, caller, hydrate=False)
+    assert projected.public["frontmatter"]["prompt"] != current.public["frontmatter"]["prompt"]
+    assert proof is None
+
+
+def test_pending_reference_reads_cannot_seal_conflicting_observations(vault: Path, monkeypatch) -> None:
+    """Returning to the first pending state cannot certify a different state consumed between reads."""
+    from test_governance_egress import _external
+
+    from exomem import memory_refs, pending_recall
+    from exomem.governance import egress, principal
+
+    changed = pending_recall.ReferenceProjection({}, frozenset({"withdrawn.md"}), {"withdrawn.md": None})
+    with principal.request_scope(_external()):
+        basis = egress.current_source_release_basis(vault)
+        with egress.source_release_proof(vault, basis) as capture:
+            for projection in (None, changed, None):
+                monkeypatch.setattr(pending_recall, "reference_projection", lambda _root, value=projection: value)
+                assert memory_refs._pending_reference_projection(vault) is projection
+        assert capture.finish() is None
+
+
 def test_release_proof_binds_the_decision_bytes_across_an_a_b_a_write(vault: Path, monkeypatch) -> None:
     """Restoring A after an owner authorizes B must not seal B's decision with A's earlier guard."""
     import yaml
@@ -92,7 +195,7 @@ def test_idle_view_eviction_releases_capacity_for_ordinary_canonical_preparation
         assert runtime_resources._preparation_bytes + runtime_resources._released_corpus_bytes <= 512 * 1024
     assert runtime_resources._released_corpus_bytes < retained
     def ends_after_one_source():
-        if any(build.rows for build in store._released_corpus_builds.values()):
+        if any(build.preparation_cursor for build in store._released_corpus_builds.values()):
             raise TimeoutError("request ended after a complete source")
     with principal.request_scope(_external()):
         caller = context_views.CallerView.current(vault)
@@ -132,8 +235,8 @@ def test_a_dangling_link_probe_declines_reuse_when_its_external_target_appears(v
         assert capture.finish() is None
 
 
-def test_a_racy_namespace_can_become_provable_without_resetting_the_request_memo(vault: Path, monkeypatch) -> None:
-    """A previous namespace miss must not force every later canonical source to remain uncacheable."""
+def test_a_racy_namespace_requires_owner_publication_before_reuse(vault: Path, monkeypatch) -> None:
+    """Proof lookup must leave a racy view unchanged until its owner republishes it."""
     from test_governance_egress import _external
 
     from exomem.governance import egress, principal, source_release
@@ -143,10 +246,13 @@ def test_a_racy_namespace_can_become_provable_without_resetting_the_request_memo
     memo = {"namespace": None}
     now = artifact_census.time.time_ns()
     monkeypatch.setattr(artifact_census.time, "time_ns", lambda: now + 2 * artifact_census._CENSUS_RACY_NS)
+    assert artifact_census.current_namespace_proof(vault) is None
+    artifact_census.rebuild_published(vault, eager=True)
+    view = artifact_census.request_census(vault)
     with principal.request_scope(_external()):
         basis = egress.current_source_release_basis(vault)
         with egress.source_release_proof(vault, basis, memo=memo) as capture:
-            source_release.namespace_dependency(vault)
+            source_release.namespace_dependency(vault, artifact_census.namespace_proof_for_view(vault, view))
     proof = capture.finish()
     assert proof is not None and proof.namespace is not None
     assert artifact_census.namespace_proof_is_current(vault, proof.namespace)
@@ -251,6 +357,7 @@ def test_preparation_and_aggregation_resume_without_reading_completed_sources(va
     _withhold(vault, hidden, ceiling=0)
     _seed_live_scopes(vault)
     _built(vault).close()
+    artifact_census.rebuild_published(vault, eager=True)
     store = lexstore.get_store(vault)
     original = context_task.project_source
     prepared = []
@@ -260,7 +367,7 @@ def test_preparation_and_aggregation_resume_without_reading_completed_sources(va
         return result
     monkeypatch.setattr(context_task, "project_source", record)
     def expires():
-        if any(len(build.rows) == 2 for build in store._released_corpus_builds.values()):
+        if any(build.preparation_cursor == 2 for build in store._released_corpus_builds.values()):
             raise TimeoutError("request ended")
     with principal.request_scope(_external()):
         caller = context_views.CallerView.current(vault)
@@ -295,6 +402,7 @@ def test_reused_terms_reproject_denied_dependencies_even_when_public_json_stays_
     from test_context_catalogue import _built, _page
     from test_governance_egress import _external
     from test_lexstore import _seed_live_scopes
+    from test_released_corpus_memory import _independent_bytes
     from test_working_set_withheld_twins import _withhold
 
     from exomem import context_task, context_views, freshness, working_set_index
@@ -313,6 +421,7 @@ def test_reused_terms_reproject_denied_dependencies_even_when_public_json_stays_
     scope.write_text(yaml.safe_dump(definition))
     _seed_live_scopes(vault)
     _built(vault).close()
+    artifact_census.rebuild_published(vault, eager=True)
     store = lexstore.get_store(vault)
     def corpus():
         with principal.request_scope(_external()):
@@ -321,7 +430,12 @@ def test_reused_terms_reproject_denied_dependencies_even_when_public_json_stays_
                 fresh = {path: bm25.tokenize(json.dumps(context_task.project_source(
                     vault, path, caller, hydrate=False).public, sort_keys=True, ensure_ascii=False)) for path in (source, independent)}
                 assert result[0] == bm25.CorpusStatistics.of(fresh)
-        return next(reversed(store._released_corpus_builds.values()))
+        build = next(reversed(store._released_corpus_builds.values()))
+        identities = set()
+        actual = _independent_bytes([build.basis, build.candidates, *build.rows.keys(), *build.rows.values()], identities)
+        assert build.payload_bytes == actual
+        assert build.epoch.identities.count == len(identities)
+        return build
     first = corpus()
     before = first.rows[source]
     held = first.rows[independent]
@@ -363,6 +477,7 @@ def test_a_previous_name_miss_invalidates_the_source_when_a_hidden_target_appear
     _withhold(vault, target, ceiling=0)
     _seed_live_scopes(vault)
     _built(vault).close()
+    artifact_census.rebuild_published(vault, eager=True)
     store = lexstore.get_store(vault)
     word = bm25.tokenize("germination")[0]
     with principal.request_scope(_external()):
@@ -374,6 +489,7 @@ def test_a_previous_name_miss_invalidates_the_source_when_a_hidden_target_appear
         _page(vault, "future-reference", body="Private reference material.\n")
         freshness.on_files_changed(vault, [vault / target])
         working_set_index.WorkingSetIndex(vault).rebuild()
+        artifact_census.rebuild_published(vault, eager=True)
         with store.released_task_corpus({source}, caller, check=lambda: None, max_bytes=64 * 1024 * 1024) as result:
             assert word not in result[0].document_frequency
         current = next(iter(store._released_corpus_builds.values())).rows[source]

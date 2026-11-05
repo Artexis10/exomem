@@ -7260,7 +7260,10 @@ class _ArtifactReferenceGate:
     def _index(self) -> None:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
-        source_release.namespace_dependency(self.vault_root)
+        if source_release.capture_active(self.vault_root):
+            source_release.namespace_dependency(
+                self.vault_root, artifact_census.namespace_proof_for_view(self.vault_root, self.census),
+            )
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, kb_dirname()
         )

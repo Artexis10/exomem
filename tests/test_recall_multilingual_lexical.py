@@ -21,6 +21,7 @@ dense lane's bars; they are measured here and reported, not asserted.
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from functools import cache
@@ -41,6 +42,7 @@ if str(_REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 import eval_retrieval  # noqa: E402
 
+_LEGACY_TOKEN = re.compile(r"[a-z0-9]+")
 _LEGACY_STEMMER = snowballstemmer.stemmer("english")
 
 #: Lexical-arm floors on recall@10 (design §17.6.2): the measured value minus
@@ -62,7 +64,7 @@ def _legacy_stem(word: str) -> str:
 
 def _legacy_tokenize(text: str, *, query: bool = False) -> list[str]:
     """Tokenizer v1, frozen: lowercase, `[a-z0-9]+`, English Snowball."""
-    return [_legacy_stem(word) for word in bm25._TOKEN_RE.findall(text.lower())]
+    return [_legacy_stem(word) for word in _LEGACY_TOKEN.findall(text.lower())]
 
 
 def _legacy_units(text: str, *, query: bool = False) -> list[bm25.TokenUnit]:

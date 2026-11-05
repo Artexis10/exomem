@@ -54,7 +54,7 @@ This revision reuses the existing scoring implementation and current canonical p
 - [x] 5.1 Run the existing real-agent proof route on fresh source-derived cases with independent blind judgment; verify first-answer context use and cross-client method changes.
 - [ ] 5.2 Exercise unexpected inputs, refusals, crisis context, malformed model replies and provider outage; verify failure handling without invented state or authority.
 - [x] 5.3 Regenerate changed public surfaces and document behavior, configuration and rollback; verify schema parity, privacy, strict OpenSpec validation and scoped tests.
-- [x] 5.4 Obtain independent adversarial review of the integrated diff and correct its findings; record the exact reviewed content, C4/C6 findings and product/proof weight.
+- [ ] 5.4 Obtain independent adversarial review of the integrated diff and correct its findings; record the exact reviewed content, C4/C6 findings and product/proof weight.
 - [ ] 5.5 Run the full completion corpus and current-head CI, then merge and publish the ordinary containing release; verify the released artifact and its public contract.
 - [ ] 5.6 Verify installed behavior where authorized, refresh overlapping parent spec blocks, and archive through OpenSpec; preserve open replay obligations and clean only owned scratch.
 

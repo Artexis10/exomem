@@ -474,14 +474,21 @@ class SemanticPreparation:
 
     def __init__(
         self, source_bytes: int, *, bulk: bool, limit_bytes: int | None = None,
-        check: Callable[[], None] | None = None,
+        check: Callable[[], None] | None = None, owner: SemanticPreparation | None = None,
     ) -> None:
+        self.owner = owner
+        self._child_bytes = 0
+        self._completed = []
+        self.floor_bytes = 0
+        self.peak_bytes = 0
         self.limit = (
             SEMANTIC_PREPARATION_BYTES - SEMANTIC_SMALL_RESERVE_BYTES
             if bulk else SEMANTIC_SMALL_RESERVE_BYTES
         )
         if limit_bytes is not None:
             self.limit = min(self.limit, limit_bytes)
+        if owner is not None:
+            self.limit = min(self.limit, max(0, owner.limit - owner.reserved - owner._child_bytes))
         self.check = check
         self.reuse_allowance = (4 if bulk else 1) * 1024 * 1024
         self.reserved = 0
@@ -495,14 +502,24 @@ class SemanticPreparation:
         global _preparation_bytes, _preparation_peak
         if self.check is not None:
             self.check()
-        if amount > self.limit:
-            raise PreparationBudgetExceeded("semantic preparation budget exceeded")
-        _reclaim_released_corpora(max(0, amount - self.reserved))
+        extra = max(0, amount - self.reserved)
+        current = self
+        while current is not None:
+            if current.reserved + current._child_bytes + extra > current.limit:
+                raise PreparationBudgetExceeded("semantic preparation budget exceeded")
+            current = current.owner
+        _reclaim_released_corpora(extra)
         with _preparation_lock:
             extra = max(0, amount - self.reserved)
             if _preparation_bytes + _released_corpus_bytes + extra > SEMANTIC_PREPARATION_BYTES:
                 raise PreparationCapacityBusy("semantic preparation capacity busy")
             self.reserved += extra
+            self.peak_bytes = max(self.peak_bytes, self.reserved + self._child_bytes)
+            current = self.owner
+            while current is not None:
+                current._child_bytes += extra
+                current.peak_bytes = max(current.peak_bytes, current.reserved + current._child_bytes)
+                current = current.owner
             _preparation_bytes += extra
             _preparation_peak = max(_preparation_peak, _preparation_bytes + _released_corpus_bytes)
 
@@ -556,11 +573,51 @@ class SemanticPreparation:
             + self.reuse_allowance
         )
 
+    def replace_phase(self, live_bytes: int, *, workspace: int = 0) -> None:
+        """Drop completed canonical buffers, keeping their returned data owned by this row."""
+        global _preparation_bytes, _preparation_peak
+        for child in self._completed:
+            child.source = ""
+            child.guard = child.signature = None
+        completed = sum(child.reserved for child in self._completed)
+        amount = live_bytes + workspace
+        delta = amount - self.reserved - completed
+        _reclaim_released_corpora(max(0, delta))
+        with _preparation_lock:
+            if amount + self._child_bytes - completed > self.limit:
+                raise PreparationBudgetExceeded("semantic preparation budget exceeded")
+            if _preparation_bytes + _released_corpus_bytes + delta > SEMANTIC_PREPARATION_BYTES:
+                raise PreparationCapacityBusy("semantic preparation capacity busy")
+            self._child_bytes -= completed
+            for child in self._completed:
+                child.reserved = 0
+                child.owner = None
+            self._completed.clear()
+            self.reserved = amount
+            self.floor_bytes = live_bytes
+            self.peak_bytes = max(self.peak_bytes, self.reserved + self._child_bytes)
+            current = self.owner
+            while current is not None:
+                current._child_bytes += delta
+                current = current.owner
+            _preparation_bytes += delta
+            _preparation_peak = max(_preparation_peak, _preparation_bytes + _released_corpus_bytes)
+
     def release(self) -> None:
         global _preparation_bytes
+        for child in self._completed:
+            child.release()
+        self._completed.clear()
+        if self.owner is not None:
+            self.source = ""
+            self.guard = self.signature = None
         with _preparation_lock:
             _preparation_bytes -= self.reserved
-            self.reserved = 0
+            current = self.owner
+            while current is not None:
+                current._child_bytes -= self.reserved
+                current = current.owner
+            self.reserved = self.floor_bytes = 0
 
 
 def _reclaim_released_corpora(additional: int) -> None:
@@ -580,18 +637,24 @@ class ReleasedCorpusMemory:
         self.limit = min(limit_bytes, SEMANTIC_PREPARATION_BYTES)
         self.reserved = 0
 
-    def reserve(self, amount: int, *, transient: SemanticPreparation | None = None) -> None:
+    def reserve(self, amount: int, *, transient: SemanticPreparation | None = None, floor_bytes: int = 0, reclaim: bool = True) -> None:
         global _released_corpus_bytes, _preparation_bytes, _preparation_peak
         if amount > self.limit:
             raise PreparationBudgetExceeded("released task corpus preparation allowance exceeded")
-        transfer = min(max(0, amount - self.reserved), transient.reserved) if transient is not None else 0
-        _reclaim_released_corpora(max(0, amount - self.reserved - transfer))
+        credit = max(0, transient.reserved - max(transient.floor_bytes, floor_bytes)) if transient is not None else 0
+        transfer = min(max(0, amount - self.reserved), credit)
+        if reclaim:
+            _reclaim_released_corpora(max(0, amount - self.reserved - transfer))
         with _preparation_lock:
             total = _preparation_bytes + _released_corpus_bytes + amount - self.reserved - transfer
             if total > SEMANTIC_PREPARATION_BYTES:
                 raise PreparationCapacityBusy("semantic preparation capacity busy")
             if transient is not None:
                 transient.reserved -= transfer
+                current = transient.owner
+                while current is not None:
+                    current._child_bytes -= transfer
+                    current = current.owner
                 _preparation_bytes -= transfer
             _released_corpus_bytes += amount - self.reserved
             self.reserved = amount
@@ -608,6 +671,7 @@ class ReleasedCorpusMemory:
 def parser_preparation(
     source_bytes: int, *, limit_bytes: int | None = None,
     check: Callable[[], None] | None = None, bulk: bool | None = None,
+    owner: SemanticPreparation | None = None, keep_open: bool = False,
 ):
     """Hold the shared reservation while a bounded source is read and parsed.
 
@@ -615,18 +679,21 @@ def parser_preparation(
     """
     if bulk is None:
         bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
-    preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check)
+    preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check, owner=owner)
     try:
         yield preparation
     finally:
-        preparation.release()
+        if keep_open and owner is not None:
+            owner._completed.append(preparation)
+        else:
+            preparation.release()
 
 
 @contextlib.contextmanager
 def semantic_preparation(
     vault_root: Path, path: Path, *, source_limit: int | None = None,
     limit_bytes: int | None = None, check: Callable[[], None] | None = None,
-    expected_hash: str | None = None,
+    expected_hash: str | None = None, owner: SemanticPreparation | None = None,
 ):
     """Reserve before source/parse allocations; never wait for memory capacity."""
     from . import find_corpus, freshness, vault
@@ -635,21 +702,27 @@ def semantic_preparation(
         check()
     signature = freshness.stat_signature(path)
     source_bytes = path.stat().st_size
-    with parser_preparation(source_bytes, limit_bytes=limit_bytes, check=check) as preparation:
-        preparation.reserve_source(source_bytes, source_limit=source_limit)
-        source, preparation.guard = vault.read_bounded_guarded_bytes(
-            vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes,
-            **({"expected_hash": expected_hash} if expected_hash is not None else {}),
-        )
-        if len(source) != source_bytes or freshness.stat_signature(path) != signature:
-            raise OSError("semantic input changed during preparation")
-        preparation.source = source.decode("utf-8")
-        preparation.signature = signature
-        frontmatter = find_corpus.FRONTMATTER_PATTERN.match(preparation.source)
-        preparation.reserve_parser(
-            preparation.source, yaml_text=frontmatter.group(1) if frontmatter else None,
-        )
-        yield preparation
+    with parser_preparation(source_bytes, limit_bytes=limit_bytes, check=check, owner=owner, keep_open=owner is not None) as preparation:
+        source = frontmatter = None
+        try:
+            preparation.reserve_source(source_bytes, source_limit=source_limit)
+            source, preparation.guard = vault.read_bounded_guarded_bytes(
+                vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes,
+                **({"expected_hash": expected_hash} if expected_hash is not None else {}),
+            )
+            if len(source) != source_bytes or freshness.stat_signature(path) != signature:
+                raise OSError("semantic input changed during preparation")
+            preparation.source = source.decode("utf-8")
+            preparation.signature = signature
+            frontmatter = find_corpus.FRONTMATTER_PATTERN.match(preparation.source)
+            preparation.reserve_parser(
+                preparation.source, yaml_text=frontmatter.group(1) if frontmatter else None,
+            )
+            yield preparation
+
+        finally:
+            if owner is not None:
+                source = frontmatter = None
 
 
 def semantic_preparation_status() -> dict[str, int]:

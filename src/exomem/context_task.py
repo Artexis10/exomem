@@ -162,108 +162,113 @@ def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
 
 
 def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expected_hash=None, provider=None, check=None,
-                   hydrate: bool = True, limit_bytes: int | None = None):
+                   hydrate: bool = True, limit_bytes: int | None = None, preparation_owner=None):
     """Release one immutable source before its text, metadata or version can influence a task."""
-    check = check or _deadline_check
-    check()
-    if cache is not None and source_ref in cache and expected_hash is None and provider is None:
-        return cache[source_ref]
-    path = (root / source_ref).resolve()
-    if (not path.is_relative_to(root.resolve()) or path.relative_to(root.resolve()).as_posix() != source_ref
-            or not caller.sees(source_ref) or not egress.quick_page_visible(root, source_ref, purpose=caller.purpose)):
-        return None
-    check()
-    method_cache = {}
-    if full_source_access(root, caller, provider=provider):
-        if expected_hash is not None:
-            _raw, guard = vault.read_bounded_guarded_bytes(
-                root, source_ref, limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES, expected_hash=expected_hash,
-            )
-            guard.recheck(root)
-        page = _source(root, source_ref, caller)
-        if page is None:
+    try:
+        check = check or _deadline_check
+        check()
+        if cache is not None and source_ref in cache and expected_hash is None and provider is None:
+            return cache[source_ref]
+        path = (root / source_ref).resolve()
+        if (not path.is_relative_to(root.resolve()) or path.relative_to(root.resolve()).as_posix() != source_ref
+                or not caller.sees(source_ref) or not egress.quick_page_visible(root, source_ref, purpose=caller.purpose)):
             return None
-        try:
-            methods = _method_refs(root, page, caller, method_cache, check=check) if hydrate else None
-        except Exception:  # noqa: BLE001 - failed method currency leaves the source read route usable
-            methods = None
-        result = SourceProjection(
-            {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body},
-            page.snapshot_hash, page.snapshot_hash, methods, egress.without_wikilinks(page.title), page.page_type,
-        )
-    else:
-        with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash,
-                                                    limit_bytes=limit_bytes) as prepared:
-            egress.source_release.path_dependency(root, source_ref, guard=prepared.guard)
-            raw = prepared.source.encode("utf-8")
-            page = find_corpus.parse_page(path, path.stat().st_mtime, root, content=raw)
+        check()
+        method_cache = {}
+        if full_source_access(root, caller, provider=provider):
+            if expected_hash is not None:
+                _raw, guard = vault.read_bounded_guarded_bytes(
+                    root, source_ref, limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES, expected_hash=expected_hash,
+                )
+                guard.recheck(root)
+            page = _source(root, source_ref, caller)
             if page is None:
-                raise ValueError("task source is unavailable")
-            who = principal.effective_principal().with_purpose(caller.purpose)
-            views = [(who, caller)]
-            if provider is not None:
-                from .context_views import CallerView
-
-                views.append((provider.with_purpose(caller.purpose), CallerView.current(root, principal=provider, purpose=caller.purpose)))
-            policy, _active = egress.gate_state(root)
-            # Extra unit omissions have no exact canonical L5 excerpt mapping; keep that source on ordinary pull surfaces.
-            if any(egress._release_level_for_markdown_snapshot(
-                root, source_ref, raw, principal=actor, purpose=caller.purpose, policy=policy,
-            ) != egress.LEVEL_FULL for actor, _view in views):
-                if cache is not None and provider is None:
-                    cache[source_ref] = None
                 return None
-            selected = semantic_index.selected_parent_index_state(root, source_ref, source=prepared.source)
-            egress.source_release.registry_dependency(root, selected.definitions)
-            if selected.parent_source_hash != page.snapshot_hash:
-                raise ValueError("task source changed during selection")
-            units, _categories = _unit_candidates(page, selected)
-            kept = [True] * len(units)
-            for actor, view in views:
-                reader = egress.reader_view(root, principal=actor, purpose=caller.purpose, keep=view.visible)
-                verdicts = (reader.verdicts([working_set._served_unit(item) for item in units]) if reader is not None
-                            else egress.classify_units(root, [working_set._served_unit(item) for item in units], principal=actor, purpose=caller.purpose))
-                kept = [previous and verdict == egress.UNIT_KEPT for previous, verdict in zip(kept, verdicts, strict=True)]
-            prose_units = find_results.prose_units(root, page, selected.document.units)
-            admitted_refs = {unit.unit_ref for unit in prose_units}
-            admitted = tuple(item for item, keep in zip(units, kept, strict=True) if keep and item.ref in admitted_refs)
-            admitted_refs = {item.ref for item in admitted}
-            body = provenance.remove_carriers(page.body, provenance._merged(
-                (unit.span.start_offset, unit.span.end_offset)
-                for unit in selected.document.units if unit.unit_ref not in admitted_refs
-            ))
-            # These are the canonical page-read fields; raw hash and advisory file time remain private guard evidence.
-            released = {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": body}
-            reference = memory_refs.ref_from_markdown(prepared.source)
-            if reference is not None:
-                released["ref"] = reference
-            for actor, _view in views:
-                with principal.request_scope(actor):
-                    released = egress.annotate_page(root, released, principal=actor, purpose=caller.purpose)
-                    if released is None or released.get("release_level", egress.LEVEL_FULL) != egress.LEVEL_FULL:
-                        return None
-                    released = egress.postfilter("read_memory", released, root, request_kwargs={"purpose": caller.purpose})
-            if not isinstance(released, dict) or not isinstance(released.get("body"), str) or released.get("path") != source_ref:
-                raise ValueError("released task source is unavailable")
-            for field in ("content_hash", "content", "mtime"):  # Exact-byte read fields do not define this derived source version.
-                released.pop(field, None)
-            released = _PUBLIC_SOURCE.dump_python(released, mode="json", warnings="error")
-            metadata = released.get("frontmatter")
-            title = (vault.resolve_display_title(metadata, released["body"], path) if isinstance(metadata, Mapping) else None)
-            carrier = metadata.get("type") if isinstance(metadata, Mapping) else None
             try:
-                methods = (_method_refs(root, page, caller, method_cache, selected=selected, admitted=admitted, check=check)
-                           if hydrate else None)
-            except Exception:  # noqa: BLE001 - failed currency cannot remove admitted source prose
+                methods = _method_refs(root, page, caller, method_cache, check=check) if hydrate else None
+            except Exception:  # noqa: BLE001 - failed method currency leaves the source read route usable
                 methods = None
-            prepared.guard.recheck(root)
-            check()
-            version = hashlib.sha256(json.dumps(released, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            result = SourceProjection(released, page.snapshot_hash, version, methods,
-                                      egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None)
-    if cache is not None and provider is None:
-        cache[source_ref] = result
-    return result
+            result = SourceProjection(
+                {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body},
+                page.snapshot_hash, page.snapshot_hash, methods, egress.without_wikilinks(page.title), page.page_type,
+            )
+        else:
+            with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash,
+                                                        limit_bytes=limit_bytes, owner=preparation_owner) as prepared:
+                egress.source_release.path_dependency(root, source_ref, guard=prepared.guard)
+                raw = prepared.source.encode("utf-8")
+                page = find_corpus.parse_page(path, path.stat().st_mtime, root, content=raw)
+                if page is None:
+                    raise ValueError("task source is unavailable")
+                who = principal.effective_principal().with_purpose(caller.purpose)
+                views = [(who, caller)]
+                if provider is not None:
+                    from .context_views import CallerView
+
+                    views.append((provider.with_purpose(caller.purpose), CallerView.current(root, principal=provider, purpose=caller.purpose)))
+                policy, _active = egress.gate_state(root)
+                # Extra unit omissions have no exact canonical L5 excerpt mapping; keep that source on ordinary pull surfaces.
+                if any(egress._release_level_for_markdown_snapshot(
+                    root, source_ref, raw, principal=actor, purpose=caller.purpose, policy=policy,
+                ) != egress.LEVEL_FULL for actor, _view in views):
+                    if cache is not None and provider is None:
+                        cache[source_ref] = None
+                    return None
+                selected = semantic_index.selected_parent_index_state(root, source_ref, source=prepared.source)
+                egress.source_release.registry_dependency(root, selected.definitions)
+                if selected.parent_source_hash != page.snapshot_hash:
+                    raise ValueError("task source changed during selection")
+                units, _categories = _unit_candidates(page, selected)
+                kept = [True] * len(units)
+                for actor, view in views:
+                    reader = egress.reader_view(root, principal=actor, purpose=caller.purpose, keep=view.visible)
+                    verdicts = (reader.verdicts([working_set._served_unit(item) for item in units]) if reader is not None
+                                else egress.classify_units(root, [working_set._served_unit(item) for item in units], principal=actor, purpose=caller.purpose))
+                    kept = [previous and verdict == egress.UNIT_KEPT for previous, verdict in zip(kept, verdicts, strict=True)]
+                prose_units = find_results.prose_units(root, page, selected.document.units)
+                admitted_refs = {unit.unit_ref for unit in prose_units}
+                admitted = tuple(item for item, keep in zip(units, kept, strict=True) if keep and item.ref in admitted_refs)
+                admitted_refs = {item.ref for item in admitted}
+                body = provenance.remove_carriers(page.body, provenance._merged(
+                    (unit.span.start_offset, unit.span.end_offset)
+                    for unit in selected.document.units if unit.unit_ref not in admitted_refs
+                ))
+                # These are the canonical page-read fields; raw hash and advisory file time remain private guard evidence.
+                released = {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": body}
+                reference = memory_refs.ref_from_markdown(prepared.source)
+                if reference is not None:
+                    released["ref"] = reference
+                for actor, _view in views:
+                    with principal.request_scope(actor):
+                        released = egress.annotate_page(root, released, principal=actor, purpose=caller.purpose)
+                        if released is None or released.get("release_level", egress.LEVEL_FULL) != egress.LEVEL_FULL:
+                            return None
+                        released = egress.postfilter("read_memory", released, root, request_kwargs={"purpose": caller.purpose})
+                if not isinstance(released, dict) or not isinstance(released.get("body"), str) or released.get("path") != source_ref:
+                    raise ValueError("released task source is unavailable")
+                for field in ("content_hash", "content", "mtime"):  # Exact-byte read fields do not define this derived source version.
+                    released.pop(field, None)
+                released = _PUBLIC_SOURCE.dump_python(released, mode="json", warnings="error")
+                metadata = released.get("frontmatter")
+                title = (vault.resolve_display_title(metadata, released["body"], path) if isinstance(metadata, Mapping) else None)
+                carrier = metadata.get("type") if isinstance(metadata, Mapping) else None
+                try:
+                    methods = (_method_refs(root, page, caller, method_cache, selected=selected, admitted=admitted, check=check)
+                               if hydrate else None)
+                except Exception:  # noqa: BLE001 - failed currency cannot remove admitted source prose
+                    methods = None
+                prepared.guard.recheck(root)
+                check()
+                version = hashlib.sha256(json.dumps(released, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                result = SourceProjection(released, page.snapshot_hash, version, methods,
+                                          egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None)
+        if cache is not None and provider is None:
+            cache[source_ref] = result
+        return result
+
+    finally:
+        if preparation_owner is not None:
+            raw = page = selected = units = kept = prose_units = admitted = body = released = result = None
 
 
 def _revalidate(root: Path, held: Sequence[Mapping[str, str]], caller: Any, sources: dict) -> bool:

@@ -105,8 +105,11 @@ def _pending_reference_projection(vault_root: Path):
     the settled path stays exactly as it was.
     """
     from . import pending_recall
+    from .governance import source_release
 
-    return pending_recall.reference_projection(Path(vault_root))
+    projection = pending_recall.reference_projection(Path(vault_root))
+    source_release.pending_references_dependency(Path(vault_root), projection)
+    return projection
 
 
 def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) -> None:
@@ -989,6 +992,9 @@ def reference_owner_lookup(
     read: list[tuple[bool, ReferenceProjection | None]] = []
 
     def owners_of(identity: str) -> tuple[str, ...] | None:
+        from .governance import source_release
+
+        source_release.unsupported()  # A borrowed bare owner map carries no exact identity-snapshot proof.
         if not read:
             try:
                 read.append((True, _settled_projection(root, _admitted_projection(
@@ -1121,7 +1127,6 @@ def _reference_owners_read_only(
     from .governance import source_release
 
     root = Path(vault_root)
-    source_release.references_dependency(root, wanted)
     if not wanted and not _optional:
         return _ReferenceOwners(root.resolve(), {}, None)
 
@@ -1191,6 +1196,7 @@ def _reference_owners_read_only(
                 measured["pages"] = len(pages)
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
+    source_release.references_dependency(root, snapshot, resolved)
     return _ReferenceOwners(root.resolve(), resolved, snapshot)
 
 

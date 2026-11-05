@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -119,28 +120,49 @@ class SourceReleaseCapture:
     references: dict = field(default_factory=dict)
     pending: tuple | None = None
     memo: dict = field(default_factory=dict, repr=False)
+    preparation_owner: runtime_resources.SemanticPreparation | None = field(default=None, repr=False)
+    memory: Callable[[SourceReleaseCapture, tuple, int], None] | None = field(default=None, repr=False)
+
+    def admit(self, *values, extra=0):
+        if self.memory is not None:
+            # These maps are the closed capture schema, not customer vocabulary.
+            overlap = 3 * sum(sys.getsizeof(value) for value in (
+                self.paths, self.observed_hashes, self.decisions, self.names, self.directories, self.registries, self.references,
+            ))
+            self.memory(self, values, extra + overlap)
 
     def finish(self) -> SourceReleaseProof | None:
         if not self.supported or self.basis is None:
             return None
         if self.source is not None and (self.source not in self.paths or self.source not in self.decisions):
             return None
+        self.admit()
         proof = SourceReleaseProof(
             self.basis, self.source, tuple(self.paths.values()), tuple(sorted(self.decisions.items())),
             tuple(sorted(self.names.items())), tuple(sorted(self.directories.values())),
             tuple(sorted(self.registries.values())), self.namespace,
             tuple(sorted(self.references.items())), self.pending,
         )
-        return proof if validate_source_release_proofs(self.root, self.basis, (proof,), memo=self.memo)[0] else None
+        return proof if validate_source_release_proofs(
+            self.root, self.basis, (proof,), memo=self.memo, preparation_owner=self.preparation_owner,
+            memory=lambda extra=0: self.admit(proof, extra=extra),
+        )[0] else None
 
 
 _CAPTURE: ContextVar[SourceReleaseCapture | None] = ContextVar("source_release", default=None)
 
 
+def capture_active(root: Path) -> bool:
+    """Whether this request observes owner dependencies for this vault."""
+    capture = _CAPTURE.get()
+    return capture is not None and capture.root == root
+
+
 @contextmanager
-def source_release_proof(root: Path, basis: SourceReleaseBasis | None, *, source_ref: str | None = None, memo=None):
+def source_release_proof(root: Path, basis: SourceReleaseBasis | None, *, source_ref: str | None = None, memo=None,
+                         preparation_owner=None, memory=None):
     """Observe canonical preparation; the observer never changes release decisions."""
-    capture = SourceReleaseCapture(root, basis, source=source_ref)
+    capture = SourceReleaseCapture(root, basis, source=source_ref, preparation_owner=preparation_owner, memory=memory)
     if memo is not None:
         capture.memo = memo
     token = _CAPTURE.set(capture)
@@ -167,6 +189,7 @@ def path_dependency(root: Path, path: str, *, guard=None) -> None:
         unsupported()
         return
     try:
+        capture.admit(extra=4 * len(path) * (path.count("/") + 1) + 256 * (path.count("/") + 1))
         if guard is None:
             try:
                 info = (root / path).stat()
@@ -182,12 +205,13 @@ def path_dependency(root: Path, path: str, *, guard=None) -> None:
                         unsupported()
                         return
                     # The maintained guard hashes in 64 KiB chunks; retaining another target body would double read memory.
-                    with runtime_resources.parser_preparation(0) as preparation:
+                    with runtime_resources.parser_preparation(0, owner=capture.preparation_owner) as preparation:
                         preparation.reserve(65536)
                         guard = vault.PathGuard.capture(root, path, leaf_policy="stable")
                         digest = vault._leaf_hash(root / path, guard.leaf_identity)
                         guard = replace(guard, leaf_policy="content", expected_content_hash=digest)
                         guard.recheck(root)
+        capture.admit(guard)
         capture.paths[path] = guard
     except (OSError, ValueError, runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
         unsupported()
@@ -199,6 +223,7 @@ def observed_content(root: Path, path: str, digest: str) -> None:
     if capture is None or capture.root != root:
         return
     path_dependency(root, path)
+    capture.admit(digest)
     previous = capture.observed_hashes.setdefault(path, digest)
     guard = capture.paths.get(path)
     if previous != digest or guard is None or guard.leaf_policy == "absent":
@@ -213,6 +238,7 @@ def directory_dependency(root: Path, directory: Path, name: str, resolved: str |
     if capture is not None and capture.root == root:
         try:
             relative = directory.relative_to(root).as_posix()
+            capture.admit(relative, name, resolved)
             capture.directories[relative, name] = relative, name, resolved
         except (ValueError, OSError):
             unsupported()
@@ -227,7 +253,9 @@ def registry_dependency(root: Path, definitions) -> None:
         return
     for subject, snapshot in definitions.snapshots.items():
         key = subject, definitions.instance_id
-        capture.registries[key] = (*key, definitions.binding_revision, snapshot.content_hash, snapshot.effective_digest)
+        value = (*key, definitions.binding_revision, snapshot.content_hash, snapshot.effective_digest)
+        capture.admit(key, value)
+        capture.registries[key] = value
 
 
 def names_dependency(root: Path, names, resolved) -> None:
@@ -235,52 +263,56 @@ def names_dependency(root: Path, names, resolved) -> None:
     if capture is not None and capture.root == root:
         from ..working_set_index import normalize
 
+        capture.admit(resolved, extra=256 * len(names))
         capture.names.update((normalize(name), resolved.get(normalize(name), ())) for name in names)
 
 
-def namespace_dependency(root: Path) -> None:
+def namespace_dependency(root: Path, proof: artifact_census.NamespaceProof | None) -> None:
     capture = _CAPTURE.get()
     if capture is not None and capture.root == root:
-        proof = capture.memo.get("namespace")
-        if proof is None:
-            proof = artifact_census.current_namespace_proof(root)
-            if proof is not None:
-                capture.memo["namespace"] = proof
-        if proof is None:
+        capture.admit(proof)
+        if proof is None or capture.namespace is not None and capture.namespace != proof:
             unsupported()
         else:
             capture.namespace = proof
 
 
-def _pending_identity(root: Path) -> tuple | None:
-    projection = memory_refs._pending_reference_projection(root)
+def _pending_identity(projection) -> tuple:
     if projection is None:
-        return None
+        return ()
     return (tuple(sorted(projection.paths_by_id.items())), projection.absent_paths,
             tuple(sorted(projection.refs_by_path.items())), projection.blocked_paths)
 
 
-def references_dependency(root: Path, ids: Iterable[str]) -> None:
+def pending_references_dependency(root: Path, projection) -> None:
     capture = _CAPTURE.get()
-    ids = tuple(ids)
-    if capture is None or capture.root != root or not ids:
+    if capture is None or capture.root != root:
         return
-    from .. import semantic_contract
-
-    try:
-        snapshot = semantic_contract.current_reference_identity_snapshot(root)
-        if snapshot is None:
-            unsupported()
-            return
-        capture.references.update((identity, snapshot.reference_owners.get(identity, ())) for identity in ids)
-        capture.pending = _pending_identity(root)
-    except Exception:  # noqa: BLE001 - a missing proof cannot add a refusal to the canonical read
+    capture.admit(projection)
+    observed = _pending_identity(projection)
+    if (capture.pending is not None and capture.pending != observed
+            or projection is not None and projection.blocked_paths):
         unsupported()
+    capture.pending = observed
+
+
+def references_dependency(root: Path, snapshot, resolved) -> None:
+    capture = _CAPTURE.get()
+    if capture is None or capture.root != root or not resolved:
+        return
+    if snapshot is None:
+        unsupported()  # A scan answers canonically but supplies no reusable owner proof.
+        return
+    capture.admit(resolved)
+    for identity, paths in resolved.items():
+        previous = capture.references.setdefault(identity, paths)
+        if previous != paths or snapshot.reference_owners.get(identity, ()) != paths:
+            unsupported()
 
 
 def validate_source_release_proofs(
     root: Path, basis: SourceReleaseBasis, proofs: Iterable[SourceReleaseProof], *, memo: dict | None = None,
-    check_paths: bool = True,
+    check_paths: bool = True, preparation_owner=None, memory=None,
 ) -> tuple[bool, ...]:
     """Validate owner facts under the incoming request's freshly verified authority."""
     from .. import semantic_contract, working_set_index
@@ -289,11 +321,22 @@ def validate_source_release_proofs(
 
     memo = memo if memo is not None else {}
     results = []
+    if memory is not None:
+        memory(extra=512)
     for proof in proofs:
+        if type(proof) is not SourceReleaseProof:
+            results.append(False)
+            continue
+        local_facts = (sum(len(guard.ancestors) + 1 for guard in proof.paths)
+                       + len(proof.directories) + len(proof.names) + len(proof.registries) + len(proof.references))
+        if memory is not None:
+            memory(extra=256 * local_facts)
+        elif preparation_owner is not None:
+            preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + 256 * local_facts)
         valid = type(proof) is SourceReleaseProof and proof.basis == basis
         try:
             if valid and proof.namespace is not None:
-                if "namespace" not in memo:
+                if memo.get("namespace") is None:
                     memo["namespace"] = artifact_census.current_namespace_proof(root)
                 valid = memo["namespace"] == proof.namespace
             for guard in proof.paths if valid and check_paths else ():
@@ -302,7 +345,7 @@ def validate_source_release_proofs(
                     try:
                         if guard.leaf_policy == "content":
                             size = guard.expected_content_size or 0
-                            with runtime_resources.parser_preparation(size) as preparation:
+                            with runtime_resources.parser_preparation(size, owner=preparation_owner) as preparation:
                                 preparation.reserve(8 * size + 65536)
                                 guard.recheck(root, memo.setdefault("ancestors", set()))
                         else:
@@ -316,8 +359,17 @@ def validate_source_release_proofs(
                 if key not in memo:
                     import os
 
+                    names = {}
+                    name_bytes = 0
                     with os.scandir(root / relative) as scanned:
-                        memo[key] = dict.fromkeys(entry.name for entry in scanned)
+                        for entry in scanned:
+                            if preparation_owner is not None:
+                                preparation_owner.reserve(preparation_owner.floor_bytes + 65536
+                                                          + 3 * sys.getsizeof(names)
+                                                          + name_bytes + sys.getsizeof(entry.name) + 256)
+                            names[entry.name] = None
+                            name_bytes += sys.getsizeof(entry.name)
+                    memo[key] = names
                 valid = valid and _physical_directory_match(memo[key], name) == resolved
             for subject, scope, binding, content, digest in proof.registries if valid else ():
                 key = "registry", subject, scope
@@ -333,14 +385,26 @@ def validate_source_release_proofs(
                     memo[key] = working_set_index.WorkingSetIndex(root).resolve_names(names)
                 valid = all(memo[key].get(name, ()) == paths for name, paths in proof.names)
             if valid and proof.references:
-                if "references" not in memo:
-                    memo["references"] = semantic_contract.current_reference_identity_snapshot(root)
-                    memo["pending"] = _pending_identity(root)
-                snapshot = memo["references"]
-                valid = (snapshot is not None and memo["pending"] == proof.pending
-                         and all(snapshot.reference_owners.get(identity, ()) == paths for identity, paths in proof.references))
+                snapshot = None
+                for identity, paths in proof.references:
+                    key = "reference", identity
+                    if key not in memo:
+                        if snapshot is None:
+                            snapshot = semantic_contract.current_reference_identity_snapshot(root)
+                        if snapshot is None:
+                            valid = False
+                            break
+                        memo[key] = snapshot.reference_owners.get(identity, ())
+                    valid = valid and memo[key] == paths
+                snapshot = None
+            if valid and proof.pending is not None:
+                if "pending" not in memo:
+                    memo["pending"] = _pending_identity(memory_refs._pending_reference_projection(root))
+                valid = memo["pending"] == proof.pending
         except Exception:  # noqa: BLE001 - unsupported or unknown owner proof requires canonical preparation
             valid = False
+        if memory is not None:
+            memory()
         results.append(valid)
     return tuple(results)
 
