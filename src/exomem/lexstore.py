@@ -139,6 +139,7 @@ class _CatalogReadView:
 
     def published_withheld_paths(
         self, scope: str, checkpoint: object, admission: Admission, paths: Set[str],
+        *, source_hashes: Mapping[str, str] | None = None,
     ) -> frozenset[str]:
         """Prove only held rows, using the caller's current admission identity."""
         identity = admission.identity()
@@ -147,7 +148,15 @@ class _CatalogReadView:
         entry = self.withheld_verdicts.get((scope, identity))
         if entry is None:
             return frozenset()
-        return frozenset(path for path in paths if entry.allowed.get(path) is False)
+        return frozenset(
+            path for path in paths
+            if entry.allowed.get(path) is False
+            and (source_hashes is None or (
+                (digest := source_hashes.get(path)) is not None
+                and (signature := entry.signatures.get(path)) is not None
+                and signature[0] == digest
+            ))
+        )
 
     def close(self) -> None:
         conn, self.connection = self.connection, None

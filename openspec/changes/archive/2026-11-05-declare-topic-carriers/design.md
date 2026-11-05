@@ -167,3 +167,7 @@ The carrier counts partition the declared carriers: filing, matching but with no
   - a folder that mixes two topics;
   - a tag that is a status, not a subject;
   - a carrier in another language.
+
+## Closure sequencing
+
+The canonical `context-activation` spec now contains "Topic membership is declared". Its availability permits this change to update that requirement before `compile-context-maps-and-profiles` archives. The later maps archive must refresh its delta against current canonical text and preserve the carrier and home routes. This changes closure order, not the membership contract.

@@ -30,12 +30,13 @@ def link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
     """
     from .governance import egress
 
-    matches = (
-        vault.cached_inbound_wikilinks(
-            vault_root, rel_path, visible=egress.visible_page_filter(vault_root)
+    with egress.proven_withheld_scope(reuse=True):
+        matches = (
+            vault.cached_inbound_wikilinks(
+                vault_root, rel_path, visible=egress.reader_view(vault_root)
+            )
+            if rel_path else None
         )
-        if rel_path else None
-    )
     inbound = None if matches is None else [match.as_dict() for match in matches]
     prose = egress.prose_for_caller(vault_root, body, owner_path=rel_path)
     return {"inbound": inbound, "outbound": outbound_link_targets(prose)}

@@ -559,7 +559,7 @@ def _neighborhood(
     """
     from .governance import egress
 
-    visible = egress.visible_page_filter(vault_root)
+    visible = egress.reader_view(vault_root)
     packed_canon = {corpus_aware._canon(p.rel_path) for p in packed_pages}
     # canon -> {"path", "directions": set, "referenced_by": set}
     neigh: dict[str, dict] = {}
@@ -594,11 +594,12 @@ def _neighborhood(
                 page, vault_root, resolver, **view
             ):
                 _touch(target, page.rel_path, "out")
-        inbound = (
-            vault_module.cached_inbound_wikilinks(vault_root, page.rel_path, **view)
-            if borrow
-            else vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view)
-        )
+        with egress.proven_withheld_scope(reuse=True):
+            inbound = (
+                vault_module.cached_inbound_wikilinks(vault_root, page.rel_path, **view)
+                if borrow
+                else vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view)
+            )
         if inbound is None:
             if INBOUND_INCOMPLETE_TRUNCATION not in incomplete:
                 incomplete.append(INBOUND_INCOMPLETE_TRUNCATION)

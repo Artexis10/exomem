@@ -1,4 +1,9 @@
-## ADDED Requirements
+# topic-carrier-declaration Specification
+
+## Purpose
+Declare topic membership through governed project, folder and tag carriers and homes. Keep inferred declarations visible for owner review.
+
+## Requirements
 
 ### Requirement: Topics are declared on carriers
 
