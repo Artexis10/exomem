@@ -74,6 +74,7 @@ Keep its account, client, arguments, original `continuation` and explicit idempo
 The server reconciles the same abandoned mutation identity before it resumes the retained scope.
 Do not substitute a continuation from a later status reply or change retry filters for this call.
 After recovery returns a new continuation, follow that continuation normally.
+If replay returns only a committed envelope, read the summary again for the current phase and continuation.
 
 An active writer returns `MUTATION_ACKNOWLEDGEMENT_PENDING`; wait for that call before retrying its exact identity.
 `IMPORT_RECOVERY_UNRESOLVED` means the server cannot prove the original scope or exact custody.

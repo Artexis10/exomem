@@ -1468,7 +1468,8 @@ def status(root: Path, *, run_id: str | None = None, path: str = "", view: Statu
     else:
         extra["interrupted"] = False
     extra["interrupted"] = extra["interrupted"] or any(
-        "reply" not in invocation for invocation in (run.get("apply_invocations") or {}).values()
+        "reply" not in invocation and invocation.get("plan_id") == (run.get("plan") or {}).get("plan_id")
+        for invocation in (run.get("apply_invocations") or {}).values()
     )
     stale = probe_staleness(root, run)
     presented = _present(
@@ -3093,6 +3094,12 @@ def apply(
             )
         ):
             run.update(before)
+            if identity is not None:
+                # This refusal imported nothing; settle its intent before the outer writer releases the uncommitted key.
+                run["apply_invocations"].pop(identity[0], None)
+                if not run["apply_invocations"]:
+                    run.pop("apply_invocations")
+                store.save_intent(run)
             raise AdoptionRunError(
                 "ADOPTION_SOURCE_CHANGED",
                 "every requested source changed or is missing since the plan was captured; "

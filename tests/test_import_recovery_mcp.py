@@ -357,6 +357,43 @@ def test_legacy_recovery_without_scope_or_publication_proof_changes_nothing(tmp_
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
+def test_replan_after_prepublication_refusal_has_no_phantom_interruption(vault, monkeypatch):
+    """A known uncommitted refusal must not make a later successful plan look interrupted."""
+    folder = vault / "Legacy"
+    folder.mkdir()
+    original = folder / "document.md"
+    original.write_text("# Initial\n\nInitial material.\n", encoding="utf-8")
+    run = adoption_run.start(vault, path="Legacy", consume=False)
+    run_id = run["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=["Legacy"])
+    planned = adoption_run.plan(vault, run_id=run_id)
+    original.write_text("# Updated\n\nUpdated material.\n", encoding="utf-8")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+
+    async def journey():
+        async with Client(server.build_server(require_auth=False)) as client:
+            refused = await client.call_tool("import_memory", {"operation": {
+                "kind": "apply", "run_id": run_id, "plan_id": planned["plan"]["plan_id"]},
+                "response_detail": "full"}, raise_on_error=False,
+                meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "refused-plan"})
+            assert "ADOPTION_SOURCE_CHANGED" in json.dumps(refused.structured_content)
+            assert adoption_run.status(vault, run_id=run_id, view="summary")["interrupted"] is False
+            refreshed = adoption_run.plan(vault, run_id=run_id)
+            result = await client.call_tool("import_memory", {"operation": {
+                "kind": "apply", "run_id": run_id, "plan_id": refreshed["plan"]["plan_id"]},
+                "response_detail": "full"}, raise_on_error=False,
+                meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "refreshed-plan"})
+            assert not result.is_error and result.structured_content.get("success") is not False, result
+            summary = adoption_run.status(vault, run_id=run_id, view="summary")
+            assert summary["phase"] == "applied" and summary["remaining"] == 0
+            assert summary["interrupted"] is False
+
+    try:
+        asyncio.run(journey())
+    finally:
+        writer_lease.reset_managers_for_tests()
+
+
 def test_same_identity_recovers_a_frozen_chunk_after_rename_before_source(tmp_path, monkeypatch):
     """The rename journal and invocation checkpoint must retain one original and one Source identity."""
     import test_adoption_consume as consume
@@ -574,7 +611,7 @@ def test_crashed_apply_resumes_same_mcp_identity_without_duplicate_sources(vault
         writer_lease.reset_managers_for_tests()
 
 
-@pytest.mark.parametrize("cut", ["note", "final-run", "signed-receipt"])
+@pytest.mark.parametrize("cut", ["note", "final-run", "signed-receipt", "canonical-row"])
 def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypatch, cut):
     """A note or leaf result that landed before acknowledgement must not run twice or lose its progress."""
     from exomem import graph_sync
@@ -613,7 +650,7 @@ def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypa
             return result
 
         monkeypatch.setattr(adoption_run.AdoptionRunStore, "save", save_then_stop)
-    else:
+    elif cut == "signed-receipt":
         persist = graph_sync.write_graph_commit_receipt
 
         def stop_before_receipt(*args, **kwargs):
@@ -621,6 +658,14 @@ def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypa
             return persist(*args, **kwargs)
 
         monkeypatch.setattr(graph_sync, "write_graph_commit_receipt", stop_before_receipt)
+    else:
+        persist = writer_lease.IdempotencyStore._persist_canonically_committed
+
+        def stop_after_receipt(*args, **kwargs):
+            stop_once()
+            return persist(*args, **kwargs)
+
+        monkeypatch.setattr(writer_lease.IdempotencyStore, "_persist_canonically_committed", stop_after_receipt)
     arguments = {"operation": {"kind": "apply", "run_id": run_id, "plan_id": planned["plan"]["plan_id"]},
                  "response_detail": "full"}
     store = adoption_run.AdoptionRunStore(vault)
