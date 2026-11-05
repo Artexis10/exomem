@@ -296,8 +296,15 @@ async def main():
 asyncio.run(main())
 """
 
-INIT_VAULT = ("import sys; from pathlib import Path; from exomem import init; "
-              "init.init_vault(Path(sys.argv[1]), force=sys.argv[2:] == ['overlay'])")
+INIT_VAULT = """
+import sys
+from pathlib import Path
+from exomem import init
+from exomem.governance.principal import library_scope
+# Trusted offline fixture setup needs an explicit owner binding.
+with library_scope():
+    init.init_vault(Path(sys.argv[1]), force=sys.argv[2:] == ['overlay'])
+"""
 INIT_STATE = ("import sys; from pathlib import Path; from exomem import state_migration as m; "
               "Path(sys.argv[1]).mkdir(parents=True, exist_ok=True); m.migrate_vault_state_offline(Path(sys.argv[1]), "
               "authority=m.assert_offline_migration_authority(source='latency gate arm before seeding'))")
