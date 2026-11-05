@@ -54,6 +54,48 @@ double's new reader argument. No unresolved product finding remained.
 Repository-wide CI is recorded on [PR #1068](https://github.com/Artexis10/exomem/pull/1068).
 Release, live-cell acceptance and OpenSpec closure remain separate gates.
 
+## Current seam reconciliation
+
+On 2026-11-05, eight changed seams received derived counterexamples against
+source `166f89b5451b9e163d88d1dde738f6a73feb7994`.
+[current-counterexamples.json](current-counterexamples.json) records each actual
+edit, test, source hash, outcome and exact restoration. These edits are new
+counterexamples; the historical edit text was not retained.
+
+| Historical claim | Current observation |
+|---|---|
+| L1-M10B-current | A zero-duration semantic parent fails child containment. |
+| filter-completion/L2-N4-current | Authored compact tags in the canonical column lose matching parents. |
+| filter-completion/L2-N5-current | Removing the unit `EXISTS` arm loses unit-only and same-unit matches. |
+| L3-M3b-current | Disabling lexical fan-out and custody repair leaves six stale cache rows. |
+| L3-N3-current | Custody before final revalidation changes caches for a rejected batch. |
+| L4-M2 | Removing the projection-lag refusal exposes stale widening in page and mixed results. |
+| L4-M2, active cache | Removing the lag key serves the previously live reserve after projection drift. |
+| L4-M3 | Removing the reserve cap spends the only result slot outside the knowledge base. |
+| L4-M6 | Removing the widening key serves the cached plain answer to a widened request. |
+
+Eleven attempts produced nine behavioral failures and two survivors. The cold
+widening attempt failed both parameters, giving ten failed cases. Four scoped
+restoration runs passed 3, 4, 5 and 2 cases. These repeated cases are restoration
+checks, not fourteen distinct guards.
+
+Both survivors used an admitted caller that disables shared result caching.
+The trace reported `enabled=false`, no cache entries and an admission callback.
+The corrected cache cases use the existing library principal and page results.
+They require an enabled cache or an actual cache hit before testing separation.
+Both counterexamples then fail at the intended observable result. Production
+cache policy remains unchanged.
+
+Current CI run `41952112987` supplies restored-green evidence for all 39 named
+historical nodes, comprising 41 cases. All 25 core JUnit archives matched their
+provider digests. Their runtime, dependency lock, conftest and five guard modules
+match the delivered source. This proves execution, not current mutant kills.
+
+The other fifty historical claims retain their bounded historical evidence.
+The eight declared controls, two retired anchors and shared-proof duplicates
+keep their original dispositions. Task 5.3 remains open for final aggregate
+qualification; these receipts close no absolute, installed or live acceptance.
+
 ## Recovered-row ledger
 
 IDs below map to `id` in the JSON. The `filter-completion/` prefix also

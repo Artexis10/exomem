@@ -8434,19 +8434,15 @@ def reset_page_and_result_caches() -> dict[str, int]:
 
 
 def cache_status() -> dict:
-    """No-allocation residency status for find's rebuildable RAM caches."""
-    page_entries = list(_CACHE.entries.values())
+    """Read resident counts without loading pages or rebuilding caches."""
+    pages = _CACHE.cache_status()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         hot_hits = sum(len(v[0]) for v in _FIND_CACHE.values())
     return {
-        "pages": {
-            "entries": len(page_entries),
-            "body_chars": sum(len(p.body) for p in page_entries),
-            "hits": int(_CACHE.hits),
-        },
+        "pages": pages,
         "resolvers": {"entries": resolver_entries},
         "hot_find": {"entries": hot_entries, "hits": hot_hits},
     }
