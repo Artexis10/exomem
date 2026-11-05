@@ -122,10 +122,10 @@ def list_directory(
 ) -> ListDirectoryResult:
     """List a folder; with `limit`, one page after the `after` sort key.
 
-    A page reads bytes and frontmatter, and runs egress decisions, only for
-    the entries it returns; the folder's children are still each opened and
-    stat'ed once to enumerate it. `exclude` drops vault paths before they can
-    take a place on the page.
+    A page inspects candidate content floors through one authorized lookahead.
+    It renders full entries only for the returned page. The folder's children
+    are still each opened and stat'ed once to enumerate it. `exclude` drops
+    vault paths before they can take a place on the page.
     """
     from .governance import egress
 

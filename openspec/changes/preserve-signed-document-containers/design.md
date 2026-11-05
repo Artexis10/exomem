@@ -30,6 +30,10 @@ An evicted parent retains its verified stored identity. Authorize that binary th
 
 Require a valid binding throughout the reserved payload subtree. Outside it, use the existing tolerant frontmatter parser to detect a parsed container_member claim, then validate that claim strictly. This also checks retained provenance after a desktop move. Preserve ordinary path classification for malformed notes without a parsed claim; this binding does not add an ancestry registry.
 
+Preserve staged and supplied metadata before probing disk. Resolve only the configured vault root through its existing alias contract. Use the ordinary reader's lexical spelling for companion lookup; never resolve a companion through a link. An absent ordinary companion adds no dependency. Existing unsafe companions remain refused, and caller validation still handles invalid paths.
+
+Folder listings inspect only their existing page and continuation candidate window. Current custody checks may read that window before the normal reads of selected entries. Continue existing selection after denied candidates to fill the page. A denied continuation candidate must not change truncation metadata. Add no cache or alternate admission mode for this inspection.
+
 ### Reuse byte proofs within one request
 
 Repeated child checks must not hash their shared container again each time. Reuse the existing request-owned companion proof map and its file-version checks. This adds no global cache, time limit or disk copy.

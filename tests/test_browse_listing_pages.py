@@ -2,7 +2,7 @@
 
 An unbounded listing read every file of a folder and decided every entry
 twice, so one large folder took minutes and slowed every concurrent call. A
-page now costs the entries it returns, and a cursor continues the listing.
+page inspects candidates through one authorized lookahead, and a cursor continues the listing.
 """
 
 from __future__ import annotations
@@ -137,20 +137,37 @@ def test_the_owners_page_and_cursor_skip_a_page_whose_deletion_is_pending(vault:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="counts reads on the POSIX held filesystem")
-def test_a_page_reads_only_the_files_it_returns(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_page_reads_only_its_entries_and_one_authorized_lookahead(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import _held_fs_posix
 
     _write_notes(vault, [f"note-{index:03d}" for index in range(60)])
-    reads: list[object] = []
+    reads: list[str] = []
     real_read = _held_fs_posix.PosixHeldFilesystem.read
 
     def counted_read(self, file, **kwargs):
-        reads.append(file)
+        reads.append(file.name)
         return real_read(self, file, **kwargs)
 
     monkeypatch.setattr(_held_fs_posix.PosixHeldFilesystem, "read", counted_read)
 
-    page = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=10)
+    limit = 10
+    page = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=limit)
 
-    assert len(page["entries"]) == 10
-    assert len(reads) <= 10
+    assert len(page["entries"]) == limit
+    assert set(reads) <= {f"note-{index:03d}.md" for index in range(limit + 1)}
+    assert len(reads) <= 2 * limit + 1
+
+
+def test_denied_lookahead_cannot_reveal_a_further_page_or_hide_a_later_allowed_entry(vault: Path) -> None:
+    _write_notes(vault, ["a-open", "b-open", "c-denied"])
+    (vault / _BULK / "c-denied.md").write_text("---\ncontainer_member: forged\n---\n")
+
+    with request_scope(owner_principal()):
+        final = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=2)
+        assert final["truncated"] is False
+        assert final["next_cursor"] is None
+        _write_notes(vault, ["d-open"])
+        first = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=2)
+        assert first["truncated"] is True
+        second = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=2, cursor=first["next_cursor"])
+    assert [Path(path).stem for path in _paths(first) + _paths(second)] == ["a-open", "b-open", "d-open"]

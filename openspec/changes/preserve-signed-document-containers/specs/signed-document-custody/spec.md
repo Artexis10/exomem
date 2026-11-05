@@ -42,6 +42,8 @@ Current-parent validation SHALL use the existing retained candidate windows rath
 
 The reserved payload subtree SHALL require a valid binding. Outside it, Exomem SHALL strictly validate every parsed container_member claim. Malformed ordinary notes without a parsed claim SHALL retain their existing path classification.
 
+Companion inspection SHALL preserve existing vault-root aliases, prospective paths and caller validation. Alternate lexical spellings SHALL not hide an existing custody claim. Folder inspection SHALL stay within its existing page and continuation candidate window; denied candidates SHALL not affect truncation metadata.
+
 #### Scenario: Parent access changes after extraction
 - **WHEN** a principal loses access to the preserved container
 - **THEN** that principal cannot read or find its payload text or download its payload originals

@@ -777,6 +777,10 @@ def test_relocated_payload_original_keeps_parent_restriction(vault, monkeypatch)
     assert not egress.release_allows_download(vault, moved, principal=who)
     compiled = policy.load(vault)
     assert not egress.container_parent_allows(vault, moved + ".md", policy=compiled, principal=who, purpose=None)
+    aliases = (moved, moved.replace("relocated", "ｒelocated"), moved.replace("/", "\\"), moved.replace("/", "//", 1))
+    for alias in aliases:
+        assert not egress.content_permits(vault, alias, who)
+        assert not egress.container_parent_allows(vault, alias + ".md", policy=compiled, principal=who, purpose=None)
     raw = (vault / (moved + ".md")).read_bytes()
     hit = Hit(path=moved + ".md", type="source", scope="kb", title="Stale relocated payload", updated="", excerpt="hiddenword", snapshot_hash=hashlib.sha256(raw).hexdigest(), decision=Decision(6))
     runtime = SimpleNamespace(snapshot=SimpleNamespace(policy=compiled))
@@ -790,8 +794,54 @@ def test_relocated_payload_original_keeps_parent_restriction(vault, monkeypatch)
     original_page.write_text(before)
     with request_scope(who):
         assert commands.op_find(vault, query="hiddenword", mode="keyword", graph=False)["hits"] == []
-        with pytest.raises(ValueError):
-            commands.op_fetch(vault, id=moved + ".md")
+        for alias in aliases:
+            with pytest.raises(ValueError):
+                commands.op_fetch(vault, id=alias + ".md")
+
+
+def test_supplied_provenance_is_checked_before_invalid_path_is_ignored(vault):
+    from exomem import document_containers
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+    from exomem.vault import PlannedWrite
+
+    raw = b"---\ncontainer_member: forged\n---\n"
+    who = owner_principal()
+    assert not egress.content_permits(vault, "/outside.md", who, snapshot=raw)
+    with document_containers.planned_scope(vault, [PlannedWrite(vault / "../outside.md", raw.decode())]):
+        assert not egress.content_permits(vault, "../outside.md", who)
+
+
+def test_normalized_payload_subtree_cannot_become_an_absent_candidate(vault):
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    path = "Knowledge Base/bundle.ａｓｉｃｅ．ｄｏｃｕｍｅｎｔｓ/../outside.md"
+    assert not egress.content_permits(vault, path, owner_principal())
+
+
+def test_undecodable_body_cannot_erase_a_parsed_provenance_header(vault):
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    path = "Knowledge Base/ordinary.md"
+    (vault / path).write_bytes(b"---\ncontainer_member: forged\n---\n\nBody\xff")
+    assert not egress.content_permits(vault, path, owner_principal())
+
+
+def test_payload_download_accepts_the_configured_vault_root_alias(vault):
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    alias = vault.parent / "vault-alias"
+    try:
+        alias.symlink_to(vault, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    child = stored.document_container["payloads"][0]
+    assert egress.release_allows_download(vault, child, principal=owner_principal())
+    assert egress.release_allows_download(alias, child, principal=owner_principal())
 
 
 def test_unrelated_malformed_frontmatter_keeps_path_only_reading(vault):

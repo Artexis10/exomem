@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import tempfile
+import unicodedata
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -14,14 +16,16 @@ from typing import BinaryIO
 
 import yaml
 
-from . import archive_members, originals, reserved_paths
+from . import archive_members, originals, reserved_paths, state_paths
 from .vault import (
     MISSING_CONTENT_HASH,
+    FrontmatterError,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
     content_hash,
     parse_frontmatter,
+    read_frontmatter_header,
 )
 
 MAX_EXPANDED_BYTES = 256 * 1024**2
@@ -144,7 +148,9 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
 
 def in_payload_tree(path: str) -> bool:
     """The version 1 custody layout reserves this ASiC-E child subtree."""
-    return any(part.casefold().endswith(".asice.documents") for part in PurePosixPath(path).parts)
+    # The reserved layout follows generic NFKC/separator spelling even when the full candidate is invalid.
+    spelling = unicodedata.normalize("NFKC", path).replace("\\", "/")
+    return any(part.casefold().endswith(".asice.documents") for part in PurePosixPath(spelling).parts)
 
 
 def child_path(parent: str, member: str) -> str:
@@ -238,6 +244,7 @@ def planned_scope(vault_root: Path, writes) -> Iterator[None]:
 
 
 def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding:
+    root = state_paths.resolved_vault_path(root, expanduser=False)
     staged = _OVERLAY.get().get(path)
     if isinstance(staged, PreparedBinaryContent):
         actual = staged.sha256, staged.size
@@ -270,6 +277,7 @@ def _canonical_path(value: object) -> str:
 
 def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Validate a child binding against location, parent companion and current byte identities."""
+    root = state_paths.resolved_vault_path(root, expanduser=False)
     binding = frontmatter.get("container_member")
     # The reserved subtree cannot become public by deleting the provenance block.
     in_subtree = in_payload_tree(path)
@@ -318,18 +326,42 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     """Resolve direct pages, binary originals and extraction parts through one binding validator."""
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
-    if reserved_paths.classify_logical(path).disposition is reserved_paths.PathDisposition.RESERVED:
-        return None
+    root = state_paths.resolved_vault_path(root, expanduser=False)
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
-    try:
-        raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else reserved_paths.read_generic_bytes(root, page_path).data)
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "MISSING" and not in_payload_tree(path):
-            return None
-        raise
-    decoded = raw.decode("utf-8")
+    raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
+    path = PurePosixPath(path.replace("\\", "/")).as_posix()
+    classified = reserved_paths.classify_logical(path)
+    if classified.disposition is reserved_paths.PathDisposition.ORDINARY:
+        parent, leaf = reserved_paths._leaf_spelling(path)
+        path = PurePosixPath(parent, leaf).as_posix()
+        classified = reserved_paths.classify_logical(path)
+    page_path = path if path.lower().endswith(".md") else path + ".md"
+    staged = _OVERLAY.get().get(page_path)
+    if raw is None:
+        raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
     in_subtree = in_payload_tree(path)
+    if raw is None:
+        if classified.disposition is not reserved_paths.PathDisposition.ORDINARY:
+            if in_subtree:
+                raise ValueError("container member path is invalid")
+            return None
+        if not in_subtree:
+            try:
+                (root / page_path).lstat()
+            except FileNotFoundError:
+                return None
+        raw = reserved_paths.read_generic_bytes(root, page_path).data
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        if in_subtree:
+            raise
+        # An undecodable body cannot erase a valid provenance header.
+        try:
+            decoded = read_frontmatter_header(io.BytesIO(raw), max(8, len(raw))).decode("utf-8")
+        except (UnicodeDecodeError, FrontmatterError):
+            return None
     fm, _, _ = parse_frontmatter(decoded, strict=in_subtree)
     if not in_subtree:
         # Ordinary malformed notes keep path-only handling; a parsed custody claim requires strict validation.
