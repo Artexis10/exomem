@@ -34,13 +34,49 @@ _BYTE_PROOFS: ContextVar[tuple[dict[str, reserved_paths.GenericFileCopy], bool] 
 
 
 @contextmanager
-def byte_proof_scope(proofs: dict[str, reserved_paths.GenericFileCopy], *, allow_capture: bool):
+def byte_proof_scope(proofs: dict[str, reserved_paths.GenericFileCopy], *, allow_capture: bool, join_existing: bool = False):
     """Reuse request-owned parent bytes while recomputing classification and authority."""
+    if join_existing and _BYTE_PROOFS.get() is not None:
+        yield
+        return
     token = _BYTE_PROOFS.set((proofs, allow_capture))
     try:
         yield
     finally:
         _BYTE_PROOFS.reset(token)
+
+
+@contextmanager
+def request_byte_proofs():
+    """Own byte proofs for one read, preserving any enclosing recovery capture restriction."""
+    with byte_proof_scope({}, allow_capture=True, join_existing=True):
+        yield
+
+
+def prove_original(vault_root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> reserved_paths.GenericFileCopy:
+    """Reuse bytes only at their exact current source version; never reuse access decisions."""
+    scope = _BYTE_PROOFS.get()
+    proof = artifact_copy if artifact_copy is not None else (scope[0].get(path) if scope is not None else None)
+    if proof is not None:
+        try:
+            if proof.vault_root != vault_root or proof.relative_path != path:
+                raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+            reserved_paths.require_generic_copy_source_version(proof)
+            return proof
+        except reserved_paths.ReservedPathLeafError:
+            if artifact_copy is not None or (scope is not None and not scope[1]):
+                raise
+    if scope is not None and not scope[1]:
+        raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+    from .. import media_store
+
+    with reserved_paths.hold_generic_file(
+        vault_root, path, recorded_sha256=lambda version: media_store.cached_sha256(vault_root, Path(path), version),
+    ) as held:
+        proof = replace(held, held=None)
+    if scope is not None:
+        scope[0][path] = proof
+    return proof
 
 
 @dataclass(frozen=True, slots=True)

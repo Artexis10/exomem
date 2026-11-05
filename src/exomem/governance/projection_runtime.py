@@ -1717,6 +1717,22 @@ def _find_projected_hits_pinned(
                             "governed projected retrieval is unavailable"
                         ) from error
 
+    from .egress import container_parent_allows
+
+    # Admit only bounded acquired candidates before their passages reach the reranker or page counts.
+    candidate_access = {
+        identity: container_parent_allows(
+            Path(vault_root), identity, policy=runtime.snapshot.policy,
+            principal=principal, purpose=declared_purpose,
+        )
+        for identity in {hit.item_identity for hits in lane_hits.values() for hit in hits}
+    }
+    lane_hits = {
+        lane: tuple(hit for hit in hits if candidate_access[hit.item_identity])
+        for lane, hits in lane_hits.items()
+    }
+    withheld = withheld | frozenset(identity for identity, allowed in candidate_access.items() if not allowed)
+
     raw_bm25_hits = lane_hits.get("bm25", ())
     lexical_crossing: str | None = None
     if mode == "hybrid":
@@ -1768,6 +1784,14 @@ def _find_projected_hits_pinned(
                 for seed in seeds:
                     for edge in admitted.outgoing_edges(seed):
                         target = edge.target_item_identity
+                        if target not in candidate_access:
+                            candidate_access[target] = container_parent_allows(
+                                Path(vault_root), target, policy=runtime.snapshot.policy,
+                                principal=principal, purpose=declared_purpose,
+                            )
+                        if not candidate_access[target]:
+                            withheld = withheld | frozenset((target,))
+                            continue
                         graph_degrees[target] = graph_degrees.get(target, 0) + 1
                         if target in primary_set:
                             position += 1

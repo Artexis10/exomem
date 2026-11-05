@@ -36,6 +36,10 @@ Inspection SHALL validate archive paths, aliases, duplicate entries, entry types
 
 Payload pages, extracted text parts and original downloads SHALL retain every applicable parent restriction, including raw protection and later policy changes. Exomem SHALL validate the child location and exact parent identity before trusting the binding. An unresolved or forged binding SHALL not grant access.
 
+Exomem SHALL check current parent access before selected payload text reaches a scorer or changes visible graph results. Held Markdown and path-only snapshots SHALL enforce the same parent access.
+
+The reserved payload subtree SHALL require a valid binding. Outside it, Exomem SHALL strictly validate every parsed container_member claim. Malformed ordinary notes without a parsed claim SHALL retain their existing path classification.
+
 #### Scenario: Parent access changes after extraction
 - **WHEN** a principal loses access to the preserved container
 - **THEN** that principal cannot read or find its payload text or download its payload originals
@@ -43,6 +47,29 @@ Payload pages, extracted text parts and original downloads SHALL retain every ap
 #### Scenario: A payload claims a different parent
 - **WHEN** a payload binding does not match its parent identity or deterministic child location
 - **THEN** Exomem refuses disclosure through that binding
+
+#### Scenario: A desktop move retains payload provenance
+- **WHEN** a moved payload or companion retains its parsed binding outside the reserved subtree
+- **THEN** the invalid location refuses original downloads, page reads and projected scoring
+
+#### Scenario: A projected candidate loses parent access
+- **WHEN** stored projected scopes still admit a payload whose current parent denies access
+- **THEN** the payload text does not reach a scorer or appear in results
+- **AND** the payload does not contribute to visible graph ranking or counts
+
+### Requirement: Share byte identity proofs within a request
+
+Read requests SHALL reuse unchanged byte identity proofs through the existing companion proof scope. Each reuse SHALL validate the proof's root, path and current file version. Proof reuse SHALL not cache parent metadata or access decisions. A restricted final recheck SHALL not capture another proof.
+
+#### Scenario: Several payloads share a container
+- **WHEN** a read request admits several unchanged payloads from the same container
+- **THEN** their checks reuse the container's byte proof within that request
+- **AND** each admission still checks current parent restrictions
+
+#### Scenario: Original bytes change during a request
+- **WHEN** an original changes after a request captures its byte proof
+- **THEN** Exomem refuses reuse of that proof
+- **AND** it captures a fresh proof only where the existing scope permits capture
 
 ### Requirement: Reuse complete document processing and honest signature states
 

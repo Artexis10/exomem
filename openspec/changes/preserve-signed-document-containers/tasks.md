@@ -12,6 +12,7 @@
 - [x] 2.2 Queue payload extraction through existing jobs and preserve provenance on reconciliation; prove complete DOCX text and PDF text when supported.
 - [x] 2.3 Extend explicit media processing for existing opaque containers; prove idempotent child recovery and retry after partial processing failure.
 - [x] 2.4 Document supported custody, verification limits, processing and recovery through existing public interfaces.
+- [x] 2.5 Reuse request-owned byte proofs with current-version checks; prove repeated-read cost, live parent revocation and changed-byte invalidation.
 
 ## 3. Integrated delivery
 

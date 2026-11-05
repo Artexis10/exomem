@@ -88,7 +88,7 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
     with ExitStack() as held:
         try:
             with archive_members.open_zip(stream, max_entries=MAX_ENTRIES) as archive:
-                entries = archive_members.central_directory(archive, max_entries=MAX_ENTRIES)
+                entries = archive_members.central_directory(archive, max_entries=MAX_ENTRIES, portable_paths=True)
                 if sum(entry.info.file_size for entry in entries) > MAX_EXPANDED_BYTES:
                     raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the aggregate byte limit")
                 total = 0
@@ -137,6 +137,8 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
             result.members.clear()
         finally:
             stream.seek(position)
+        if result.state != "inspected":
+            held.close()  # Opaque custody must not compete with payload spools after failed or unsupported inspection.
         yield result
 
 
@@ -242,15 +244,12 @@ def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact
     elif isinstance(staged, str):
         encoded = staged.encode("utf-8")
         actual = hashlib.sha256(encoded).hexdigest(), len(encoded)
-    elif artifact_copy is not None and artifact_copy.relative_path == path and artifact_copy.vault_root == root:
-        reserved_paths.require_generic_copy_source_version(artifact_copy)
-        actual = artifact_copy.sha256, artifact_copy.size
     else:
-        from . import media_store
+        from .governance import companions
 
         try:
-            with reserved_paths.hold_generic_file(root, path, recorded_sha256=lambda version: media_store.cached_sha256(root, Path(path), version)) as held:
-                actual = held.sha256, held.size
+            proof = companions.prove_original(root, path, artifact_copy=artifact_copy)
+            actual = proof.sha256, proof.size
         except reserved_paths.ReservedPathLeafError:
             stored = originals.original_state(root, path)
             if stored.state != "evicted" or stored.reference is None:
@@ -268,21 +267,12 @@ def _canonical_path(value: object) -> str:
     return value
 
 
-def _digest(value: object) -> bool:
-    if not isinstance(value, str) or len(value) != 64 or value.lower() != value:
-        return False
-    try:
-        return len(bytes.fromhex(value)) == 32
-    except ValueError:
-        return False
-
-
 def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
     """Validate a child binding against location, parent companion and current byte identities."""
     binding = frontmatter.get("container_member")
     # The reserved subtree cannot become public by deleting the provenance block.
     in_subtree = in_payload_tree(path)
-    if binding is None and not in_subtree:
+    if "container_member" not in frontmatter and not in_subtree:
         return None
     if not isinstance(binding, dict) or set(binding) != _BINDING_FIELDS or type(binding["version"]) is not int or binding["version"] != 1:
         raise ValueError("container member provenance is missing or invalid")
@@ -290,13 +280,17 @@ def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_cop
     parent_page = _canonical_path(binding["parent_page"])
     artifact = _canonical_path(binding["artifact_path"])
     member = binding["member_path"]
-    if not isinstance(member, str) or archive_members.validated_member(member) != member or not is_container(parent) or in_payload_tree(parent) or PurePosixPath(member).suffix.casefold() not in _PAYLOAD_SUFFIXES:
+    try:
+        normalized_member = archive_members.validated_member(member)
+    except archive_members.ArchiveError as error:
+        raise ValueError("container member path is invalid") from error
+    if normalized_member != member or not is_container(parent) or in_payload_tree(parent) or PurePosixPath(member).suffix.casefold() not in _PAYLOAD_SUFFIXES:
         raise ValueError("container member path is invalid")
     expected_page = originals.sidecar_path(root / parent).relative_to(root).as_posix()
     if artifact != child_path(parent, member) or path != artifact + ".md" or parent_page != expected_page:
         raise ValueError("container member location is invalid")
     for key in ("parent_sha256", "artifact_sha256"):
-        if not _digest(binding[key]):
+        if not originals.is_sha256(binding[key]):
             raise ValueError("container member digest is invalid")
     for key in ("parent_size", "artifact_size"):
         if type(binding[key]) is not int or binding[key] < 0:
@@ -317,13 +311,22 @@ def parent_for_path(root: Path, path: str, *, content: bytes | None = None, arti
     """Resolve direct pages, binary originals and extraction parts through one binding validator."""
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
-    if not in_payload_tree(path):
-        if content is None:
-            return None
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
-    raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else reserved_paths.read_generic_bytes(root, page_path).data)
-    fm, _, _ = parse_frontmatter(raw.decode("utf-8"), strict=True)
+    try:
+        raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else reserved_paths.read_generic_bytes(root, page_path).data)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING" and not in_payload_tree(path):
+            return None
+        raise
+    decoded = raw.decode("utf-8")
+    in_subtree = in_payload_tree(path)
+    fm, _, _ = parse_frontmatter(decoded, strict=in_subtree)
+    if not in_subtree:
+        # Ordinary malformed notes keep path-only handling; a parsed custody claim requires strict validation.
+        if "container_member" not in fm:
+            return None
+        fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:
         from . import extraction_parts
         source_path = extraction_parts.source_page_for(Path(page_path))

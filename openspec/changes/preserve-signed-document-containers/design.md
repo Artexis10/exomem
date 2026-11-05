@@ -22,6 +22,16 @@ The existing parent_media field describes timestamped scene frames and cannot ca
 
 Resolve staged parent evidence from the planned batch during catalog preflight. At disclosure, check current parent dependencies before cached or projected admission. Include binary downloads under path-only policies. Unchanged child bytes cannot prove that a parent still permits access.
 
+Check selected projected candidates before their text reaches a scorer or changes visible graph results. Apply the same parent check to held Markdown and path-only snapshots.
+
+Require a valid binding throughout the reserved payload subtree. Outside it, use the existing tolerant frontmatter parser to detect a parsed container_member claim, then validate that claim strictly. This also checks retained provenance after a desktop move. Preserve ordinary path classification for malformed notes without a parsed claim; this binding does not add an ancestry registry.
+
+### Reuse byte proofs within one request
+
+Repeated child checks must not hash their shared container again each time. Reuse the existing request-owned companion proof map and its file-version checks. This adds no global cache, time limit or disk copy.
+
+Recheck each proof's root, path and current file version before reuse. Read current parent metadata and evaluate parent policy on every admission. Keep the existing restricted final recheck: it cannot capture a new proof. Close held files after capture; the request retains only their identity and digest metadata.
+
 ### Separate inspection, custody and verification
 
 Use the standard ZIP reader with the shared path, entry and directory checks. Add aggregate expanded-byte and streaming limits for document inspection. Treat archive syntax and format identifiers as closed protocol data, with reasons beside new lists or regexes. Do not parse XML with regexes or fetch relationships, certificates or external resources.

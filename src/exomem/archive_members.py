@@ -189,7 +189,7 @@ def open_zip(stream: BinaryIO, *, max_entries: int | None = None) -> zipfile.Zip
         raise ArchiveError(INVALID, "an archive entry's name is not valid UTF-8") from exc
 
 
-def central_directory(zip_file: zipfile.ZipFile, *, max_entries: int | None = None) -> list[Entry]:
+def central_directory(zip_file: zipfile.ZipFile, *, max_entries: int | None = None, portable_paths: bool = False) -> list[Entry]:
     """Validate every entry before any member is read; members sorted by path."""
     infos = zip_file.infolist()
     limit = MAX_ENTRIES if max_entries is None else min(MAX_ENTRIES, max_entries)
@@ -198,18 +198,23 @@ def central_directory(zip_file: zipfile.ZipFile, *, max_entries: int | None = No
     entries: dict[str, Entry] = {}
     names: dict[str, bool] = {}
     for info in infos:
+        if info.is_dir() and not portable_paths:
+            continue
         if info.flag_bits & _ZIP_FLAG_ENCRYPTED:
             raise ArchiveError(INVALID, "the archive has an encrypted entry")
         mode = stat.S_IFMT(info.external_attr >> 16)
         # ZIP entry modes are closed filesystem protocol values; no device or link is a document.
-        if mode not in (0, stat.S_IFREG, stat.S_IFDIR):
+        if entry_is_symlink(info) or (portable_paths and mode not in (0, stat.S_IFREG, stat.S_IFDIR)):
             raise ArchiveError(INVALID, "the archive has an unsupported entry type")
-        path = validated_member(info.filename)
-        if path != info.filename.removesuffix("/"):
+        if portable_paths and info.filename != info.orig_filename:
+            raise ArchiveError(INVALID, "an archive entry uses a truncated or normalized name")
+        path = validated_member(info.orig_filename if portable_paths else info.filename)
+        if portable_paths and path != info.filename.removesuffix("/"):
             raise ArchiveError(INVALID, "an archive entry uses a path alias")
         if PureWindowsPath(path).drive:
             raise ArchiveError(INVALID, "an archive entry has a drive path")
-        key = path.casefold()
+        # Member pools preserve exact ZIP labels; document custody also refuses cross-platform aliases.
+        key = path.casefold() if portable_paths else path
         if key in names:
             raise ArchiveError(INVALID, "the archive names one member twice or uses a path alias")
         names[key] = info.is_dir()
@@ -217,7 +222,7 @@ def central_directory(zip_file: zipfile.ZipFile, *, max_entries: int | None = No
             raise ArchiveError(TOO_LARGE, "an archive member exceeds the expanded-byte limit")
         if not info.is_dir():
             entries[path] = Entry(path, info)
-    for key in names:
+    for key in names if portable_paths else ():
         if any(names.get(parent.as_posix()) is False for parent in PurePosixPath(key).parents):
             raise ArchiveError(INVALID, "an archive file aliases a directory")
     return [entries[path] for path in sorted(entries)]

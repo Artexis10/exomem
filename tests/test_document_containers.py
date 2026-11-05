@@ -61,6 +61,7 @@ def _hostile_cases():
         (container_bytes([("C:" + "/drive.pdf", b"x")]), "failed"),
         (container_bytes([("a.pdf", b"x"), ("A.pdf", b"y")]), "failed"),
         (container_bytes([("a/b.pdf", b"x"), ("a//b.pdf", b"y")]), "failed"),
+        (container_bytes([("one.pdfXhidden.exe", b"payload")]).replace(b"one.pdfXhidden.exe", b"one.pdf\x00hidden.exe"), "failed"),
         (container_bytes([("a/../", b"")]), "failed"),
         (container_bytes([(link, b"target")]), "failed"),
         (container_bytes([(fifo, b"")]), "failed"),
@@ -72,7 +73,7 @@ def _hostile_cases():
 
 
 @pytest.mark.parametrize(("data", "state"), _hostile_cases(), ids=[
-    "traversal", "absolute", "drive", "case-alias", "path-alias", "unsafe-directory", "symlink",
+    "traversal", "absolute", "drive", "case-alias", "path-alias", "nul-alias", "unsafe-directory", "symlink",
     "fifo", "encrypted", "crc", "truncated", "unsupported-payload",
 ])
 def test_failed_inspection_never_returns_partial_payloads(data: bytes, state: str) -> None:
@@ -187,6 +188,8 @@ def test_public_upload_processes_complete_docx_and_pdf_and_downloads_exact_bytes
     complete = child_page.read_text() + "".join(part.read_text() for part in parts)
     assert "Zirconiumtail" in complete
     assert "container_member:" in child_page.read_text()
+    pdf_child = next(child for child in children if child.endswith(".pdf"))
+    assert "Quartz appendix confirms the harbour inspection" in (vault / (pdf_child + ".md")).read_text()
     hits = commands.op_find(vault, query="Zirconiumtail", mode="keyword", graph=False)
     assert any(hit["path"] == docx_child + ".md" for hit in hits), hits
     with request_scope(owner_principal(surface="mcp")):
@@ -348,6 +351,8 @@ def test_forged_missing_or_changed_parent_binding_never_grants_access(vault):
     child = stored.document_container["payloads"][0]
     page = vault / (child + ".md")
     before = page.read_text()
+    page.write_text(before.replace("member_path: one.pdf", "member_path: ../one.pdf"))
+    assert not egress.content_permits(vault, child, owner_principal())
     page.write_text(before.replace("member_path: one.pdf", "member_path: different.pdf"))
     assert not egress.content_permits(vault, child, owner_principal())
     page.write_text(preserve._remove_frontmatter_fields(before, lambda key: key == "container_member"))
@@ -475,3 +480,233 @@ def test_reconciliation_fallback_keeps_container_provenance(vault):
     after = parse_frontmatter(page.read_text())[0]
     assert after["container_member"] == before
     assert after["governance_companion"]["artifact_path"] == child
+
+
+@pytest.mark.parametrize("surface", ["projected-search", "held-read", "path-only"])
+def test_projected_child_admission_checks_current_parent_before_release(vault, monkeypatch, surface):
+    from types import SimpleNamespace
+
+    from exomem import commands, find_corpus
+    from exomem.find_types import Hit
+    from exomem.governance import egress, policy, projection_runtime
+    from exomem.governance.decisions import Decision
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0] + ".md"
+    rules = vault / "Knowledge Base" / "_Governance"
+    (rules / "scopes").mkdir(parents=True, exist_ok=True)
+    (rules / "rules").mkdir(exist_ok=True)
+    (rules / "scopes" / "container.yaml").write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["{stored.path}"]\n')
+    (rules / "rules" / "external.yaml").write_text('governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 0\n')
+    compiled = policy.load(vault)
+    who = RequestPrincipal(audience_id="external")
+    raw = (vault / child).read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    monkeypatch.setattr(egress, "projection_decision", lambda root, path, **kwargs: Decision(6) if path == child else None)
+    with request_scope(who):
+        if surface == "projected-search":
+            runtime = SimpleNamespace(snapshot=SimpleNamespace(policy=compiled))
+            hit = Hit(path=child, type="source", scope="kb", title="Stale public payload", updated="", excerpt="hiddenword", snapshot_hash=digest, decision=Decision(6))
+            monkeypatch.setattr(commands.projection_runtime_module, "load_active_projection_runtime", lambda root: runtime)
+            monkeypatch.setattr(commands.projection_runtime_module, "find_projected_hits", lambda *args, **kwargs: projection_runtime.ProjectedFindResult(hits=(hit,), withheld_paths=frozenset()))
+            result = commands.op_find(vault, query="hiddenword", mode="keyword", graph=False)
+            assert result["hits"] == []
+        elif surface == "held-read":
+            parsed = find_corpus.parse_page(vault / child, 0, vault, content=raw)
+            decision = egress._decide_markdown_snapshot(vault, child, raw, parsed, policy=compiled, principal=who, purpose=None, content_hash=digest)
+            assert decision is None or decision.level == 0
+        else:
+            assert egress.release_level_for_path_only(vault, child, principal=who, policy=compiled) == 0
+
+
+def test_projected_graph_and_reranker_receive_only_currently_admitted_payloads(vault, monkeypatch):
+    from dataclasses import replace
+
+    from test_governance_projected_runtime_lanes import _graph, _item, _runtime, _variant
+
+    from exomem import embeddings, readiness
+    from exomem.governance import policy, projection_runtime
+    from exomem.governance.principal import RequestPrincipal
+
+    stored = _capture(vault, container_bytes([("direct.pdf", b"direct"), ("neighbor.pdf", b"neighbor")]))
+    first, second = [path + ".md" for path in stored.document_container["payloads"]]
+    rules = vault / "Knowledge Base" / "_Governance"
+    (rules / "scopes").mkdir(parents=True, exist_ok=True)
+    (rules / "rules").mkdir(exist_ok=True)
+    (rules / "scopes" / "container.yaml").write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["{stored.path}"]\n')
+    (rules / "rules" / "external.yaml").write_text('governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 0\n')
+    direct = _variant(first, "1" * 64, "harbor revoked-payload")
+    neighbor = _variant(second, "2" * 64, "revoked-neighbor")
+    shown = _variant("Knowledge Base/shown.md", "3" * 64, "harbor visible-clause")
+    spawned = _variant("Knowledge Base/spawned.md", "4" * 64, "unrelated visible-clause")
+    runtime = _runtime(tuple(_item(item) for item in (direct, neighbor, shown, spawned)), graphs=(
+        _graph(shown, neighbor.item_identity), _graph(direct, spawned.item_identity), _graph(neighbor), _graph(spawned),
+    ))
+    compiled = replace(policy.load(vault), fingerprint=runtime.snapshot.policy.fingerprint)
+    runtime = replace(runtime, snapshot=replace(runtime.snapshot, policy=compiled))
+    monkeypatch.delenv("EXOMEM_DISABLE_RANKING", raising=False)
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda component: False)
+    observed = []
+    def scorer(query, passages):
+        observed.extend(passages)
+        assert all("revoked-" not in text for text in passages), passages
+        return [0.5] * len(passages)
+    monkeypatch.setattr(embeddings, "rerank_pairs", scorer)
+    result = projection_runtime.find_projected_hits(vault, runtime, query="harbor", limit=3, mode="hybrid", graph=True, rerank=True,
+                                                   principal=RequestPrincipal(audience_id="external"), purpose=None)
+    assert observed and all("visible-clause" in text for text in observed), (observed, result)
+    assert [hit.path for hit in result.hits] == [shown.item_identity]
+    assert {first, second} <= result.withheld_paths
+
+
+def test_descriptor_exhaustion_keeps_exact_opaque_original(vault, tmp_path, request):
+    from memory_measurement import run_in_fresh_process
+
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("the descriptor-limit probe requires a POSIX process descriptor census")
+    resource = pytest.importorskip("resource")
+    if run_in_fresh_process(request, tmp_path):
+        return
+    data = container_bytes([(f"document-{number}.pdf", b"") for number in range(64)])
+    previous = resource.getrlimit(resource.RLIMIT_NOFILE)
+    descriptor_count = len(list(Path("/proc/self/fd").iterdir()))
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(previous[0], descriptor_count + 32), previous[1]))
+        result = _capture(vault, data)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, previous)
+    assert (vault / result.path).read_bytes() == data
+    assert result.document_container["inspection_state"] == "failed"
+    assert result.document_container["supported_payload_count"] is None
+    assert not (vault / (result.path + ".documents")).exists()
+
+
+def test_request_owned_byte_proofs_avoid_rehashing_unchanged_originals(vault, monkeypatch):
+    from exomem import document_containers, reserved_paths
+    from exomem.governance import companions
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    hashed = []
+    actual = reserved_paths._digest_fd
+    def count(*args, **kwargs):
+        result = actual(*args, **kwargs)
+        hashed.append(result[1])
+        return result
+    monkeypatch.setattr(reserved_paths, "_digest_fd", count)
+    with companions.byte_proof_scope({}, allow_capture=True):
+        for _ in range(3):
+            assert document_containers.parent_for_path(vault, child)[0] == stored.path
+    assert sorted(hashed) == sorted([len((vault / stored.path).read_bytes()), 3])
+
+
+@pytest.mark.parametrize("allow_capture", [True, False])
+def test_changed_same_size_original_cannot_reuse_request_owned_byte_proof(vault, allow_capture):
+    import os
+
+    from exomem import document_containers, reserved_paths
+    from exomem.governance import companions
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    proofs = {}
+    with companions.byte_proof_scope(proofs, allow_capture=True):
+        assert document_containers.parent_for_path(vault, child)
+    original = vault / stored.path
+    before = original.stat()
+    data = original.read_bytes()
+    original.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+    os.utime(original, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with companions.byte_proof_scope(proofs, allow_capture=allow_capture):
+        with pytest.raises((ValueError, reserved_paths.ReservedPathLeafError)):
+            document_containers.parent_for_path(vault, child)
+
+
+def test_nested_read_scope_cannot_reenable_recovery_byte_capture(vault):
+    from exomem import document_containers, reserved_paths
+    from exomem.governance import companions
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    with companions.byte_proof_scope({}, allow_capture=False), companions.request_byte_proofs():
+        with pytest.raises((ValueError, reserved_paths.ReservedPathLeafError)):
+            document_containers.parent_for_path(vault, child)
+
+
+def test_reused_original_bytes_do_not_cache_parent_authority(vault):
+    from exomem.governance import companions, egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    rules = vault / "Knowledge Base" / "_Governance"
+    (rules / "scopes").mkdir(parents=True, exist_ok=True)
+    (rules / "rules").mkdir(exist_ok=True)
+    (rules / "scopes" / "container.yaml").write_text('governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ntags: [private-container]\n')
+    (rules / "rules" / "external.yaml").write_text('governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 0\n')
+    proofs = {}
+    who = RequestPrincipal(audience_id="external")
+    with request_scope(who), companions.byte_proof_scope(proofs, allow_capture=True):
+        assert egress.release_allows_download(vault, child, principal=who)
+        assert stored.path in proofs and child in proofs
+        parent_page = vault / stored.sidecar_path
+        parent_page.write_text(preserve._set_frontmatter_field(parent_page.read_text(), "tags", "[private-container]"))
+        assert not egress.release_allows_download(vault, child, principal=who)
+
+
+def test_relocated_payload_original_keeps_parent_restriction(vault, monkeypatch):
+    from types import SimpleNamespace
+
+    from exomem import commands
+    from exomem.find_types import Hit
+    from exomem.governance import egress, policy, projection_runtime
+    from exomem.governance.decisions import Decision
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    stored = _capture(vault, container_bytes([('one.pdf', b'pdf')]))
+    child = stored.document_container['payloads'][0]
+    who = RequestPrincipal(audience_id='external')
+    rules = vault/'Knowledge Base'/'_Governance'
+    (rules/'scopes').mkdir(parents=True, exist_ok=True)
+    (rules/'rules').mkdir(exist_ok=True)
+    sid='01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    (rules/'scopes'/'container.yaml').write_text(f'governance_version: 1\nid: {sid}\npaths: ["{stored.path}"]\n')
+    (rules/'rules'/'external.yaml').write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["{sid}"]\naudience: external\nceiling: 0\n')
+    assert not egress.release_allows_download(vault, child, principal=who)
+    destination=(vault/child).parent.parent/'relocated.pdf'
+    (vault/child).rename(destination)
+    (vault/(child+'.md')).rename(destination.with_name(destination.name+'.md'))
+    moved=destination.relative_to(vault).as_posix()
+    assert not egress.release_allows_download(vault, moved, principal=who)
+    compiled = policy.load(vault)
+    assert not egress.container_parent_allows(vault, moved + ".md", policy=compiled, principal=who, purpose=None)
+    raw = (vault / (moved + ".md")).read_bytes()
+    hit = Hit(path=moved + ".md", type="source", scope="kb", title="Stale relocated payload", updated="", excerpt="hiddenword", snapshot_hash=hashlib.sha256(raw).hexdigest(), decision=Decision(6))
+    runtime = SimpleNamespace(snapshot=SimpleNamespace(policy=compiled))
+    monkeypatch.setattr(commands.projection_runtime_module, "load_active_projection_runtime", lambda root: runtime)
+    monkeypatch.setattr(commands.projection_runtime_module, "find_projected_hits", lambda *args, **kwargs: projection_runtime.ProjectedFindResult(hits=(hit,), withheld_paths=frozenset()))
+    original_page = vault / (moved + ".md")
+    before = original_page.read_text()
+    malformed = preserve._remove_frontmatter_fields(before, lambda key: key == "container_member")
+    original_page.write_text(preserve._set_frontmatter_field(malformed, "container_member", "null"))
+    assert not egress.release_allows_download(vault, moved, principal=who)
+    original_page.write_text(before)
+    with request_scope(who):
+        assert commands.op_find(vault, query="hiddenword", mode="keyword", graph=False)["hits"] == []
+        with pytest.raises(ValueError):
+            commands.op_fetch(vault, id=moved + ".md")
+
+
+def test_unrelated_malformed_frontmatter_keeps_path_only_reading(vault):
+    from exomem import commands, find_corpus
+    from exomem.governance import membership, policy
+
+    path = 'Knowledge Base/ordinary-malformed.md'
+    target = vault / path
+    target.write_text('---\ntags: [\n---\n\n# Ordinary note\n\nNeutral readable body.\n')
+    page = find_corpus.parse_page(target, 0, vault)
+    compiled = policy.Policy(fingerprint='probe', scopes={'scope': policy.Scope(id='scope', source='probe', paths=(path,))})
+    assert membership.evaluate_snapshot(page, compiled, content_hash=page.snapshot_hash) == frozenset({'scope'})
+    assert commands.op_fetch(vault, id=path)['text']

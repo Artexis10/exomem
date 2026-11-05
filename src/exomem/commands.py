@@ -177,7 +177,7 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
-from .governance import connector_boundary
+from .governance import companions, connector_boundary
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -2534,6 +2534,7 @@ _PRE_ADMISSION_SIGNALS = (
 )
 
 
+@companions.request_byte_proofs()
 def op_find(
     vault_root: Path,
     query: str = "",

@@ -2176,6 +2176,29 @@ _DECIDE_PATH_BATCH = Batch(
 )
 
 
+def container_parent_allows(
+    vault_root: Path, rel_path: str, *, policy: Policy, principal: RequestPrincipal,
+    purpose: str | None, content: bytes | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+) -> bool:
+    """Meet current parent authority before any cached child disclosure or model scoring."""
+    from .. import document_containers
+
+    try:
+        dependency = document_containers.parent_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return False
+    for parent in dependency or ():
+        decision = _decide_path(
+            vault_root, parent, policy=policy, audience=principal.audience_id, purpose=purpose,
+            grants_hash=_grants_hash(policy), authorization_session=principal.authorization_session_id,
+            authorization_context=principal.verified_authorization_session, principal=principal,
+        )
+        if decision is None or decision.level < LEVEL_FULL:
+            return False  # A parent's excerpt cannot authorize an intact payload or its complete extracted text.
+    return True
+
+
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
 def _decide_path(
     vault_root: Path,
@@ -2249,22 +2272,9 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
-    from .. import document_containers
-
-    try:
-        dependency = document_containers.parent_for_path(vault_root, rel_path, content=raw, artifact_copy=artifact_copy)
-    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
-        return None
-    if dependency is not None:
-        # Cached child admission cannot prove that its mutable parent still permits disclosure.
-        for parent in dependency:
-            parent_decision = _decide_path(
-                vault_root, parent, policy=policy, audience=audience, purpose=purpose,
-                grants_hash=grants_hash, authorization_session=authorization_session,
-                authorization_context=authorization_context, principal=who,
-            )
-            if parent_decision is None or parent_decision.level < LEVEL_FULL:
-                return Decision(DISCLOSURE_MIN)
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who,
+                                   purpose=purpose, content=raw, artifact_copy=artifact_copy):
+        return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
         authorization_context=authorization_context, content=raw if raw is not None else b"",
@@ -2763,6 +2773,9 @@ def annotate_projected_hits(
         rel_path = _hit_path(hit)
         if not rel_path:
             raise ValueError("projected release snapshot is invalid")
+        if not container_parent_allows(vault_root, rel_path, policy=policy, principal=principal, purpose=purpose):
+            withheld_paths = withheld_paths | frozenset((rel_path,))
+            continue
         if decision.level >= RELEASE_FLOOR:
             released.append(hit)
             _outcome_for_decision(
@@ -5270,6 +5283,9 @@ def _decide_markdown_snapshot(
     policy: Policy, principal: RequestPrincipal, purpose: str | None, content_hash: str,
 ) -> Decision | None:
     """Decide exact held Markdown without assuming that it is the current file."""
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=principal,
+                                   purpose=purpose, content=raw):
+        return Decision(DISCLOSURE_MIN)
     decision = projection_decision(
         vault_root, rel_path, policy=policy, audience=principal.audience_id,
         purpose=purpose, authorization_context=principal.verified_authorization_session,
@@ -7082,6 +7098,8 @@ def _release_level_for_path_only_snapshot(
     if not content_permits(vault_root, rel_path, who):
         return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who, purpose=declared_purpose):
+        return DISCLOSURE_MIN
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=who.audience_id,
         purpose=declared_purpose, authorization_context=who.verified_authorization_session,
