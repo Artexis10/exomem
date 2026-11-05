@@ -242,3 +242,28 @@ def test_an_archive_through_a_linked_destination_folder_writes_nothing(vault: Pa
 
     assert (refused.value.code, refused.value.reason) == ("WRITE_REFUSED", "target is unavailable")
     assert list(elsewhere.rglob("*")) == []
+
+
+@pytest.mark.parametrize("scenario", ["case-distinct", "normalized-label", "file-prefix", "fifo-mode"])
+def test_member_pool_keeps_labels_that_do_not_require_filesystem_extraction(vault: Path, scenario: str) -> None:
+    """Hash blobs do not create the paths or filesystem entry types that the labels describe."""
+    if scenario == "case-distinct":
+        entries = [("Report.pdf", b"first"), ("report.pdf", b"second")]
+        expected = {"Report.pdf": b"first", "report.pdf": b"second"}
+    elif scenario == "normalized-label":
+        entries = [("folder//one.pdf", b"first")]
+        expected = {"folder/one.pdf": b"first"}
+    elif scenario == "file-prefix":
+        entries = [("folder", b"first"), ("folder/two.pdf", b"second")]
+        expected = {"folder": b"first", "folder/two.pdf": b"second"}
+    else:
+        fifo = zipfile.ZipInfo("pipe.pdf")
+        fifo.external_attr = (stat.S_IFIFO | 0o600) << 16
+        entries = [(fifo, b"")]
+        expected = {"pipe.pdf": b""}
+    receipt, stored = _preserve(vault, _zip(entries))
+    assert stored
+    manifest = archive_members.read_manifest(vault, receipt["path"])
+    assert manifest is not None
+    family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
+    assert {member["path"]: gzip.decompress((family / member["blob"]).read_bytes()) for member in manifest.members} == expected

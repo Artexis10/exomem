@@ -1786,16 +1786,20 @@ def prepare_planned_markdown_batch(
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare catalog rows lazily so v3/open planned writes remain unchanged."""
 
-    return _prepare_markdown_batch(
-        vault_root,
-        normalized=None,
-        planned_writes=writes,
-        removals=(),
-        clip_replacements=clip_replacements,
-        graph_replacements=graph_replacements,
-        graph_replacement_provider=graph_replacement_provider,
-        now=now,
-    )
+    from .. import document_containers
+
+    with document_containers.planned_scope(vault_root, writes):
+        return _prepare_markdown_batch(
+            vault_root,
+            normalized=None,
+            planned_writes=writes,
+            removals=(),
+            clip_replacements=clip_replacements,
+            graph_replacements=graph_replacements,
+            graph_replacement_provider=graph_replacement_provider,
+            now=now,
+        )
+
 
 
 def prepare_catalog_membership_batch(
