@@ -20,9 +20,9 @@ from exomem.vault import kb_dirname
 
 
 @pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
-@pytest.mark.parametrize("principal", ["owner", "admitted"])
+@pytest.mark.parametrize("principal,pending_write", [("owner", False), ("admitted", False), ("admitted", True)])
 def test_public_recall_work_does_not_scale_with_unrelated_pages(
-    tmp_path: Path, monkeypatch, principal: str, record_property,
+    tmp_path: Path, monkeypatch, principal: str, pending_write: bool, record_property,
     request: pytest.FixtureRequest,
 ) -> None:
     """Catch whole-catalogue SQL and candidate hydration through both public read commands."""
@@ -35,6 +35,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
         epistemic_graph,
         file_watcher,
         memory_refs,
+        pending_recall,
         readiness,
         warmup,
         working_set_index,
@@ -144,6 +145,18 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 # projection and the second reuses it, so the measured call is the third.
                 invoke()
                 working_set_runtime.reset_caches_for_tests(packets_only=True)
+                if pending_write:
+                    from test_pending_recall_delta import _publish_change
+
+                    relative = f"{kb_dirname()}/余白/資料0000.md"
+                    before = (root / relative).read_text(encoding="utf-8")
+                    with library_scope():
+                        _publish_change(
+                            root, batch_id=f"structural-{size}-{operation}",
+                            generation=f"structural-{size}-{operation}",
+                            changes=((relative, before, before + "\n静かな変更。\n", None),),
+                        )
+                        assert pending_recall.overlay(root).covers(relative)
                 with counts.request():
                     result = invoke()
                 sample = counts.snapshot()
@@ -191,10 +204,11 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
             bounded = ratio is not None and ratio <= 1.5
             if not bounded:
                 failures.append((operation, key, ratio))
-            # These fixed instrumentation spans cover admission and match queries; other admitted bounds remain debt.
-            if principal == "admitted" and key[2].startswith((
-                "filter_eligibility/", "bm25/lexical.query/", "keyword/lexical.query/",
-            )):
+            # Pending match work retains its measured baseline; this added case gates admission only.
+            admission_or_settled_match = key[2].startswith("filter_eligibility/") or (
+                not pending_write and key[2].startswith(("bm25/lexical.query/", "keyword/lexical.query/"))
+            )
+            if principal == "admitted" and admission_or_settled_match:
                 assert bounded, (operation, key, ratio)
         for size, sample in ((400, small), (1600, large)):
             if sample["outside_output_reads"]:
@@ -232,7 +246,8 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 "outside_output_reads": sample["outside_output_reads"],
             } for size, sample in ((400, small), (1600, large))},
         })
-    report = json.dumps({**runtime, "principal": principal, "bounds_gating": principal == "owner",
+    report = json.dumps({**runtime, "principal": principal, "pending_write": pending_write,
+                         "bounds_gating": principal == "owner",
                          "bounds_exceeded": failures, "requests": reports}, sort_keys=True)
     record_property("structural_recall", report)
     print(report)
