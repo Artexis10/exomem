@@ -846,7 +846,7 @@ def route_with_proof(command, vault_root, arguments):
     """The store thread a request must run on, or None when file collections answer it, with the proof.
 
     A selector the vault's marker routes to the store, a NEW summary collection's create,
-    Records discovery, and a curation or episode command that runs a Records step or
+    Records discovery, a Planning progress review, and a curation or episode command that runs a Records step or
     structured-files maintenance on a store collection run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
     refuses (C never falls back to its views), a summary create on a vault with no store
@@ -860,7 +860,9 @@ def route_with_proof(command, vault_root, arguments):
         return Routed(None)
     if command in _CURATION_COMMANDS:
         return Routed(_curation_route(command, root, arguments))
-    if command not in _STORE_COMMANDS:
+    # This closed review mode can read store Records through file Planning or discover both profiles.
+    progress_review = command == "review_memory" and arguments.get("mode") == "plan-progress"
+    if command not in _STORE_COMMANDS and not progress_review:
         return Routed(None)
     from . import ownership
 
@@ -878,11 +880,11 @@ def route_with_proof(command, vault_root, arguments):
 
             capability.require_records_summary(root)
             raise admission.enrollment_required()
-    elif selector is None and (
+    elif progress_review or selector is None and (
         arguments.get("action") == "inspect"
         or (command == "record_memory" and arguments.get("action") == "describe")
     ):
-        # Both public store tools need the service writer for global inventory.
+        # Inventory and composite review need the writer for every collection they select.
         server = None if proof.marker is None else _server(root)
         return Routed(server, proof) if server is not None and server.runtime is not None else Routed(None)
     elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
