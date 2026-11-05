@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .. import record_formats
+from .. import call_spans, record_formats
 from .. import structured_collections as collections
 
 
@@ -35,8 +35,10 @@ class StoreAdapter:
             return self._read(manifest)
 
     def _read(self, manifest: collections.CollectionManifest) -> record_formats.AdapterSnapshot:
-        items, snapshot, _ = self.writer._operation.authorized_rows(manifest.collection_id)
-        return self._snapshot(manifest, items, snapshot)
+        with call_spans.span("store.authorized_rows"):
+            items, snapshot, _ = self.writer._operation.authorized_rows(manifest.collection_id)
+        with call_spans.span("store.materialize", {"items": len(items)}):
+            return self._snapshot(manifest, items, snapshot)
 
     def _snapshot(self, manifest, items, snapshot):
         versions = [manifest.manifest_version]

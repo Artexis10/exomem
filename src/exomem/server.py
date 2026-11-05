@@ -572,6 +572,7 @@ def _record_ledger_row(
     activation_result: dict[str, object] | None = None,
 ) -> None:
     """Append one call-ledger row. Never raises into the call path."""
+    started = time.perf_counter()
     try:
         from . import call_ledger, request_budget
         from .command_surface import current_rendering, mcp_caller_identity, mcp_retry_scope
@@ -610,6 +611,7 @@ def _record_ledger_row(
         )
     except Exception:  # noqa: BLE001 - the ledger must never break a call
         pass
+    ledger_finished = time.perf_counter()
     # After the row, never before it: the watch is a reader of the same facts,
     # and a failure in it must leave the ledger exactly as it was.
     try:
@@ -630,6 +632,18 @@ def _record_ledger_row(
         from . import latency_watch
 
         latency_watch.current().record_failure()
+    # The ledger's total ends before observation; keep these phases on the same request id.
+    observation_finished = time.perf_counter()
+    try:
+        from .log_events import log_event
+
+        log_event(_call_log, logging.INFO, "call_observation", fields={
+            "request_id": request_id,
+            "ledger_record_ms": round((ledger_finished - started) * 1000, 2),
+            "latency_watch_ms": round((observation_finished - ledger_finished) * 1000, 2),
+        })
+    except Exception:  # noqa: BLE001 - observation must not change the call outcome
+        pass
 
 
 def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:
