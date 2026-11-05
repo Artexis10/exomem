@@ -32,6 +32,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Literal, get_args
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
@@ -61,6 +62,10 @@ RUNS_DIR = "_Adoption/runs"
 SCHEMA_VERSION = 1
 # The plan layout `apply` understands. A plan made by an earlier layout is refused as stale.
 PLAN_FORMAT = 2
+# These are fixed status protocol views, not vault vocabulary.
+StatusView = Literal["summary", "inventory", "selection", "plan", "outcomes", "stale", "full"]
+STATUS_PAGE_ITEMS = 100
+STATUS_PAGE_BYTES = 32 * 1024
 MAX_CANDIDATES_DEFAULT = 5000
 # Where Exomem Cloud stages an uploaded collection (see `cloud_import_job`).
 IMPORT_STAGE_DIR = import_stage.STAGE_DIR
@@ -255,6 +260,13 @@ class AdoptionRunStore:
 
     def save(self, run: dict) -> None:
         batch_atomic_write([self.planned_write(run)], vault_root=self.vault_root)
+
+    def save_intent(self, run: dict) -> None:
+        """Freeze recovery scope without claiming that an import already committed."""
+        batch_atomic_write(
+            [self.planned_write(run)], vault_root=self.vault_root,
+            commit_point=False, post_commit_fanout=False,
+        )
 
     def load_proposals(self, run_id: str) -> dict:
         f = self.run_dir(run_id) / "proposals.json"
@@ -842,7 +854,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", _NOTE_PRICE, "sources_seal"})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal"})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _present(root: Path, run: dict, **extra) -> dict:
@@ -1021,6 +1033,8 @@ def _issue_cursor(run: dict, kind: str) -> str:
     seq = len(cursors) + 1
     token = f"{kind}-{seq:04d}-{secrets.token_hex(4)}"
     cursors[token] = {"kind": kind, "seq": seq, "state": "open"}
+    if kind == "apply":
+        cursors[token]["scope"] = copy.deepcopy(run.get("scope"))
     return token
 
 
@@ -1360,9 +1374,74 @@ def _pending(run: dict) -> list[dict]:
     ]
 
 
-def status(root: Path, *, run_id: str | None = None, path: str = "") -> dict:
+def _status_view(run: dict, presented: dict, *, view: StatusView, offset: int,
+                 limit: int, revision: str | None) -> dict:
+    """Project one persisted run into summary metadata or a revision-bound page."""
+    current_revision = hashlib.sha256(json.dumps(
+        run, sort_keys=True, ensure_ascii=False, default=str,
+    ).encode("utf-8")).hexdigest()
+    if revision is not None and revision != current_revision:
+        raise AdoptionRunError("IMPORT_STATUS_CHANGED", "the run changed; read its summary and restart paging")
+    outcomes = run.get("outcomes") or {}
+    plan = run.get("plan") or {}
+    summary = {
+        **_compact_row(run), "revision": current_revision, "view": view,
+        "plan_id": plan.get("plan_id"), "interrupted": presented["interrupted"],
+        "remaining": len(_pending(run)), "next_actions": presented["next_actions"],
+        "proposals_summary": presented["proposals_summary"], "handoff": presented["handoff"],
+        "staleness": {"count": len(presented["stale_paths"]), "view": "stale"},
+    }
+    summary["counts"].update(
+        planned=len(plan.get("items") or []),
+        failed=sum(outcome.get("status") == "failed" for outcome in outcomes.values()),
+        source_applied=sum(outcome.get("status") == _SOURCE_ONLY for outcome in outcomes.values()),
+    )
+    # These bounded protocol fields retain recorded verification, never a fresh byte claim.
+    for key in ("continuation", "progress", "verified_unchanged", "verified_total", "consumed"):
+        if key in presented:
+            summary[key] = presented[key]
+    if view == "summary":
+        return summary
+    if view == "inventory":
+        rows = run.get("inventory") or []
+    elif view == "selection":
+        rows = (run.get("selection") or {}).get("paths") or []
+    elif view == "plan":
+        rows = plan.get("items") or []
+    elif view == "outcomes":
+        rows = [{"original_path": path, **outcomes[path]} for path in sorted(outcomes)]
+    else:
+        rows = presented["stale_paths"]
+    items, omitted = [], []
+    used = 0
+    next_offset = offset
+    for index in range(offset, min(len(rows), offset + limit)):
+        row = rows[index]
+        size = len(json.dumps(row, default=str).encode("utf-8"))
+        if size > STATUS_PAGE_BYTES:
+            omitted.append({"offset": index, "code": "ROW_TOO_LARGE", "bytes": size})
+        elif used + size > STATUS_PAGE_BYTES:
+            break
+        else:
+            items.append(row)
+            used += size
+        next_offset = index + 1
+    return {
+        **summary, "items": items, "omitted": omitted, "offset": offset, "limit": limit,
+        "total": len(rows), "next_offset": next_offset if next_offset < len(rows) else None,
+    }
+
+
+def status(root: Path, *, run_id: str | None = None, path: str = "", view: StatusView = "full",
+           offset: int = 0, limit: int = STATUS_PAGE_ITEMS, revision: str | None = None) -> dict:
     root = Path(root)
     store = AdoptionRunStore(root)
+    if view not in get_args(StatusView):
+        raise AdoptionRunError("IMPORT_REQUEST_INVALID", "unknown status view")
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= STATUS_PAGE_ITEMS:
+        raise AdoptionRunError("IMPORT_REQUEST_INVALID", f"status requires offset >= 0 and limit from 1 to {STATUS_PAGE_ITEMS}")
+    if offset and revision is None:
+        raise AdoptionRunError("IMPORT_REQUEST_INVALID", "a later status page requires its run revision")
     if not run_id:
         return {"mode": "adoption", "mutated": False, **store.listing(path=path)}
     run = store.load(run_id)
@@ -1387,7 +1466,7 @@ def status(root: Path, *, run_id: str | None = None, path: str = "") -> dict:
     else:
         extra["interrupted"] = False
     stale = probe_staleness(root, run)
-    return _present(
+    presented = _present(
         root,
         run,
         staleness={"stale_paths": stale},
@@ -1396,6 +1475,9 @@ def status(root: Path, *, run_id: str | None = None, path: str = "") -> dict:
         handoff=_handoff(run),
         **extra,
     )
+    if view == "full":
+        return presented
+    return _status_view(run, presented, view=view, offset=offset, limit=limit, revision=revision)
 
 
 def select(
@@ -2085,11 +2167,49 @@ class _CallReads:
         return self.recorded_stage(root, run) if run.get("consume", True) else None
 
 
+def _apply_invocation(run: dict) -> dict | None:
+    from .writer_lease import active_mutation_recovery_identity
+
+    identity = active_mutation_recovery_identity()
+    return (run.get("apply_invocations") or {}).get(identity[0]) if identity else None
+
+
+def _freeze_import_chunk(
+    store: AdoptionRunStore, run: dict, survivors: list[tuple[dict, adopt_module.ImportItem]],
+    *, run_date: dt.date,
+) -> tuple[dict | None, bool]:
+    """Retain exact post-images before a rename or any destination is published."""
+    invocation = _apply_invocation(run)
+    if invocation is None:
+        return None, False
+    if invocation.get("publication") is not None:
+        return invocation["publication"], True
+    items = {}
+    for planned, item in survivors:
+        items[planned["original_path"]] = {
+            "target_path": item.target_rel,
+            "source_sha256": hashlib.sha256(item.content.encode("utf-8")).hexdigest(),
+            "source_id": parse_frontmatter(item.content)[0].get("exomem_id") if item.artifact else None,
+            "artifact_path": planned.get("artifact_path"), "original_sha256": item.sha256,
+        }
+    sequence = invocation["chunk_sequence"] = invocation.get("chunk_sequence", 0) + 1
+    publication = {
+        "date": run_date.isoformat(), "items": items,
+        "operation_token": hashlib.sha256(json.dumps(
+            [run["run_id"], invocation["identity_digest"], invocation["command_digest"], sequence, items], sort_keys=True,
+        ).encode("utf-8")).hexdigest(),
+    }
+    invocation["publication"] = publication
+    store.save_intent(run)
+    return publication, False
+
+
 def _commit_chunk(
     root: Path, store: AdoptionRunStore, run: dict,
     survivors: list[tuple[dict, adopt_module.ImportItem]], *,
     run_date: dt.date, label: str | None, reads: _CallReads,
     placed: Mapping[str, import_rename.Placed],
+    publication: dict | None = None, reconciling: bool = False,
 ) -> list[dict]:
     """Commit one chunk's pages, artifacts, indexes, log and the run object in one batch.
 
@@ -2104,11 +2224,22 @@ def _commit_chunk(
         outcomes[planned["original_path"]] = _applied(planned)
         _hold_for_note(outcomes[planned["original_path"]], planned)
     try:
+        invocation = _apply_invocation(run)
+        if invocation is not None:
+            invocation.pop("publication", None)
         committed = adopt_module.commit_import_items(
             root, [item for _planned, item in survivors], today=run_date,
             extra_writes=[store.planned_write(run)], source_counts=reads.source_counts,
+            reconcile=reconciling,
+            operation_token=publication["operation_token"] if publication else None,
         )
     except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
+        if reconciling:
+            raise AdoptionRunError(
+                "IMPORT_RECOVERY_UNRESOLVED",
+                "the interrupted chunk cannot establish exact custody and canonical bookkeeping; "
+                "preserve the run, staging and original mutation identity",
+            ) from error
         reads.source_counts = None
         # The pages the batch left are unknown, so only the walk can say which items landed.
         index = reads.whole_index(root, run)
@@ -2177,14 +2308,17 @@ def _apply_chunk(
     texts: dict[str, str] = {}
     stage = reads.filing_stage(root, run)
     placed: dict[str, import_rename.Placed] = {}
+    invocation = _apply_invocation(run)
+    publication = invocation.get("publication") if invocation else None
     for planned in chunk:
         path = planned["original_path"]
+        frozen = (publication.get("items") or {}).get(path) if publication else None
         by_rename = import_rename.renamable(stage, planned)
         text, failure = _read_original(root, planned, ceiling, by_rename=by_rename)
         moved = None
         if failure is not None and failure["code"] == "NOT_FOUND":
             # Not a failure when adoption already filed it and removed the staged copy.
-            earlier = _filed_and_gone(root, run, reads, planned)
+            earlier = None if frozen else _filed_and_gone(root, run, reads, planned)
             if earlier is not None:
                 _release_hold(root, planned)
                 outcomes[path] = _already_applied(
@@ -2201,6 +2335,8 @@ def _apply_chunk(
                 # An earlier call may have renamed the file and stopped before its Source page committed.
                 replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
                 if isinstance(replay, import_rename.Refused):
+                    if frozen:
+                        raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the interrupted artifact cannot establish its rename custody")
                     # The hold stays: the file is unbound with other bytes, and only the person's move
                     # lifts it. The scans leave it alone and a discard of its stage refuses until then.
                     outcomes[path] = _failed(replay.code, replay.reason)
@@ -2208,6 +2344,8 @@ def _apply_chunk(
                 if replay is not None:
                     moved, failure = replay, None
         if failure is not None:
+            if frozen:
+                raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the interrupted chunk's original bytes are unavailable or changed")
             if by_rename and rename_journal.is_held(root, root / planned["artifact_path"]):
                 # An earlier call renamed this member's file and could not put it back: the retry finds the
                 # staged path changed, and the outcome must still say where the file is.
@@ -2221,6 +2359,22 @@ def _apply_chunk(
             texts[path] = text
         if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
             continue  # an earlier call wrote its Source; only the note is owed
+        if frozen:
+            item = adopt_module.import_item(
+                root, planned, text=text, date_iso=plan["date"], collection=label, source_id=frozen.get("source_id"),
+            )
+            if (
+                frozen.get("target_path") != item.target_rel
+                or frozen.get("artifact_path") != planned.get("artifact_path")
+                or frozen.get("original_sha256") != item.sha256
+                or frozen.get("source_sha256") != hashlib.sha256(item.content.encode("utf-8")).hexdigest()
+            ):
+                raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the chunk no longer matches its frozen post-images")
+            if moved is not None:
+                item.artifact.placed = True
+                placed[path] = moved
+            survivors.append((planned, item))
+            continue
         index = reads.earlier_imports(root, run, planned)
         if planned["action"] == "already-imported":
             frozen = [entry for entry in index if entry.path == planned["target_path"]]
@@ -2260,6 +2414,9 @@ def _apply_chunk(
             item.artifact.placed = True
             placed[path] = moved
         survivors.append((planned, item))
+    reconciling = False
+    if survivors:
+        publication, reconciling = _freeze_import_chunk(store, run, survivors, run_date=run_date)
     if survivors and stage is not None:
         survivors = _file_by_rename(
             root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
@@ -2267,7 +2424,9 @@ def _apply_chunk(
     landed: list[dict] = []
     if survivors:
         landed = _commit_chunk(
-            root, store, run, survivors, run_date=run_date, label=label, reads=reads, placed=placed
+            root, store, run, survivors,
+            run_date=dt.date.fromisoformat(publication["date"]) if publication else run_date,
+            label=label, reads=reads, placed=placed, publication=publication, reconciling=reconciling,
         )
         for planned in landed:
             _release_hold(root, planned)
@@ -2654,6 +2813,76 @@ def _consumed_count(outcomes: dict) -> int:
     return sum(1 for o in outcomes.values() if o.get("status") in _APPLIED_STATUSES and o.get("consumed"))
 
 
+def _legacy_apply_invocation(
+    root: Path, run: dict, identity: tuple[str, str, bool], *,
+    continuation: str | None, retry_failed: bool, only_paths: list[str] | None,
+) -> dict:
+    """Reconstruct immutable argument scope or the scope held by a current legacy cursor."""
+    plan_items = run["plan"]["items"]
+    planned_paths = {item["original_path"] for item in plan_items}
+    invocation = {
+        "identity_digest": identity[0], "command_digest": identity[1],
+        "plan_id": run["plan"]["plan_id"], "continuation": continuation,
+    }
+    if continuation:
+        entry = _cursor_entry(run, "apply", continuation)
+        saved = entry.get("reply")
+        if entry["state"] == "used" and isinstance(saved, dict):
+            progress = saved.get("progress")
+            # These counters are the fixed apply-reply protocol, not a vocabulary.
+            counters = ("applied", "failed", "remaining", "total")
+            if (
+                isinstance(saved.get("apply_result"), dict) and isinstance(progress, dict)
+                and all(type(progress.get(key)) is int and progress[key] >= 0 for key in counters)
+                and progress["total"] == sum(progress[key] for key in counters[:3])
+            ):
+                invocation["reply"] = copy.deepcopy(saved)
+                return invocation
+        scope = run.get("scope")
+        if not (
+            run["phase"] == "applying" and run.get("inflight") is True
+            and _open_cursor(run, "apply") == continuation and entry["state"] == "open"
+            and "scope" in run
+            and (scope is None or isinstance(scope, list)
+                 and all(isinstance(path, str) and path in planned_paths for path in scope))
+        ):
+            raise AdoptionRunError(
+                "IMPORT_RECOVERY_UNRESOLVED",
+                "the legacy continuation no longer proves its original scope; preserve the run and mutation identity",
+            )
+        # Every fresh apply supersedes this cursor before changing scope; an open current cursor retains it.
+        scope = copy.deepcopy(scope)
+    elif retry_failed:
+        raise AdoptionRunError(
+            "IMPORT_RECOVERY_UNRESOLVED",
+            "the earlier version did not retain this invocation's original failed subset; "
+            "preserve the run, staging and original mutation identity",
+        )
+    else:
+        scope = sorted({_clean(path) for path in only_paths} & planned_paths) if only_paths else None
+    selected = set(scope) if scope is not None else None
+    label = (run.get("collection") or {}).get("label")
+    for planned in plan_items:
+        path = planned["original_path"]
+        if selected is not None and path not in selected:
+            continue
+        outcome = (run.get("outcomes") or {}).get(path) or {}
+        if outcome.get("status") in _APPLIED_STATUSES or outcome.get("status") == _SOURCE_ONLY:
+            earlier = adoption_plan.read_import_entry(root, root / planned["target_path"])
+            if _earlier_with_same_bytes(root, [earlier] if earlier else [], label, planned) is not None:
+                continue
+            raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "an earlier committed outcome no longer proves Source custody")
+        if any(os.path.lexists(root / target) for target in (planned["target_path"], planned.get("artifact_path")) if target):
+            raise AdoptionRunError(
+                "IMPORT_RECOVERY_UNRESOLVED",
+                "the earlier version left an occupied destination without a complete chunk receipt; "
+                "its partial publication has no frozen post-image proof",
+            )
+    invocation["scope"] = scope
+    run.setdefault("apply_invocations", {})[identity[0]] = invocation
+    return invocation
+
+
 def apply(
     root: Path,
     *,
@@ -2671,7 +2900,7 @@ def apply(
     twice: every item is checked against the earlier imports before it is copied.
     """
     from . import client_artifacts
-    from .writer_lease import active_manager
+    from .writer_lease import active_manager, active_mutation_recovery_identity
 
     root = Path(root)
     run_date = _today(today)
@@ -2691,10 +2920,33 @@ def apply(
         if plan.get("selection_hash") != (run.get("selection") or {}).get("selection_hash"):
             raise AdoptionRunError("PLAN_STALE", "selection changed since the plan was created")
 
+        identity = active_mutation_recovery_identity()
+        invocation = None
+        reconciling = identity is not None and identity[2]
+        if reconciling:
+            invocation = (run.get("apply_invocations") or {}).get(identity[0])
+            if invocation is None:
+                invocation = _legacy_apply_invocation(
+                    root, run, identity, continuation=continuation, retry_failed=retry_failed, only_paths=only_paths,
+                )
+            if (
+                not isinstance(invocation, dict)
+                or invocation.get("command_digest") != identity[1]
+                or invocation.get("plan_id") != plan_id
+                or invocation.get("continuation") != continuation
+            ):
+                raise AdoptionRunError(
+                    "IMPORT_RECOVERY_UNRESOLVED",
+                    "the interrupted invocation has no matching durable scope checkpoint; "
+                    "preserve this run and its original mutation identity",
+                )
+            if "reply" in invocation:
+                return _present(root, run, **invocation["reply"])
+
         entry = None
         if continuation:
             entry = _cursor_entry(run, "apply", continuation)
-            if entry["state"] == "used":
+            if entry["state"] == "used" and not reconciling:
                 return _present(root, run, **(entry.get("reply") or {}))
 
         plan_items = plan["items"]
@@ -2706,7 +2958,7 @@ def apply(
         }
         stats: Counter = Counter()
         reads = _CallReads()
-        fresh = entry is None
+        fresh = entry is None and not reconciling
         if fresh:
             _supersede_cursors(run, "apply")
             if retry_failed:
@@ -2720,6 +2972,41 @@ def apply(
                 run["scope"] = sorted({_clean(p) for p in only_paths} & set(by_path))
             else:
                 run["scope"] = None
+        elif reconciling:
+            scope = invocation.get("scope")
+            if "scope" not in invocation or scope is not None and (
+                not isinstance(scope, list)
+                or any(not isinstance(path, str) or path not in by_path for path in scope)
+            ):
+                raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the frozen import scope is invalid")
+            run["scope"] = copy.deepcopy(scope)
+        elif "scope" in entry:
+            run["scope"] = copy.deepcopy(entry["scope"])
+        wanted = None if run.get("scope") is None else set(run["scope"])
+        for owner, other in (run.get("apply_invocations") or {}).items():
+            if "reply" in other or identity is not None and owner == identity[0]:
+                continue
+            held = set((other.get("publication") or {}).get("items") or {})
+            if held and (wanted is None or held & wanted):
+                # Otherwise another call could publish note backrefs or outcomes over an unfinished chunk's post-images.
+                raise AdoptionRunError(
+                    "IMPORT_RECOVERY_UNRESOLVED",
+                    "another interrupted invocation holds this chunk; reconcile its original mutation identity first",
+                )
+        run["outcomes"] = outcomes
+        if identity is not None and not reconciling:
+            invocation = {
+                "identity_digest": identity[0], "command_digest": identity[1], "plan_id": plan_id,
+                "continuation": continuation, "scope": copy.deepcopy(run.get("scope")),
+            }
+            run.setdefault("apply_invocations", {})[identity[0]] = invocation
+            # This intent precedes staged settlement, rename and Source/note publication.
+            # It is not evidence that any requested import committed.
+            store.save_intent(run)
+        elif reconciling:
+            store.save_intent(run)
+
+        if fresh:
             scope = None if run["scope"] is None else set(run["scope"])
             # A repeat call re-checks what an earlier call applied: the originals stay unchanged.
             for path in list(outcomes):
@@ -2729,14 +3016,14 @@ def apply(
                     _settle_staged(root, run, reads, by_path[path], outcomes[path], stats)
         else:
             # A call that stopped between a chunk's commit and its settlement left those items unsettled.
+            scope = None if run.get("scope") is None else set(run["scope"])
             for path, outcome in outcomes.items():
                 if (
-                    path in by_path and outcome.get("status") in _APPLIED_STATUSES
+                    path in by_path and (scope is None or path in scope)
+                    and outcome.get("status") in _APPLIED_STATUSES
                     and "consumed" not in outcome and "original_unchanged" not in outcome
                 ):
                     _settle_staged(root, run, reads, by_path[path], outcome, stats)
-        run["outcomes"] = outcomes
-
         run.pop("apply_stop", None)
         budget = _call_budget()
         ceiling = client_artifacts.adoption_ceiling()
@@ -2760,7 +3047,15 @@ def apply(
                 active_manager().lend_boundary(
                     root, next_unit_seconds=seconds, next_unit_batches=batches, room_seconds=room
                 )
-            chunk = pacer.next_chunk(pending, first=not chunks)
+            publication = invocation.get("publication") if invocation else None
+            if publication:
+                # The frozen batch owns one bookkeeping/log identity; its membership cannot change on retry.
+                members = set(publication["items"])
+                chunk = [item for item in pending if item["original_path"] in members]
+                if len(chunk) != len(members):
+                    raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the frozen chunk's pending membership changed")
+            else:
+                chunk = pacer.next_chunk(pending, first=not chunks)
             if not chunk:
                 stopped = True
                 break
@@ -2775,7 +3070,8 @@ def apply(
                 budget=budget, stats=stats, written=written, reads=reads, pacer=pacer,
             )
             pacer.record(chunk, time.monotonic() - started, extractions)
-            pending = pending[len(chunk):]
+            completed_paths = {item["original_path"] for item in chunk}
+            pending = [item for item in pending if item["original_path"] not in completed_paths]
             chunks += 1
             if stats["notes_deferred"]:
                 stopped = True
@@ -2835,6 +3131,8 @@ def apply(
             entry["state"], entry["reply"] = "used", reply
         if reads.sealed:
             run["sources_seal"] = adoption_plan.sources_seal(reads.pages)
+        if invocation is not None:
+            invocation["reply"] = copy.deepcopy(reply)
         store.save(run)
     return _present(root, run, **reply)
 

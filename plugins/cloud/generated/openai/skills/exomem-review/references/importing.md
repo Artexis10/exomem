@@ -47,6 +47,41 @@ If another import is open, inspect its progress through MCP and agree whether to
 - A file over the adoption ceiling stays staged and is listed in the residual with its code and the ceiling.
 - A file that changed after `plan` is refused for that item, and its neighbours still file.
 
+## Interrupted apply
+
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` means data committed, but the call's exact terminal result could not be saved.
+`MUTATION_OUTCOME_UNKNOWN` does not establish how many files committed.
+Keep the original folder, staged import, run and original tool call until recovery resolves their state.
+Refreshing the connector or plugin does not repair the Cloud server or update its runtime.
+
+On servers through v0.161.1, per-run status includes the full inventory, plan and outcomes.
+If that reply is too large, `read_import(operation={"kind":"status"})` lists compact run rows without a `run_id`.
+That listing does not reconcile the interrupted call.
+
+On a server whose status schema includes `view`, use this sequence:
+
+1. Read `status` with the existing `run_id`; expect a compact summary with counts, `plan_id`, `revision` and interruption state.
+2. Read details with `view="outcomes"`, `limit=100` and that `revision`; expect a bounded page with `next_offset`.
+3. Carry `next_offset` as `offset` and keep the revision; expect each page from the same saved run.
+4. If `IMPORT_STATUS_CHANGED` returns, read the summary again; expect a new revision before restarting the detail pages.
+
+Other detail views are `inventory`, `selection`, `plan` and `stale`.
+One oversized row appears in `omitted` with `ROW_TOO_LARGE`; it is uninspected, not an empty or successful item.
+`view="full"` remains unbounded for the browser and explicit compatibility callers.
+
+After the server recovery repair is deployed, repeat the interrupted `import_memory` apply call exactly once.
+Keep its account, client, arguments, original `continuation` and explicit idempotency key when present.
+The server reconciles the same abandoned mutation identity before it resumes the retained scope.
+Do not substitute a continuation from a later status reply or change retry filters for this call.
+After recovery returns a new continuation, follow that continuation normally.
+
+An active writer returns `MUTATION_ACKNOWLEDGEMENT_PENDING`; wait for that call before retrying its exact identity.
+`IMPORT_RECOVERY_UNRESOLVED` means the server cannot prove the original scope or exact custody.
+Preserve the run and staging, and report that code with the server version and run metadata to the operator.
+Do not create another run, change the mutation identity, force an import or discard the stage to bypass it.
+Some older runs lack enough evidence, especially failed-only retries or partially published chunks without a complete receipt.
+Recovery confirms filing and custody; `finish` must still report recall coverage and any pending extraction or visibility.
+
 ## What adoption leaves staged
 - Each file that is filed as an artifact loses its staged copy once its Knowledge Base copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.
 - A text file stays staged until the discard. Adoption does not consume it.
