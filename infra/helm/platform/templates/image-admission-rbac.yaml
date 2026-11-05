@@ -1,0 +1,152 @@
+{{- if .Values.operatorDeploy.enabled }}
+{{- $profile := .Files.Get "files/image-admission-v1.json" | fromJson }}
+{{- $namespace := .Values.kyverno.namespaceOverride }}
+{{- $account := .Values.kyverno.admissionController.rbac.serviceAccount.name }}
+{{- $service := include "kyverno.admission-controller.serviceName" .Subcharts.kyverno }}
+{{- $validating := list }}
+{{- $mutating := list }}
+{{- range $hook := $profile.webhooks }}
+{{- if eq $hook.kind "ValidatingWebhookConfiguration" }}
+{{- $validating = append $validating $hook.name }}
+{{- else }}
+{{- $mutating = append $mutating $hook.name }}
+{{- end }}
+{{- if not (lookup "admissionregistration.k8s.io/v1" $hook.kind "" $hook.name) }}
+---
+# Helm owns missing-object recovery. The runtime can update only these fixed
+# upstream configurations; it cannot create a new hook or a native policy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: {{ $hook.kind }}
+metadata:
+  name: {{ $hook.name }}
+  annotations:
+    helm.sh/resource-policy: keep
+webhooks: []
+{{- end }}
+{{- end }}
+{{- if not (lookup "v1" "Secret" $namespace $profile.provenanceSecret) }}
+---
+# The upstream process requires this immutable key even with generation off.
+# Seed it once; dropping it costs an installer repair rather than Secret CREATE.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $profile.provenanceSecret }}
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+immutable: true
+type: Opaque
+data:
+  key: {{ randBytes 32 | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $account }}
+  namespace: {{ $namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-image-admission
+rules:
+  # Unfiltered vendor informers require LIST/WATCH. UPDATE is confined below.
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
+    verbs: [get, list, watch]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations]
+    resourceNames: {{ $validating | toJson }}
+    verbs: [update]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [mutatingwebhookconfigurations]
+    resourceNames: {{ $mutating | toJson }}
+    verbs: [update]
+  # Read policy definitions for the vendor's shared informers; no spec mutation.
+  - apiGroups: [policies.kyverno.io, kyverno.io]
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups: [policies.kyverno.io]
+    resources: [imagevalidatingpolicies/status, namespacedimagevalidatingpolicies/status]
+    verbs: [get, update, patch]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list, watch]
+  # Kyverno 1.19.2 waits for these authorization caches before serving admission.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings, clusterrolebindings, clusterroles]
+    verbs: [list, watch]
+  # The pinned vendor watches native validation policies even with generation disabled.
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+    verbs: [list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch, update]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-image-admission
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-image-admission
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ $namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exomem-image-admission
+  namespace: {{ $namespace }}
+rules:
+  # The vendor's Secret informer requires payload LIST/WATCH in its own namespace.
+  # That namespace holds only admission TLS/provenance and the read-only registry key.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - {{ $profile.provenanceSecret }}
+      - {{ .Values.operatorDeploy.registryReadSecretName }}
+      {{- range $suffix := $profile.tlsSecretSuffixes }}
+      - {{ printf "%s.%s.svc.%s" $service $namespace $suffix }}
+      {{- end }}
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exomem-image-admission
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exomem-image-admission
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ $namespace }}
+{{- end }}

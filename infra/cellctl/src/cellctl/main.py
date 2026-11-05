@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -259,6 +260,7 @@ def build_cluster_config() -> ClusterConfig:
         cell_data_staging_bucket=os.environ["CELLCTL_CELL_DATA_STAGING_BUCKET_NAME"],
         cell_data_endpoint=os.environ["CELLCTL_CELL_DATA_ENDPOINT"],
         key_retention_sources=_retention_sources(),
+        access_record_enabled=os.environ.get("CELLCTL_ACCESS_RECORD_ENABLED") == "true",
         resources=ResourceSettings(
             cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
             cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
@@ -321,18 +323,51 @@ def run() -> None:
     )
     volume_provider = HetznerVolumeProvider(read_only_token=os.environ["CELLCTL_HETZNER_READ_TOKEN"])
 
-    asyncio.run(
-        run_loop(
-            os.environ["CELLCTL_DATABASE_DSN"],
-            cluster,
-            volume_provider,
-            build_secrets_config(),
-            cluster_config,
-            config=build_reconcile_config(),
-            heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
-            backup_listing=backup_listing,
-        )
-    )
+    async def serve():
+        from .access_record import AccessRecordConfig, run_access_record_loop
+
+        stop = asyncio.Event()
+        access_task = None
+        if cluster_config.access_record_enabled:
+            try:
+                access_task = asyncio.create_task(
+                    run_access_record_loop(
+                        os.environ["CELLCTL_DATABASE_DSN"],
+                        AccessRecordConfig(**{
+                            **json.loads(os.environ["CELLCTL_ACCESS_RECORD_READER"]),
+                            # The chart supplies the deployed identity, not a reader credential default.
+                            "platform_namespace": os.environ["CELLCTL_ACCESS_RECORD_PLATFORM_NAMESPACE"],
+                            "platform_workload": os.environ["CELLCTL_ACCESS_RECORD_PLATFORM_WORKLOAD"],
+                        }),
+                        stop,
+                        cluster,
+                        cluster_config,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - optional recording must never gate cell reconciliation
+                # Log no reader values: they include the read credential.
+                logging.getLogger("cellctl").error(
+                    "cellctl: configure CELLCTL_ACCESS_RECORD_READER and its rendered controller identity; access recording is unavailable"
+                )
+        try:
+            await run_loop(
+                os.environ["CELLCTL_DATABASE_DSN"],
+                cluster,
+                volume_provider,
+                build_secrets_config(),
+                cluster_config,
+                config=build_reconcile_config(),
+                heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
+                backup_listing=backup_listing,
+            )
+        finally:
+            stop.set()
+            if access_task is not None:
+                access_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await access_task
+
+    asyncio.run(serve())
 
 
 if __name__ == "__main__":

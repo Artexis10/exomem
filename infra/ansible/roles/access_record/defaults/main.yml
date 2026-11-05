@@ -1,0 +1,22 @@
+---
+access_record_enabled: false
+access_record_pam_enabled: false
+access_record_vector_version: "0.60.0"
+access_record_vector_archives:
+  x86_64:
+    target: x86_64-unknown-linux-gnu
+    sha256: 89a9f134dcc35a6fbba9cb8ad0fec2d4802657bba6cb1c374a30660ef9456bdc
+  aarch64:
+    target: aarch64-unknown-linux-gnu
+    sha256: 1540662d8bc33af5afd287f821ba930417e0f3124073bc9db6a29c59dda88dbb
+access_record_node_id: ""
+access_record_bucket: ""
+access_record_endpoint: ""
+access_record_region: ""
+access_record_writer_key_id: ""
+access_record_writer_key: ""
+access_record_audit_path: /var/lib/rancher/k3s/server/logs/audit.log
+access_record_heartbeat_seconds: 60
+access_record_batch_seconds: 30
+access_record_buffer_bytes: 536870912
+access_record_metrics_address: 127.0.0.1:9598

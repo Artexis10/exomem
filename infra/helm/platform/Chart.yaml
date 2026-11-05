@@ -20,3 +20,7 @@ dependencies:
     repository: https://topolvm.github.io/topolvm
     version: 17.2.0
     condition: cellStorage.local.enabled
+  - name: kyverno
+    repository: https://kyverno.github.io/kyverno/
+    version: 3.9.2
+    condition: operatorDeploy.enabled
