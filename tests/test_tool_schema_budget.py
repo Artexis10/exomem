@@ -44,7 +44,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
 # The generic-relation wording on the write tools adds 50 B; the `offset` cursor on
 # read_memory adds 150 B for windows over long Source text. Keep both integration costs.
-TOTAL_BUDGET = 165_450
+# Bounded import status adds four view and paging fields. read_import measures 3,052 B;
+# its ceiling rounds to 3,100 B, and the total budget rises 550 B for those protocol inputs.
+TOTAL_BUDGET = 166_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -83,7 +85,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_import": 2550,
+    "read_import": 3100,
     "read_connections": 3300,
     "read_episode": 1500,
     "read_governance": 2250,

@@ -344,7 +344,7 @@ def test_finished_run_manifest_carries_no_per_item_detail_but_status_does(
     assert "Selected:" in body
 
     # The owner still reads the full per-item detail through the owning command.
-    status = commands.op_adoption_studio(vault, action="status", run_id=run_id)
+    status = commands.op_adoption_studio(vault, action="status", run_id=run_id, view="full")
     assert "Old Notes/quarterly-planning.md" in status["selection"]["paths"]
     status_json = json.dumps(status, default=str)
     assert all(t in status_json for t in targets)

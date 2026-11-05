@@ -409,6 +409,8 @@ def _prepend_recent_capture(text: str, *, date_iso: str, rel_source_path: str) -
         body_start += 2
     # The section is generated here: its list is the lines that start with "- ", as in Recent activity.
     lines = text[body_start:section_end].splitlines()
+    if entry in lines:
+        return text
     kept, _dropped = _capped([entry, *(line for line in lines if line.startswith("- "))])
     rest = [line for line in lines if not line.startswith("- ")]
     body = "\n".join(kept) + "\n" + ("\n".join(rest) + "\n" if rest else "")
