@@ -13,8 +13,8 @@ the marker.
 Run from a merge checkout with at least two commits of history, naming what
 the calling job leaves out on a docs-only change. It writes `docs_only` and
 `pytest_args` to `$GITHUB_OUTPUT` and reports the omission in the job summary.
-On docs-only changes, each tier runs all marked tests in shard 1; its other
-shards omit collection. The appended split options override the normal shard
+On docs-only changes, each tier runs all marked tests in shard 1; CI omits its
+other shard jobs. The appended split options override the normal shard
 arguments in the workflow. Any event other than `pull_request`, or a history
 it cannot compare, gives a full run.
 
@@ -73,7 +73,7 @@ def docs_only(event_name: str) -> bool:
 
 def main(omitted: str) -> int:
     only_docs = docs_only(os.environ.get("EVENT_NAME", ""))
-    # The fixed CI matrices keep their check names; shard 1 owns each docs-only tier.
+    # The matrix and pytest consume this same decision so a single shard covers the whole docs tier.
     pytest_args = f"-m {DOCS_MARKER} --splits=1 --group=1" if only_docs else ""
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"docs_only={'true' if only_docs else 'false'}\n")
@@ -85,7 +85,7 @@ def main(omitted: str) -> int:
                 f"Docs-only change: {omitted} did not run. Every change is in docs, "
                 "OpenSpec or root Markdown, so this job makes no claim about them.\n"
                 "Core and harness shard 1 each run all their marked tests; "
-                "the other shards omit test collection.\n"
+                "CI omits the other core and harness shard jobs.\n"
             )
     return 0
 

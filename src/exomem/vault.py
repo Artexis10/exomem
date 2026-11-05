@@ -41,6 +41,7 @@ from . import (
     freshness,
     held_fs,
     privacy_log,
+    request_budget,
     reserved_paths,
     stack_sites,
     view_lag,
@@ -1249,6 +1250,7 @@ def _leaf_hash(path: Path, expected: PathIdentity) -> str:
         if not stat.S_ISREG(info.st_mode) or not _same_identity(expected, info):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded content identity changed")
         while chunk := os.read(descriptor, 65536):
+            request_budget.checkpoint()
             digest.update(chunk)
     finally:
         os.close(descriptor)
@@ -1659,6 +1661,7 @@ def _descriptor_hash(descriptor: int, expected: PathIdentity) -> str:
         if not stat.S_ISREG(info.st_mode) or not _same_identity(expected, info):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
         while chunk := os.read(descriptor, 65536):
+            request_budget.checkpoint()
             digest.update(chunk)
         if not _same_identity(expected, os.fstat(descriptor)):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
@@ -4149,6 +4152,7 @@ def _read_bounded_guarded_snapshot(
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
+            request_budget.checkpoint()
             chunk = os.read(leaf, min(65536, remaining))
             if not chunk:
                 break
@@ -4274,6 +4278,7 @@ def _read_bounded_windows_snapshot(
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
+            request_budget.checkpoint()
             chunk = os.read(leaf, min(65536, remaining))
             if not chunk:
                 break
@@ -8131,12 +8136,14 @@ class WikilinkResolver:
             for rel_path, title in entries
         )
         for rel_path, title_lower in normalized:
+            request_budget.checkpoint()
             resolver._add_entry(rel_path, title_lower)
         return resolver
 
     def _build(self) -> None:
         vault_resolved = self.vault_root.resolve()
         for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
+            request_budget.checkpoint()
             try:
                 rel = md.resolve().relative_to(vault_resolved).as_posix()
             except ValueError:
