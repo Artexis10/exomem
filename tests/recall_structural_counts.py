@@ -18,6 +18,7 @@ from test_recall_integration import _PageReadSentinel
 
 from exomem import call_spans, find_candidates, lexstore
 from exomem.find_types import FindTimings
+from exomem.governance import egress
 
 
 class RequestCounts:
@@ -36,6 +37,9 @@ class RequestCounts:
         self.proofs = Counter()
         self.candidates = defaultdict(set)
         self.sources = {}
+        self.pool_paths = set()
+        self.pool_sources = set()
+        self.pool_size = 0
         self.pages = _PageReadSentinel(root)
         self.pages.install(monkeypatch)
         connect = sqlite3.connect
@@ -118,6 +122,19 @@ class RequestCounts:
             return result
 
         monkeypatch.setattr(find_candidates, "collect_candidates", measured_candidates)
+        annotate_hits = egress.annotate_hits
+
+        def measured_annotation(vault_root, hits, **kwargs):
+            if self.measuring():
+                self.pool_size += len(hits)
+                for hit in hits:
+                    path = egress._hit_path(hit)
+                    self.pool_paths.add(path)
+                    self.pool_sources.add(path)
+                    self.pool_sources.update(getattr(hit, "evidence_sources", {}))
+            return annotate_hits(vault_root, hits, **kwargs)
+
+        monkeypatch.setattr(egress, "annotate_hits", measured_annotation)
 
     def measuring(self):
         return self.active and threading.get_ident() == self.owner
@@ -169,6 +186,9 @@ class RequestCounts:
         self.proofs.clear()
         self.candidates.clear()
         self.sources.clear()
+        self.pool_paths.clear()
+        self.pool_sources.clear()
+        self.pool_size = 0
         self.pages.reset()
         self.next_selection = 0
         self.active = True
@@ -185,4 +205,7 @@ class RequestCounts:
             "page_reads": self.pages.count,
             "read_paths": [path for path, _caller in self.pages.read],
             "sources": dict(self.sources),
+            "pool_paths": frozenset(self.pool_paths),
+            "pool_sources": frozenset(self.pool_sources),
+            "pool_size": self.pool_size,
         }

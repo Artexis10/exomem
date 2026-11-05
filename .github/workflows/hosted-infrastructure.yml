@@ -206,3 +206,61 @@ jobs:
           EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL: ${{ secrets.EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL }}
           EXOMEM_BLACKBOX_SCHEDULER_URL: ${{ secrets.EXOMEM_BLACKBOX_SCHEDULER_URL }}
         run: python3 infra/scripts/external_blackbox.py --contract infra/contracts/observability-v1.json
+
+  access-record-node:
+    name: Disposable Ubuntu access metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Install the pinned node source tools
+        timeout-minutes: 9
+        run: |
+          source infra/tool-versions.env
+          uv sync --project infra/cellctl --locked
+          uv pip install --python infra/cellctl/.venv/bin/python "ansible-core==$ANSIBLE_CORE_VERSION"
+          read -r vector_version vector_target vector_sha < <(infra/cellctl/.venv/bin/python - <<'PY'
+          import yaml
+          values=yaml.safe_load(open('infra/ansible/roles/access_record/defaults/main.yml'))
+          archive=values['access_record_vector_archives']['x86_64']
+          print(values['access_record_vector_version'],archive['target'],archive['sha256'])
+          PY
+          )
+          curl --fail --silent --show-error --location "https://github.com/vectordotdev/vector/releases/download/v$vector_version/vector-$vector_version-$vector_target.tar.gz" --output "$RUNNER_TEMP/vector.tar.gz"
+          printf '%s  %s\n' "$vector_sha" "$RUNNER_TEMP/vector.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/vector-node"
+          tar --extract --gzip --file "$RUNNER_TEMP/vector.tar.gz" --directory "$RUNNER_TEMP/vector-node" --strip-components=2
+          scripts/ci-apt-install.sh openssh-server
+      - name: Prove SSH, PAM, sudo and the native metadata projection
+        run: |
+          sudo env RUN_ACCESS_RECORD_NODE_TEST=1 VECTOR_BIN="$RUNNER_TEMP/vector-node/bin/vector" ANSIBLE_PLAYBOOK_BIN="$PWD/infra/cellctl/.venv/bin/ansible-playbook" infra/cellctl/.venv/bin/python -m pytest -q -s infra/cellctl/tests/test_access_record_node.py --basetemp="$RUNNER_TEMP/access-record-node"
+
+  image-admission-runtime:
+    name: Scoped image admission runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Install the pinned chart renderer
+        run: |
+          source infra/tool-versions.env
+          curl --fail --silent --show-error --location "https://get.helm.sh/helm-v$HELM_VERSION-linux-amd64.tar.gz" --output "$RUNNER_TEMP/helm.tar.gz"
+          printf '%s  %s\n' "$HELM_LINUX_AMD64_SHA256" "$RUNNER_TEMP/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/helm.tar.gz" --directory "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/linux-amd64" >> "$GITHUB_PATH"
+          uv run --frozen python infra/scripts/helm_dependencies.py infra/helm/platform --helm "$RUNNER_TEMP/linux-amd64/helm"
+      - name: Prove scoped startup, negative permissions and CA rotation
+        env:
+          RUN_K3S_ADMISSION_TEST: "1"
+          RUN_IMAGE_ADMISSION_RUNTIME_TEST: "1"
+        run: HELM_BIN="$(command -v helm)" uv run --frozen pytest -q -s tests/test_hosted_k3s_admission.py -k image_admission_runtime

@@ -1,0 +1,213 @@
+{{- if .Values.operatorDeploy.enabled }}
+{{- $deploy := .Values.operatorDeploy }}
+{{- $profile := .Files.Get "files/image-admission-v1.json" | fromJson }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.kyverno.namespaceOverride }}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
+{{- range $workload := $deploy.workloads }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exomem-image-deploy-{{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ $workload.name | quote }}]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exomem-image-deploy-{{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exomem-image-deploy-{{ $workload.name }}
+subjects:
+  - kind: Group
+    name: {{ $deploy.group | quote }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
+---
+# K3s 1.35 exposes dyn objects as complete maps. Keep every sibling and future
+# field; remove only image at each container and the server-owned root fields.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-image-only-deploy
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [deployments]
+  matchConditions:
+    - name: deploy-principal
+      expression: {{ printf "has(request.userInfo.groups) && %s in request.userInfo.groups" ($deploy.group | toJson) | quote }}
+  variables:
+    - name: normalized
+      expression: >-
+        [dyn(object), dyn(oldObject)].map(o,
+          o.transformMap(k, v,
+            k == 'metadata' ? v.transformMap(mk, mv,
+              !(mk in ['managedFields', 'resourceVersion', 'generation']), mv) :
+            k == 'spec' ? v.transformMap(sk, sv,
+              sk == 'template' ? sv.transformMap(tk, tv,
+                tk == 'spec' ? tv.transformMap(pk, pv,
+                  pk in ['containers', 'initContainers'] ? pv.map(c,
+                    dyn(c).transformMap(ck, cv, ck != 'image', cv)) : pv) : tv) : sv) : v))
+  validations:
+    - expression: variables.normalized[0] == variables.normalized[1]
+      message: The deploy identity can change container images only.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-image-only-deploy
+spec:
+  policyName: exomem-image-only-deploy
+  validationActions: [Deny]
+---
+# Parameter lookup is scoped before match conditions. Ordinary namespaces need
+# no cell StatefulSet. A wrongly firing denial delays a Job, never a live restart.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cell-job-image
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: apps/v1
+    kind: StatefulSet
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: exomem.io/cloud-cell
+          operator: Exists
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs]
+  matchConditions:
+    - name: confined-producer
+      expression: {{ printf "request.userInfo.username == 'system:serviceaccount:%s:cellctl' || (has(request.userInfo.groups) && %s in request.userInfo.groups)" .Values.cellctl.namespace ($deploy.group | toJson) | quote }}
+  validations:
+    - expression: >-
+        params.spec.template.spec.containers.size() == 1 &&
+        object.spec.template.spec.containers.all(c, c.image == params.spec.template.spec.containers[0].image) &&
+        (!has(object.spec.template.spec.initContainers) || object.spec.template.spec.initContainers.all(c,
+          c.image == params.spec.template.spec.containers[0].image))
+      message: Every Job image must match the admitted cell StatefulSet image.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cell-job-image
+spec:
+  policyName: exomem-cell-job-image
+  paramRef:
+    name: cell
+    parameterNotFoundAction: Deny
+  validationActions: [Deny]
+{{- $policies := list (dict "name" "cloud-cell" "kind" "StatefulSet" "resource" "statefulsets" "family" $deploy.cellFamily "repository" .Values.cellctl.cellImageRepository) }}
+{{- range $workload := $deploy.workloads }}
+{{- $policies = append $policies (dict "name" $workload.name "namespace" $workload.namespace "kind" "Deployment" "resource" "deployments" "family" $workload.family "repository" (first (splitList "@" $.Values.cellctl.image))) }}
+{{- end }}
+{{- range $policy := $policies }}
+---
+apiVersion: policies.kyverno.io/v1beta1
+kind: ImageValidatingPolicy
+metadata:
+  name: exomem-release-image-{{ $policy.name }}
+spec:
+  failurePolicy: Fail
+  validationActions: [Deny]
+  webhookConfiguration:
+    timeoutSeconds: 20
+  evaluation:
+    admission: {enabled: true}
+    background: {enabled: false}
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    {{- if eq $policy.kind "StatefulSet" }}
+    namespaceSelector:
+      matchExpressions:
+        - key: exomem.io/cloud-cell
+          operator: Exists
+    {{- end }}
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [{{ $policy.resource }}]
+  matchConditions:
+    - name: expected-producer
+      expression: >-
+        {{- if eq $policy.kind "StatefulSet" }}
+        request.userInfo.username == 'system:serviceaccount:{{ $.Values.cellctl.namespace }}:cellctl'
+        {{- else }}
+        request.namespace == {{ $policy.namespace | toJson }} && object.metadata.name == {{ $policy.name | toJson }} &&
+        has(request.userInfo.groups) && {{ $deploy.group | toJson }} in request.userInfo.groups
+        {{- end }}
+    - name: new-or-changed-image
+      expression: >-
+        oldObject == null ||
+        object.spec.template.spec.containers.map(c,c.image) != oldObject.spec.template.spec.containers.map(c,c.image) ||
+        (has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers.map(c,c.image) : []) !=
+        (has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers.map(c,c.image) : [])
+  images:
+    - name: workload
+      expression: >-
+        object.spec.template.spec.containers.map(c,c.image) +
+        (has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers.map(c,c.image) : [])
+  matchImageReferences:
+    - glob: '*'
+  validationConfigurations:
+    mutateDigest: false
+    verifyDigest: true
+    required: true
+  credentials:
+    secrets: [{{ $deploy.registryReadSecretName | quote }}]
+  attestors:
+    - name: release
+      cosign:
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              # The regex describes GitHub's workflow/ref certificate protocol.
+              subjectRegExp: {{ printf "^https://github\\.com/%s/%s@refs/tags/v[^/]+$" ($deploy.sourceRepository | regexQuoteMeta) ($deploy.workflow | regexQuoteMeta) | quote }}
+        ctlog:
+          url: https://rekor.sigstore.dev
+  attestations:
+    - name: family
+      intoto:
+        type: {{ $profile.familyPredicateType | quote }}
+  validations:
+    - expression: >-
+        images.workload.all(image, image.startsWith({{ printf "%s@sha256:" $policy.repository | toJson }}))
+      message: The image must use the configured repository and an exact digest.
+    - expression: >-
+        images.workload.all(image, verifyAttestationSignatures(image, attestations.family, [attestors.release]) > 0)
+      message: The image needs a signed release family assertion.
+    - expression: >-
+        images.workload.all(image,
+          extractPayload(image,attestations.family).predicate.family == {{ $policy.family | toJson }} &&
+          extractPayload(image,attestations.family).predicate.source.repository == {{ $deploy.sourceRepository | toJson }} &&
+          extractPayload(image,attestations.family).predicate.source.ref.startsWith('refs/tags/v'))
+      message: The signed source and image family must match this workload.
+{{- end }}
+{{- end }}

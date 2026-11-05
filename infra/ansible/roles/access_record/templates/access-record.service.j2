@@ -1,0 +1,21 @@
+[Unit]
+Description=Retained access metadata through Vector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/exomem-access-record/writer.env
+# Vector 0.60 requires opt-in for the fixed runtime fields in this role-owned, root-only configuration.
+ExecStart=/bin/sh -c 'export ACCESS_RECORD_BOOT_ID=$(/usr/bin/cat /proc/sys/kernel/random/boot_id); exec /opt/exomem-vector/bin/vector --dangerously-allow-env-var-interpolation --config /etc/exomem-access-record/vector.yaml'
+Restart=always
+RestartSec=5
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/exomem-access-record
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
