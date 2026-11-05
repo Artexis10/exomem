@@ -15,9 +15,6 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows idempote
 def test_sidecar_delete_pending_preserves_runtime_trust_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_replacement: bool
 ) -> None:
-    import ctypes
-    from ctypes import wintypes
-
     from exomem import mutation_lock
     from exomem.writer_lease import IdempotencyStore
 
@@ -27,9 +24,6 @@ def test_sidecar_delete_pending_preserves_runtime_trust_checks(
     handle = mutation_lock._windows_open_path(
         sidecar, directory=False, access=0x00010080, share=0x7  # DELETE | FILE_READ_ATTRIBUTES
     )
-    delete_file = mutation_lock._windows_library(ctypes, "kernel32").DeleteFileW
-    delete_file.argtypes = [wintypes.LPCWSTR]
-    delete_file.restype = wintypes.BOOL
     release = threading.Event()
     replaced = threading.Event()
     observed: list[int] = []
@@ -61,7 +55,8 @@ def test_sidecar_delete_pending_preserves_runtime_trust_checks(
     thread = threading.Thread(target=finish_delete)
     thread.start()
     try:
-        assert delete_file(str(sidecar)), "the native sidecar did not enter delete-pending"
+        # Retained-handle disposition keeps deletion pending; path deletion may unlink immediately.
+        mutation_lock._windows_delete_handle(handle)
         if unsafe_replacement:
             with pytest.raises(mutation_lock.WindowsRuntimeDaclError):
                 store._ensure_private_runtime_state()
