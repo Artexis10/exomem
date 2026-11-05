@@ -109,6 +109,15 @@ class FrontmatterCache:
     #: Served-from-cache count: the use signal the idle reaper watches.
     hits: int = 0
 
+    def cache_status(self) -> dict[str, int]:
+        """Read page counts and cache hits under the cache lock."""
+        with self._lock:
+            return {
+                "entries": len(self.entries),
+                "body_chars": sum(len(page.body) for page in self.entries.values()),
+                "hits": int(self.hits),
+            }
+
     def clear(self) -> None:
         """Discard every row, and record it as a whole-cache re-derivation.
 

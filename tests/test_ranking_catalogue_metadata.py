@@ -120,6 +120,10 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
             stored = {row[0] for row in connection.execute("SELECT path FROM pages WHERE in_kb=1")}
         assert len(provider) == len(stored) == size
         assert provider == stored
+        # Activation publishes a release verdict map after this size's search
+        # measurements. Start both sizes with the same application-cache state,
+        # then let each operation's existing public warm-up populate its maps.
+        lexstore.release_admitted_recall_rows()
         for operation, query in queries.items():
             with request_scope(reader):
                 store = lexstore.get_store(root)
