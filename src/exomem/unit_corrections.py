@@ -8,8 +8,16 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import epistemic_graph, find, freshness, memory_refs, relation_registry, request_budget
-from .governance import egress
+from . import (
+    epistemic_graph,
+    find,
+    freshness,
+    memory_refs,
+    relation_registry,
+    request_budget,
+)
+from .governance import egress, policy
+from .published_admission import admission_of
 
 # nosemgrep: ep-word-set -- closed relation-schema families whose authored facts inform a claim.
 CORRECTIVE_FAMILIES = frozenset(
@@ -20,6 +28,14 @@ MAX_COUNTERPARTS = 4
 
 def reader_view(root: Path, purpose: str | None = None) -> Callable[[str], bool] | None:
     return egress.reader_view(root, purpose=purpose)
+
+
+def _current_reader(root: Path, reader: egress.ReaderView) -> egress.ReaderView | None:
+    # Rebuild the same caller's authority without its request's cached policy or deleted-page verdicts.
+    with policy.outside_request_policy_snapshot():
+        return egress.reader_view(
+            root, principal=reader._principal, purpose=reader._purpose, withheld=frozenset(),
+        )
 
 
 def discover(
@@ -60,19 +76,37 @@ def discover(
     conn = None
     try:
         check_deadline()
-        checkpoint = freshness.live_recall_checkpoint(root, "vault")
-        if checkpoint is None:
-            return result("unavailable")
-        resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
-        if resolver is None:
-            return result("unavailable")
-        conn = epistemic_graph.EpistemicGraphIndex(root)._open_read_snapshot(live_only=True)
-        if conn is None:
-            return result("unavailable")
+        index = epistemic_graph.EpistemicGraphIndex(root)
+        publication = None
+        authority = None
+        current_reader = _current_reader(root, keep) if isinstance(keep, egress.ReaderView) else None
+        if current_reader is not None and (admission := admission_of(current_reader)) is not None:
+            authority = admission.identity()
+            if authority is not None:
+                retained = index._open_published_read(current_reader, deadline=deadline)
+                check_deadline()
+                if retained is not None:
+                    conn, publication = retained
+        if publication is not None:
+            resolver = publication.resolver
+        else:
+            checkpoint = freshness.live_recall_checkpoint(root, "vault")
+            if checkpoint is None:
+                return result("unavailable")
+            resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
+            if resolver is None:
+                return result("unavailable")
+            conn = index._open_read_snapshot(live_only=True)
+            if conn is None:
+                return result("unavailable")
+            instance = conn.execute("SELECT value FROM main.graph_meta WHERE key = 'instance'").fetchone()
+            snapshot_instance = instance[0] if instance is not None else None
         # The shared SQL row cap bounds volume; the progress handler bounds work.
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         check_deadline()
-        view = epistemic_graph.GraphView(root, conn, keep=keep, resolver=resolver)
+        view = epistemic_graph.GraphView(
+            root, conn, keep=current_reader if publication is not None else keep, resolver=resolver,
+        )
         seeds: dict[str, str] = {}
         outgoing_seeds: dict[str, tuple[str, str, frozenset[str]]] = {}
         partial = False
@@ -193,8 +227,25 @@ def discover(
             set(seeds), limit=MAX_COUNTERPARTS * len(references), accept=inspect,
         )
         check_deadline()
-        if freshness.external_pending(root) or not freshness.recall_checkpoint_is_current(root, "vault", checkpoint):
+        if publication is not None:
+            final_reader = _current_reader(root, keep)
+            final_admission = admission_of(final_reader)
+            proof_current = (
+                final_reader is not None and final_admission is not None
+                and final_admission.identity() == authority
+                and index._published_read_is_current(publication, final_reader, deadline=deadline)
+            )
+            check_deadline()
+            if not proof_current:
+                return result("unavailable")
+        elif (
+            freshness.external_pending(root)
+            or not freshness.recall_checkpoint_is_current(root, "vault", checkpoint)
+            or not index._snapshot_instance_is_current(snapshot_instance, deadline=deadline)
+        ):
+            check_deadline()
             return result("unavailable")
+        check_deadline()
         return result("partial" if partial or overflow or view.unavailable else "available",
                       admitted.values(), outgoing.values())
     except TimeoutError:

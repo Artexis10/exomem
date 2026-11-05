@@ -478,8 +478,9 @@ def test_graph_internal_deletion_epoch_keeps_floor_caller_checkpoint_order(
 def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    existing = tmp_path / "existing.md"
-    created = tmp_path / "created.md"
+    # Generic transaction fixtures use text artifacts; Markdown also stages resolver epochs.
+    existing = tmp_path / "existing.txt"
+    created = tmp_path / "created.txt"
     existing.write_bytes(b"old")
     workspace_mkdir_modes: list[int] = []
     backup_creations: list[str] = []
@@ -530,7 +531,7 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     assert replaced == [existing, created]
     assert existing.read_bytes() == b"existing\nexact"
     assert created.read_bytes() == b"created\nexact"
-    assert flips == ["existing.md", "created.md"]
+    assert flips == ["existing.txt", "created.txt"]
     assert workspace_mkdir_modes == [0o777 if os.name == "nt" else 0o700]
     assert backup_creations == []
     assert watcher_calls == [(existing, created)]
@@ -819,9 +820,9 @@ def test_batch_cleanup_outcome_summarizes_commit_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = tmp_path / "first.md"
-    second = tmp_path / "second.md"
-    third = tmp_path / "third.md"
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    third = tmp_path / "third.txt"
     raw = PermissionError("private workspace initialization failure")
 
     def fail_workspace_create(
@@ -859,7 +860,7 @@ def test_batch_cleanup_outcome_summarizes_commit_order(
         "committed": False,
         "incomplete": True,
         "affected_count": 3,
-        "targets": ["first.md", "second.md", "third.md"],
+        "targets": ["first.txt", "second.txt", "third.txt"],
         "omitted_target_count": 0,
     }
     assert incomplete.value.__cause__ is raw
@@ -1106,8 +1107,8 @@ def test_vault_batch_rollback_unlinks_new_file_through_retained_handle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    created = tmp_path / "created.md"
-    existing = tmp_path / "existing.md"
+    created = tmp_path / "created.txt"
+    existing = tmp_path / "existing.txt"
     existing.write_bytes(b"old")
     acquired = vault_module.held_fs.acquire(tmp_path)
     assert acquired.ok
@@ -1144,7 +1145,7 @@ def test_vault_batch_rollback_unlinks_new_file_through_retained_handle(
             post_commit_fanout=False,
         )
 
-    assert "created.md" in unlinked_names
+    assert "created.txt" in unlinked_names
     assert not created.exists()
     assert existing.read_bytes() == b"old"
     assert _workspaces(tmp_path) == []
@@ -1470,7 +1471,7 @@ def test_batch_atomic_write_cleans_partially_initialized_stage(
 def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = tmp_path / "target.md"
+    target = tmp_path / "target.txt"
     target.write_bytes(b"old")
     drifted = b"same-owner drift must not be deleted"
     raw_errors: list[PermissionError] = []
@@ -1504,7 +1505,7 @@ def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
         "committed": False,
         "incomplete": True,
         "affected_count": 1,
-        "targets": ["target.md"],
+        "targets": ["target.txt"],
         "omitted_target_count": 0,
     }
     assert retained.value.__cause__ is raw_errors[0]
@@ -1571,8 +1572,8 @@ def test_batch_atomic_write_reports_cleanup_incomplete_after_complete_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = tmp_path / "first.md"
-    second = tmp_path / "second.md"
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
     first.write_bytes(b"first-old")
     second.write_bytes(b"second-old")
     real_cleanup = vault_module._BatchWorkspace.cleanup
@@ -1618,7 +1619,7 @@ def test_batch_atomic_write_reports_cleanup_incomplete_after_complete_rollback(
     assert first.read_bytes() == b"first-old"
     assert second.read_bytes() == b"second-old"
     assert cleanup_calls == 1
-    assert replacements == ["first.md", "first.md"]
+    assert replacements == ["first.txt", "first.txt"]
     workspace = _workspaces(tmp_path)[0]
     assert (workspace / "unexpected.tmp").read_bytes() == b"retain for reconcile"
 
@@ -1627,8 +1628,8 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = tmp_path / "first.md"
-    second = tmp_path / "second.md"
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
     first.write_bytes(b"first-old")
     second.write_bytes(b"second-old")
     real_cleanup = vault_module._BatchWorkspace.cleanup
@@ -1687,7 +1688,7 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
     assert first.read_bytes() == b"first-new"
     assert second.read_bytes() == b"second-new"
     assert cleanup_calls == 1
-    assert replacements == ["first.md", "second.md"]
+    assert replacements == ["first.txt", "second.txt"]
     assert watcher_calls == [(first, second)]
     assert index_calls == [(first, second)]
     assert reports == [report]
@@ -2621,7 +2622,7 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
 ) -> None:
     guarded = tmp_path / "guarded"
     guarded.mkdir()
-    target = guarded / "target.md"
+    target = guarded / "target.txt"
     target.write_bytes(b"old")
     stale = _make_residue(guarded, 1, children=("stage-0.tmp",))
     for index in range(2, 65):

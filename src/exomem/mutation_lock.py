@@ -1979,6 +1979,7 @@ class _LocalLockState:
     acquired_at: float | None = None
     long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
     long_warning_emitted: bool = False
+    after_release: dict[object, Callable[[], None]] = field(default_factory=dict)
     # Contention attribution. These are *measurement only* — nothing in the
     # acquire path reads them, so no fairness or timeout behaviour depends on
     # them. They share ``metadata_guard`` with the holder fields so a published
@@ -2331,6 +2332,18 @@ class VaultMutationCoordinator:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
 
+    def defer_optional_after_release(self, key: object, work: Callable[[], None]) -> bool:
+        """Run the latest keyed optional work after this thread's outer real release.
+
+        A borrowed hold cannot enqueue work in its lender's context. Failures
+        must not change a committed mutation's result.
+        """
+        state = _state_for(self.lock_path)
+        if state.owner_thread != threading.get_ident() or state.borrower is not None:
+            return False
+        state.after_release[key] = work
+        return True
+
     def waiter_count(self) -> int:
         """Waiters for this boundary, in this process or another on the host.
 
@@ -2566,6 +2579,7 @@ class VaultMutationCoordinator:
                 entered = state.guard.acquire(timeout=remaining)
         if not entered:
             raise _Contended() if probe else self._refused(wait_start)
+        released_work: tuple[Callable[[], None], ...] = ()
         try:
             handle = self._open_lock_file(self.lock_path)
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
@@ -2616,6 +2630,8 @@ class VaultMutationCoordinator:
             try:
                 yield
             finally:
+                released_work = tuple(state.after_release.values())
+                state.after_release.clear()
                 hold_ms = round((time.monotonic() - acquired_at) * 1000, 2)
                 # The part of `hold_ms` that borrowers held (`lend`), so a long hold reads honestly.
                 lent_ms = round(state.lent_seconds * 1000, 2)
@@ -2724,6 +2740,11 @@ class VaultMutationCoordinator:
             # A waiting borrower waits on `turn`, not on the guard (`_enter_or_borrow`).
             with state.turn:
                 state.turn.notify_all()
+            for work in released_work:
+                try:
+                    work()
+                except Exception:  # noqa: BLE001 - optional work cannot change the committed result
+                    logger.warning("optional post-release work failed", exc_info=True)
 
     def snapshot(self) -> dict[str, object]:
         """Measure this vault's OS boundary without exposing identity or content.

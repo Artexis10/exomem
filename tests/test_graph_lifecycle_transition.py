@@ -52,7 +52,7 @@ def _isolated_graph_state(
     writer_lease.reset_managers_for_tests()
 
 
-def test_relocated_deletion_epoch_uses_the_canonical_content_prefix(
+def test_deletion_epoch_covers_resolver_inputs_outside_the_content_prefix(
     monkeypatch: pytest.MonkeyPatch,
     _isolated_graph_state: Path,
 ) -> None:
@@ -65,11 +65,11 @@ def test_relocated_deletion_epoch_uses_the_canonical_content_prefix(
     )
 
     assert epoch is not None
-    assert epoch.checkpoint.paths == ((relative, None),)
+    assert epoch.checkpoint.scope == "full"
     graph_sync.restore_deletion_epoch(epoch)
 
 
-def test_relocated_recovery_epoch_uses_the_canonical_content_prefix(
+def test_recovery_epoch_covers_resolver_inputs_outside_the_content_prefix(
     _isolated_graph_state: Path,
 ) -> None:
     relative, _source = _note(_isolated_graph_state, "relocated-recovery.md")
@@ -81,8 +81,7 @@ def test_relocated_recovery_epoch_uses_the_canonical_content_prefix(
     )
 
     assert epoch is not None
-    assert epoch.checkpoint.paths == ((relative, "a" * 64),)
-    assert epoch.checkpoint.created_paths == (relative,)
+    assert epoch.checkpoint.scope == "full"
     graph_sync.restore_deletion_epoch(epoch)
 
 

@@ -624,6 +624,17 @@ class FreshnessSnapshot:
         """Read the lexical catalogue at `checkpoint`."""
         self._lexical[scope] = checkpoint
 
+    def lexical_view(
+        self, scope: str, checkpoint: freshness.RecallFreshnessCheckpoint
+    ) -> FreshnessSnapshot:
+        """Read a proved catalogue checkpoint without changing earlier request consumers."""
+        if self.lexical_checkpoint(scope) == checkpoint:
+            return self
+        view = copy.copy(self)
+        view._lexical = dict(self._lexical)
+        view.pin_lexical_checkpoint(scope, checkpoint)
+        return view
+
     def projection_key(self, scope: str) -> tuple:
         checkpoint = self.recall_checkpoint(scope)
         return (
@@ -8367,6 +8378,10 @@ def unload_ram_caches(
         from . import lexstore
 
         lexstore.release_admitted_recall_rows()
+    if not keep_recall_resolver:
+        from . import graph_read_publication
+
+        graph_read_publication.clear()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
@@ -8409,6 +8424,9 @@ def release_idle_ram_caches() -> dict[str, int]:
 def evict_resolver_caches(vault_root: Path) -> int:
     """Withdraw both resolver projections for one vault after an event gap."""
     root = Path(vault_root)
+    from . import graph_read_publication
+
+    graph_read_publication.forget(root)
     with _RESOLVER_LOCK:
         removed = int(root in _RESOLVER_CACHE) + int(root in _RECALL_RESOLVER_CACHE)
         _evict_resolver(root)

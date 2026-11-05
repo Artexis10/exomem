@@ -189,6 +189,26 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
     return _admitted_relative(vault_root, path, None) is not None
 
 
+def admits_markdown_content(vault_root: Path, path: Path | str, content: bytes) -> bool:
+    """Apply recall policy to bytes a guarded canonical writer will publish.
+
+    The writer proves the destination separately. This decision also works
+    before creation or restoration, when no regular destination exists yet.
+    """
+    root = Path(vault_root)
+    rel = _vault_relative(root, path)
+    if rel is None or not access.is_indexable(root, rel):
+        return False
+    parts = rel.split("/")
+    if _is_structured_alias(parts):
+        return (
+            _is_collection_manifest(parts)
+            and len(content) <= _MAX_MANIFEST_BYTES
+            and _manifest_admits(root, rel, content)
+        )
+    return True
+
+
 def _admitted_relative(
     vault_root: Path, path: Path | str, proven_directories: set[str] | None
 ) -> str | None:
@@ -221,9 +241,7 @@ def _admitted_relative(
     if _is_structured_alias(parts):
         # Casefold/Unicode aliases are never ordinary pages: on a
         # case-insensitive filesystem they can reach the same Records bytes.
-        if not _is_structured_descendant(parts):
-            return None
-        if len(parts) < 3 or parts[-1] != "_collection.md":
+        if not _is_collection_manifest(parts):
             return None
         if not access.is_indexable(root, rel):
             return None
@@ -233,7 +251,7 @@ def _admitted_relative(
             )
         except (UnicodeError, ValueError, OSError, vault.PathGuardError):
             return None
-        return rel if _manifest_admits(root, rel, data) else None
+        return rel if admits_markdown_content(root, rel, data) else None
     if not access.is_indexable(root, rel):
         return None
     return rel
@@ -338,6 +356,11 @@ def _vault_relative(root: Path, path: Path | str) -> str | None:
 
 def _is_structured_descendant(parts: list[str]) -> bool:
     return len(parts) >= 3 and parts[0] == vault.kb_dirname() and parts[1] in {"Records", "Planning"}
+
+
+def _is_collection_manifest(parts: list[str]) -> bool:
+    # The collection storage contract fixes the manifest filename and layer spelling.
+    return _is_structured_descendant(parts) and parts[-1] == "_collection.md"
 
 
 def _is_structured_alias(parts: list[str]) -> bool:

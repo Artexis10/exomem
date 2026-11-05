@@ -985,6 +985,18 @@ def checkpoint_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / _CHECKPOINT_FILENAME
 
 
+def _resolver_requires_full_scope(
+    epoch: GraphEpochState, paths: Iterable[tuple[str, str | None]]
+) -> bool:
+    from .kbdir import kb_dirname
+
+    # Non-KB inputs and physical names outside the checkpoint format use full recovery.
+    return epoch.requires_full_recovery or any(
+        not rel.startswith(f"{kb_dirname()}/") or not _is_canonical_relative_path(rel)
+        for rel, _digest in paths
+    )
+
+
 def floor_path(vault_root: Path) -> Path:
     from . import state_paths
 
@@ -1591,7 +1603,6 @@ def _epoch_writes_with_predecessor(
     The import stays here to keep the vault writer free of a module cycle.
     """
     from . import recall_policy
-    from .kbdir import kb_dirname
     from .vault import (
         PlannedWrite,
         PreparedBinaryContent,
@@ -1614,11 +1625,24 @@ def _epoch_writes_with_predecessor(
         except (OSError, ValueError):
             continue
         if (
-            not relative.endswith(".md")
-            or not relative.startswith(f"{kb_dirname()}/")
+            not relative.lower().endswith(".md")
             or not is_graph_input_path(relative)
             or in_excluded_scan_dir(relative)
-            or recall_policy.is_structured_only_path(root, relative)
+        ):
+            continue
+        if isinstance(write.content, str):
+            policy_content = write.content.encode("utf-8")
+        elif isinstance(write.content, PreparedBinaryContent):
+            position = write.content.stream.tell()
+            try:
+                policy_content = write.content.stream.read(recall_policy._MAX_MANIFEST_BYTES + 1)
+            finally:
+                write.content.stream.seek(position)
+        else:
+            policy_content = b""
+        if not (
+            recall_policy.is_recall_candidate(root, write.path)
+            or recall_policy.admits_markdown_content(root, relative, policy_content)
         ):
             continue
         if isinstance(write.content, str):
@@ -1650,7 +1674,7 @@ def _epoch_writes_with_predecessor(
         mutation_id=mutation_id,
         paths=paths,
         created_paths=created_paths,
-        force_full_scope=epoch.requires_full_recovery,
+        force_full_scope=_resolver_requires_full_scope(epoch, paths),
     )
     return (
         PlannedWrite(floor_path(root), GraphSyncGenerationFloor.create(checkpoint.generation).render()),
@@ -1664,9 +1688,9 @@ def epoch_writes(
 ) -> tuple[PlannedWrite, PlannedWrite] | None:
     """Build ordered internal epoch replacements for canonical graph inputs.
 
-    Only admitted Markdown is a graph input. Stored rows hold raw relation
-    observations that each reader resolves with its own definitions, so a
-    vocabulary registry save changes no stored row and owes the graph nothing.
+    Cover membership before and after publication throughout the resolver's
+    vault-wide corpus. Non-KB inputs use full recovery. Vocabulary definitions
+    remain reader-owned and do not change the stored observations.
     """
     result = _epoch_writes_with_predecessor(vault_root, writes)
     return None if result is None else result[:2]
@@ -1886,59 +1910,73 @@ def prepare_deletion_epoch(
 ) -> GraphDeletionEpoch | None:
     """Publish deletion floor before the lifecycle rename, retaining rollback proof."""
     from . import recall_policy
-    from .kbdir import kb_dirname
 
     root = Path(vault_root).resolve()
     paths: list[tuple[str, str | None]] = [
         (rel, None)
         for raw in removed_rel_paths
-        if (rel := str(raw).replace("\\", "/")).endswith(".md")
-        and rel.startswith(f"{kb_dirname()}/")
+        if (rel := str(raw).replace("\\", "/")).lower().endswith(".md")
         and is_graph_input_path(rel)
-        and not recall_policy.is_structured_only_path(root, rel)
         and recall_policy.is_recall_candidate(root, root / rel)
     ]
     if not paths:
         return None
-    prior_bytes = _prior_artifact_bytes(root, floor_path(root))
-    prior_checkpoint_bytes = _prior_artifact_bytes(root, checkpoint_path(root))
-    epoch = _admit_epoch_inputs(root)
-    checkpoint = next_checkpoint(
-        current=epoch.checkpoint,
-        acknowledged_generation=(
-            epoch.acknowledgement.generation if epoch.acknowledgement is not None else 0
-        ),
-        floor_generation=epoch.floor.generation if epoch.floor is not None else 0,
-        mutation_id=_checkpoint_mutation_id(),
-        paths=paths,
-        created_paths=[],
-        force_full_scope=epoch.requires_full_recovery,
-    )
-    _write_floor(root, GraphSyncGenerationFloor.create(checkpoint.generation))
-    return GraphDeletionEpoch(root, checkpoint, prior_bytes, prior_checkpoint_bytes)
+    return _prepare_lifecycle_epoch(root, paths, [])
 
 
 def prepare_recovery_epoch(
     vault_root: Path,
     restored_paths: Iterable[tuple[str, str]],
 ) -> GraphDeletionEpoch | None:
-    """Publish the restore floor before moving graph-relevant Markdown from trash."""
+    """Stage a floor for restored `(destination, Markdown text)` inputs before rename."""
     from . import recall_policy
-    from .kbdir import kb_dirname
+    from .vault import content_hash
 
     root = Path(vault_root).resolve()
     paths: list[tuple[str, str | None]] = [
-        (rel, content_hash)
+        (rel, content_hash(content))
         for raw_rel, raw_content in restored_paths
-        if (rel := str(raw_rel).replace("\\", "/")).endswith(".md")
-        and rel.startswith(f"{kb_dirname()}/")
+        if (rel := str(raw_rel).replace("\\", "/")).lower().endswith(".md")
         and is_graph_input_path(rel)
-        and not recall_policy.is_structured_only_path(root, rel)
-        and isinstance(raw_content, str)
-        and (content_hash := raw_content)
+        and isinstance(content := raw_content, str)
+        and recall_policy.admits_markdown_content(root, rel, content.encode("utf-8"))
     ]
     if not paths:
         return None
+    return _prepare_lifecycle_epoch(root, paths, [rel for rel, _digest in paths])
+
+
+def prepare_rename_epoch(
+    vault_root: Path, renames: Iterable[tuple[str, str]]
+) -> GraphDeletionEpoch | None:
+    """Fence actual file renames before any source leaves its current location."""
+    from . import recall_policy, reserved_paths
+    from .vault import in_excluded_scan_dir
+
+    root = Path(vault_root)
+    paths: list[tuple[str, str | None]] = []
+    created: list[str] = []
+    for old_rel, new_rel in renames:
+        old_input = (
+            old_rel.lower().endswith(".md")
+            and not in_excluded_scan_dir(old_rel)
+            and recall_policy.is_recall_candidate(root, root / old_rel)
+        )
+        new_input = new_rel.lower().endswith(".md") and not in_excluded_scan_dir(new_rel)
+        if new_input:
+            content = reserved_paths.read_generic_bytes(root, old_rel, physical=True).data
+            new_input = recall_policy.admits_markdown_content(root, new_rel, content)
+        if old_input:
+            paths.append((old_rel, None))
+        if new_input:
+            paths.append((new_rel, hashlib.sha256(content).hexdigest()))
+            created.append(new_rel)
+    return _prepare_lifecycle_epoch(root, paths, created) if paths else None
+
+
+def _prepare_lifecycle_epoch(
+    root: Path, paths: list[tuple[str, str | None]], created: list[str]
+) -> GraphDeletionEpoch:
     prior_bytes = _prior_artifact_bytes(root, floor_path(root))
     prior_checkpoint_bytes = _prior_artifact_bytes(root, checkpoint_path(root))
     epoch = _admit_epoch_inputs(root)
@@ -1950,11 +1988,44 @@ def prepare_recovery_epoch(
         floor_generation=epoch.floor.generation if epoch.floor is not None else 0,
         mutation_id=_checkpoint_mutation_id(),
         paths=paths,
-        created_paths=[rel for rel, _content_hash in paths],
-        force_full_scope=epoch.requires_full_recovery,
+        created_paths=created,
+        force_full_scope=_resolver_requires_full_scope(epoch, paths),
     )
-    _write_floor(root, GraphSyncGenerationFloor.create(checkpoint.generation))
+    try:
+        _write_floor(root, GraphSyncGenerationFloor.create(checkpoint.generation))
+    except Exception:
+        # No source has moved yet; restore even a floor whose durable write raised afterward.
+        _restore_epoch_artifacts(root, prior_bytes, prior_checkpoint_bytes)
+        raise
     return GraphDeletionEpoch(root, checkpoint, prior_bytes, prior_checkpoint_bytes)
+
+
+def publish_rename_epoch(epoch: GraphDeletionEpoch) -> None:
+    """Queue the rename without starting a reader during the compound move's rollback window."""
+    from . import deferred_index
+
+    deferred_index.enqueue_graph_checkpoint(epoch.vault_root, epoch.checkpoint)
+    commit_deletion_epoch(epoch)
+
+
+def rename_epoch_is_current(epoch: GraphDeletionEpoch) -> bool:
+    """Whether a failed child batch left the exact pre-batch graph artifacts intact."""
+    return (
+        read_floor(epoch.vault_root)
+        == GraphSyncGenerationFloor.create(epoch.checkpoint.generation)
+        and read_checkpoint(epoch.vault_root) == epoch.checkpoint
+    )
+
+
+def provision_rename_recovery(epoch: GraphDeletionEpoch) -> None:
+    """Keep unknown rename or child-batch outcomes on the existing full repair queue."""
+    from . import deferred_index
+
+    floor = read_floor(epoch.vault_root)
+    deferred_index.mark_graph_full_rebuild(
+        epoch.vault_root,
+        generation=max(epoch.checkpoint.generation, floor.generation if floor else 0),
+    )
 
 
 def commit_deletion_epoch(epoch: GraphDeletionEpoch) -> None:
