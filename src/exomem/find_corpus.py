@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from . import freshness, privacy_log
+from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 from .vault import relative_posix
@@ -551,6 +551,7 @@ def parse_page(
 ) -> ParsedPage | None:
     from .foreground_activity import checkpoint
 
+    request_budget.checkpoint()
     checkpoint(vault_root)
     return _parse_page_after_checkpoint(
         path, mtime, vault_root, content=content, resolved_relative=resolved_relative

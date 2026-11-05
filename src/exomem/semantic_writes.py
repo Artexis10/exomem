@@ -36,6 +36,7 @@ from . import (
     relation_offer,
     relation_registry,
     relation_review,
+    request_budget,
     semantic_authoring,
     semantic_contract,
     semantic_index,
@@ -719,6 +720,7 @@ def evaluate_posthoc_batch(
     ] = {}
     evaluations: list[PosthocPageEvaluation] = []
     for rel_path in selected:
+        request_budget.checkpoint()
         state = corpus.pages.get(rel_path)
         # Each selected page is this operation's own; its eligibility needs its class.
         semantic_contract.require_page_status(state)

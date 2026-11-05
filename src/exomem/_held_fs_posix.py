@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator
 from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64
 from pathlib import Path
 
+from . import request_budget
 from .held_fs import (
     FILE_ACCESS_MODES,
     Capabilities,
@@ -506,6 +507,7 @@ class PosixHeldFilesystem(HeldFilesystem):
             _lseek(checked.descriptor, 0, os.SEEK_SET)
             chunks, size = [], 0
             while chunk := _read(checked.descriptor, 65536):
+                request_budget.checkpoint()
                 size += len(chunk)
                 if max_bytes is not None and size > max_bytes:
                     return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))

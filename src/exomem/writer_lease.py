@@ -8581,6 +8581,7 @@ def invoke_command(
     **kwargs: Any,
 ) -> Any:
     from .commands import (
+        invocation_is_audit,
         invocation_is_read_only,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
@@ -8802,19 +8803,39 @@ def invoke_command(
             # The terminal filter decides the store-owned pages in a scope of its own, so it asks the
             # store live rather than replaying the body's verdict; the one place that scope can
             # withhold the pages is here, so this is also where the owner is told it did.
+            budget = request_budget.current()
+            checkpoint = (
+                request_budget.ReadCheckpoint(budget)
+                if budget is not None and invocation_is_audit(command, kwargs) else None
+            )
             with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
-                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
+                                    checkpoint=checkpoint)
                 result = store_preview.note_withheld_pages(command.name, result, injected[0])
+            if checkpoint is not None:
+                with request_budget.checking(checkpoint), call_spans.span("command.ownership_finish"):
+                    checkpoint()
+                    ownership_scope.finish()
+                    checkpoint()
         except BaseException as error:
+            budget_exhausted = isinstance(error, request_budget.ReadBudgetExhausted)
+            if budget_exhausted:
+                from .cli_ops import _AuditBudgetExhausted
+
+                request_budget.current().note_truncated("audit.release")
+                error = _AuditBudgetExhausted()
             try:
                 with call_spans.span("command.terminal_filter"):
                     postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             finally:
                 try:
-                    ownership_scope.finish()
+                    if not budget_exhausted:
+                        ownership_scope.finish()
                 finally:
                     with call_spans.span("command.disclosure_receipt"):
                         emit_boundary_receipt(collector)
+            if budget_exhausted:
+                raise error from None
             raise
         try:
             with call_spans.span("command.ownership_finish"):

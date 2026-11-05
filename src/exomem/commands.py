@@ -3952,11 +3952,17 @@ def op_audit(
         vault_root,
         categories=categories,
         semantic_detail=detail,
+        budget=request_budget_module.current(),
     )
-    return report.as_public_dict(
+    result = report.as_public_dict(
         detail=detail,
         legacy_sample_limit=legacy_sample_limit,
     )
+    budget = request_budget_module.current()
+    block = budget.as_response_block() if budget is not None else None
+    if block is not None:
+        result["budget"] = block
+    return result
 
 
 def op_attention(
@@ -13592,6 +13598,17 @@ def _resolved_invocation_selector(command: Command, kwargs: dict[str, Any], sele
     if parameter is None or parameter.default is inspect.Parameter.empty:
         return _MISSING_SELECTOR_DEFAULT
     return parameter.default
+
+
+
+def invocation_is_audit(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Resolve audit routes from command metadata, including omitted defaults."""
+    if command.leaf is op_audit:
+        return True
+    if "audit" not in command.routes:
+        return False
+    selector = egress_module.selector_for_command(command.name)
+    return selector is not None and _resolved_invocation_selector(command, kwargs, selector) == "audit"
 
 
 def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[str, Any]) -> bool:

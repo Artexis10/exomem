@@ -41,7 +41,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -54,6 +54,7 @@ from .. import (
     call_spans,
     find_corpus,
     memory_refs,
+    request_budget,
     reserved_paths,
     state_paths,
     vault,
@@ -5873,8 +5874,27 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
+
 @_at_release_boundary
 def postfilter(
+    command_name: str,
+    result: Any,
+    vault_root: Path,
+    *,
+    request_kwargs: Mapping[str, Any] | None = None,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> Any:
+    """Release a whole result under an optional request-owned allowance."""
+    with request_budget.checking(checkpoint), (
+        policy_module.outside_request_policy_snapshot() if checkpoint is not None else nullcontext()
+    ):
+        request_budget.checkpoint()
+        value = _postfilter(command_name, result, vault_root, request_kwargs=request_kwargs)
+        request_budget.checkpoint()
+        return value
+
+
+def _postfilter(
     command_name: str,
     result: Any,
     vault_root: Path,
@@ -6101,6 +6121,11 @@ def postfilter_error(
     Mutates in place and returns the same object, so the caller re-raises with
     its original type, error code and traceback intact.
     """
+    from ..cli_ops import _AuditBudgetExhausted
+
+    # Only this fixed internal type contains no content that needs reference scanning.
+    if type(error) is _AuditBudgetExhausted:
+        return error
     vault_root = Path(vault_root)
     gate = _ArtifactReferenceGate(
         vault_root,
@@ -7192,6 +7217,7 @@ class _ArtifactReferenceGate:
 
     def _ensure_index(self) -> None:
         # Structured results need no artifact census unless they carry free text.
+        request_budget.checkpoint()
         if self._indexed:
             return
         self._indexed = True
@@ -7322,6 +7348,7 @@ class _ArtifactReferenceGate:
         return allowed
 
     def gate_text(self, text: str) -> str:
+        request_budget.checkpoint()
         if (raw_protection.PREFIX in text.casefold()
                 and not unrestricted_content_access(self.vault_root, self.who)):
             # The token is recognizable even in an orphan/bare-name citation.
@@ -7371,6 +7398,7 @@ class _ArtifactReferenceGate:
         return "".join(pieces)
 
     def gate_payload(self, value: Any, *, scan_strings: bool = False) -> Any:
+        request_budget.checkpoint()
         if isinstance(value, str):
             return self.gate_text(value) if scan_strings else value
         if isinstance(value, Mapping):
@@ -8241,6 +8269,7 @@ def _entry_candidate_paths(
     entries therefore had no candidates at all and were kept unconditionally.
     With `directory` in hand a bare name resolves against it.
     """
+    request_budget.checkpoint()
     found: list[str] = []
 
     def _add(value: Any) -> None:
@@ -8389,6 +8418,7 @@ def filter_withheld_entries(
     The compiler can opt into explicit links in scalar metadata. Bare labels
     stay literal; the default projection keeps its existing reference rules.
     """
+    request_budget.checkpoint()
     vault_root = Path(vault_root)
     writer = bound_writer(vault_root)
     operation = writer._operation if writer is not None else None
@@ -8474,6 +8504,7 @@ def filter_withheld_entries(
         decided here — see `_is_vault_item`."""
         # A payload names the same page in many fields; decide it once per
         # call. Every stored verdict already reflects the tombstone check.
+        request_budget.checkpoint()
         cached = verdicts.get(rel_path)
         if cached is not None:
             return cached
@@ -8564,6 +8595,7 @@ def filter_withheld_entries(
         than indexing the whole vault, so the cost is O(depth) directory reads
         on a miss instead of a full walk per result.
         """
+        request_budget.checkpoint()
         cached = resolved_items.get(rel_path, _UNSET)
         if cached is not _UNSET:
             return cached  # type: ignore[return-value]
@@ -8672,6 +8704,7 @@ def filter_withheld_entries(
     def _candidate_paths(entry, directory, location):
         # Only exact producer-bound metadata slots avoid physical-byte proof.
         # A sibling body or another occurrence of the same path remains ordinary.
+        request_budget.checkpoint()
         if metadata_references:
             if isinstance(entry, Mapping):
                 entry = {key: value for key, value in entry.items()
@@ -8723,6 +8756,7 @@ def filter_withheld_entries(
         )
 
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
+        request_budget.checkpoint()
         if isinstance(node, Mapping) and any(
             not content_permits(vault_root, path, who)
             for path in _entry_candidate_paths(
@@ -8811,6 +8845,7 @@ def filter_withheld_entries(
         A page this misses is decided on a request of its own, and one it adds is decided for nothing:
         a drift between the two costs requests and never a verdict.
         """
+        request_budget.checkpoint()
         if isinstance(node, Mapping):
             here = _directory_of(node)
             here = directory if here is None else here
