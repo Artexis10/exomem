@@ -1,0 +1,148 @@
+---
+- name: Prepare retained access recording only when enabled
+  when: access_record_enabled | bool
+  block:
+    - name: Validate the access record configuration
+      ansible.builtin.assert:
+        that:
+          - access_record_node_id is match('^[a-z0-9][a-z0-9-]{0,62}$')
+          - access_record_bucket | length > 0
+          - access_record_endpoint is match('^https://')
+          - access_record_region | length > 0
+          - access_record_writer_key_id | length > 0
+          - access_record_writer_key | length > 0
+          - access_record_buffer_bytes | int >= 268435488
+          - access_record_batch_seconds | int < 300
+          - access_record_heartbeat_seconds | int > 0
+        quiet: true
+      no_log: true
+
+    - name: Prepare the journal audit producer
+      ansible.builtin.import_tasks: audit-source.yml
+
+    - name: Create the Vector installation and protected state directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop: [/opt/exomem-vector, /etc/exomem-access-record, /var/lib/exomem-access-record]
+
+    - name: Download the pinned Vector archive
+      ansible.builtin.get_url:
+        url: >-
+          {{ 'https://github.com/vectordotdev/vector/releases/download/v'
+             ~ access_record_vector_version ~ '/vector-' ~ access_record_vector_version
+             ~ '-' ~ access_record_vector_archives[ansible_facts['architecture']].target ~ '.tar.gz' }}
+        dest: /opt/exomem-vector/archive.tar.gz
+        checksum: "sha256:{{ access_record_vector_archives[ansible_facts['architecture']].sha256 }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Install the pinned Vector executable
+      ansible.builtin.unarchive:
+        src: /opt/exomem-vector/archive.tar.gz
+        dest: /opt/exomem-vector
+        remote_src: true
+        extra_opts: [--strip-components=2]
+      notify: Restart access record
+
+    - name: Install the content-free projection and write credential
+      ansible.builtin.template:
+        src: "{{ item.source }}"
+        dest: "{{ item.destination }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop:
+        - {source: vector.yaml.j2, destination: /etc/exomem-access-record/vector.yaml}
+        - {source: access-record.env.j2, destination: /etc/exomem-access-record/writer.env}
+      no_log: true
+      notify: Restart access record
+
+    - name: Install the independent Vector unit
+      ansible.builtin.template:
+        src: access-record.service.j2
+        dest: /etc/systemd/system/exomem-access-record.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart access record
+
+    - name: Start retained metadata shipping
+      ansible.builtin.systemd_service:
+        name: exomem-access-record
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Create the local adapter directory
+      ansible.builtin.file:
+        path: /usr/local/libexec
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: access_record_pam_enabled | bool
+
+    - name: Install the optional PAM metadata adapter
+      ansible.builtin.copy:
+        src: exomem-pam-session.py
+        dest: /usr/local/libexec/exomem-pam-session.py
+        owner: root
+        group: root
+        mode: "0755"
+      when: access_record_pam_enabled | bool
+
+    - name: Add the optional SSH session observation boundary
+      ansible.builtin.lineinfile:
+        path: /etc/pam.d/sshd
+        line: session optional pam_exec.so quiet /usr/local/libexec/exomem-pam-session.py
+        state: "{{ 'present' if access_record_pam_enabled else 'absent' }}"
+
+    - name: Keep sudo denial evidence in its existing Linux audit producer
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/exomem-access-record
+        content: "Defaults log_denied, log_allowed\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+- name: Deactivate retained access recording when disabled
+  when: not (access_record_enabled | bool)
+  block:
+    - name: Check for the role's installed unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/exomem-access-record.service
+      register: access_record_installed_unit
+
+    - name: Stop and disable the installed recording unit
+      ansible.builtin.systemd_service:
+        name: exomem-access-record
+        enabled: false
+        state: stopped
+        daemon_reload: true
+      when: access_record_installed_unit.stat.exists
+
+    - name: Check for the SSH PAM configuration
+      ansible.builtin.stat:
+        path: /etc/pam.d/sshd
+      register: access_record_pam_file
+
+    - name: Remove only the optional recording hook
+      ansible.builtin.lineinfile:
+        path: /etc/pam.d/sshd
+        line: session optional pam_exec.so quiet /usr/local/libexec/exomem-pam-session.py
+        state: absent
+      when: access_record_pam_file.stat.exists
+
+    - name: Remove the role's sudo logging override and writer environment
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/sudoers.d/exomem-access-record
+        - /etc/exomem-access-record/writer.env

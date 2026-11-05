@@ -885,3 +885,39 @@ def test_partial_namespace_metadata_cannot_authorize_a_secret_delete():
     client._core.read_namespace.return_value = NS(metadata=NS(labels={CELL_LABEL: CELL_ID}))
     assert client.delete_secret(NAMESPACE, "cell-credentials", cell_id=CELL_ID) is False
     client._core.delete_namespaced_secret.assert_not_called()
+
+
+def test_access_placement_observes_job_and_same_node_replacements_without_lifecycle_filtering():
+    """Stopped-cell Jobs and replacement Pods must remain separate evidence of content access."""
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 11, 4, 12, tzinfo=UTC)
+    def pod(uid, owner_kind, owner_uid, *, namespace=NAMESPACE):
+        return NS(metadata=NS(uid=uid, namespace=namespace, creation_timestamp=now,
+                              deletion_timestamp=None, owner_references=[
+                                  NS(controller=True, kind=owner_kind, uid=owner_uid)]),
+                  spec=NS(node_name="node-a"), status=NS(phase="Running"))
+
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = Mock()
+    client._apps = Mock()
+    client._batch = Mock()
+    client._core.list_namespace.return_value = NS(items=[
+        NS(metadata=NS(name=NAMESPACE, labels={CELL_LABEL: CELL_ID})),
+        NS(metadata=NS(name="unlabelled", labels={}))])
+    client._apps.list_stateful_set_for_all_namespaces.return_value = NS(items=[
+        NS(kind="StatefulSet", metadata=NS(namespace=NAMESPACE, uid="sts-a"))])
+    client._batch.list_job_for_all_namespaces.return_value = NS(items=[
+        NS(kind="Job", metadata=NS(namespace=NAMESPACE, uid="job-a"))])
+    client._core.list_pod_for_all_namespaces.return_value = NS(items=[
+        pod("old", "StatefulSet", "sts-a"), pod("replacement", "StatefulSet", "sts-a"),
+        pod("backup", "Job", "job-a"), pod("forged-owner", "Job", "other"),
+        pod("foreign", "Job", "job-a", namespace="unlabelled")])
+
+    observed = client.observe_access_placements({CELL_ID})
+
+    assert [(item.uid, item.workload_kind, item.node) for item in observed[CELL_ID]] == [
+        ("old", "StatefulSet", "node-a"), ("replacement", "StatefulSet", "node-a"),
+        ("backup", "Job", "node-a")]
+    assert all(item.created_at == now for item in observed[CELL_ID])
+    client._core.list_pod_for_all_namespaces.assert_called_once_with()

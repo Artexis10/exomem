@@ -10,7 +10,11 @@ on the Cloud node. On 2026-09-28 the operator certificate, the operator
 checks, a break-glass mint, exec and audit trail, and the log canary with its
 negative control all ran on the Cloud node as written.
 
-Exomem Cloud has three cluster identities. Use the least one that does the job.
+That evidence covers the legacy profile below.
+The access record, tenant log and scoped deploy profile remain disabled until their operational checks pass.
+Source delivery does not establish hardware presence, off-node retention or a production privacy claim.
+
+Use the least identity that does the job.
 
 - **Everyday operator (`exomem-operator`).** The default for every procedure.
   It reads workload status, current node/pod CPU and memory usage, events, endpoint and isolation-policy metadata,
@@ -19,7 +23,7 @@ Exomem Cloud has three cluster identities. Use the least one that does the job.
   `exomem-operator-read` ClusterRole grants this to group `exomem:operators`.
   The certificate lasts 30 days.
 
-- **Deploy (the K3s admin kubeconfig, `/etc/rancher/k3s/k3s.yaml`).** Root
+- **Chart administration (the K3s admin kubeconfig, `/etc/rancher/k3s/k3s.yaml`).** Root
   only. Use it for scripted Helm and apply procedures, and for approving the
   CSRs below. Those procedures name it explicitly; nothing uses it by default.
 - **Break-glass (`exomem-break-glass`).** Mint it for one task and let it
@@ -32,9 +36,10 @@ The metrics API grant is read-only (`get`/`list` for `metrics.k8s.io` nodes and
 pods). Use its observations with declared reservations for capacity checks;
 one sample reports current usage, not a warmed-workload or lifetime peak.
 
-Every block runs on the node as root with shell tracing off. `kubectl` is not
-on the node's PATH, so the blocks use `k3s kubectl`. A private key never
-leaves the node, and nothing below prints one.
+The marked certificate procedures run on the node as root with shell tracing off.
+They use `k3s kubectl`, because `kubectl` is not on that node's PATH.
+After the workstation migration, routine checks use the workstation's `kubectl` without a node login.
+The admin kubeconfig stays on the node; nothing below prints a private key.
 
 ## Issue the everyday operator certificate
 
@@ -133,18 +138,64 @@ CHECKS
 
 ## Make the operator identity the default
 
-`k3s kubectl` otherwise falls back to the admin kubeconfig. Point root's
-shells at the operator one:
+The prepared profile keeps the routine kubeconfig on the operator's workstation.
+It keeps the admin kubeconfig on the node.
+Select this migration in the operational window; source and sandbox work does not perform it.
+First qualify a private workstation route to the API with certificate validation and no node login.
+The node-issued kubeconfig can name a loopback endpoint; copying it alone does not create that route.
+The current node firewall admits the API from cluster peers, not arbitrary workstations.
+Record the selected endpoint and its TLS name in private operational evidence before the migration.
+Do not expose the API publicly or disable certificate validation to make these checks pass.
+
+1. Transfer only the routine kubeconfig through the approved private channel; the workstation holds the routine credential.
+2. Set its owner to the workstation user and its mode to `600`; other users cannot read it.
+3. Select that file in the workstation shell; routine commands use the routine identity.
+
+Use the configured workstation location:
 
 ```bash
-OPERATOR_KUBECONFIG=/root/.kube/exomem-operator.kubeconfig
-line="export KUBECONFIG=$OPERATOR_KUBECONFIG"
-grep -qxF "$line" /root/.bashrc || printf '%s\n' "$line" >> /root/.bashrc
+export OPERATOR_KUBECONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/exomem/operator.kubeconfig"
 ```
 
-Deploy procedures keep passing `--kubeconfig /etc/rancher/k3s/k3s.yaml` (or
-`KUBECONFIG=/etc/rancher/k3s/k3s.yaml`) explicitly. Keep both kubeconfigs mode
-600 and owned by root; never copy either off the node.
+```bash
+export KUBECONFIG="$OPERATOR_KUBECONFIG"
+```
+
+```bash
+kubectl auth whoami
+```
+
+```bash
+kubectl get nodes
+```
+
+```bash
+kubectl get namespaces --selector=exomem.io/cloud-cell
+```
+
+```bash
+kubectl get pods --all-namespaces
+```
+
+4. Check the routine permissions from the workstation; Secret and connect access remain denied.
+
+```bash
+test "$(kubectl auth can-i get secrets --all-namespaces)" = no
+```
+
+```bash
+test "$(kubectl auth can-i create pods --subresource=exec --all-namespaces)" = no
+```
+
+```bash
+test "$(kubectl auth can-i create certificatesigningrequests)" = no
+```
+
+5. Remove the routine kubeconfig from the node after those checks; no routine credential remains there.
+
+Keep the admin kubeconfig owned by root with mode `600`.
+Full Helm changes and CSR approval remain admin actions.
+The new scoped deploy credential does not authorize either action.
 
 ## Re-issue before expiry
 
@@ -152,9 +203,110 @@ Read the current expiry, and rerun the issue block with at least a week to
 spare. An expired certificate fails closed to no access, not to admin.
 
 ```bash
-k3s kubectl --kubeconfig /root/.kube/exomem-operator.kubeconfig config view --raw \
-  -o jsonpath='{.users[0].user.client-certificate-data}' | base64 -d | openssl x509 -noout -enddate
+kubectl --kubeconfig "$OPERATOR_KUBECONFIG" config view --raw -o jsonpath='{.users[0].user.client-certificate-data}' | base64 -d | openssl x509 -noout -enddate
 ```
+
+## Prepare the access record and scoped deploy profile
+
+These settings are off by default.
+Apply them only through the selected operational packet, with the current release and schema prerequisites reconciled.
+
+| Component | Setting or route | Required evidence before activation |
+|---|---|---|
+| Node collection | Ansible `access_record_enabled` and optional `access_record_pam_enabled` | Qualified node metadata, bounded buffering and operator alerts |
+| Control plane | `EXOMEM_CLOUD_ACCESS_LOG_ENABLED` | Receipt, tenant isolation and recovery workflow checks |
+| Controller | `CELLCTL_ACCESS_RECORD_ENABLED`; chart `cellctl.accessRecord.enabled` and `readerSecretName` | Exact object-version derivation and placement history |
+| Notification receiver | `POST /api/exomem/access-record/receipts` | Configured bucket and prefix, raw-body signature and durable receipt |
+| Tenant log | `GET /api/exomem/cloud/access-log`; `/exomem/access-log` | Healthy, delayed, unknown and denied browser states |
+| Scoped deployment | Chart `operatorDeploy.enabled`; separate `EXOMEM_DEPLOY_TOKEN`; `/api/exomem/admin/cloud-release` | Correct signed family accepted; other families and non-image changes denied |
+
+The notification receiver uses `EXOMEM_ACCESS_RECORD_BUCKET_ID`, `EXOMEM_ACCESS_RECORD_PREFIX` and `EXOMEM_ACCESS_RECORD_NOTIFICATION_SECRET`.
+Configure `EXOMEM_ACCESS_LOG_RETENTION_DAYS` and `EXOMEM_ACCESS_RECORD_HEARTBEAT_MAX_AGE_SECONDS` when the profile is enabled.
+The controller's reader Secret is separate from each node's write-only credential.
+Its `reader.json` supplies `bucket_id`, `bucket_name`, `endpoint`, `region`, `access_key_id` and `secret_access_key`.
+It also supplies `expected_nodes`, `heartbeat_max_age_seconds` and `buffer_warn_fraction` for the existing operator alert receiver.
+Optional fields supply identity-tier mappings and processing bounds.
+Keep credential values in the selected Secret store and private operational evidence.
+The chart supplies the controller's actual namespace and Deployment name; do not repeat them in the reader Secret.
+Store actual bucket, key and account identifiers in private operational evidence, never in this runbook.
+
+1. Verify the live bucket's compliance retention and node-key permissions; delete and retention-shortening attempts fail.
+2. Verify the actual node packages and session sources; their submitted metadata matches the qualified producer.
+3. Exercise one isolated tenant workflow through storage, derivation and the browser; delivery meets the configured windows.
+4. Interrupt the receipt path and restart the consumer; gaps remain visible and other cells continue.
+5. Verify signed image policies for current and rollback releases; scoped credentials cannot change other fields.
+6. Verify hardware presence and recovery before moving admin credentials; routine automation retains no admin credential.
+
+The access log shows received events and visible gaps.
+It does not prove completeness: node root can suppress or forge events before upload.
+Inspect exact retained object versions; a node writer can hide a name or add another version.
+A delayed receipt, unknown placement or missing heartbeat must not appear as zero access.
+
+Full chart upgrades remain admin operations.
+Ordinary image publication remains with the release procedure; the scoped deploy identity cannot publish images.
+During a verifier outage, admission still allows Pod restarts and Jobs using the admitted cell image.
+A node without that image still needs registry access.
+New images or fresh cells can wait for verification without changing the running image.
+
+The verifier's webhook UPDATE permission can change admission enforcement.
+Record that credential as an admin capability in the private inventory.
+Direct Secret permission checks cover RBAC access only; the deploy identity cannot update the verifier or its webhook definitions.
+
+### Prepare the operational packet
+
+Keep this packet in private operational evidence, with actual resource identifiers and credential locations.
+Preparing it does not authorize live changes.
+The activation owner reconciles the controller, runtime, control-plane migrations and grants before selecting a window.
+Record the current settings and release digests so that each reversible change has an undo.
+
+| Boundary | Prerequisite | Undo or retained effect |
+|---|---|---|
+| Storage | Live B2 notification enablement, exact-version reads, compliance retention and permission refusals | Compliance retention cannot be shortened; preserve the bucket and received evidence |
+| Control plane | Reviewed schema and grants applied under separate authority; existing account and deletion workflows pass | Disable the new feature flags; preserve the additive tables and received evidence |
+| Node record | Qualified packages, metadata canaries, buffer limits and measured delivery through the real sink | Apply disabled role settings; preserve prior buffers and record the collection gap |
+| Image admission | Matching signed family assertions for current and rollback images, read-only registry access, controller permissions and negative admission checks | Restore the prior reviewed policy and role settings through the admin identity |
+| Release provenance | Protected release tags, a publisher key available only on `main`, and a successful ordinary release | Keep the prior publisher until its replacement passes; preserve published attestations |
+| Routine access | Qualified private API route and workstation permission denials | Restore the recorded endpoint settings; keep the admin kubeconfig on the node |
+| Admin custody | Physical presence, recovery and all credential copies accounted for | Keep the existing path until the replacement and recovery both pass |
+
+1. Record the approved live actions and their owner; every write has explicit authority.
+2. Run the existing tenant workflow before activation; account, deletion and cell operations pass.
+3. Enable the record and verify exact retained versions; event counts and discarded-field canaries match.
+4. Verify derivation and the stopped-cell view; tenant isolation, recovery and visible gaps pass.
+5. Verify admission with the selected images; ordinary restarts work during a registry outage.
+6. Move each approved credential after its recovery check; routine automation cannot recover an admin copy.
+7. Repeat the tenant workflow and record the observation window; only verified properties enter privacy claims.
+
+If a check fails, use the recorded undo for that boundary and keep the failure visible.
+Do not delete retained evidence, roll back the schema destructively or erase the only working recovery credential.
+Disabling a log view does not erase its received evidence or make the collection window complete.
+Applying `access_record_enabled: false` stops the installed shipper and removes its writer environment and optional observation hooks.
+It preserves the local buffer; record the resulting collection gap.
+The enabled role also enables journald's audit socket for sudo metadata.
+If that socket is inactive, the role restarts journald once so that systemd opens the socket first.
+Disabling the role preserves this shared host audit facility because other consumers can depend on it.
+
+### Prepare admin credential custody
+
+Keep the credential inventory in private operational evidence.
+For each credential, record its permissions, custody location, permitted readers, presence check, recovery path and verification date.
+Include provider control, datastore and snapshot recovery, Terraform state, escrow, registry write and repository administration.
+Do not copy credential values or account details into the repository.
+
+The release publisher and running services retain only the exemptions that design D6 names.
+Record each exemption's permissions and runtime boundary.
+The separate key-custodian programme owns its account split, service credentials, deployment and rotations.
+This preparation does not repeat that work or prove that operator credentials require physical presence.
+
+1. Verify two separate workstation logins; each requires a fresh authenticator touch.
+2. Verify SOPS with the selected presence-gated identity; decryption without the authenticator fails.
+3. Check every routine and deploy credential source; none returns a plaintext admin credential.
+4. Verify the replacement and recovery paths before retiring an existing credential; administration remains recoverable.
+
+Keep release-tag creation, updates and deletion restricted to the release App.
+Keep its private key available only to workflows running on `main`.
+Branch workflows and agent credentials must fail the corresponding negative checks before the protected-release claim applies.
+Keep full chart upgrades outside the scoped deploy identity.
 
 ## Break-glass: mint a one-hour identity
 
@@ -495,7 +647,7 @@ test "$CANARY_FILE_HITS" -eq 0
 ```
 
 A clean scan proves nothing unless the same search can find the canary. As a
-negative control, the deploy identity runs a throwaway pod that prints the
+negative control, the admin identity runs a throwaway pod that prints the
 canary, and one base64 alignment of it, on two lines. The same two searches
 must each find both lines. The pod runs in its own namespace,
 `exomem-canary-control`, created and deleted here. `exomem-cloud` has no quota
