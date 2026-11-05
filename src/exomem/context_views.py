@@ -454,7 +454,7 @@ def _carryable(row: Row) -> bool:
     return row.lifecycle_class is not None and lifecycle_statuses.Classification(row.lifecycle_class).carryable
 
 
-def _admits(entry: context_catalogue.Entry, sees: Callable[[str], bool] | None) -> bool:
+def _admits(entry: context_catalogue.Entry | context_catalogue.TaskEntry, sees: Callable[[str], bool] | None) -> bool:
     """Whether the caller may see an entry. Anchors, collections and pages share one rule."""
     if sees is None:
         return True
