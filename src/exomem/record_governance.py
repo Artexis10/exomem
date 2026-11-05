@@ -1822,6 +1822,7 @@ def _diagnostics_summary(diagnostics: Sequence[Mapping[str, Any]]) -> str:
     return f"{summary} (+{remaining} more)" if remaining > 0 else summary
 
 
+@call_spans.timed("records.inventory_coverage")
 def _inventory_coverage(
     root: Path,
     manifest: collections.CollectionManifest,
@@ -1914,9 +1915,10 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
     def authorize(path: str) -> bool:
         return _authorize(root, path, receipt=True)
 
-    discovered, unreadable = collections.discover_collections_with_errors(
-        root, authorize_path=authorize, semantic_profile=semantic_profile
-    )
+    with call_spans.span("records.inventory_discovery"):
+        discovered, unreadable = collections.discover_collections_with_errors(
+            root, authorize_path=authorize, semantic_profile=semantic_profile
+        )
     manifests = [
         manifest
         for manifest in discovered
@@ -1944,14 +1946,16 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         if writer is not None:
             with writer.read_snapshot():
                 owned_views = owned_view_paths(writer._operation)
-        legacy, legacy_truncated = collections.discover_legacy_trackers(
-            root, authorize_path=authorize, owned_views=owned_views
-        )
+        with call_spans.span("records.inventory_legacy"):
+            legacy, legacy_truncated = collections.discover_legacy_trackers(
+                root, authorize_path=authorize, owned_views=owned_views
+            )
     from . import due_state
 
-    observations = due_state._collection_observation_coverages(
-        root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
-    )
+    with call_spans.span("records.inventory_observations"):
+        observations = due_state._collection_observation_coverages(
+            root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
+        )
     inventory, selections = [], []
     for manifest in manifests:
         coverage, selection = _inventory_coverage(
@@ -2007,7 +2011,7 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
     }
     if selections:
         writer = bound_writer(root)
-        with writer.read_snapshot():
+        with call_spans.span("records.inventory_evidence"), writer.read_snapshot():
             return writer._operation.inventory_evidence(payload, writer.handle, selections)
     return payload
 

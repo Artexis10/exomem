@@ -177,7 +177,7 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
-from .governance import connector_boundary
+from .governance import companions, connector_boundary
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -2534,6 +2534,7 @@ _PRE_ADMISSION_SIGNALS = (
 )
 
 
+@companions.request_byte_proofs()
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -9408,6 +9409,8 @@ def _process_media(
                 "job_id": result.job_id,
                 "requeued": result.requeued,
             }
+            if result.document_container is not None:
+                row["document_container"] = result.document_container
             results.append(row)
         return {
             "operation": operation,
@@ -9467,7 +9470,9 @@ def _process_media(
             "MEDIA_PATH_OUTSIDE_KB",
             f"media path must be inside {kb_dirname()}: {path}",
         ) from exc
-    if media_processing.classify_media(binary) is None:
+    from . import document_containers
+
+    if media_processing.classify_media(binary) is None and not document_containers.is_container(binary):
         raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
 
     try:
@@ -9487,6 +9492,8 @@ def _process_media(
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
+    if result.document_container is not None:
+        payload["document_container"] = result.document_container
     if operation in mutation_terminal_module.MEDIA_REQUEUE_OPERATIONS:
         payload["requeued"] = result.requeued
     payload["index_refreshed"] = 0
@@ -9498,8 +9505,12 @@ def _run_media_operation(
     vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard
 ):
     """Run one explicit media operation on one governed binary."""
-    from . import media_processing
+    from . import document_containers, media_processing
 
+    if document_containers.is_container(binary):
+        if language is not None or multilingual or operation == "reprocess":
+            raise media_processing.MediaProcessingError("UNSUPPORTED_MEDIA", "process or retry the container; reprocess individual document payloads without a language option")
+        return media_processing.process_container(vault_root, binary, retry=operation == "retry", commit_guard=commit_guard)
     if operation == "process" and (language is not None or multilingual):
         return media_processing.process_declared_media(
             vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard

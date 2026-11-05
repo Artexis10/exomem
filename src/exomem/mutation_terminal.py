@@ -705,6 +705,18 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
+            container = item.get("document_container")
+            if isinstance(container, Mapping):
+                # These scalar fields are the bounded container-inspection receipt protocol.
+                row["document_container"] = {
+                    key: value for key in (
+                        "inspection_state", "signature_verification", "supported_payload_count",
+                        "code", "reason", "next_action",
+                    ) if key in container and (
+                        (value := container[key]) is None or nonnegative_int(value)
+                        or string(value, limit=300)
+                    )
+                }
             if "duplicate_of" in item:
                 duplicate = duplicate_of(item["duplicate_of"])
                 if duplicate is None:

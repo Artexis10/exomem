@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from .. import find_corpus, memory_refs, reserved_paths
+from .. import document_containers, find_corpus, memory_refs, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
 from . import companions
@@ -379,6 +379,20 @@ def evaluate_path_only(
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
 
+    dependency = None
+    inherited = frozenset()
+    if not resolve_bytes:
+        if document_containers.in_payload_tree(rel_path):
+            return MembershipOutcome("unresolved", frozenset(), "metadata_required")
+    else:
+        try:
+            dependency = document_containers.parent_for_path(vault_root, rel_path, artifact_copy=artifact_copy)
+            inherited = frozenset() if dependency is None else _current_parent_scopes(
+                vault_root, dependency[1], policy
+            ) | evaluate_path_only(vault_root, dependency[0], policy).require_classified()
+        except (ValueError, OSError, reserved_paths.ReservedPathLeafError, MembershipUnresolved):
+            return MembershipOutcome("unresolved", frozenset(), "companion_unsafe")
+
     from ..vocabulary import instances
 
     try:
@@ -388,7 +402,7 @@ def evaluate_path_only(
 
     def classified(scope_ids: set[str]) -> MembershipOutcome:
         return MembershipOutcome("classified", _complete(
-            policy, frozenset(scope_ids),
+            policy, frozenset(scope_ids) | inherited,
             classified=_classified_by_registry(vault_root, rel_path, assigned, policy),
             directory=lambda: _is_directory(vault_root, rel_path),
         ))
@@ -425,8 +439,6 @@ def evaluate_path_only(
             undecided.append((scope_id, scope))
     if undecided:
         if assigned is not None and proposed_companion is None:
-            from .. import reserved_paths
-
             try:
                 identity = reserved_paths.inspect_generic_path(vault_root, rel_path)
             except reserved_paths.ReservedPathLeafError as error:
@@ -449,7 +461,7 @@ def evaluate_path_only(
                 return classified(matched)
             return MembershipOutcome("unresolved", frozenset(matched), error.reason)
         memo_key = (policy.fingerprint, rel_path, companion.identities, companion.stored_originals, assigned)
-        cached = _PATH_MEMO.get(memo_key) if proposed_companion is None else None
+        cached = _PATH_MEMO.get(memo_key) if proposed_companion is None and dependency is None else None
         if cached is not None:
             _PATH_MEMO.move_to_end(memo_key)
             return cached
@@ -457,7 +469,7 @@ def evaluate_path_only(
             if _semantic_scope_matches(scope, companion):
                 matched.add(scope_id)
         result = classified(matched)
-        if proposed_companion is None:
+        if proposed_companion is None and dependency is None:
             _PATH_MEMO[memo_key] = result
             _PATH_MEMO.move_to_end(memo_key)
             while len(_PATH_MEMO) > _MEMO_MAX:
@@ -469,6 +481,39 @@ def evaluate_path_only(
 # Parsed parent pages keyed on path, mtime and size, so the frames of one video parse it once.
 _PARENT_MEMO: OrderedDict[tuple[str, int, int], ParsedPage] = OrderedDict()
 _PARENT_MEMO_MAX = 256
+
+
+def _read_parent_path(root: Path, path: str) -> ParsedPage:
+    staged = document_containers.staged_page(root, path)
+    if staged is not None:
+        return staged
+    try:
+        snapshot = reserved_paths.read_generic_bytes(root, path)
+        page = find_corpus.parse_page(root / path, snapshot.mtime, root, content=snapshot.data)
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError) as error:
+        raise MembershipUnresolved("container parent page is unavailable") from error
+    if page is None:
+        raise MembershipUnresolved("container parent page is unreadable")
+    return page
+
+
+def _current_parent_scopes(root: Path, path: str, policy: Policy) -> frozenset[str]:
+    page = _read_parent_path(root, path)
+    return _page_membership(page, policy, _registry_assignment(root, path, policy))
+
+
+def _container_membership(page: ParsedPage, policy: Policy) -> frozenset[str] | None:
+    if page.vault_root is None:
+        if "container_member" in page.frontmatter:
+            raise MembershipUnresolved("container member has no vault root")
+        return None
+    try:
+        dependency = document_containers.parent_for_page(page.vault_root, page.rel_path, page.frontmatter)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError) as error:
+        raise MembershipUnresolved("container parent provenance is unavailable") from error
+    if dependency is None:
+        return None
+    return _current_parent_scopes(page.vault_root, dependency[1], policy) | evaluate_path_only(page.vault_root, dependency[0], policy).require_classified()
 
 
 def _read_parent(page: ParsedPage, parent: str) -> ParsedPage:
@@ -531,7 +576,7 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     if (source := _part_source(page)) is not None:
         return evaluate(source, policy)
     video = _frame_video(page)
-    inherited = frozenset() if video is None else evaluate(video, policy)
+    inherited = (frozenset() if video is None else evaluate(video, policy)) | (_container_membership(page, policy) or frozenset())
     # `st_size` alongside `st_mtime_ns`, not `st_mtime_ns` alone. Two writes
     # in quick succession can share an identical `st_mtime_ns` — the platform
     # timestamp is not always as fine-grained as the field width suggests
@@ -586,6 +631,8 @@ def cached_snapshot_membership(
     """Reuse byte-bound membership, with current registry assignment, or miss."""
     if policy.empty or not policy.scopes:
         return None
+    if document_containers.in_payload_tree(rel_path):
+        return None  # Parent authority is mutable even when child bytes are unchanged.
     key = _snapshot_key(vault_root, rel_path, policy, content_hash)
     # Membership is immutable; later eviction cannot invalidate this result.
     return _SNAPSHOT_MEMO.get(key)
@@ -612,6 +659,9 @@ def evaluate_snapshot(
             page, policy, _registry_assignment(page.vault_root, page.rel_path, policy)
         )
         return own | evaluate(video, policy)
+    inherited = _container_membership(page, policy)
+    if inherited is not None:
+        return inherited | _page_membership(page, policy, _registry_assignment(page.vault_root, page.rel_path, policy))
     key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:

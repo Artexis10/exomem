@@ -119,6 +119,7 @@ class AddResult:
     artifact_path: str | None = None
     artifact_hash: str | None = None
     artifact_size: int | None = None
+    document_container: dict | None = None
     adoption: dict[str, object] | None = None
     # The shared domain identity record, present only when a domain was given.
     vocabulary_resolution: dict[str, str] | None = None
@@ -137,6 +138,8 @@ class AddResult:
             out["hash"] = self.artifact_hash
             out["hash_algorithm"] = "sha256"
             out["size"] = self.artifact_size
+        if self.document_container is not None:
+            out["document_container"] = self.document_container
         if self.adoption is not None:
             out["adoption"] = self.adoption
         if self.vocabulary_resolution is not None:
@@ -784,7 +787,20 @@ def add(
     )
     if correction_plan is not None:
         required_guards = (*required_guards, correction_plan.guards[0])
+    from . import document_containers
+
+    container_stack = contextlib.ExitStack()
+    container_metadata = None
     try:
+        if artifact_stream is not None and document_containers.is_container(artifact_path):
+            container_plan = container_stack.enter_context(document_containers.plan(
+                vault_root, parent=artifact_path.relative_to(vault_root).as_posix(),
+                parent_page=source_path.relative_to(vault_root).as_posix(), digest=artifact_digest,
+                size=artifact_size, stream=artifact_stream, date_iso=stamp_iso,
+            ))
+            container_metadata = container_plan.metadata()
+            writes[0].content = document_containers.annotate(source_md, "document_container", container_metadata)
+            writes.extend(container_plan.writes)
         def validate_bindings() -> None:
             taxonomy_plan.recheck_bindings(vault_root)
             if source_identity is not None:
@@ -817,6 +833,7 @@ def add(
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
     finally:
+        container_stack.close()
         if artifact_stream is not None:
             artifact_stream.close()
 
@@ -939,6 +956,7 @@ def add(
         ),
         artifact_hash=artifact_digest,
         artifact_size=artifact_size,
+        document_container=container_metadata,
         slug=filename_slug,
         structure_suggestion=_classification_suggestion(
             vault_root, taxonomy, post_counts

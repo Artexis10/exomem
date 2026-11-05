@@ -446,6 +446,13 @@ def test_no_byte_membership_retains_unknown_selectors_without_reading_artifact(
         return original(target)
 
     monkeypatch.setattr(Path, "read_bytes", read)
+    generic_read = membership.reserved_paths.read_generic_bytes
+
+    def read_generic(root, value, **kwargs):
+        assert value not in (path, path + ".md"), "metadata-only membership opened its artifact or companion"
+        return generic_read(root, value, **kwargs)
+
+    monkeypatch.setattr(membership.reserved_paths, "read_generic_bytes", read_generic)
     monkeypatch.setattr(
         membership.companions,
         "classify",

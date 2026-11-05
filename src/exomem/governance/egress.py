@@ -54,6 +54,7 @@ from .. import (
     call_spans,
     find_corpus,
     memory_refs,
+    originals,
     request_budget,
     reserved_paths,
     state_paths,
@@ -2059,22 +2060,32 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
             and connector_boundary.unrestricted(vault_root, who))
 
 
-def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
-                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+def _independent_content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
+                                 snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
     source_release.path_dependency(vault_root, path)
     return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
             and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
 
-def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
-    """`content_permits` for each path of one walk.
+def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
+                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    """Apply current container dependencies and independent content floors to a real path."""
+    from .. import document_containers
 
-    Inside a request scope the connector snapshot is read once for the walk;
-    see `connector_boundary.permits_filter`.
-    """
-    boundary = connector_boundary.permits_filter(vault_root, who)
-    return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+    try:
+        dependency = document_containers.parent_for_path(vault_root, path, content=snapshot, artifact_copy=artifact_copy)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return False
+    if dependency is not None and any(not content_permits(vault_root, parent, who) for parent in dependency):
+        return False
+    return _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy)
+
+
+
+def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
+    """Apply all content floors once per path, using their shared request memos."""
+    return lambda path: content_permits(vault_root, path, who)
 
 
 def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool:
@@ -2091,9 +2102,11 @@ def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool
     read error the same way they refuse a restricted page, and a refusal that a
     retry could lift must not outlast the retry.
     """
+    from .. import document_containers
     from ..collection_store import ownership
 
     if (not _is_markdown_path(rel_path) or raw_protection.marked(rel_path)
+            or document_containers.in_payload_tree(rel_path)
             or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
         return False
     if withheld:
@@ -2174,6 +2187,36 @@ _DECIDE_PATH_BATCH = Batch(
 )
 
 
+def container_parent_allows(
+    vault_root: Path, rel_path: str, *, policy: Policy, principal: RequestPrincipal,
+    purpose: str | None, content: bytes | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+) -> bool:
+    """Meet current parent authority before any cached child disclosure or model scoring."""
+    from .. import document_containers
+
+    try:
+        parent = document_containers.parent_binding_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        if parent is None:
+            return True
+        # Recheck the validated binding before using its fingerprint without a local inode.
+        parent = document_containers._require_identity(vault_root, parent.path, parent.sha256, parent.size)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return False
+    if _release_level_for_path_only_snapshot(
+        vault_root, parent.path, policy=policy, principal=principal, purpose=purpose,
+        content_fingerprint=parent.sha256,
+    ) < LEVEL_FULL:
+        return False  # A parent's excerpt cannot authorize an intact payload or its complete extracted text.
+    decision = _decide_path(
+        vault_root, originals.sidecar_path(Path(parent.path)).as_posix(),
+        policy=policy, audience=principal.audience_id, purpose=purpose,
+        grants_hash=_grants_hash(policy), authorization_session=principal.authorization_session_id,
+        authorization_context=principal.verified_authorization_session, principal=principal,
+    )
+    return decision is not None and decision.level >= LEVEL_FULL
+
+
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
 @source_release.capture_decision
 def _decide_path(
@@ -2249,6 +2292,9 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who,
+                                   purpose=purpose, content=raw, artifact_copy=artifact_copy):
+        return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
         authorization_context=authorization_context, content=raw if raw is not None else b"",
@@ -2748,6 +2794,9 @@ def annotate_projected_hits(
         rel_path = _hit_path(hit)
         if not rel_path:
             raise ValueError("projected release snapshot is invalid")
+        if not container_parent_allows(vault_root, rel_path, policy=policy, principal=principal, purpose=purpose):
+            withheld_paths = withheld_paths | frozenset((rel_path,))
+            continue
         if decision.level >= RELEASE_FLOOR:
             released.append(hit)
             _outcome_for_decision(
@@ -5257,6 +5306,9 @@ def _decide_markdown_snapshot(
     policy: Policy, principal: RequestPrincipal, purpose: str | None, content_hash: str,
 ) -> Decision | None:
     """Decide exact held Markdown without assuming that it is the current file."""
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=principal,
+                                   purpose=purpose, content=raw):
+        return Decision(DISCLOSURE_MIN)
     decision = projection_decision(
         vault_root, rel_path, policy=policy, audience=principal.audience_id,
         purpose=purpose, authorization_context=principal.verified_authorization_session,
@@ -7080,6 +7132,8 @@ def _release_level_for_path_only_snapshot(
     if not content_permits(vault_root, rel_path, who):
         return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who, purpose=declared_purpose):
+        return DISCLOSURE_MIN
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=who.audience_id,
         purpose=declared_purpose, authorization_context=who.verified_authorization_session,
@@ -8800,7 +8854,7 @@ def filter_withheld_entries(
             return candidates
         review_audience = _bridge_review_audience(entry)
         for rel_path in candidates:
-            if not content_permits(vault_root, rel_path, who):
+            if not _independent_content_permits(vault_root, rel_path, who):
                 return None
             if fail_closed:
                 _record_blocked_outcome(who.audience_id)
@@ -8815,6 +8869,8 @@ def filter_withheld_entries(
                 # A bridge-review finding is owner work derived from an exact
                 # release approval. It remains actionable when that approval
                 # is stale; hiding it then would strand the required reapproval.
+                if not content_permits(vault_root, resolved, who):
+                    return None
                 continue
             if not _permitted(resolved):
                 return None
@@ -8835,7 +8891,7 @@ def filter_withheld_entries(
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
         request_budget.checkpoint()
         if isinstance(node, Mapping) and any(
-            not content_permits(vault_root, path, who)
+            not _independent_content_permits(vault_root, path, who)
             for path in _entry_candidate_paths(
                 node, directory,
                 reference_markup=_reference_markup if explicit_reference_markup else None,
