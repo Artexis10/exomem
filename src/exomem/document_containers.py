@@ -346,12 +346,22 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
             if in_subtree:
                 raise ValueError("container member path is invalid")
             return None
-        if not in_subtree:
+        # A cold inventory cannot classify an absent ordinary companion.
+        if not in_subtree and not reserved_paths.identity_catalogue_ready(root):
             try:
                 (root / page_path).lstat()
             except FileNotFoundError:
                 return None
-        raw = reserved_paths.read_generic_bytes(root, page_path).data
+        try:
+            raw = reserved_paths.read_generic_bytes(root, page_path).data
+        except (reserved_paths.ReservedPathLeafError, RuntimeError):
+            # Inventory loss can precede a typed read error; only physical absence clears an ordinary claim.
+            if not in_subtree:
+                try:
+                    (root / page_path).lstat()
+                except FileNotFoundError:
+                    return None
+            raise
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:

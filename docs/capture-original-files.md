@@ -93,9 +93,9 @@ A payload and its text parts inherit the container's current access restrictions
 Changing the container's restrictions also changes payload search, reads and original downloads.
 Explicit raw protection covers the entire payload subtree.
 
-1. For an older opaque container, call `process_media(path=container_path, operation="process")`; receive payload custody and processing states.
-2. After fixing a processing failure, call `process_media(path=container_path, operation="retry")`; reuse the preserved originals.
-3. For a completed payload that needs new extraction, call `process_media(path=payload_path, operation="reprocess")`; keep its previous text until replacement succeeds.
+1. For an older opaque container, call `change_media(operation={"kind": "process", "path": container_path})`; receive payload custody and processing states.
+2. After fixing a processing failure, call `change_media(operation={"kind": "retry", "path": container_path})`; reuse the preserved originals.
+3. For completed payloads needing new extraction, call `change_media(operation={"kind": "reprocess", "path": payload_path})`; retain previous text until replacement succeeds.
 
 Repeated preservation returns `already_stored` without changing companions or repairing missing payloads.
 Explicit processing creates missing payload pairs and can restore missing provenance only when existing bytes match exactly.
