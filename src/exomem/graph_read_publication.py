@@ -47,6 +47,7 @@ class _State:
     publication: Publication
     coordinator: VaultMutationCoordinator
     reader_lock: threading.RLock
+    # Unverified bytes cost optional context until they can authorize retained rows.
     pending: tuple[_TargetProof, ...] | None = None
 
 

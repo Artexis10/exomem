@@ -990,9 +990,10 @@ def _resolver_requires_full_scope(
 ) -> bool:
     from .kbdir import kb_dirname
 
-    # Non-KB resolver inputs have no incremental graph rows; reuse full recovery.
+    # Non-KB inputs and physical names outside the checkpoint format use full recovery.
     return epoch.requires_full_recovery or any(
-        not rel.startswith(f"{kb_dirname()}/") for rel, _digest in paths
+        not rel.startswith(f"{kb_dirname()}/") or not _is_canonical_relative_path(rel)
+        for rel, _digest in paths
     )
 
 

@@ -414,9 +414,10 @@ def move_file(
 ) -> MoveFileResult | MoveFileValidation:
     manager = writer_lease.active_manager()
     boundary = manager.consistency_guard if validate_only else manager.mutation_guard
-    # Hold the canonical boundary before semantic creation; direct callers need its repair handoff too.
-    with boundary(vault_root, operation="move_file"), ExitStack() as originals_context:
-        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context)
+    # Protect semantic creation and rollback, then release before standalone index fan-out.
+    with ExitStack() as mutation_context, ExitStack() as originals_context:
+        mutation_context.enter_context(boundary(vault_root, operation="move_file"))
+        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context)
 
 
 def _evicted_source(vault_root: Path, old_path: str) -> tuple[Path, str, originals.OriginalSnapshot] | None:
@@ -457,6 +458,7 @@ def _move_file_local(
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     originals_context: ExitStack,
+    mutation_context: ExitStack,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -1322,6 +1324,7 @@ def _move_file_local(
 
     # The filesystem transaction succeeded. Only now notify watcher/sidecars;
     # no derived index observes a move that was subsequently rolled back.
+    mutation_context.close()
     from . import file_watcher, index_sync
 
     watcher_failures: list[str] = []

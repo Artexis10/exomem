@@ -48,6 +48,22 @@ def test_uppercase_markdown_creation_issues_an_epoch(tmp_path: Path) -> None:
     assert checkpoint.paths == ((relative, vault.content_hash(write.content)),)
 
 
+def test_a_physical_unicode_rename_uses_full_recovery_without_losing_its_floor(tmp_path: Path) -> None:
+    import unicodedata
+
+    old = "Knowledge Base/Notes/" + unicodedata.normalize("NFD", "café.md")
+    new = "Knowledge Base/Notes/renamed.md"
+    path = tmp_path / old
+    path.parent.mkdir(parents=True)
+    path.write_text("# Source\n", encoding="utf-8")
+
+    epoch = graph_sync.prepare_rename_epoch(tmp_path, [(old, new)])
+
+    assert epoch is not None and epoch.checkpoint.scope == "full"
+    assert graph_sync.read_floor(tmp_path).generation == epoch.checkpoint.generation
+    assert graph_sync.read_checkpoint(tmp_path) is None
+
+
 @pytest.mark.parametrize("was_admitted", [False, True], ids=["created", "suppressed"])
 def test_manifest_membership_before_or_after_the_write_issues_an_epoch(
     tmp_path: Path, was_admitted: bool
