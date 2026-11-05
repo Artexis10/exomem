@@ -196,6 +196,13 @@ LINK_NAMED_IDENTITIES_LINE = (
     "even with no page yet."
 )
 
+_GLOBAL_STANCE_CAPTURE = (
+    "Propose a sourced global line; until confirmed, keep its content in conversation, "
+    "never notes or drafts. Exact save, promotion or persistent use requests need no "
+    "reconfirmation. Decline alone grants no write or status repair. Confirm every "
+    "promoted unit; keep scoped rules local. "
+)
+
 _ARTIFACT_ADOPTION_CAPTURE = (
     " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
     "keeps exact bytes as Source/Evidence by role, never MIME. No handle: non-committing "
@@ -207,8 +214,8 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: `light` and `off` capture on request, so asking them to sweep would be asking
 #: them to capture proactively, which is the thing those levels exist to refuse.
 #:
-#: The class list is EXAMPLES and says so twice — "for example" opening it and no
-#: "only" anywhere. An agent reads a closed list inside a capture contract as a
+#: The class list is EXAMPLES: "e.g." introduces it and "not a closed set" keeps
+#: it open. An agent reads a closed list inside a capture contract as a
 #: boundary, so an enumeration here would narrow capture rather than complete it,
 #: which is the opposite of the point.
 #: Cut to the minimum that carries the whole rule, because this text sits inside
@@ -217,11 +224,9 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: carries all ten, and a client that receives this contract receives that block
 #: on its next durable write. What must survive here is the rule, not the roster.
 _EPISODE_SWEEP_CAPTURE = (
-    " After any capture, make one bounded episode pass over the recent exchange for "
-    "anything else that would materially improve a later decision, lookup, task, "
-    "comparison or continuation, e.g. an outcome, a preference, a method, an entity "
-    "facet or an operational quirk; examples, not a closed set. Never re-write what "
-    "the response lists as written recently, and stay silent when nothing qualifies."
+    " After capture, make one bounded episode pass over the recent exchange for material "
+    "value in later work or recall, e.g. outcomes; not a closed set. "
+    "Skip what the response lists as written recently; stay silent if nothing qualifies."
 )
 
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
@@ -371,10 +376,10 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Skip chit-chat, control messages, and context-free fresh tasks."
         ),
         capture=(
-            LINK_NAMED_IDENTITIES_LINE + " "
-            "Propose the sourced global line; confirm unless exactly requested. "
-            "Confirm every promoted unit; keep scoped rules local. "
-            "Capture at a stepping stone: a durable conclusion, central or recurring "
+            LINK_NAMED_IDENTITIES_LINE
+            + " "
+            + _GLOBAL_STANCE_CAPTURE
+            + "Capture at a stepping stone: a durable conclusion, central or recurring "
             "entity with reusable facts, or method that was carried out with a reported "
             "result. Not "
             "mid-thought exploration, tangents, or unresolved questions. Capture stable "
@@ -406,10 +411,10 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "chit-chat and control messages."
         ),
         capture=(
-            LINK_NAMED_IDENTITIES_LINE + " "
-            "Propose the sourced global line; confirm unless exactly requested. "
-            "Confirm every promoted unit; keep scoped rules local. "
-            "Capture at every stepping stone; treat the bar for 'durable' as low: "
+            LINK_NAMED_IDENTITIES_LINE
+            + " "
+            + _GLOBAL_STANCE_CAPTURE
+            + "Capture at every stepping stone; treat the bar for 'durable' as low: "
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
             "a fact about a central or recurring entity, or a method you actually ran and "
             "how it turned out. Capture stable preferences, recurring routines, historical "

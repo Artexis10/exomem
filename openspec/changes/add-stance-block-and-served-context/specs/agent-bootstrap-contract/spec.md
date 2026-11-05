@@ -36,7 +36,9 @@ beside the ceiling constant, without a new 512-byte requirement.
 ## ADDED Requirements
 
 ### Requirement: Bootstrap teaches the authorized stance-line route
-At balanced and maximal prominence, the client model MAY initiate a proposal for a correction that applies to every task. It SHALL propose the exact line and cite the user's words. It SHALL write only with authority for that exact global line and any page promotion. An explicit request for that exact action SHALL count as authority without another confirmation. Otherwise an initiated proposal SHALL wait for confirmation. Marking an existing page SHALL cover every resulting global unit.
+At balanced and maximal prominence, the client model MAY initiate a proposal for a correction that applies to every task. It SHALL propose the exact line and cite the user's words. It SHALL keep an initiated proposal in conversation until the user confirms its durable write. It SHALL NOT persist the proposed content as ordinary compiled knowledge or a stored draft while waiting.
+
+An explicit request for that exact durable save, promotion or ongoing persistent use SHALL count as authority without another confirmation. A decline alone SHALL grant no further write, including status repair of a premature save. Marking an existing page SHALL require authority for every resulting global unit.
 
 At light, write only on request. At off, initiate no capture or proposal, but honor an explicit request. These rules SHALL preserve the existing engagement gate. Scoped rules SHALL remain ordinary compiled knowledge. Replacements SHALL use same-page unit supersession or existing page supersession. No server cue list or classifier SHALL judge correction meaning.
 
@@ -44,10 +46,14 @@ The scaffold, its deployed skill copies, prominence and bootstrap SHALL derive t
 
 #### Scenario: An unconfirmed proposal is not written
 - **WHEN** the agent initiates a proposal and the user declines or gives no confirmation
-- **THEN** no stance line or page promotion is written
+- **THEN** its content stays in conversation, with no stance line, ordinary note, stored draft or page promotion written
+
+#### Scenario: A decline does not authorize repair of a premature save
+- **WHEN** an agent prematurely saves an initiated proposal and the user declines it without requesting a repair
+- **THEN** the decline alone grants no further write, including a status change to the premature save
 
 #### Scenario: An exact request at off remains actionable
-- **WHEN** at off the user explicitly asks to save an exact global stance line with its source
+- **WHEN** at off the user explicitly requests an exact durable save, promotion or ongoing persistent use of a global stance line
 - **THEN** the agent makes that authorized write without a second confirmation
 
 #### Scenario: A scoped correction stays out of stance
