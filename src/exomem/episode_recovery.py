@@ -75,7 +75,6 @@ class EpisodeInputOwner:
         if (
             resolved.released is None
             or resolved.guard is None
-            or resolved.released.get("frontmatter") != page.frontmatter
             or str(page.frontmatter.get("type") or "").casefold() != "source"
             or str(page.frontmatter.get("source_type") or "").casefold() != "episode"
         ):
@@ -185,11 +184,6 @@ class EpisodeInputOwner:
                 )
         except retained_inputs.RetainedInputError as error:
             raise _retained_error(error) from error
-        if (
-            evidence.get("version_scheme") == model.MATERIAL_EVIDENCE_SCHEME
-            and resolved.released.get("frontmatter") != resolved.page.frontmatter
-        ):
-            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
         return resolved
 
     def _resolve_reference(

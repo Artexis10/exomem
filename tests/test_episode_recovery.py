@@ -688,7 +688,9 @@ def test_bind_committed_input_keeps_two_audiences_isolated(vault: Path) -> None:
 
 
 def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, source_schema) -> None:
-    """Retiring a recap preserves its bound page, exact span and single origin."""
+    """A withheld successor cannot hide the retired recap, exact span or single origin."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
     from exomem import episode_model as model
     from exomem import retained_inputs
     from exomem.episode_store import EpisodeStore
@@ -725,6 +727,11 @@ def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, so
         first_ref = first["source"]["ref"]
         source = vault / first["source"]["path"]
         journal = EpisodeStore(vault, owner_audience_id="root-proof-a").path(identity)
+        write_scope(vault, paths=recorded["source"]["path"].removeprefix("Knowledge Base/"))
+        write_rule(vault, ceiling=0, audience="root-proof-a")
+        _reset_caches()
+        assert not egress.visible_memory_refs(vault, [reference], principal=_owner("root-proof-a"))
+        assert commands.op_get(vault, path=first["source"]["path"])["body"] == original_body
         before = source.read_bytes(), journal.read_bytes()
         page = owner.recover_input(identity, input_revision=1)
         unit = owner.recover_input(identity, input_revision=2)
