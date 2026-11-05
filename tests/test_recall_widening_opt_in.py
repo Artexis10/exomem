@@ -33,6 +33,7 @@ import pytest
 
 from exomem import bm25, commands, find_types, freshness, lexstore
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 from exomem.kbdir import kb_dirname, kb_prefix
 
 pytestmark = pytest.mark.skipif(
@@ -336,12 +337,9 @@ def test_requested_widening_keeps_the_reserve_under_limit_minus_one(
     assert seeded["outside"], "the fixture seeded nothing outside the knowledge base"
 
 
-@pytest.mark.parametrize(("result_level", "warm_widening_cache"), [
-    ("page", False), ("page", True), ("mixed", False),
-])
+@pytest.mark.parametrize("result_level", ["page", "mixed"])
 def test_requested_widening_declines_when_the_catalogue_is_not_live(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, warm_widening_cache: bool,
-    result_level: str,
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, result_level: str,
 ) -> None:
     """A catalogue behind the corpus declines; it never substitutes a scan.
 
@@ -352,9 +350,6 @@ def test_requested_widening_declines_when_the_catalogue_is_not_live(
     _seed(vault)
     warm_managed_cell(vault)
     baseline = _paths(_recall(vault, result_level=result_level))
-
-    if warm_widening_cache:
-        assert _outside_paths(_recall(vault, widen_outside_kb=True, result_level=result_level))
 
     _age_the_vault_catalogue(vault)
     tripwires = _withdraw_corpus_builds(monkeypatch)
@@ -375,6 +370,27 @@ def test_requested_widening_declines_when_the_catalogue_is_not_live(
 
     stage = _stage(result)
     assert stage["source"] == "declined", stage
+
+
+@library_scope()
+def test_cached_widening_declines_when_the_catalogue_falls_behind(
+    vault: Path, warm_managed_cell,
+) -> None:
+    """A live cached reserve cannot answer after its vault projection ages."""
+    _seed(vault)
+    warm_managed_cell(vault)
+    baseline = _paths(_recall(vault, result_level="page"))
+    widened = _recall(vault, widen_outside_kb=True, result_level="page")
+    assert _outside_paths(widened)
+    cached = _recall(vault, widen_outside_kb=True, result_level="page")
+    assert cached["timings"]["cache"]["hit"] is True
+
+    _age_the_vault_catalogue(vault)
+
+    result = _recall(vault, widen_outside_kb=True, result_level="page")
+    assert _outside_paths(result) == []
+    assert _paths(result) == baseline
+    assert _stage(result)["source"] == "declined"
 
 
 def test_requested_widening_declines_when_the_reserve_query_is_not_ready(
@@ -422,6 +438,7 @@ def test_requested_widening_declines_when_the_reserve_query_is_not_ready(
     assert stage["source"] == "declined", stage
 
 
+@library_scope()
 def test_kb_ranking_is_identical_with_and_without_widening(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -442,8 +459,9 @@ def test_kb_ranking_is_identical_with_and_without_widening(
     warm_managed_cell(vault)
     _withdraw_corpus_builds(monkeypatch)
 
-    plain = _recall(vault, limit=3)
-    widened = _recall(vault, widen_outside_kb=True, limit=3)
+    plain = _recall(vault, limit=3, result_level="page")
+    assert plain["timings"]["cache"]["enabled"] is True
+    widened = _recall(vault, widen_outside_kb=True, limit=3, result_level="page")
 
     plain_kb = _kb_paths(plain)
     widened_kb = _kb_paths(widened)

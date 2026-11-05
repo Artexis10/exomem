@@ -1,0 +1,281 @@
+{
+  "record_type": "derived-current-counterexamples",
+  "observed_date": "2026-11-05",
+  "source_commit": "166f89b5451b9e163d88d1dde738f6a73feb7994",
+  "scope": "Eight changed seams from the historical matrix; not an exhaustive current kill matrix or latency verdict.",
+  "environment": {
+    "python": "3.12.13",
+    "sqlite": "3.53.1",
+    "dependencies": "frozen uv.lock at source_commit, lean dev",
+    "models": "disabled",
+    "state": "isolated temporary roots",
+    "memory_cap_gib": 1
+  },
+  "command_shape": "python -m pytest -q -s -p no:cacheprovider -o junit_family=legacy --timeout=90 --basetemp=<isolated-temp> --junitxml=<isolated-junit> <nodes>",
+  "historical_source": "afd5f6709b75438c0d5f14c880f82680efa0f2d9",
+  "current_green_ci": {
+    "head": "102e774766e7c0681614444a12e3e19ebe251c39",
+    "run": 41952112987,
+    "verified_core_archives": 25,
+    "named_historical_nodes": 39,
+    "passed_cases": 41,
+    "basis": "Runtime, lock, conftest and five guard test modules match source_commit."
+  },
+  "attempts": [
+    {
+      "id": "L1-M10B-derived",
+      "round": 1,
+      "nodes": [
+        "tests/test_recall_timing_completeness.py::test_every_nested_stage_fits_inside_its_parent"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/find_types.py": {
+          "before": "e32b6f8928c1d5747837cda9d267590c5f73ac7e01b683b4aa7e8f42029940a5",
+          "mutant": "151652cc1a8f384321b4dd386501f647b84b43e80b4f30dc688c2a52a7c306b8"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/find_types.py\n+++ src/exomem/find_types.py\n@@ -866,6 +866,8 @@\n             # Off the MCP path record_span is a no-op.\n             call_spans.record_span(f\"recall.{name}\", elapsed, ledger_fields)\n             entry.update(fields)\n+            if name == \"semantic.search\":\n+                entry[\"ms\"] = 0.0\n \n     def mark_source(self, name: str, source: str) -> None:\n         \"\"\"Declare, from inside an open span, where that stage answered from.\n",
+      "junit_sha256": "6954d201b756300a5d5cc2c18d5d6ebc6bda79b64996ee1ec59417c41c7b87b1"
+    },
+    {
+      "id": "L2-N5-derived",
+      "round": 1,
+      "nodes": [
+        "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/lexstore.py": {
+          "before": "264e4d6dfa0949494fe6428bb848037cac8c9afd1c5be27b235dbae4b7f54d4a",
+          "mutant": "6e319506a33b02e1d5fdd135fe699b6bbc89697d510b5374bbd042cfbafd4586"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/lexstore.py\n+++ src/exomem/lexstore.py\n@@ -772,12 +772,7 @@\n     sql, params = _eligibility_sql(eligibility.expr, unit_missing=True)\n     if not eligibility.has_unit_axis:\n         return sql, params\n-    unit_sql, unit_params = _eligibility_sql(eligibility.expr, unit_missing=False, labels=labels)\n-    return (\n-        f\"({sql}) OR EXISTS(SELECT 1 FROM semantic_units u \"\n-        f\"WHERE u.parent_path = p.path AND u.{scope_column} = 1 AND ({unit_sql}) IS NOT 0)\",\n-        params + unit_params,\n-    )\n+    return sql, params\n \n \n def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:\n",
+      "junit_sha256": "227958c2bd0757c5295d60e12161d13d566054ae0beeeabdf3adc8ed200022ca"
+    },
+    {
+      "id": "L4-M3-derived",
+      "round": 1,
+      "nodes": [
+        "tests/test_recall_widening_opt_in.py::test_requested_widening_keeps_the_reserve_under_limit_minus_one"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/find.py": {
+          "before": "58269fecefbf793a879259156bd1a72bad0a24c372ee026848f697c23360a141",
+          "mutant": "b9a49c157910793b17ee8cd1d9754637c745d3581848ad6c515f13e86270b7c2"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/find.py\n+++ src/exomem/find.py\n@@ -1298,7 +1298,7 @@\n         return _WidenPlan(primary, [], [], [], 0, limit)\n     strong = [path for path in primary if path in strong_paths]\n     weak = [path for path in primary if path not in strong_paths]\n-    reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))\n+    reserve = min(len(outside), max(1, limit // 5))\n     kb_keep = limit - reserve\n     return _WidenPlan(\n         ((strong + weak)[:kb_keep] + outside)[:limit],\n",
+      "junit_sha256": "923f121a57f38264234ea16c1f121f7fed9f5c600a40a95c0f45c9ca3c50aeb3"
+    },
+    {
+      "id": "L2-N4-derived",
+      "round": 2,
+      "nodes": [
+        "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/lexstore.py": {
+          "before": "264e4d6dfa0949494fe6428bb848037cac8c9afd1c5be27b235dbae4b7f54d4a",
+          "mutant": "535d47d2e40a13c695e8792708ba024b45eb6912cec23b4dead7cd3f500b29d7"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/lexstore.py\n+++ src/exomem/lexstore.py\n@@ -600,9 +600,7 @@\n         _canonical_scalar(\"unit.verdict\", view.get(\"verdict\")),\n         _iso_day(check_by),\n         _day_members(check_by, present=\"check_by\" in view),\n-        _canonical_members(\n-            \"unit.tags\", view.get(\"tags\"), present=\"tags\" in view, list_axis=True\n-        ),\n+        json.dumps(list(unit.tags), separators=(\",\", \":\")),\n     )\n \n \n",
+      "junit_sha256": "4c15509621ccd5125158a433509b7e8d41dc90bec483fd1c762d27059002f67b"
+    },
+    {
+      "id": "L3-N3-derived",
+      "round": 2,
+      "nodes": [
+        "tests/test_recall_read_cache_custody.py::test_custody_is_applied_only_after_the_batch_revalidates"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/index_sync.py": {
+          "before": "c7b9c8bf9ed6b1a284f17d2c978d7ab7f490c6fdd06d0b8f00408d564699be05",
+          "mutant": "7166966a0366d82648fbec12c9e837ac6450ba03d2a8545901e7c6be745d3652"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/index_sync.py\n+++ src/exomem/index_sync.py\n@@ -2062,10 +2062,6 @@\n         )\n     finally:\n         semantic_index.reset_parent_states(token)\n-    with call_spans.span(\"index.policy_revalidate\"):\n-        current = batch.revalidate(vault_root)\n-    if not current:\n-        return stale_report()\n     with call_spans.span(\n         \"index.path_custody\", {\"paths\": len(batch.identity_paths)}\n     ):\n@@ -2080,6 +2076,10 @@\n             deleted=watcher_deleted_rels or [],\n             reason=\"governed_write\",\n         )\n+    with call_spans.span(\"index.policy_revalidate\"):\n+        current = batch.revalidate(vault_root)\n+    if not current:\n+        return stale_report()\n     report = IndexSyncReport(\n         \"upsert\",\n         requested_report,\n",
+      "junit_sha256": "778f3f18917a7d1d08e012e198178219f98eb76e15ff07edcd2c504abcd40a5c"
+    },
+    {
+      "id": "L4-M6-derived",
+      "round": 2,
+      "nodes": [
+        "tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening"
+      ],
+      "exit_code": 0,
+      "failed_cases": 0,
+      "status": "survived-inactive-cache",
+      "hashes": {
+        "src/exomem/find.py": {
+          "before": "58269fecefbf793a879259156bd1a72bad0a24c372ee026848f697c23360a141",
+          "mutant": "7ecf03456460d93c1f5b12aff71344b02979a6c49e877758b4a8d611629d8498"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/find.py\n+++ src/exomem/find.py\n@@ -2146,7 +2146,6 @@\n             effective_result_level,\n             prefer_compiled,\n             prefer_active,\n-            widen_outside_kb,\n             snapshot.projection_is_lagging(\"vault\") if widen_outside_kb else False,\n             resolved_config,\n             _origin_view(vault_root),\n",
+      "junit_sha256": "fa76b20249182730090862d5f5de491ccdf04fa3be5549ac84ead5be19e0bcbe"
+    },
+    {
+      "id": "L4-M2-hot-derived",
+      "round": 2,
+      "nodes": [
+        "tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_catalogue_is_not_live[page-True]"
+      ],
+      "exit_code": 0,
+      "failed_cases": 0,
+      "status": "survived-inactive-cache",
+      "hashes": {
+        "src/exomem/find.py": {
+          "before": "58269fecefbf793a879259156bd1a72bad0a24c372ee026848f697c23360a141",
+          "mutant": "833d5ad11578016b361d62f8d43d21e1498abfa25d452166a4b760dfb490a94b"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/find.py\n+++ src/exomem/find.py\n@@ -2147,7 +2147,6 @@\n             prefer_compiled,\n             prefer_active,\n             widen_outside_kb,\n-            snapshot.projection_is_lagging(\"vault\") if widen_outside_kb else False,\n             resolved_config,\n             _origin_view(vault_root),\n         )\n",
+      "junit_sha256": "a72f2aeef1e18236ed309155b202c4890d2495483b71b4f82172df65dedf39ba"
+    },
+    {
+      "id": "L3-M3b-derived",
+      "round": 3,
+      "nodes": [
+        "tests/test_recall_read_cache_custody.py::test_a_burst_of_distinct_writes_leaves_every_cache_row_current"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/index_sync.py": {
+          "before": "c7b9c8bf9ed6b1a284f17d2c978d7ab7f490c6fdd06d0b8f00408d564699be05",
+          "mutant": "264bde58aad2d382b5b69496e46658023ed9540d954b3256c21cc976327a887c"
+        },
+        "src/exomem/lexstore.py": {
+          "before": "264e4d6dfa0949494fe6428bb848037cac8c9afd1c5be27b235dbae4b7f54d4a",
+          "mutant": "e96f876e3369a2f884b7b2bb701f7c39f647910a08a84852839639ef69c347b0"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/index_sync.py\n+++ src/exomem/index_sync.py\n@@ -1673,7 +1673,7 @@\n     if not watcher_lexical_batch:\n \n         def lexical_dispatch():\n-            return lexstore.upsert_after_write(vault_root, semantic_paths)\n+            return None\n \n     else:\n         lexical_paths = semantic_paths if watcher_lexical_paths is None else watcher_lexical_paths\n--- src/exomem/lexstore.py\n+++ src/exomem/lexstore.py\n@@ -4648,28 +4648,7 @@\n     that, because a degraded component is precisely the case where a stale row\n     would otherwise survive under a receipt that says it did not.\n     \"\"\"\n-    if not _custody_catalogue_live(vault_root):\n-        return\n-    # One query for the whole batch, then one decision per path: a receipt\n-    # naming a hundred paths must not cost a hundred connections to the store\n-    # it is keeping current.\n-    held = page_eligibility_rows(vault_root, [*changed, *deleted])\n-    stale = [\n-        rel\n-        for rel in changed\n-        if _custody_indexable(vault_root, rel)\n-        and held.get(rel) != _stored_row_for(vault_root, rel, digests)\n-    ]\n-    retired = [\n-        rel\n-        for rel in (*deleted, *(rel for rel in changed if not _custody_indexable(vault_root, rel)))\n-        if held.get(rel) is not None\n-    ]\n-    store = get_store(vault_root)\n-    if stale:\n-        store.upsert_paths([vault_root.joinpath(*rel.split(\"/\")) for rel in stale])\n-    if retired:\n-        store.delete_rel_paths(retired)\n+    return\n \n \n #: Derived eligibility rows, keyed by the exact bytes they were derived from.\n",
+      "junit_sha256": "907b2a8635170c5f403212f7ecafd7eada2feb004d341d389d41e23099cf77f9"
+    },
+    {
+      "id": "L4-M2-cold-derived",
+      "round": 3,
+      "nodes": [
+        "tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_catalogue_is_not_live[page-False]",
+        "tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_catalogue_is_not_live[mixed-False]"
+      ],
+      "exit_code": 1,
+      "failed_cases": 2,
+      "status": "red",
+      "hashes": {
+        "src/exomem/find.py": {
+          "before": "58269fecefbf793a879259156bd1a72bad0a24c372ee026848f697c23360a141",
+          "mutant": "4c8ded988716c450c5832c5241b9bffee6d7ee5d1f45ca213f38af9649ae8a1d"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": null,
+      "patch": "--- src/exomem/find.py\n+++ src/exomem/find.py\n@@ -6770,12 +6770,6 @@\n     from . import bm25, lexstore, readiness\n \n     managed = readiness.runtime_managed()\n-    if managed and snapshot is not None and snapshot.projection_is_lagging(\"vault\"):\n-        # Ordinary recall can use its proven pending overlay, but widening has\n-        # no such overlay and requires the current vault catalogue. Its cache\n-        # key also distinguishes this state from a previously live reserve.\n-        _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)\n-        return []\n     vault_freshness = snapshot.for_scope(\"vault\") if snapshot is not None else None\n     snapshot = snapshot or FreshnessSnapshot(vault_root)\n     #: Applied per candidate AFTER ranking. Only the unrestricted rungs need\n",
+      "junit_sha256": "3203daa6d03c42de8784fe592f23c0f042ccd2789d933bc633e4b671cc97738a"
+    },
+    {
+      "id": "L4-M6-active-library-derived",
+      "round": 4,
+      "nodes": [
+        "tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/find.py": {
+          "before": "58269fecefbf793a879259156bd1a72bad0a24c372ee026848f697c23360a141",
+          "mutant": "7ecf03456460d93c1f5b12aff71344b02979a6c49e877758b4a8d611629d8498"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": "fa87e5f2f207148eb32befde3764e8842dff83dd26490c06d53421ba1287ad28",
+      "patch": "--- src/exomem/find.py\n+++ src/exomem/find.py\n@@ -2146,7 +2146,6 @@\n             effective_result_level,\n             prefer_compiled,\n             prefer_active,\n-            widen_outside_kb,\n             snapshot.projection_is_lagging(\"vault\") if widen_outside_kb else False,\n             resolved_config,\n             _origin_view(vault_root),\n",
+      "junit_sha256": "ed5d4634cb93eedce846f90b7f9e61f13884f35e01eaaf271dac88abde094393"
+    },
+    {
+      "id": "L4-M2-hot-active-library-derived",
+      "round": 4,
+      "nodes": [
+        "tests/test_recall_widening_opt_in.py::test_cached_widening_declines_when_the_catalogue_falls_behind"
+      ],
+      "exit_code": 1,
+      "failed_cases": 1,
+      "status": "red",
+      "hashes": {
+        "src/exomem/find.py": {
+          "before": "58269fecefbf793a879259156bd1a72bad0a24c372ee026848f697c23360a141",
+          "mutant": "833d5ad11578016b361d62f8d43d21e1498abfa25d452166a4b760dfb490a94b"
+        }
+      },
+      "restore_exact": true,
+      "test_sha256": "fa87e5f2f207148eb32befde3764e8842dff83dd26490c06d53421ba1287ad28",
+      "patch": "--- src/exomem/find.py\n+++ src/exomem/find.py\n@@ -2147,7 +2147,6 @@\n             prefer_compiled,\n             prefer_active,\n             widen_outside_kb,\n-            snapshot.projection_is_lagging(\"vault\") if widen_outside_kb else False,\n             resolved_config,\n             _origin_view(vault_root),\n         )\n",
+      "junit_sha256": "13ad5485c13905b978b36c5015774a298c62ef725ec19fbe672541b29c82d70a"
+    }
+  ],
+  "restored": [
+    {
+      "round": 1,
+      "passed_cases": 3,
+      "exit_code": 0,
+      "elapsed_seconds": 22.42777778202435,
+      "junit_sha256": "67b8e7abd19efddae08bc0144a597b79e8ff5095a282ea8c07cde468d1626b45"
+    },
+    {
+      "round": 2,
+      "passed_cases": 4,
+      "exit_code": 0,
+      "elapsed_seconds": 21.85751145600807,
+      "junit_sha256": "643fb208119d3c3593fa1383c8d66b6c4f78ceb3323fabf694169bd5a6f90acf"
+    },
+    {
+      "round": 3,
+      "passed_cases": 5,
+      "exit_code": 0,
+      "elapsed_seconds": 14.221042261982802,
+      "junit_sha256": "622abdce295cff31a856c1b2daf3f422cd8f44d3038729ec0705a3afab5fefbd"
+    },
+    {
+      "round": 4,
+      "passed_cases": 2,
+      "exit_code": 0,
+      "elapsed_seconds": 7.538404986029491,
+      "junit_sha256": "b39814fc662f7d9863d332ba2e63b53d51a5d306480547ba5ab8a53e266e0a48"
+    }
+  ]
+}

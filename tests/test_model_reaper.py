@@ -137,6 +137,61 @@ def test_find_reports_a_use_fingerprint_that_moves_with_use(tmp_path: Path) -> N
     assert find.cache_status()["pages"]["hits"] >= 1
 
 
+def test_find_reaper_observes_activity_during_a_concurrent_cache_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ordinary LRU hit must not break the reaper's activity read."""
+    import threading
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+
+    iterating = threading.Event()
+    resume = threading.Event()
+    hit_finished = threading.Event()
+
+    class PausingEntries(OrderedDict):
+        def values(self):
+            iterator = iter(super().values())
+            for index, page in enumerate(iterator):
+                if index == 0:
+                    iterating.set()
+                    assert resume.wait(3), "status traversal did not resume"
+                yield page
+
+    cache = find_corpus.FrontmatterCache(entries=PausingEntries())
+    paths = [tmp_path / "a.md", tmp_path / "b.md"]
+    for page in paths:
+        page.write_text("# Page\n\nbody\n", encoding="utf-8")
+        assert cache.get(page, tmp_path) is not None
+    monkeypatch.setattr(find, "_CACHE", cache)
+    clock = _Clock()
+    slot = model_reaper._quiet_cache_slot(
+        "find-ram-caches", lambda: True, lambda: False, find.cache_activity, clock=clock,
+    )
+
+    def read_page():
+        try:
+            return cache.get(paths[0], tmp_path)
+        finally:
+            hit_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        tick = workers.submit(model_reaper._reap_once, [slot], clock.now, 900)
+        try:
+            assert iterating.wait(3), "the reaper did not read cache activity"
+            hit = workers.submit(read_page)
+            # Permit the real hit to reorder the map at this preemption point.
+            # A synchronized reader instead completes before the hit proceeds.
+            hit_finished.wait(0.25)
+        finally:
+            resume.set()
+        assert tick.result(timeout=3) == []
+        assert hit.result(timeout=3) is not None
+
+    assert not [record for record in caplog.records if record.name == model_reaper.log.name], caplog.text
+    assert find.cache_status()["pages"] == {"entries": 2, "body_chars": 26, "hits": 1}
+
+
 def test_a_matrix_served_by_catch_up_counts_as_used(tmp_path: Path, monkeypatch) -> None:
     """The catch-up branch is the common serve under a moving write generation."""
     import numpy as np
