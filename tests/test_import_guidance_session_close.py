@@ -400,7 +400,8 @@ def test_judge_view_shows_turns_reference_and_diffs_but_not_the_arm_or_the_recap
     assert "+No meetings before 10:00." in view
     assert KEY["reference"] in view
     assert "1. hi" in view
-    assert not {"candidate", "sonnet", "recap", "compile"} & set(view.lower().replace(".", " ").split())
+    assert "A recap by the candidate arm." not in view
+    assert not {"candidate", "sonnet", "compile"} & set(view.lower().replace(".", " ").split())
 
 
 def test_an_interrupted_session_with_a_recap_cannot_pass_missing_canonical_work(tmp_path: Path) -> None:

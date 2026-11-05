@@ -50,6 +50,10 @@ accumulates reusable facts, history, or relations, **a method was actually
 carried out and the user reports how it went**, **a stated intent or commitment
 is made**, or **an observed outcome or event is reported** — capture it:
 
+Judge reusable facts independently of the task or artifact that carried them.
+A passing mention can supply knowledge that matters for a later decision.
+Updating a resolved entity follows the live capture disposition; the threshold for creating an entity does not exclude that update.
+
 - A **durable personal baseline** is also a stepping-stone: a stable preference,
   recurring routine, historical baseline, or durable affiliation. Capture it only
   when both stability or recurrence and reusable comparison, interpretation, or
@@ -83,7 +87,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   those exact values through the governed
   `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
   editing frontmatter around the registry rule.
-  A single incidental mention, unresolved identity, or transient participant
+  An incidental name without reusable facts, unresolved identity, or transient participant
   stays in source/note context.
 - **Recurring-identity maintenance boundary (balanced/maximal only).** On the
   first user turn after bootstrap, after primary work and before the final

@@ -61,9 +61,10 @@ CRITERIA = (
     {
         "id": "J3",
         "expect": True,
-        "text": "All material facts and constraints in the reference are recorded on their rightful canonical pages. "
-        "Missing facts or a missing required page update fail, even when every shown edit is correct. "
-        "A recap or citation alone cannot satisfy this criterion. When the reference requires restraint, no update is owed.",
+        "text": "All material settled knowledge and semantic constraints in the reference appear on their rightful canonical pages. "
+        "Include qualifications, rationale and temporal status. Missing knowledge or required canonical page work fails. "
+        "Score recap production and recap citation separately; their absence alone does not fail this criterion. "
+        "A recap or citation cannot replace required canonical content. True when no canonical update is owed.",
     },
 )
 # These criterion IDs are fixed by the scoring protocol.
@@ -169,7 +170,12 @@ def judge_view(case: Case, key: dict, row: dict) -> str:
     )
     return (
         f"WHAT THE PERSON SAID, IN ORDER\n{turns}\n\n"
-        f"REFERENCE (what the session settled; it is true)\n{key['reference']}\n\n"
+        "INDEPENDENT REFERENCE (semantic truth and workflow obligations)\n"
+        "J1–J3 assess canonical knowledge, factual correctness and justified preservation. "
+        "Separate deterministic checks assess recap production and required recap citation. "
+        "A missing new recap citation alone does not fail J1–J3. "
+        "Unsupported knowledge and lost unrelated content still fail the applicable criterion.\n"
+        f"{key['reference']}\n\n"
         "PAGE CHANGES THE SESSION LEFT, AS DIFFS\n" + ("\n\n".join(changes) or "No page changed.")
         + (f"\n\nFINAL REQUIRED PAGES\n{required}" if required else "")
     )
