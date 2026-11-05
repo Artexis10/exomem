@@ -6495,11 +6495,9 @@ def op_get_video_frames(
         NO_DECODABLE_FRAMES (corrupt/streamless video, or a window on a
         video of unknown duration).
     """
-    # Release gate BEFORE extraction: frames are the item's content in image
-    # form, so a sub-floor decision must refuse rather than render — and it
-    # must refuse indistinguishably from a missing path, exactly as `op_get`
-    # does. Decided first so a withheld video is never even decoded.
-    if not egress_module.release_allows_frames(vault_root, path):
+    # Local reads gate before extraction. Cloud's preparation handshake supplies
+    # the exact retained source proof before the worker decodes anything.
+    if not cloud_cell_module.cloud_mode_enabled() and not egress_module.release_allows_frames(vault_root, path):
         raise ValueError(f"NOT_FOUND: file does not exist: {path}")
     video_frames_module = _video_frames_module()
     try:
@@ -14655,10 +14653,9 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="read_media",
                 reason=(
-                    "Sampling video frames needs video decoding, which the "
-                    "cloud image does not ship."
+                    "This cell has not selected the on-demand frame engine."
                 ),
-                lifted_when="the cloud image ships video decoding",
+                lifted_when="the cell selects the frame engine",
             ),
         )
     }
@@ -14670,12 +14667,21 @@ def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, .
     return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
 
 
+def _cloud_frames_selected() -> bool:
+    from . import media_engines
+
+    return media_engines.FRAMES in media_engines.enabled_engines(
+        {**os.environ, cloud_cell_module.CLOUD_MODE_ENV: "1"}
+    )
+
+
 def cloud_surface_exclusions(*, upload_bridge: bool = False) -> tuple[SurfaceExclusion, ...]:
     """The exclusions in force on a cell, with or without gateway upload handoffs."""
     return tuple(
         exclusion
         for exclusion in CLOUD_SURFACE_EXCLUSIONS.values()
         if not (upload_bridge and exclusion.lifted_by_upload_bridge)
+        and not (exclusion.command == "read_media" and _cloud_frames_selected())
     )
 
 
