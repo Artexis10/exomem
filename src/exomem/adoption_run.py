@@ -2835,7 +2835,7 @@ def _legacy_apply_invocation(
         saved = entry.get("reply")
         if entry["state"] == "used" and isinstance(saved, dict):
             progress = saved.get("progress")
-            # These counters are the fixed apply-reply protocol, not a vocabulary.
+            # nosemgrep: ep-word-set -- The apply-reply schema fixes these progress counter fields.
             counters = ("applied", "failed", "remaining", "total")
             if (
                 isinstance(saved.get("apply_result"), dict) and isinstance(progress, dict)
