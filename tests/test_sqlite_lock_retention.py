@@ -37,17 +37,17 @@ writer.close()
 """
 
 
-def _locks_held_here(path: Path) -> list[str]:
-    """The POSIX locks that this process holds on `path`, as /proc/locks lists them."""
+def _locks_held_here(path: Path) -> set[str]:
+    """The process's lock coverage; duplicate proc records add no protection."""
     info = path.stat()
     file_id = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
-    held = []
+    held = set()
     for line in Path("/proc/locks").read_text().splitlines():
         # "7: POSIX  ADVISORY  READ 4242 08:30:1234 128 128"; a blocked waiter's line adds "->".
         fields = line.split()
         if fields[1] == "POSIX" and fields[4] == str(os.getpid()) and fields[5] == file_id:
-            held.append(" ".join((fields[3], *fields[6:8])))
-    return sorted(held)
+            held.add(" ".join((fields[3], *fields[6:8])))
+    return held
 
 
 def _wal_reader(database: Path) -> sqlite3.Connection:

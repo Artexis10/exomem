@@ -244,6 +244,56 @@ def test_data_publication_preserves_an_admitted_recall(
     assert "recall_projection" in degraded
 
 
+@library_scope()
+def test_keyword_grouping_retains_its_snapshot_after_match_selection(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later parent and source hash cannot enter the second keyword statement."""
+    from exomem import find as find_module
+
+    for name in ("earlier-parent", "later-parent"):
+        (vault / f"Knowledge Base/Notes/{name}.md").write_text(f"# {name}\n", encoding="utf-8")
+    child = vault / "Knowledge Base/Notes/publication-frame.md"
+
+    def frame(parent):
+        return f"---\nparent_media: Knowledge Base/Notes/{parent}\n---\n\nphasepublicationmarker\n"
+
+    child.write_text(frame("earlier-parent"), encoding="utf-8")
+    warm_managed_cell(vault)
+    options = dict(
+        query="phasepublicationmarker", mode="keyword", scope="kb-only", limit=1,
+        graph=False, rerank=False, admit_path=lambda _path: True,
+    )
+    assert [hit.path for hit in find_module.find(vault, **options)] == [
+        "Knowledge Base/Notes/earlier-parent.md"
+    ]
+    store = lexstore.get_store(vault)
+    checkpoints = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+    original = store._matched_substring_paths
+    published = False
+
+    def publish_after_matches(*args, **kwargs):
+        nonlocal published
+        paths = original(*args, **kwargs)
+        if not published:
+            child.write_text(frame("later-parent"), encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[child])
+            for scope in freshness.SCOPES:
+                delta = freshness.recall_delta_since(vault, scope, checkpoints[scope])
+                assert delta.complete and not delta.requires_source_proof
+                store.apply_catalog_delta(scope, delta)
+            published = True
+        return paths
+
+    monkeypatch.setattr(store, "_matched_substring_paths", publish_after_matches)
+    degraded: list[str] = []
+    hits = find_module.find(vault, **options, degraded_out=degraded)
+
+    assert published
+    assert hits == []  # Selected old evidence changed; never substitute the later parent and bytes.
+    assert "recall_projection" in degraded
+
+
 @pytest.mark.parametrize("mode", ["keyword", "hybrid"])
 @pytest.mark.parametrize("publish_during_query", [False, True])
 @pytest.mark.parametrize("changed_visible", [False, True])
