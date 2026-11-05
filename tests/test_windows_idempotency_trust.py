@@ -3,11 +3,90 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows idempotency trust boundary")
+
+
+@pytest.mark.parametrize("unsafe_replacement", [False, True])
+def test_sidecar_delete_pending_preserves_runtime_trust_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_replacement: bool
+) -> None:
+    from exomem import mutation_lock
+    from exomem.writer_lease import IdempotencyStore
+
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    sidecar = store.path.with_name(f"{store.path.name}-shm")
+    sidecar.write_bytes(b"\0")
+    handle = mutation_lock._windows_open_path(
+        sidecar, directory=False, access=0x00010080, share=0x7  # DELETE | FILE_READ_ATTRIBUTES
+    )
+    release = threading.Event()
+    replaced = threading.Event()
+    observed: list[int] = []
+    real_open = mutation_lock._windows_open_path
+
+    def open_path(path: Path, **kwargs):  # noqa: ANN003, ANN202 - native boundary observer
+        try:
+            return real_open(path, **kwargs)
+        except OSError as error:
+            if path == sidecar and error.errno == 5:
+                observed.append(error.errno)
+                release.set()
+                assert replaced.wait(timeout=5), "the pending sidecar was not released"
+            raise
+
+    def finish_delete() -> None:
+        try:
+            # The main thread's finally releases this; a timer must not erase the pending state.
+            release.wait()
+            mutation_lock._windows_close_handle(handle)
+            if unsafe_replacement:
+                sidecar.write_bytes(b"\0")
+                mutation_lock._windows_apply_dacl_sddl(sidecar, "D:P(A;;FA;;;WD)")
+        finally:
+            replaced.set()
+
+    # Synchronization and DACL replacement are test overhead, outside the production retry budget.
+    monkeypatch.setattr(mutation_lock, "_WINDOWS_SQLITE_PATH_RETRY_SECONDS", 5.0)
+    monkeypatch.setattr(mutation_lock, "_windows_open_path", open_path)
+    thread = threading.Thread(target=finish_delete)
+    thread.start()
+    try:
+        # Retained-handle disposition keeps deletion pending; path deletion may unlink immediately.
+        mutation_lock._windows_delete_handle(handle)
+        if unsafe_replacement:
+            with pytest.raises(mutation_lock.WindowsRuntimeDaclError):
+                store._ensure_private_runtime_state()
+        else:
+            store._ensure_private_runtime_state()
+        assert observed, "the validator did not encounter the native delete-pending error"
+    finally:
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def test_persistent_sidecar_access_denial_still_refuses(tmp_path: Path) -> None:
+    from exomem import mutation_lock
+    from exomem.writer_lease import IdempotencyStore
+
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    sidecar = store.path.with_name(f"{store.path.name}-shm")
+    sidecar.write_bytes(b"\0")
+    sid = mutation_lock._windows_current_user_sid()
+    mutation_lock._windows_apply_dacl_sddl(
+        sidecar, f"D:P(D;;GR;;;{sid})(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+    )
+    try:
+        with pytest.raises(OSError) as raised:
+            store._ensure_private_runtime_state()
+        assert raised.value.errno == 5
+    finally:
+        mutation_lock._windows_apply_private_dacl(sidecar, sid)
 
 
 def test_dpapi_receipt_envelope_round_trips_with_exact_header(tmp_path: Path) -> None:
