@@ -3815,6 +3815,7 @@ def guard_working_set(
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
         guarded.pop("turn_slice", None)
+        guarded.pop("task_context", None)
     if "map" in guarded:
         from .. import context_views
 
@@ -3842,13 +3843,19 @@ def guard_working_set(
                         release_gate_active=release_gate_active, who=who, purpose=purpose,
                     )
                 guarded["turn_slice"] = slice_block
-            stance_chars = 0
+            if "task_context" in guarded:
+                from .. import context_task
+
+                guarded["task_context"] = context_task.guarded(
+                    vault_root, caller, guarded["task_context"], limit=guarded["budget"]["limit_chars"],
+                )
             if "stance" in guarded:
                 from .. import stance
 
                 guarded["stance"] = stance.guard_block(vault_root, caller, guarded["stance"])
-                stance_chars = stance.chars(guarded["stance"])
-            guarded["budget"]["used_chars"] = context_views.packet_chars(map_block, slice_block) + stance_chars + len((guarded.get("next_action") or {}).get("say", ""))
+            guarded["budget"]["used_chars"] = context_views.packet_chars(
+                map_block, slice_block, guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+            )
 
     ctx = _packet_release(
         vault_root,

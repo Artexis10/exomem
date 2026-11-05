@@ -2,7 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: 238b25d5afb653f39fbcc4d09dc5457c900a43d8f61ed2d78963ff8d1c65dad9
+  skill_contract: bdfd3643ca20182824eaea536d0068671f220fe2cf1054b404e26898d13a0235
   version: "0.2.0"
 ---
 
@@ -47,6 +47,19 @@ Bootstrap's `store` names the Exomem this connector reaches. When the user asks 
 different Exomem, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
+
+Maps activation also returns `task_context`: source-bound leads and reusable methods.
+Read a lead before treating it as a fact or an ongoing commitment.
+Methods are live governed knowledge. Read each `read_ref` when applicability is
+`read_required`, including the source's scope and exclusions, before applying it.
+A current user instruction can override a method for this task within existing authority.
+This local adaptation does not revise the reusable method or authorize external actions.
+Use the ordinary guarded writer for an authorized reusable revision.
+Carry the activation `continuity` token on later activations. If `methods.reset` is
+true, discard held method projections before using this response.
+Without method continuity, freshly read a method before reusing it.
+An unchanged map does not certify method freshness. Refresh when the task, evidence
+or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
 1. Start with `read_review(operation={'kind': 'attention'})` for the ranked review queue.

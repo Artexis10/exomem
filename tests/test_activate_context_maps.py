@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -514,7 +515,8 @@ def test_equal_rendered_lines_do_not_select_an_extra_entry(vault: Path, monkeypa
     assert len(lines) == 2 and lines[0] == lines[1]
     _, overflow = context_views.map_within(view, 100_000)
     description = _activate(vault, max_chars=500)["map"]["description"]
-    budget = len(description) + len(lines[0]) + len(overflow) + 2 + read_next_action.MAX_CHARS
+    required = len(description) + len(lines[0]) + len(overflow) + 2
+    budget = math.ceil(required / (1 - context_views.TURN_SLICE_SHARE)) + read_next_action.MAX_CHARS
     assert budget >= 500
     packet = _activate(vault, max_chars=budget)
     assert len(packet["map"]["items"]) == 1

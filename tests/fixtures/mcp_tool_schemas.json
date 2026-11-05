@@ -7812,7 +7812,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation supplies excerpts, not attachment reads.\nfocus is agent-authored, not human intent; clarify ambiguity.\nKeep source identity/scope. Due/refresh grants no writes.\nRead map refs with read_memory; follow `next_action`.\nOptional epistemic_status has counts/completeness; read_memory gives\nitems/reading provenance.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nRead map/task_context refs and method scope/exclusions with read_memory.\nDiscard held methods on methods.reset. Follow next_action.\nepistemic_status: counts/completeness; read_memory: provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

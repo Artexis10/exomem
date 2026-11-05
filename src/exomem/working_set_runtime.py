@@ -401,6 +401,7 @@ def encode_continuity(
     thread_ns: int | None = None,
     salt: str = "",
     map_generation: str | None = None,
+    method_versions: Sequence[Mapping[str, str]] = (),
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -441,6 +442,8 @@ def encode_continuity(
     }
     if map_generation is not None:
         payload["map_generation"] = str(map_generation)
+    if method_versions:
+        payload["method_versions"] = [dict(item) for item in method_versions]
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -546,6 +549,16 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     }
     if isinstance(payload.get("map_generation"), str):
         decoded["map_generation"] = payload["map_generation"]
+    methods = payload.get("method_versions")
+    decoded["method_versions"] = []
+    if isinstance(methods, list) and len(methods) + len(refs) <= CONTINUITY_MAX_REFS:
+        # These fixed field names define read hints, never semantic vocabulary or anchor evidence.
+        for item in methods:
+            if isinstance(item, dict) and all(
+                isinstance(item.get(key), str) and item[key] and len(item[key]) <= CONTINUITY_MAX_CHARS
+                for key in ("ref", "source_ref", "source_version")
+            ):
+                decoded["method_versions"].append({key: item[key] for key in ("ref", "source_ref", "source_version")})
     return decoded
 
 

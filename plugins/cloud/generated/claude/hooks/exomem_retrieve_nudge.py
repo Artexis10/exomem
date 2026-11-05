@@ -173,6 +173,8 @@ _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last che
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
 _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recall_context` again with the original turn '
               'and `anchor` set to the ref you mean.',
+ 'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
+                 'and exclusions before applying it within existing authority.',
  'related': 'Related pages (not loaded). Use `read_memory` to read a relevant ref before relying '
             'on it.',
  'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '
@@ -180,7 +182,9 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
  'search_miss': 'Empty recall means not found in that query/scope. Try related terms or '
                 "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections.",
  'slice_empty': 'Map and slice cover compiled material only. Use `search_memory` for captured '
-                'Sources; an empty slice is not proof of absence.'}
+                'Sources; an empty slice is not proof of absence.',
+ 'task_read': 'Use `read_memory` to open a task_context read_ref before relying on it. Read method '
+              'scope and exclusions before applying it within existing authority.'}
 # END GENERATED NEXT ACTION COMPATIBILITY
 _WORKING_SET_ANCHOR_INSTRUCTION = _COMPAT_NEXT_ACTION.get("ambiguous", "")
 _WORKING_SET_AMBIGUITY_LINE = _WORKING_SET_ANCHOR_INSTRUCTION
@@ -2161,6 +2165,31 @@ def _format_slice_block(block: object, max_chars: int) -> str:
     return "\n".join([leading, *kept, *tail])
 
 
+# Fixed protocol advice, separate from retrieved source text.
+_METHOD_RESET_LINE = "- methods: discard held methods before reuse."
+
+
+def _format_task_context(block: object, max_chars: int) -> str:
+    """Render current read routes, with invalidation before every method projection."""
+    if not isinstance(block, dict):
+        return ""
+    methods = block.get("methods") or {}
+    lines = []
+    for item in block.get("candidates") or ():
+        lines.append(_packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or "")))
+    for item in methods.get("items") or ():
+        lines.append(_packet_line("method", f"{item.get('attribution', '')}; read the source for applicability and exclusions.", str(item.get("read_ref") or "")))
+    if lines:
+        lines.insert(0, _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""))
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
+
+
 def _format_stance_block(block: object, max_chars: int, last_generation: str = "") -> tuple[str, bool]:
     """Whole global lines under the data header; remember only a complete generation."""
     if not isinstance(block, dict) or block.get("state") != "ready":
@@ -2187,19 +2216,25 @@ def _format_stance_block(block: object, max_chars: int, last_generation: str = "
 
 
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
-    """The map, stance and slice data, followed by one supplied move."""
+    """Keep reset and standing data before optional routes, with one supplied move last."""
+    methods = (packet.get("task_context") or {}).get("methods") or {}
+    # This fixed protocol reset must reach the agent before any method content.
+    reset = _METHOD_RESET_LINE if methods.get("reset") else ""
+    if len(reset) > max_chars:
+        return "", False, False
     action = str((packet.get("next_action") or {}).get("say") or "")
     if not action and (packet.get("turn_slice") or {}).get("state") == "empty":
         action = _COMPAT_NEXT_ACTION.get("slice_empty", "")
-    action = action if len(action) <= min(240, max_chars) else ""
-    room = max_chars - len(action) - (1 if action else 0)
+    action = action if len(action) <= min(240, max_chars - len(reset) - (1 if reset else 0)) else ""
+    room = max_chars - len(action) - (1 if action else 0) - len(reset) - (1 if reset else 0)
     stance_text, stance_complete = _format_stance_block(packet.get("stance"), room, last_stance)
-    text, complete = _format_map_block(packet["map"], room - len(stance_text) - (1 if stance_text else 0), last_generation)
-    parts = [part for part in (text, stance_text) if part]
-    used = len("\n".join(parts))
-    turn = _format_slice_block(packet.get("turn_slice"), room - used - (1 if parts else 0))
-    parts.extend(part for part in (turn, action) if part)
-    return "\n".join(parts), complete, stance_complete
+    room -= len(stance_text) + (1 if stance_text else 0)
+    text, complete = _format_map_block(packet["map"], room, last_generation)
+    room -= len(text) + (1 if text else 0)
+    task = _format_task_context(packet.get("task_context"), room)
+    room -= len(task) + (1 if task else 0)
+    turn = _format_slice_block(packet.get("turn_slice"), room)
+    return "\n".join(part for part in (reset, stance_text, text, task, turn, action) if part), complete, stance_complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
@@ -3413,7 +3448,6 @@ def main(argv: list[str] | None = None) -> int:
             packet_available = isinstance(packet, dict)
             packet = packet if isinstance(packet, dict) else {}
             hit_count = len(packet.get("anchors") or ())
-            _write_activation_token(session_id, str(packet.get("continuity") or ""))
             delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
             delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
             render_cap = max(0, _working_set_max_chars() - (len(delta_text) + 1 if delta_text else 0))
@@ -3449,6 +3483,9 @@ def main(argv: list[str] | None = None) -> int:
                     except (AttributeError, OSError, ValueError):
                         pass
                 block = _format_working_set_block(packet, render_cap)
+            methods_reset = ((packet.get("task_context") or {}).get("methods") or {}).get("reset")
+            if not methods_reset or _METHOD_RESET_LINE in block.splitlines():
+                _write_activation_token(session_id, str(packet.get("continuity") or ""))
             if delta_text:
                 block = f"{block}\n{delta_text}" if block else delta_text
                 _record_vocabulary_delta_shown(session_id, delta, delta_delivered)

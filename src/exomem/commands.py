@@ -6772,12 +6772,11 @@ def op_activate_context(
 ) -> dict:
     """Recall authorized context; abstain if uncertain.
 
-    Reuse held context; conversation supplies excerpts, not attachment reads.
-    focus is agent-authored, not human intent; clarify ambiguity.
-    Keep source identity/scope. Due/refresh grants no writes.
-    Read map refs with read_memory; follow `next_action`.
-    Optional epistemic_status has counts/completeness; read_memory gives
-    items/reading provenance.
+    Reuse held context; conversation gives excerpts. Agent focus is not human intent.
+    Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
+    Read map/task_context refs and method scope/exclusions with read_memory.
+    Discard held methods on methods.reset. Follow next_action.
+    epistemic_status: counts/completeness; read_memory: provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -7607,6 +7606,18 @@ def _op_activate_context_body(
         # The map generation the caller holds. A token from anchors mode, an older one or a malformed one
         # carries none, and the caller then gets the whole map.
         held_map = working_set_runtime_module.decode_continuity(continuity)
+
+        def task_context(caller, catalogue, allowance, prepare_slice):
+            from . import context_task
+
+            return context_task.compile_context(
+                vault_root, caller=caller, catalogue=catalogue, turn=turn,
+                conversation=working_set_conversation_module.bound(conversation), snapshot=snapshot,
+                held=(held_map or {}).get("method_versions", ()), max_chars=allowance, timings=timings,
+                index_token=evidence_token,
+                prepare_slice=prepare_slice,
+            )
+
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
@@ -7619,6 +7630,7 @@ def _op_activate_context_body(
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                     known_generation=(held_map or {}).get("map_generation"),
+                    task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
@@ -7644,10 +7656,17 @@ def _op_activate_context_body(
         map_generation = packet["generation"].get("map_generation")
         if map_generation is not None and not packet.get("abstained"):
             # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
-            packet["continuity"] = working_set_runtime_module.encode_continuity(
+            from . import context_task
+
+            packet["continuity"] = context_task.continuity_token(
+                packet, held=(held_map or {}).get("method_versions", ()),
                 identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
+            )
+            packet["task_context"] = context_task.pin(
+                vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),
+                packet["task_context"], limit=working_set_module.clamp_budget(max_chars),
             )
         if packet.get("abstained") is False:
             # A map whose turn slice yielded to the deadline names the skipped stage, as a served packet does.

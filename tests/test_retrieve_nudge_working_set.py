@@ -2821,3 +2821,24 @@ def test_a_whole_stance_is_held_when_vocabulary_forces_the_map_to_be_cut(
     assert "already held" in second
     assert "map unchanged" not in second
     assert max(len(first), len(second)) <= 1100
+
+
+def test_an_undelivered_method_reset_does_not_advance_hook_continuity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    every_prompt: None,
+) -> None:
+    """A tiny render retries stale-method invalidation instead of acknowledging an unseen reset."""
+    packet = {
+        "map": {"ref": "exomem://map", "generation": "map", "items": []},
+        "task_context": {"methods": {"reset": True, "items": []}},
+        "continuity": "refreshed-token", "abstained": False,
+    }
+    seen = _serve(monkeypatch, packet)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "20")
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert hook._METHOD_RESET_LINE not in first
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "500")
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert hook._METHOD_RESET_LINE in second
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert [request["continuity"] for request in seen] == ["", "", "refreshed-token"]

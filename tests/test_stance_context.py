@@ -399,3 +399,103 @@ def test_canonical_stance_does_not_depend_on_a_status_overlay(stance_vault):
     after = _stance(stance_vault)
     assert before["state"] == "ready" and before["items"]
     assert after == before
+
+
+@pytest.mark.parametrize("long_stance", [False, True])
+def test_method_reset_stance_and_move_fit_the_minimum_public_cap(stance_vault, monkeypatch, long_stance):
+    """A crowded first response invalidates held methods without losing standing lines or its next move."""
+    from exomem import commands, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    statement = ("Keep the source with each measurement and retain its inspection record for later checks."
+                 if long_stance else "Keep a source for each claim.")
+    _page(stance_vault, "global", "stance: true\n", body=f"- [rule] {statement} ^source\n")
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault).close()
+    token = working_set_runtime.encode_continuity(
+        identity="old", roles_hash="r", conventions_hash="c", generation=0,
+        refs=[], roles=[], map_generation="old",
+        method_versions=[{"ref": "missing#unit", "source_ref": "missing.md", "source_version": "old"}],
+    )
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    first = invoke_command(command, stance_vault, turn="", continuity=token, max_chars=500)
+    assert first["task_context"]["methods"]["reset"] is True
+    assert [item["text"] for item in first["stance"]["items"]] == [statement]
+    assert first["next_action"]["state"] == "method_reset"
+    assert first["budget"]["used_chars"] == context_views.packet_chars(
+        first["map"], first.get("turn_slice"), first["task_context"], first["stance"], first["next_action"],
+    ) <= 500
+    from exomem import context_task
+
+    reserve = int((500 - read_next_action.MAX_CHARS - stance.chars(first["stance"])) * context_views.TURN_SLICE_SHARE)
+    assert context_task.packet_chars(first["task_context"]) <= reserve
+    row = served_context.read(stance_vault, served_context_id=first["served_context_id"])["record"]
+    assert row["task_context"]["methods"]["reset"] is True
+    second = invoke_command(command, stance_vault, turn="", continuity=first["continuity"], max_chars=500)
+    assert second["task_context"]["methods"]["reset"] is False
+    assert second["stance"] == first["stance"]
+    assert second["map"]["unchanged"] is True
+    assert second["budget"]["used_chars"] <= 500
+
+
+def test_hook_keeps_reset_stance_and_move_when_optional_routes_cannot_fit():
+    """Hook framing must not swallow an invalidation while it remembers a fresh token."""
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    packet = {
+        "map": {"generation": "map", "ref": "exomem://map", "items": [
+            {"title": "A long optional map entry " * 20, "ref": "index.md"}]},
+        "stance": {"state": "ready", "generation": "stance", "omitted": 0,
+                   "items": [{"ref": "rule.md#source", "text": "Keep the source."}]},
+        "task_context": {"methods": {"reset": True, "items": [
+            {"attribution": "Inspection procedure", "read_ref": "method.md"}]}},
+        "next_action": {"state": "method_reset", "say": "Read the current method source."},
+    }
+    stance_text, _ = hook._format_stance_block(packet["stance"], 4000)
+    cap = len(hook._METHOD_RESET_LINE) + len(stance_text) + len(packet["next_action"]["say"]) + 2
+    first, complete, stance_complete = hook._format_map_with_slice(packet, cap, "")
+    assert first.splitlines()[0] == hook._METHOD_RESET_LINE
+    assert "Keep the source." in first and first.endswith(packet["next_action"]["say"])
+    assert "method.md" not in first and not complete and stance_complete
+    assert len(first) <= cap
+    full, *_ = hook._format_map_with_slice(packet, 4000, "")
+    assert full.index(hook._METHOD_RESET_LINE) < full.index("method.md")
+    packet["task_context"]["methods"]["reset"] = False
+    second, _, held_complete = hook._format_map_with_slice(packet, cap, "", "stance")
+    assert "already held" in second and second.endswith(packet["next_action"]["say"])
+    assert hook._METHOD_RESET_LINE not in second and held_complete and len(second) <= cap
+
+
+def test_served_task_routes_keep_identities_without_retrieved_prose(stance_vault):
+    """The owner can audit task methods and read routes without retaining their content or prompts."""
+    route = {"ref": "method.md#unit", "source_ref": "method.md", "source_version": "version", "read_ref": "method.md"}
+    packet = {**_packet(), "task_context": {
+        "state": "ready", "candidates": [{**route, "title": "Private source title", "reason": "Private task details"}],
+        "methods": {"reset": False, "items": [{**route, "content": "Private method text"}]},
+    }}
+    identifier = served_context.append(stance_vault, packet)
+    record = served_context.read(stance_vault, served_context_id=identifier)
+    assert record["record"]["task_context"] == {
+        "state": "ready", "candidates": [route], "methods": {"reset": False, "items": [route]},
+    }
+    assert "Private" not in json.dumps(record)
+    assert sum(item["ref"] == "method.md" for item in record["current_resolution"]) == 2
+    assert served_context.read(stance_vault)["ref_occurrences"] == 4
+    with principal.request_scope(_external()):
+        assert served_context.read(stance_vault, served_context_id=identifier) == {"available": False, "reason": "owner_required"}
+
+
+def test_served_rows_from_before_task_metadata_remain_readable(stance_vault):
+    """Adding task metadata must retain old audit rows and distinguish their unrecorded task state."""
+    before = served_context.append(stance_vault, _packet())
+    with sqlite3.connect(served_context.sidecar_path(stance_vault)) as connection:
+        connection.execute("ALTER TABLE served_context DROP COLUMN task_context")
+    old = served_context.read(stance_vault, served_context_id=before)
+    assert old["record"]["task_context"] == {"state": "unknown", "reason": "not_recorded"}
+    assert served_context.read(stance_vault)["retained_rows"] == 1
+    after = served_context.append(stance_vault, {**_packet(), "task_context": {"state": "empty"}})
+    assert after and after != before
+    assert served_context.read(stance_vault, served_context_id=before)["record"] == old["record"]
+    assert served_context.read(stance_vault, served_context_id=after)["record"]["task_context"]["state"] == "empty"
+    assert served_context.read(stance_vault)["retained_rows"] == 2

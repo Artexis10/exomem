@@ -16,6 +16,8 @@ def templates(activate: str, read: str, search: str) -> dict[str, str]:
     """State names and transitions are fixed by the read-next-action contract."""
     return {
         "ambiguous": f"These candidates need a choice. Call {activate} again with the original turn and `anchor` set to the ref you mean.",
+        "method_reset": "Discard held methods before reuse. Read a current method source for its scope and exclusions before applying it within existing authority.",
+        "task_read": f"Use {read} to open a task_context read_ref before relying on it. Read method scope and exclusions before applying it within existing authority.",
         "review_due": "Apply the served stance with its review caveat; its check date has passed, so verify it before relying on it.",
         "slice_empty": f"Map and slice cover compiled material only. Use {search} for captured Sources; an empty slice is not proof of absence.",
         "related": f"Related pages (not loaded). Use {read} to read a relevant ref before relying on it.",
@@ -36,8 +38,13 @@ def state(packet: Mapping[str, Any], *, search: bool = False) -> str | None:
         )
         if reason == "ambiguous" or (reason == "unresolved" and worded):
             return "ambiguous"
+    task = packet.get("task_context") or {}
+    if (task.get("methods") or {}).get("reset"):
+        return "method_reset"
     if any(item.get("review_due") for item in (packet.get("stance") or {}).get("items", ())):
         return "review_due"
+    if task.get("candidates") or (task.get("methods") or {}).get("items"):
+        return "task_read"
     if (packet.get("turn_slice") or {}).get("state") == "empty":
         return "slice_empty"
     if "map" not in packet and (packet.get("abstention") or {}).get("reason") == "unresolved" and packet.get("related"):
@@ -49,7 +56,7 @@ def move(packet: Mapping[str, Any], *, search: bool = False) -> dict[str, Any] |
     selected = state(packet, search=search)
     if selected is None:
         return None
-    command = {"ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory"}.get(selected)
+    command = {"ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory", "task_read": "read_memory"}.get(selected)
     if command is not None:
         tools = capabilities.active_tools(command)
         active = capabilities.current_active_surface()
