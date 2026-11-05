@@ -545,10 +545,18 @@ def audit(
 
     kb = kb_root(vault_root)
     projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
+    sense_scope = None
+    release = _AUDIT_RELEASE_DEFAULT
+    if "corpus_contradictions" in selected:
+        sense_scope, release = _capture_audit_scope(vault_root)
     # An explicit entity-recurrence sweep reads only the pages that changed since the
     # last one. Every other composition keeps the full parse.
     from_store = selected == {"entity_recurrence"}
-    pages = [] if from_store or selected <= projection_checks else _parse_all(kb, vault_root)
+    pages = (
+        []
+        if from_store or selected <= projection_checks
+        else _parse_all(kb, vault_root, keep=release)
+    )
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
@@ -646,7 +654,9 @@ def audit(
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
         findings.extend(
-            _check_corpus_contradictions(vault_root, pages, today=today, status_basis=status_basis)
+            _check_corpus_contradictions(
+                vault_root, pages, today=today, status_basis=status_basis, sense_scope=sense_scope
+            )
         )
     if "scope_divergence_semantic" in selected:
         findings.extend(
@@ -2118,14 +2128,21 @@ def _complete_semantic_category_summary(
 # ---------------- vault walk ----------------
 
 
+_AUDIT_RELEASE_DEFAULT = object()
+
+
 @call_spans.timed("audit.parse_corpus")
-def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
+def _parse_all(
+    kb: Path, vault_root: Path, *, keep: Any = _AUDIT_RELEASE_DEFAULT
+) -> list[find_module.ParsedPage]:
     """Parse the admitted Markdown pages in the knowledge base."""
     from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
-    admitted = egress.restricted_release_filter(vault_root)
+    admitted = (
+        egress.restricted_release_filter(vault_root) if keep is _AUDIT_RELEASE_DEFAULT else keep
+    )
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
         rel = path.relative_to(vault_root).as_posix()
@@ -6568,54 +6585,76 @@ def _is_active_compiled_rw(
     return True
 
 
-def _claim_level_enabled() -> bool:
-    """EXOMEM_CLAIM_LEVEL gate for the claim-level polarity enrichment. Isolated
-    so a claims-import problem can't disable the whole sweep."""
-    try:
-        from . import claims
+def _capture_audit_scope(vault_root: Path) -> tuple[Any, Any]:
+    """Capture the published release view and queue revision before page extraction."""
+    from . import corpus_aware, published_admission, sensed_model, sensing
+    from .governance import egress
 
-        return claims.claim_level_enabled()
-    except Exception:  # noqa: BLE001
-        return False
+    keep = egress.restricted_release_filter(vault_root)
+    if not sensing.enabled():
+        return None, keep
+    offered = published_admission.admission_of(keep)
+    identity = (
+        ("unrestricted",) if keep is None else offered.identity() if offered is not None else None
+    )
+    config = [
+        corpus_aware._contradiction_floor(),
+        corpus_aware._dup_threshold(),
+        _contradiction_top_n(),
+        _contradiction_w_dormancy(),
+        _stale_activation_params(),
+    ]
+    scope, invocation = sensed_model.producer_scope_key(identity, config)
+    return sensed_model.capture_scope(
+        vault_root, "audit-contradictions", scope, invocation=invocation
+    ), keep
 
 
-def _pair_polarity(vault_root: Path, a: str, b: str) -> dict | None:
-    """Claim-level polarity for one flagged pair, through the ADMITTED verifier only.
+def _claim_request(eligible: Mapping[str, find_module.ParsedPage], a: str, b: str):
+    from . import claims, sensing
 
-    Returns `{label, score, method, model_digest, label_map_version}` or None.
-    None when either claim is missing, or — the important case — when the frozen
-    verifier is not admitted: the entry then carries NO label at all. The lexical
-    heuristic is never consulted here. It had no admission control, which is the
-    seam the ratified authority-and-effects matrix names non-compliant, so it may
-    not produce queue metadata under any method name.
-
-    Deliberately does NOT swallow exceptions: a forward pass that blows up on one
-    pair is the caller's to record as a degraded entry, and swallowing it here
-    would make a soft-failed entry indistinguishable from an unlabelled one.
-    """
-    from . import claims
-
-    admission = claims.verifier_admission()
-    if not admission.admitted:
-        log.debug(
-            "contradiction polarity unavailable (%s): %s",
-            admission.reason,
-            admission.detail,
-        )
+    paths = (a, b)
+    texts = tuple(claims.extract_claim_for_page(eligible[path]) for path in paths)
+    if not all(texts):
         return None
-    claim_a = claims.claim_text_for_page(vault_root, a)
-    claim_b = claims.claim_text_for_page(vault_root, b)
-    if not claim_a or not claim_b:
+    # These slot names and this extractor are the reviewed pair.relation input contract.
+    inputs = tuple(
+        sensing.InputSlot(path, path, slot, "page-claim-v1", sensing.text_sha256(text))
+        for slot, path, text in zip(("a", "b"), paths, texts, strict=True)
+    )
+    return sensing.SenseRequest(sensing.PAIR_RELATION, 2, inputs, texts)
+
+
+def _pair_polarity(vault_root: Path, request: Any) -> dict | None:
+    """Consume active ledger evidence without admission, model loading, or foreign references."""
+    from . import sensed_model, sensing, sensing_ledger
+
+    entry = sensing.question(request.question_type)
+    current = sensing_ledger.lookup_current(
+        vault_root,
+        request,
+        sensed_model._question_active(request.question_type),
+        entry.label_map_version,
+    )
+    if current is None:
         return None
-    result = claims.verifier_polarity(claim_a, claim_b)
-    if result is None:
+    # This closed mapping preserves the existing audit presentation schema.
+    labels = {
+        "contradicts": "contradict",
+        "refines": "refine",
+        "restates": "duplicate",
+        "neutral": "neutral",
+    }
+    label = labels.get(current.verdict.label)
+    if label is None:
         return None
     return {
-        "label": result.label,
-        "score": result.score,
-        "method": result.method,
-        "model_digest": admission.model_digest,
-        "label_map_version": admission.label_map_version,
+        "label": label,
+        "score": current.verdict.p,
+        "method": "nli",
+        "model_digest": current.instrument.weights_sha256,
+        "label_map_version": entry.label_map_version,
+        "reading_id": current.reading_id,
     }
 
 
@@ -6651,6 +6690,8 @@ def _attach_polarity_label(finding: AuditFinding, label: dict) -> bool:
     meta["polarity_model_digest"] = label["model_digest"]
     meta["polarity_label_map_version"] = label["label_map_version"]
     meta["polarity_signal_version"] = label["signal_version"]
+    if "reading_id" in label:
+        meta["polarity_reading"] = label["reading_id"]
     finding.detail += (
         f" Claim-level check: likely {label['label'].upper()} "
         f"(via {label['method']}, label map {label['label_map_version']})."
@@ -6659,28 +6700,19 @@ def _attach_polarity_label(finding: AuditFinding, label: dict) -> bool:
 
 
 def _enrich_contradiction_polarity(
-    vault_root: Path, findings: list[AuditFinding]
+    vault_root: Path,
+    findings: list[AuditFinding],
+    eligible: Mapping[str, find_module.ParsedPage] | None = None,
+    *,
+    sense_scope: Any = None,
+    complete: bool = True,
 ) -> None:
-    """Attach admitted-verifier polarity labels to the SURFACED contradiction set.
+    """Add current labels from the ledger; defer missing work to the shared queue."""
+    from . import sensed_model, sensing
 
-    The single admitted channel (design D3). Four properties hold by
-    construction rather than by configuration:
-
-    - **Bounded.** It runs over the list it is handed, which the caller has
-      already ordered and capped at `EXOMEM_CONTRADICTION_TOP_N`, so enrichment
-      can never widen the work the sweep does.
-    - **Proximity only.** An asserted pair is skipped: the author's `contradicts`
-      edge outranks a model's guess, and a label on it would be the server
-      forming an opinion about which side is right.
-    - **Additive.** Nothing here writes `signal_version`, `provenance`,
-      `priority`, ordering, or the omitted-count summary. A dismissal cannot
-      resurface because a label arrived.
-    - **Failure-isolated per entry.** An exception leaves that entry unenriched
-      and recorded as degraded; the pass continues.
-    """
-    if not findings or not _claim_level_enabled():
+    if not sensing.enabled() or eligible is None:
         return
-    degraded = 0
+    jobs = []
     for finding in findings:
         meta = finding.meta
         if not meta or meta.get("provenance") != "proximity":
@@ -6689,21 +6721,21 @@ def _enrich_contradiction_polarity(
         if len(paths) != 2:
             continue
         try:
-            label = _pair_polarity(vault_root, paths[0], paths[1])
-        except Exception as error:  # noqa: BLE001 — one bad pair never aborts the pass
-            degraded += 1
-            log.debug("polarity enrichment degraded for %s: %s", paths, error)
-            continue
-        if label is None:
-            continue
-        label["signal_version"] = meta.get("signal_version")
-        _attach_polarity_label(finding, label)
-    if degraded:
-        log.info(
-            "contradiction polarity enrichment degraded on %d of %d surfaced entr(ies)",
-            degraded,
-            len(findings),
-        )
+            request = _claim_request(eligible, paths[0], paths[1])
+            if request is None:
+                continue
+            label = _pair_polarity(vault_root, request)
+            if label is not None:
+                label["signal_version"] = meta.get("signal_version")
+                _attach_polarity_label(finding, label)
+            # A current abstention satisfies the job too; ingestion retires it.
+            key = sensed_model.pair_key(paths[0], paths[1])
+            jobs.append(sensed_model.OwnedRequest(key, request, order_key=key))
+        except Exception as error:  # noqa: BLE001 - one entry never fails the structural sweep
+            log.debug("polarity enrichment deferred for %s: %s", paths, error)
+            complete = False
+    if sense_scope is not None:
+        sensed_model.submit_scope(vault_root, sense_scope, jobs, complete=complete)
 
 
 _ASSERTED_FIX = (
@@ -7349,6 +7381,7 @@ def _check_corpus_contradictions(
     *,
     today: dt.date | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    sense_scope: Any = None,
 ) -> list[AuditFinding]:
     """The contradiction queue: authored conflicts first, then measured proximity.
 
@@ -7362,6 +7395,8 @@ def _check_corpus_contradictions(
     authored edge is strictly the stronger signal, and two rows for one decision
     would double the pair's RRF vote in `attention`.
     """
+    if sense_scope is None:
+        sense_scope, _keep = _capture_audit_scope(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     pairs = contradiction_stance.asserted_pairs(vault_root)
     if not pairs and os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
@@ -7379,7 +7414,7 @@ def _check_corpus_contradictions(
     }
     asserted, asserted_keys = _asserted_contradictions(eligible, pairs)
     return asserted + _proximity_contradictions(
-        vault_root, eligible, today=today, exclude=asserted_keys
+        vault_root, eligible, today=today, exclude=asserted_keys, sense_scope=sense_scope
     )
 
 
@@ -7389,6 +7424,7 @@ def _proximity_contradictions(
     *,
     today: dt.date | None = None,
     exclude: set[tuple[str, str]] | None = None,
+    sense_scope: Any = None,
 ) -> list[AuditFinding]:
     """Corpus-wide contradiction sweep: surface PAIRS of active read-write compiled
     conclusions whose embeddings sit in the band `[floor, dup_threshold)`.
@@ -7453,6 +7489,7 @@ def _proximity_contradictions(
     # Both endpoints of a flagged pair must be active read-write compiled — the
     # caller already applied that gate when building `eligible`.
     if len(eligible) < 2:
+        _enrich_contradiction_polarity(vault_root, [], eligible, sense_scope=sense_scope)
         return []
     excluded = exclude or set()
 
@@ -7530,12 +7567,11 @@ def _proximity_contradictions(
             )
         )
 
-    # Sharpen PROXIMITY → POLARITY on the surfaced (already-capped) pairs, and
-    # only there. Opt-in via EXOMEM_CLAIM_LEVEL and the verifier's own admission;
-    # refused → no label at all, so every finding stays byte-identical to
-    # baseline. Runs before the omitted-count summary is appended, so the cap
-    # accounting is never in the enrichment's reach.
-    _enrich_contradiction_polarity(vault_root, findings)
+    # Ledger enrichment reads this same parsed snapshot, after the structural cap.
+    # Missing evidence is queued only when the existing projection accepts it.
+    _enrich_contradiction_polarity(
+        vault_root, findings, eligible, sense_scope=sense_scope, complete=not capped
+    )
 
     if capped:
         omitted = len(scored) - top_n
