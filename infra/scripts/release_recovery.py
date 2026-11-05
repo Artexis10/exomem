@@ -733,7 +733,7 @@ def family_assertion(
         raise ValueError("family must name an image in the publication plan")
     repository = images[name]["ref"].rsplit(":", 1)[0]
     if bundle is not None:
-        digest = verify_image_bundle(bundle, tag, commit, repository, name)
+        digest: str | None = verify_image_bundle(bundle, tag, commit, repository, name)
     elif directory is not None:
         digest, _ = recovered_image(name, repository, tag, commit, directory)
         if digest is None:
