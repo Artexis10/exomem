@@ -1102,10 +1102,11 @@ class _LinkProjector:
         seen = self.admitted.get(relative)
         if seen is None:
             check = self.visible_path or self.authorize_path
-            seen = self.admitted[relative] = (
-                check(relative) if check is not None
-                else _authorize(self.root, relative, policy=self.policy)
-            )
+            with call_spans.span("records.link_visibility"):
+                seen = self.admitted[relative] = (
+                    check(relative) if check is not None
+                    else _authorize(self.root, relative, policy=self.policy)
+                )
         return seen
 
     def _memory_target(self, identity: str) -> str | None:
@@ -1302,19 +1303,21 @@ class _LinkProjector:
                 target = canonical + ".md"
             else:
                 return False
-            _path, relative = cast(
-                tuple[Path, str],
-                vault.resolve_under_vault(self.root, target, must_exist=True, must_be_file=True),
-            )
-            vault.PathGuard.capture(self.root, relative, leaf_policy="stable")
+            with call_spans.span("records.link_path_validation"):
+                _path, relative = cast(
+                    tuple[Path, str],
+                    vault.resolve_under_vault(self.root, target, must_exist=True, must_be_file=True),
+                )
+                vault.PathGuard.capture(self.root, relative, leaf_policy="stable")
         except vault.VaultPathError as error:
             if error.code != "NOT_FOUND":
                 return False
             try:
-                _path, relative = cast(
-                    tuple[Path, str], vault.resolve_under_vault(self.root, target)
-                )
-                vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
+                with call_spans.span("records.link_path_validation"):
+                    _path, relative = cast(
+                        tuple[Path, str], vault.resolve_under_vault(self.root, target)
+                    )
+                    vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
             except (vault.VaultPathError, vault.PathGuardError):
                 return False
             return self._remember(f"forward:{relative}", False)
@@ -1324,10 +1327,10 @@ class _LinkProjector:
             return self.verdicts[relative]
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
-        return self._remember(
-            relative, (self.authorize_path(relative) if self.authorize_path is not None
+        with call_spans.span("records.link_authorize"):
+            allowed = (self.authorize_path(relative) if self.authorize_path is not None
                        else _authorize(self.root, relative, receipt=True, policy=self.policy))
-        )
+        return self._remember(relative, allowed)
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:
