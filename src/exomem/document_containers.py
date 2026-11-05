@@ -277,6 +277,9 @@ def _canonical_path(value: object) -> str:
 
 def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Validate a child binding against location, parent companion and current byte identities."""
+    from .governance import source_release
+
+    capture_root = root
     root = state_paths.resolved_vault_path(root, expanduser=False)
     binding = frontmatter.get("container_member")
     # The reserved subtree cannot become public by deleting the provenance block.
@@ -305,7 +308,16 @@ def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, art
         if type(binding[key]) is not int or binding[key] < 0:
             raise ValueError("container member size is invalid")
     staged_parent = _OVERLAY.get().get(parent_page)
-    parent_text = staged_parent if isinstance(staged_parent, str) else reserved_paths.read_generic_bytes(root, parent_page).data.decode("utf-8")
+    if isinstance(staged_parent, str):
+        parent_text = staged_parent
+        if source_release.capture_active(capture_root):
+            source_release.observed_content(capture_root, parent_page, hashlib.sha256(parent_text.encode("utf-8")).hexdigest())
+    else:
+        parent_raw = reserved_paths.read_generic_bytes(root, parent_page).data
+        if source_release.capture_active(capture_root):
+            source_release.observed_content(capture_root, parent_page, hashlib.sha256(parent_raw).hexdigest())
+        parent_text = parent_raw.decode("utf-8")
+        del parent_raw
     parent_fm = parse_frontmatter(parent_text, strict=True)[0]
     if parent_fm.get("evidence_file") != parent:
         descriptor = parent_fm.get("governance_companion", {})
@@ -324,8 +336,11 @@ def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_cop
 
 def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Resolve direct pages, binary originals and extraction parts through one binding validator."""
+    from .governance import source_release
+
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
+    capture_root = root
     root = state_paths.resolved_vault_path(root, expanduser=False)
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
@@ -362,6 +377,8 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
                 except FileNotFoundError:
                     return None
             raise
+    if source_release.capture_active(capture_root):
+        source_release.observed_content(capture_root, page_path, hashlib.sha256(raw).hexdigest())
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -385,8 +402,13 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
         if source_path is None or extraction_parts.part_number(Path(page_path)) is None:
             raise ValueError("container extraction part has an invalid source")
         page_path = source_path.as_posix()
-        fm = parse_frontmatter(reserved_paths.read_generic_bytes(root, page_path).data.decode("utf-8"), strict=True)[0]
-    return _parent_binding_for_page(root, page_path, fm, artifact_copy=artifact_copy)
+        raw = reserved_paths.read_generic_bytes(root, page_path).data
+        if source_release.capture_active(capture_root):
+            source_release.observed_content(capture_root, page_path, hashlib.sha256(raw).hexdigest())
+        decoded = raw.decode("utf-8")
+        del raw
+        fm = parse_frontmatter(decoded, strict=True)[0]
+    return _parent_binding_for_page(capture_root, page_path, fm, artifact_copy=artifact_copy)
 
 
 def parent_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:

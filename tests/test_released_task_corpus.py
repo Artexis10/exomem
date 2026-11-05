@@ -156,6 +156,50 @@ def test_release_proof_binds_the_decision_bytes_across_an_a_b_a_write(vault: Pat
         assert capture.finish() is None
 
 
+def test_container_classification_refusal_cannot_use_the_restored_source_image(vault: Path, monkeypatch) -> None:
+    """A temporary invalid custody claim must not acquire a reusable proof from the restored ordinary page."""
+    import inspect
+
+    from test_context_catalogue import _page
+    from test_governance_egress import _external
+
+    from exomem import reserved_paths
+    from exomem.governance import egress, principal
+
+    path = _page(vault, "ordinary-classification", body="Public comparison specimen.\n")
+    raw_a = (vault / path).read_bytes()
+    raw_b = raw_a.replace(b"---\n", b"---\ncontainer_member: null\n", 1)
+    read = reserved_paths.read_generic_bytes
+    raced = False
+    def swapped(root, target, *args, **kwargs):
+        nonlocal raced
+        if not raced and target == path and inspect.currentframe().f_back.f_code.co_name == "parent_binding_for_path":
+            raced = True
+            (root / path).write_bytes(raw_b)
+            try:
+                return read(root, target, *args, **kwargs)
+            finally:
+                (root / path).write_bytes(raw_a)
+        return read(root, target, *args, **kwargs)
+    with principal.request_scope(_external()):
+        who = principal.current_principal()
+        policy = egress.policy_module.load(vault)
+        basis = egress.current_source_release_basis(vault)
+        def decide():
+            return egress._decide_path(vault, path, policy=policy, principal=who,
+                                      audience=who.audience_id, purpose=None, grants_hash=egress._grants_hash(policy))
+        with egress.source_release_proof(vault, basis, source_ref=path) as control:
+            assert decide().level == egress.LEVEL_FULL
+        assert control.finish() is not None
+        with monkeypatch.context() as patch:
+            patch.setattr(reserved_paths, "read_generic_bytes", swapped)
+            with egress.source_release_proof(vault, basis, source_ref=path) as capture:
+                denied = decide()
+        assert raced and denied.level == egress.DISCLOSURE_MIN
+        assert decide().level == egress.LEVEL_FULL
+        assert capture.finish() is None
+
+
 def test_idle_view_eviction_releases_capacity_for_ordinary_canonical_preparation(vault: Path, monkeypatch) -> None:
     """Two views and a failed build must not occupy transient parser reservations while idle."""
     import pytest
