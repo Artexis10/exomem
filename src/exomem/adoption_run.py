@@ -1387,7 +1387,9 @@ def _status_view(run: dict, presented: dict, *, view: StatusView, offset: int,
     summary = {
         **_compact_row(run), "revision": current_revision, "view": view,
         "plan_id": plan.get("plan_id"), "interrupted": presented["interrupted"],
-        "remaining": len(_pending(run)), "next_actions": presented["next_actions"],
+        # Summary counts cover the whole plan; the last call's subset may already be complete.
+        "remaining": sum(_is_open(outcomes, item["original_path"]) for item in plan.get("items") or []),
+        "next_actions": presented["next_actions"],
         "proposals_summary": presented["proposals_summary"], "handoff": presented["handoff"],
         "staleness": {"count": len(presented["stale_paths"]), "view": "stale"},
     }
@@ -1465,6 +1467,9 @@ def status(root: Path, *, run_id: str | None = None, path: str = "", view: Statu
         }
     else:
         extra["interrupted"] = False
+    extra["interrupted"] = extra["interrupted"] or any(
+        "reply" not in invocation for invocation in (run.get("apply_invocations") or {}).values()
+    )
     stale = probe_staleness(root, run)
     presented = _present(
         root,

@@ -178,6 +178,12 @@ def test_interrupted_failed_subset_keeps_its_owed_note_after_another_invocation(
         adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY, only_paths=[second_path])
     assert store.load(run_id)["scope"] == [second_path]
     assert len(_notes(root)) == 1
+    # The run summary covers every planned item, even though B's own subset is complete.
+    summary = adoption_run.status(root, run_id=run_id, view="summary")
+    assert summary["counts"]["applied"] == 1
+    assert summary["counts"]["source_applied"] == 1
+    assert summary["remaining"] == 1
+    assert summary["interrupted"] is True
 
     with writer_lease.active_mutation_claim_context(
         claim_token="c" * 24, command_digest="a" * 64, identity_digest="1" * 64, reconciling=True,
@@ -195,6 +201,7 @@ def test_interrupted_failed_subset_keeps_its_owed_note_after_another_invocation(
         assert replayed["apply_result"] == recovered["apply_result"]
         assert {path: path.read_bytes() for path in snapshot} == snapshot
     assert source.exists()
+    assert adoption_run.status(root, run_id=run_id, view="summary")["interrupted"] is False
     assert recovered["outcomes"][first_path]["sha256"] == hashlib.sha256(originals[first_path].encode()).hexdigest()
     assert {path: (root / path).read_text(encoding="utf-8") for path in originals} == originals
     assert len(list((root / "Knowledge Base/Sources/Imported").glob("*.md"))) == 2
