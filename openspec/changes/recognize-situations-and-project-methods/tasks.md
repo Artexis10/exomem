@@ -3,7 +3,7 @@
 ## 1. Establish the source-bound failure and acceptance cases
 
 - [x] 1.0 Synchronize the existing parent maps contract into canonical specs without archiving its change; preserve its open replay and recovery tasks.
-- [ ] 1.1 Preserve available original input, pre-incident sources and delivery traces; verify chronology and label missing evidence before reproducing the failure.
+- [x] 1.1 Preserve available original input, pre-incident sources and delivery traces; verify chronology and label missing evidence before reproducing the failure.
 - [x] 1.2 Freeze independent development expectations for continuation, cancellation, undecided intent, competing identities and unrelated recent activity; verify that later repair material is excluded.
 - [x] 1.3 Exercise existing public method/workflow operations on two distinct task domains; record the exact missing delivery or revision field before extending a representation.
 
@@ -37,6 +37,18 @@ Each input preserved the baseline pool and source identities; none returned qual
 No quality score or benefit was established, so interpretation remains disabled.
 Tasks 4.2 and 4.5 remain unqualified; this result does not block the model-free path.
 
+## 4A. Reuse canonical released corpora within the existing latency contract
+
+- [ ] 4A.1 Add closed owner-produced release proofs for supported dependencies; verify denied, missing, session and artifact-name changes invalidate reuse.
+- [ ] 4A.2 Reuse ordered source terms through existing admitted statistics and postings; verify exact fresh/reused ranking and independent-row preservation after edits.
+- [ ] 4A.3 Retain bounded private build progress through validation and aggregation; verify no prefix publication, current caller authority and actual retained memory bounds.
+- [ ] 4A.4 Verify selected-source hydration, method reset and origin-proof fallback; pass unchanged scoped latency and installed-wheel rollback checks before release.
+
+The first released-corpus implementation rebuilt every restricted source on each request.
+Release checks exposed preparation cost and an aggregate memory charge that prevented useful discovery at scale.
+A shorter deadline rejected valid small inputs, and structural hints did not qualify the latency contract; both approaches were withdrawn.
+This revision reuses the existing scoring implementation and current canonical projection, without another persistent index or broader caller authority.
+
 ## 5. Verify and deliver the integrated behavior
 
 - [x] 5.1 Run the existing real-agent proof route on fresh source-derived cases with independent blind judgment; verify first-answer context use and cross-client method changes.
@@ -54,7 +66,10 @@ The existing stance delivery continues independently. Historical replay, live in
 
 Structural checks verify whole-source method versions, bounded egress, continuation handling and producer parity.
 Development expectations were frozen before generation and exclude later repair material.
-The missing original client trace still limits historical replay.
+Available original-case evidence is privately preserved with source hashes and episode-owner recovery evidence.
+The recorded input and earlier source establish a bounded chronology; the original client request and delivery traces remain missing.
+Current repaired notes are excluded from historical inputs.
+This completes evidence collection without qualifying a historical replay or first-answer improvement.
 
 Qualified historical journeys cover guarded method edits, current-source reads, temporary overrides and unrelated-task exclusions.
 The method code and guidance remain unchanged across those journeys; the current integration checks qualify their reuse.

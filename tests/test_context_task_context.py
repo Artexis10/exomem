@@ -445,26 +445,17 @@ def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path
 
 def test_restricted_corpus_capacity_cannot_rank_a_prepared_prefix(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Aggregate capacity exhaustion must not turn the first prepared matching source into an answer."""
-    from exomem import context_task, working_set
+    from exomem import working_set
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
-    first = _page(vault, "a-budget-reference", body="Inspect optical alignment with the target.\n")
-    last = _page(vault, "z-budget-reference", body="Calibration observation. " * 5000 + "\nInspect optical alignment.\n")
+    _page(vault, "a-budget-reference", body="Inspect optical alignment with the target.\n")
+    _page(vault, "z-budget-reference", body="Calibration observation. " * 5000 + "\nInspect optical alignment.\n")
     _withhold(vault, hidden, ceiling=0)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     monkeypatch.setattr(working_set, "TASK_CORPUS_MAX_BYTES", 1024 * 1024)
-    original = context_task.project_source
-    prepared = []
-    def record(root, path, caller, **kwargs):
-        source = original(root, path, caller, **kwargs)
-        if source is not None:
-            prepared.append(path)
-        return source
-    monkeypatch.setattr(context_task, "project_source", record)
     packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
-    assert first in prepared and last in prepared
     assert packet["abstained"] is False and "map" in packet
     assert packet["task_context"]["state"] in ("partial", "unavailable")
     assert packet["task_context"]["candidates"] == []

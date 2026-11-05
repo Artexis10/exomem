@@ -410,15 +410,10 @@ class CorpusStatistics:
         first-seen order of the words over the documents sorted by path: the idf floor sums
         over it in that order, so another order gives a different last bit.
         """
-        idf_sum = 0
-        for count in frequency.values():
-            idf_sum += math.log(pages - count + 0.5) - math.log(count + 0.5)
-        return cls(
-            pages=pages,
-            average_length=length / pages if pages else 0.0,
-            document_frequency=MappingProxyType(frequency),
-            idf_floor=0.25 * (idf_sum / len(frequency)) if frequency else 0.0,
-        )
+        build = _CorpusStatisticsBuild(pages, length, frequency)
+        while not build.advance():
+            pass
+        return build.result
 
     def _idf(self, word: str) -> float:
         count = self.document_frequency.get(word)
@@ -488,6 +483,31 @@ class CorpusStatistics:
             scored.append((path, float(total)))
         # The k smallest by this key are `sorted(...)[:k]`; paths are unique, so no tie is left open.
         return heapq.nsmallest(max(0, k), scored, key=lambda item: (-item[1], item[0]))
+
+
+class _CorpusStatisticsBuild:
+    """Cooperative `from_counts`, preserving its floating point sum order."""
+
+    def __init__(self, pages: int, length: int, frequency: dict[str, int]) -> None:
+        self.pages, self.length, self.frequency = pages, length, frequency
+        self.counts = iter(frequency.values())
+        self.idf_sum = 0
+        self.result = None
+
+    def advance(self, *, steps: int = 256, check=None) -> bool:
+        for _ in range(steps):
+            if check is not None:
+                check()
+            count = next(self.counts, None)
+            if count is None:
+                self.result = CorpusStatistics(
+                    pages=self.pages, average_length=self.length / self.pages if self.pages else 0.0,
+                    document_frequency=MappingProxyType(self.frequency),
+                    idf_floor=0.25 * (self.idf_sum / len(self.frequency)) if self.frequency else 0.0,
+                )
+                return True
+            self.idf_sum += math.log(self.pages - count + 0.5) - math.log(count + 0.5)
+        return False
 
 
 def query_words(

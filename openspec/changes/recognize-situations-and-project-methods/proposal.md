@@ -9,6 +9,7 @@ Existing continuity and method contracts promise this behavior, but discovery an
 
 - Discover relevant notes, episodes, intentions, methods and collection descriptions through existing retrieval and graph primitives, independently of successful anchor resolution.
 - Keep maps for orientation and profiles for depth; combine useful candidates under the existing packet budget and selective refresh workflow.
+- Reuse complete released-source term corpora through existing scoring machinery, with current access proofs and incremental invalidation under existing resource bounds.
 - Reconcile intentions with corrections and closure evidence before presenting them as ongoing work.
 - Project user-authored methods from governed knowledge with identity, applicability, exclusions, source versions and attribution.
 - Deliver revised or withdrawn methods at the next relevant activation across supported clients, without distributing another static skill package.

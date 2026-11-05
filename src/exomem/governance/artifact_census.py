@@ -189,6 +189,7 @@ class _Listing:
     stamp: _Stamp | None
     files: tuple[str, ...]
     directories: tuple[str, ...]
+    cacheable: bool = True
 
 
 def _list_directory(path: str, racy_after: int) -> _Listing:
@@ -197,21 +198,26 @@ def _list_directory(path: str, racy_after: int) -> _Listing:
         stamp: _Stamp | None = _directory_stamp(path)
         files: list[str] = []
         directories: list[str] = []
+        cacheable = True
         with os.scandir(path) as entries:
             for entry in entries:
                 try:
+                    # Linked file kinds can change without changing any name in this directory.
+                    if entry.is_symlink() or getattr(entry, "is_junction", lambda: False)():
+                        cacheable = False
                     # Like the former `rglob("*")`: a symlinked directory is not walked.
                     if entry.is_dir(follow_symlinks=False):
                         directories.append(entry.name)
                     elif entry.is_file():
                         files.append(entry.name)
                 except OSError:
+                    cacheable = False
                     continue
     except OSError:
         return _Listing(None, (), ())
     if stamp is not None and max(stamp[2:]) >= racy_after:
         stamp = None
-    return _Listing(stamp, tuple(sorted(files)), tuple(sorted(directories)))
+    return _Listing(stamp, tuple(sorted(files)), tuple(sorted(directories)), cacheable)
 
 
 def _walk_listings(
@@ -264,6 +270,8 @@ class ArtifactCensus:
     by_stem: Mapping[str, tuple[str, ...]]
     literals: LiteralAliases
     listings: Mapping[str, _Listing]
+    namespace: object = field(default_factory=object, compare=False, repr=False)
+    observed_at_ns: int = field(default_factory=time.time_ns, compare=False, repr=False)
 
     @classmethod
     def empty(cls) -> ArtifactCensus:
@@ -381,7 +389,7 @@ def _walk_census(
         between=between,
     )
     if previous is not None and previous.same_names(listings):
-        census = replace(previous, listings=MappingProxyType(listings))
+        census = replace(previous, listings=MappingProxyType(listings), observed_at_ns=time.time_ns())
     else:
         census = _census_from(listings)
     with _CENSUS_LOCK:
@@ -588,6 +596,55 @@ def published_view(vault_root: Path) -> CensusView | None:
 def request_census(vault_root: Path) -> CensusView:
     """What a request resolves against: the published census, else a walk of the vault."""
     return published_view(vault_root) or CensusView(vault_census(vault_root))
+
+
+@dataclass(frozen=True, slots=True)
+class NamespaceProof:
+    """A complete names and aliases fence, independent of file content."""
+
+    identity: object
+    epoch: int
+
+
+def current_namespace_proof(vault_root: Path, *, _refresh_racy: bool = True) -> NamespaceProof | None:
+    """Prove a complete owner census, including names no earlier source matched."""
+    key = _vault_key(vault_root)
+    with _CENSUS_LOCK:
+        feed = _FEEDS.get(key)
+        if feed is not None and (feed.added or feed.dirty or feed.relist_all_after):
+            return None
+        census = feed.base if feed is not None and feed.base is not None else _CENSUSES.get(key)
+        epoch = feed.epoch if feed is not None else 0
+        version = feed.version if feed is not None else 0
+        if census is None or not census.listings:
+            return None
+        if any(not listing.cacheable for listing in census.listings.values()):
+            return None
+    if any(listing.stamp is None for listing in census.listings.values()):
+        # A racy walk can become provable after its original window. Refresh through the census owner, at most once per window.
+        if _refresh_racy and time.time_ns() - census.observed_at_ns >= _CENSUS_RACY_NS:
+            rebuild_published(vault_root, eager=True)
+            return current_namespace_proof(vault_root, _refresh_racy=False)
+        return None
+    try:
+        if any(listing.stamp is None or _directory_stamp(os.path.join(vault_root, relative)) != listing.stamp
+               for relative, listing in census.listings.items()):
+            return None
+    except OSError:
+        return None
+    with _CENSUS_LOCK:
+        current = _FEEDS.get(key)
+        if current is not feed or (current is not None and (
+                current.epoch != epoch or current.version != version or current.added or current.dirty or current.relist_all_after)):
+            return None
+        if (current.base if current is not None and current.base is not None else _CENSUSES.get(key)) is not census:
+            return None
+        return NamespaceProof(census.namespace, epoch)
+
+
+def namespace_proof_is_current(vault_root: Path, proof: NamespaceProof) -> bool:
+    """A published view alone cannot prove unchanged names or completed custody."""
+    return type(proof) is NamespaceProof and current_namespace_proof(vault_root) == proof
 
 
 def rebuild_published(

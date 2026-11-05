@@ -50,11 +50,33 @@ The compiler must not index or enumerate arbitrary high-volume rows to improve g
 The cheaper baseline remains the existing map-assisted agent pulls.
 The new stage must improve the missing-candidate cases without requiring a model or forcing every context layer into every turn.
 
-Restricted callers build one complete request-local corpus from canonical released FULL sources before BM25 statistics, query-term selection, ranking or result caps.
-The existing semantic preparation reservation bounds each guarded read and parser allocation, with cooperative request-budget checks.
+Restricted callers rank only a complete corpus from canonical released FULL sources.
+Reuse source terms through the existing admitted-corpus statistics and postings code; keep this representation distinct from raw lexical text.
+A current effective caller basis and complete source-release proof must justify each reused row.
+A raw source hash, caller binding, conversation identifier or earlier grant alone cannot supply that proof.
+Revalidate the incoming principal and authorization session on every request; never retain a bearer or caller object.
+
+The egress owner records a closed set of supported release dependencies where it resolves them.
+These include source and target admission, denied targets, unresolved names, path variants, registry state, artifact names and ownership.
+Literal artifact scans require a complete names-namespace fence, including names that did not match previously.
+A row that consults managed origin evidence stays uncacheable until its owner supplies a versioned proof.
+Unsupported or unknown proofs use canonical preparation; a cache miss does not create a new refusal.
+
+Keep only public versions, ordered term counts and private proof facts after projection; discard source bodies and full token lists.
+Reproject affected rows from complete freshness history and reverse dependencies.
+An ordinary source edit must preserve reusable rows whose dependencies did not change.
+Every successful reprojection atomically replaces its raw guard, complete proof, omission facts and reverse dependencies.
+If its public version stays identical, statistics may remain unchanged.
+Selected candidates and held methods still hydrate through current canonical source projection before delivery.
+
+The existing semantic preparation reservation bounds guarded reads, parsing and retained corpus state.
+Account for terms, proofs, reverse dependencies, transient buffers and overlapping publication generations within the existing allowance.
 The existing read policy snapshot covers candidate assembly only; optional inference and terminal guards run after that scope closes.
-The accumulated released corpus has a conservative byte charge against the existing preparation allowance, checked before accumulation and statistics.
-Exhaustion discards the complete partial prefix instead of ranking it; this charge is an engineering bound, not measured resident memory.
+An expired request may retain individually complete rows and private aggregation progress, but must publish no prefix statistics or rankings.
+Under an unchanged effective basis and complete dependency history, resumption must advance validation and aggregation without restarting the retained prefix.
+Never continue caller-authorized reads after the request ends or synthesize a caller session for background work.
+Cold preparation may be unavailable; the unchanged latency gate decides whether the implementation qualifies.
+Exhaustion preserves maps and ordinary pulls without asserting source absence.
 Existing unit release decisions remove withheld unit spans before the existing BM25 scorer sees their source text.
 Visible units and uncovered prose remain discoverable on mixed pages; no raw top-k or title-only prefilter selects this corpus.
 Unrestricted callers retain the maintained retrieval fast path.

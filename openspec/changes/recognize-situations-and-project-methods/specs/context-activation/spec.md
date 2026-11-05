@@ -81,6 +81,54 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **THEN** task graph expansion reports an omitted lane until origin-unit release can precede its caps
 - **AND** collection claims routing requires existing FULL metadata admission, while independent released text remains eligible
 
+### Requirement: Released task corpora reuse only current proofs
+
+Restricted task discovery SHALL derive statistics and rankings from a complete canonical released FULL-source corpus.
+Reuse SHALL preserve document frequencies, term order, score floors, scores and ties of fresh canonical preparation.
+The corpus SHALL retain ordered terms and counts rather than source bodies or complete token lists.
+Each reused row SHALL carry a complete current release proof owned by the authorities that resolved its dependencies.
+Current incoming principal and session validity SHALL be checked on every request.
+An earlier raw hash, caller binding or session identifier SHALL NOT establish reuse authority.
+Unsupported or unavailable proof types SHALL fall back to canonical preparation without a cache-specific refusal.
+Managed origin evidence SHALL remain uncacheable until its owner supplies a versioned proof.
+
+Dependencies SHALL include denied targets, unresolved names and complete artifact names where literal scanning occurs.
+Complete freshness history and reverse dependencies SHALL identify affected rows after a change.
+A successful reprojection SHALL atomically replace every proof, raw guard, omission fact and reverse dependency even when public JSON stays identical.
+Unchanged public versions MAY reuse statistics.
+Selected sources and held methods SHALL still receive current canonical projection before delivery.
+
+Retained and transient state SHALL fit existing resource bounds, including overlapping publication generations.
+An incomplete build MAY retain private progress but SHALL publish no prefix statistics, ranking or absence conclusion.
+With an unchanged effective basis and complete dependency history, resumption SHALL advance validation and aggregation without restarting the retained prefix.
+No request SHALL retain authority for source reads after that request ends.
+Existing maps and ordinary pull routes SHALL remain usable when preparation cannot finish.
+The existing latency checks SHALL qualify reuse without increasing their limits or adding artificial warmup.
+
+#### Scenario: An ordinary edit preserves independent rows
+
+- **WHEN** one source changes and complete history proves other rows have no changed dependency
+- **THEN** preparation reprojects the affected rows and preserves the independent rows
+- **AND** its complete corpus gives the same statistics and ranking as fresh canonical preparation
+
+#### Scenario: Denied references change without changing public text
+
+- **WHEN** a withheld unit changes its reference between two denied targets and the second target later becomes visible
+- **THEN** reprojection replaces the dependency on the first target with the dependency on the second target
+- **AND** the later visibility change reprojects the source before its text affects ranking
+
+#### Scenario: A new artifact name changes literal release
+
+- **WHEN** an artifact namespace gains a name that matches text in an earlier source
+- **THEN** the complete names fence invalidates the affected release proof before reuse
+- **AND** previous matches alone cannot certify that source
+
+#### Scenario: A later request resumes incomplete preparation
+
+- **WHEN** an earlier request retained complete rows and private aggregation progress
+- **THEN** a current equivalent caller revalidates changed dependencies and advances the remaining work
+- **AND** no caller observes statistics or ranking from the partial corpus
+
 ### Requirement: Candidate context does not manufacture ongoing intent
 
 The system SHALL distinguish topical contact, recent activity and supported ongoing intent. It SHALL retain declared current state and relevant correction, closure and supersession references. Unknown state SHALL remain unknown. An unfinished episode or recent edit SHALL NOT create a commitment or establish that an earlier plan remains active.

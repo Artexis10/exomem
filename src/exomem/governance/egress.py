@@ -85,6 +85,7 @@ from . import (
     raw_protection,
     receipts,
     scrubber,
+    source_release,
     store,
     tokens,
 )
@@ -99,6 +100,13 @@ from .principal import (
     current_principal,
     effective_principal,
     request_scope,
+)
+from .source_release import (  # noqa: F401 - the release owner exposes this closed proof contract
+    SourceReleaseBasis,
+    SourceReleaseProof,
+    current_source_release_basis,
+    source_release_proof,
+    validate_source_release_proofs,
 )
 
 log = logging.getLogger(__name__)
@@ -2053,6 +2061,7 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
 def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
                     snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
+    source_release.path_dependency(vault_root, path)
     return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
             and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
@@ -2165,6 +2174,7 @@ _DECIDE_PATH_BATCH = Batch(
 
 
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
+@source_release.capture_decision
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -2242,6 +2252,7 @@ def _decide_path(
         authorization_context=authorization_context, content=raw if raw is not None else b"",
     )
     if canonical is not None:
+        source_release.unsupported()
         return _resolve_l4_bridge(vault_root, canonical, policy=policy, audience=audience)
     mtime = st.st_mtime
     if not _is_markdown_path(rel_path) or artifact_copy is not None:
@@ -4634,6 +4645,7 @@ def _resolved_prose_names(vault_root: Path, names: set[str]) -> dict[str, tuple[
         raise WorkingSetResolutionUnavailable(
             "the activation index could not resolve prose references"
         ) from error
+    source_release.names_dependency(vault_root, names, resolved)
     out: dict[str, tuple[str, ...]] = {}
     for raw in names:
         key = working_set_index.normalize(raw)
@@ -5221,6 +5233,7 @@ def _project_page_origin(
     if source_closure._eligible_path(str(page.get("path") or "")):  # noqa: SLF001
         return page, False  # Captured evidence is not managed attribution.
     with request_scope(principal.with_purpose(_declared_purpose(vault_root, principal, purpose))):
+        source_release.unsupported()  # Managed origin evidence has no owner version proof yet.
         projected = origin_bindings.project_origin_text(vault_root, text)
     if projected == text:
         return page, False
@@ -5247,12 +5260,15 @@ def _decide_markdown_snapshot(
         purpose=purpose, authorization_context=principal.verified_authorization_session,
         content=raw,
     )
+    if decision is not None:
+        source_release.unsupported()
     if decision is None:
         try:
             scope_ids = membership_module.evaluate_snapshot(
                 parsed, policy, content_hash=content_hash
             )
         except membership_module.MembershipUnresolved:
+            source_release.unsupported()
             _record_blocked_outcome(principal.audience_id)
             return None
         active_grants, _session_identity = _active_grants_for_snapshot(
@@ -5276,6 +5292,7 @@ def _decide_markdown_snapshot(
 
 
 @canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
+@source_release.capture_decision
 def _release_level_for_markdown_snapshot(
     vault_root: Path, rel_path: str, raw: bytes, *,
     principal: RequestPrincipal, purpose: str | None, policy: Policy,
@@ -5298,6 +5315,7 @@ def _release_level_for_markdown_snapshot(
         content_hash=hashlib.sha256(raw).hexdigest(),
     )
     if decision is None:
+        source_release.unsupported()
         return DISCLOSURE_MIN
     from .. import note_types
 
@@ -5306,6 +5324,7 @@ def _release_level_for_markdown_snapshot(
     )
     # Bridge approvals retain their current path and dependency custody checks.
     if metadata is not None or error is not None:
+        source_release.unsupported()  # Bridge approval custody is not a file-only dependency.
         admission = bridges.admit(
             vault_root, rel_path, raw, policy=policy, audience=principal.audience_id,
         )
@@ -5399,6 +5418,7 @@ def _annotate_page(
 
     is_summary, summary = released_summary(vault_root, rel_path, who, include_raw=include_raw)
     if is_summary:
+        source_release.unsupported()
         return summary
 
     if _file_policy_empty(vault_root, policy, rel_path=rel_path):
@@ -5688,10 +5708,12 @@ def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[
     kb_prefix = f"{kb_dirname()}/"
     for token in targets:
         candidate = token if token.lower().endswith(".md") else f"{token}.md"
+        source_release.path_dependency(vault_root, candidate)
         if (vault_root / candidate).is_file():
             out.add(candidate)
             continue
         prefixed = candidate if candidate.startswith(kb_prefix) else kb_prefix + candidate
+        source_release.path_dependency(vault_root, prefixed)
         out.add(prefixed if (vault_root / prefixed).is_file() else candidate)
     return out
 
@@ -7202,6 +7224,7 @@ class _ArtifactReferenceGate:
     def _index(self) -> None:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
+        source_release.namespace_dependency(self.vault_root)
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, kb_dirname()
         )
@@ -8363,6 +8386,15 @@ def _reconcile_attention_counts(payload: Any) -> Any:
     return out
 
 
+def _physical_directory_match(names: Mapping, part: str, folded: Mapping | None = None) -> str | None:
+    """The resolver's exact-first, case-insensitive component rule, also used to validate its proof."""
+    if part in names:
+        return part
+    return folded.get(part.casefold()) if folded is not None else next(
+        (name for name in names if name.casefold() == part.casefold()), None,
+    )
+
+
 @canonical_read
 def filter_withheld_entries(
     vault_root: Path,
@@ -8599,6 +8631,7 @@ def filter_withheld_entries(
                     listings[current] = None
             listing = listings[current]
             if listing is None:
+                source_release.unsupported()
                 return None
             entry = listing.get(part)
             if entry is None:
@@ -8607,17 +8640,26 @@ def filter_withheld_entries(
                     folded = folded_listings[current] = {}
                     for name in listing:
                         folded.setdefault(name.casefold(), name)
-                match = folded.get(part.casefold())
+                match = _physical_directory_match(listing, part, folded)
+                source_release.directory_dependency(vault_root, current, part, match)
                 if match is None:
                     return None
                 entry = listing[match]
+            else:
+                source_release.directory_dependency(vault_root, current, part, entry.name)
+            if entry.is_symlink():
+                source_release.unsupported()  # A linked component can change its target without changing this namespace.
             real.append(entry.name)
             current = current / entry.name
         try:
             # The entry's own file type proves a regular file without a stat; a symlink
             # leaf is followed exactly as `Path.is_file` followed it.
-            return "/".join(real) if entry is not None and entry.is_file() else None
+            is_file = entry is not None and entry.is_file()
+            if not is_file:
+                source_release.unsupported()  # Final non-file and failed probes have no file-source owner proof.
+            return "/".join(real) if is_file else None
         except OSError:
+            source_release.unsupported()
             return None
 
     def _resolve_uncached(rel_path: str) -> str | None:

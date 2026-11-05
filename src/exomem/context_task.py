@@ -32,7 +32,7 @@ from . import (
     working_set,
     working_set_currency,
 )
-from .governance import egress, principal
+from .governance import egress, policy, principal
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +161,8 @@ def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
             and egress.unrestricted_content_access(root, who))
 
 
-def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expected_hash=None, provider=None, check=None):
+def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expected_hash=None, provider=None, check=None,
+                   hydrate: bool = True, limit_bytes: int | None = None):
     """Release one immutable source before its text, metadata or version can influence a task."""
     check = check or _deadline_check
     check()
@@ -183,7 +184,7 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
         if page is None:
             return None
         try:
-            methods = _method_refs(root, page, caller, method_cache, check=check)
+            methods = _method_refs(root, page, caller, method_cache, check=check) if hydrate else None
         except Exception:  # noqa: BLE001 - failed method currency leaves the source read route usable
             methods = None
         result = SourceProjection(
@@ -191,7 +192,9 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             page.snapshot_hash, page.snapshot_hash, methods, egress.without_wikilinks(page.title), page.page_type,
         )
     else:
-        with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash) as prepared:
+        with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash,
+                                                    limit_bytes=limit_bytes) as prepared:
+            egress.source_release.path_dependency(root, source_ref, guard=prepared.guard)
             raw = prepared.source.encode("utf-8")
             page = find_corpus.parse_page(path, path.stat().st_mtime, root, content=raw)
             if page is None:
@@ -211,6 +214,7 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
                     cache[source_ref] = None
                 return None
             selected = semantic_index.selected_parent_index_state(root, source_ref, source=prepared.source)
+            egress.source_release.registry_dependency(root, selected.definitions)
             if selected.parent_source_hash != page.snapshot_hash:
                 raise ValueError("task source changed during selection")
             units, _categories = _unit_candidates(page, selected)
@@ -248,7 +252,8 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             title = (vault.resolve_display_title(metadata, released["body"], path) if isinstance(metadata, Mapping) else None)
             carrier = metadata.get("type") if isinstance(metadata, Mapping) else None
             try:
-                methods = _method_refs(root, page, caller, method_cache, selected=selected, admitted=admitted, check=check)
+                methods = (_method_refs(root, page, caller, method_cache, selected=selected, admitted=admitted, check=check)
+                           if hydrate else None)
             except Exception:  # noqa: BLE001 - failed currency cannot remove admitted source prose
                 methods = None
             prepared.guard.recheck(root)
@@ -290,60 +295,61 @@ def compile_context(
 ) -> dict[str, Any]:
     """Revalidate before selection, then allocate complete source-bound read routes."""
     sources: dict[str, SourceProjection | None] = {}
-    with find_types.timing_span(timings, "working_set.methods"):
-        reset = _revalidate(root, held, caller, sources)
-    block = empty(reset=reset)
-    covered, protected = prepare_slice() if prepare_slice is not None else (frozenset(), 0)
-    # Reserve the possible continuation-capacity reset before admitting complete projections.
-    allowance = max_chars - protected - (len(RESET_ADVICE) + 1 if held and not reset else 0)
-    if not turn.strip() and not conversation.focus:
-        return block
-    if working_set.budget_exhausted("working_set.task_context"):
-        return empty("unavailable", reset=bool(held))
     try:
-        with find_types.timing_span(timings, "working_set.task_context"):
-            discovered, missing = working_set.task_candidates(
-                root, catalogue=catalogue, caller=caller, turn=turn,
-                focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
-                index_token=index_token, projections=sources,
-            )
-        block["missing"] = missing
-        candidates = []
-        identities: dict[tuple[str, str], dict[str, Any]] = {}
-        methods_by_source: dict[str, list[dict[str, Any]]] = {}
-        for candidate in discovered:
-            source = project_source(root, candidate["source_ref"], caller, cache=sources)
-            if source is None:
-                block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
-                continue
-            item = {
-                **candidate, "source_version": source.version,
-                "reason": READ_ADVICE, "read_ref": candidate["source_ref"],
-            }
-            if caller.restricted:
-                item["ref"] = source.public.get("ref") or source.public["path"]
-            if source.title:
-                item["title"] = source.title
-            if source.carrier:
-                item["carrier"] = source.carrier
-            identity = item["ref"], item["source_version"]
-            previous = identities.get(identity)
-            if previous is not None:
-                previous["origins"] = list(dict.fromkeys((*previous["origins"], *item["origins"])))
-                continue
-            identities[identity] = item
-            candidates.append(item)
-            if source.methods is None:
-                block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
-            for reference in source.methods or ():
-                method = {
-                    "ref": reference,
-                    "source_ref": candidate["source_ref"], "source_version": source.version,
-                    "applicability": "read_required", "read_ref": candidate["source_ref"],
+        with policy.request_policy_snapshot():
+            with find_types.timing_span(timings, "working_set.methods"):
+                reset = _revalidate(root, held, caller, sources)
+            block = empty(reset=reset)
+            covered, protected = prepare_slice() if prepare_slice is not None else (frozenset(), 0)
+            # Reserve the possible continuation-capacity reset before admitting complete projections.
+            allowance = max_chars - protected - (len(RESET_ADVICE) + 1 if held and not reset else 0)
+            if not turn.strip() and not conversation.focus:
+                return block
+            if working_set.budget_exhausted("working_set.task_context"):
+                return empty("unavailable", reset=bool(held))
+            with find_types.timing_span(timings, "working_set.task_context"):
+                discovered, missing = working_set.task_candidates(
+                    root, catalogue=catalogue, caller=caller, turn=turn,
+                    focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
+                    index_token=index_token, projections=sources,
+                )
+            block["missing"] = missing
+            candidates = []
+            identities: dict[tuple[str, str], dict[str, Any]] = {}
+            methods_by_source: dict[str, list[dict[str, Any]]] = {}
+            for candidate in discovered:
+                source = project_source(root, candidate["source_ref"], caller, cache=sources)
+                if source is None:
+                    block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
+                    continue
+                item = {
+                    **candidate, "source_version": source.version,
+                    "reason": READ_ADVICE, "read_ref": candidate["source_ref"],
                 }
+                if caller.restricted:
+                    item["ref"] = source.public.get("ref") or source.public["path"]
                 if source.title:
-                    method["attribution"] = source.title
-                methods_by_source.setdefault(candidate["source_ref"], []).append(method)
+                    item["title"] = source.title
+                if source.carrier:
+                    item["carrier"] = source.carrier
+                identity = item["ref"], item["source_version"]
+                previous = identities.get(identity)
+                if previous is not None:
+                    previous["origins"] = list(dict.fromkeys((*previous["origins"], *item["origins"])))
+                    continue
+                identities[identity] = item
+                candidates.append(item)
+                if source.methods is None:
+                    block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
+                for reference in source.methods or ():
+                    method = {
+                        "ref": reference,
+                        "source_ref": candidate["source_ref"], "source_version": source.version,
+                        "applicability": "read_required", "read_ref": candidate["source_ref"],
+                    }
+                    if source.title:
+                        method["attribution"] = source.title
+                    methods_by_source.setdefault(candidate["source_ref"], []).append(method)
         from . import context_fit
 
         with find_types.timing_span(timings, "working_set.context_fit"):

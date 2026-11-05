@@ -1118,7 +1118,10 @@ def _reference_owners_read_only(
     where a caller that goes on to write needs the current state or the scan.
     """
     wanted = _normalized_reference_ids(ids)
+    from .governance import source_release
+
     root = Path(vault_root)
+    source_release.references_dependency(root, wanted)
     if not wanted and not _optional:
         return _ReferenceOwners(root.resolve(), {}, None)
 

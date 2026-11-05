@@ -74,7 +74,7 @@ from array import array
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -2414,11 +2414,40 @@ def release_admitted_recall_rows() -> None:
             store._admitted_recall_rows.clear()
             store._published_verdicts.clear()
             store._page_signature_maps.clear()
+    release_released_corpus_memory()
+
+
+def release_released_corpus_memory(needed: int | None = None) -> None:
+    """Evict idle released corpora until parsing has room; active request generations remain charged."""
+    with _STORES_LOCK:
+        stores = tuple(_STORES.values())
+    released = 0
+    for store in stores:
+        with store._term_frequency_cache_lock:
+            for key, build in tuple(store._released_corpus_builds.items()):
+                if build.lock.acquire(blocking=False):
+                    try:
+                        released += build.reservation.reserved if build.reservation is not None else 0
+                        del store._released_corpus_builds[key]
+                        build.release()
+                    finally:
+                        build.lock.release()
+                    if needed is not None and released >= needed:
+                        return
 
 
 def clear_stores() -> None:
     """Test seam: drop per-process stores (sync memos, failure flags)."""
     with _STORES_LOCK:
+        for store in _STORES.values():
+            for build in store._released_corpus_builds.values():
+                if build.lock.acquire(blocking=False):
+                    try:
+                        build.release()
+                    finally:
+                        build.lock.release()
+                else:
+                    build.retire_requested = True
         _STORES.clear()
     with _REPAIRS_LOCK:
         if not _REPAIRS_IN_FLIGHT:
@@ -3164,12 +3193,61 @@ def _page_identity(context: bytes, content_hash: str | None, text: str | None) -
 
 def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
     """One page's token count, distinct terms and their counts; the terms are interned so the pages of a base share each."""
-    words = stemmed.split()
+    return _page_token_terms(stemmed.split())
+
+
+def _page_token_terms(words: Sequence[str]) -> tuple[int, tuple[str, ...], Sequence[int]]:
+    """Pack the maintained token list directly, without another joined text or split list."""
     counted = Counter(words)
     most = max(counted.values(), default=0)
     # The narrowest width that holds the page's largest count: most pages repeat no word 256 times.
     width = "B" if most < 1 << 8 else "H" if most < 1 << 16 else "I"
     return len(words), tuple(map(sys.intern, counted)), array(width, counted.values())
+
+
+class _AdmittedCorpusBuild:
+    """Private resumable aggregation; publish only after all pages and IDF terms complete."""
+
+    def __init__(self, pages: Mapping[str, _PageTerms]) -> None:
+        self.pages = pages
+        self.ordered = tuple(sorted(pages))
+        self.cursor = 0
+        self.frequency: Counter[str] = Counter()
+        self.length = self.kept_terms = 0
+        self.lengths: dict[str, int] = {}
+        self.terms: dict[str, tuple] = {}
+        self.statistics = None
+        self.result = None
+
+    def advance(self, *, steps: int = 64, check=None) -> bool:
+        from . import bm25 as bm25_module
+
+        if self.result is not None:
+            return True
+        for _ in range(steps):
+            if check is not None:
+                check()
+            if self.statistics is not None:
+                if self.statistics.advance(steps=256, check=check):
+                    statistics = self.statistics.result
+                    retained = (_AdmittedBase(self.pages, statistics.document_frequency)
+                                if self.kept_terms <= _ADMITTED_BASE_TERMS_MAX else None)
+                    postings = bm25_module.CorpusPostings(self.lengths, self.terms if retained is not None else None)
+                    self.result = statistics, postings, retained
+                    return True
+                continue
+            if self.cursor == len(self.ordered):
+                self.statistics = bm25_module._CorpusStatisticsBuild(len(self.pages), self.length, self.frequency)
+                continue
+            path = self.ordered[self.cursor]
+            self.cursor += 1
+            page = self.pages[path]
+            self.length += page.length
+            self.kept_terms += len(page.terms)
+            self.lengths[path] = page.length
+            self.terms[path] = page.terms, page.counts
+            self.frequency.update(page.terms)
+        return False
 
 
 def _admitted_corpus(
@@ -3181,8 +3259,6 @@ def _admitted_corpus(
     and the word counts move by exactly the terms that left or entered. `rows` need hold only those pages.
     The result equals `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
     """
-    from . import bm25 as bm25_module
-
     held = base.pages if base is not None else {}
     pages: dict[str, _PageTerms] = {}
     for path, digest in digests.items():
@@ -3193,33 +3269,117 @@ def _admitted_corpus(
             length, terms, counts = _page_terms(rows[path])
             pages[path] = _PageTerms(digest, length, terms, counts)
             call_spans.measure(call_spans.PAGES_TOKENIZED)
-    # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
-    ordered = sorted(pages)
-    if base is None:
-        # Counting in that order leaves the counts in the order `of` gives.
-        frequency = dict(Counter(itertools.chain.from_iterable(pages[path].terms for path in ordered)))
-    else:
-        counts = Counter(base.frequency)
-        counts.subtract(itertools.chain.from_iterable(
-            kept.terms for path, kept in held.items() if pages.get(path) is not kept
-        ))
-        counts.update(itertools.chain.from_iterable(
-            page.terms for path, page in pages.items() if held.get(path) is not page
-        ))
-        # The base's order is stale: an edit can bring a word forward, a delete can end one.
-        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path].terms for path in ordered))
-        frequency = {term: counts[term] for term in first_seen}
-    statistics = bm25_module.CorpusStatistics.from_counts(
-        len(pages), sum(page.length for page in pages.values()), frequency
-    )
-    kept_terms = sum(len(page.terms) for page in pages.values())
-    retained = _AdmittedBase(pages, statistics.document_frequency) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
-    # The postings count a new word from the pages' terms only where the base keeps them: the same bound.
-    postings = bm25_module.CorpusPostings(
-        {path: page.length for path, page in pages.items()},
-        {path: (page.terms, page.counts) for path, page in pages.items()} if retained is not None else None,
-    )
-    return statistics, postings, retained
+    build = _AdmittedCorpusBuild(pages)
+    while not build.advance():
+        pass
+    return build.result
+
+
+@dataclass(frozen=True, slots=True)
+class ReleasedSourceTerms:
+    """A released representation, distinct from the catalogue's raw FTS rows."""
+
+    public_version: str
+    raw_hash: str
+    terms: _PageTerms
+    proof: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _ReleasedOmission:
+    proof: Any
+
+
+@dataclass
+class ReleasedCorpusBuild:
+    """One effective basis's bounded, private progress; never a caller or source body."""
+
+    basis: Any
+    checkpoint: Any
+    candidates: tuple[str, ...]
+    rows: dict[str, ReleasedSourceTerms] = field(default_factory=dict)
+    omissions: dict[str, _ReleasedOmission] = field(default_factory=dict)
+    retired: dict[str, tuple[str, _PageTerms]] = field(default_factory=dict)
+    reverse: dict[str, set[str]] = field(default_factory=dict)
+    validation: tuple[str, ...] | None = None
+    validation_cursor: int = 0
+    preparation: tuple[str, ...] = ()
+    preparation_cursor: int = 0
+    aggregation: Any = None
+    result: Any = None
+    fingerprint: bytes | None = None
+    retained_bytes: int = 0
+    pending: dict[str, str | None] = field(default_factory=dict)
+    invalidated: bool = False
+    retire_requested: bool = False
+    reservation: Any = None
+    lock: Any = field(default_factory=threading.Lock, repr=False)
+
+    def discard(self, path: str) -> None:
+        previous = self.rows.pop(path, None) or self.omissions.pop(path, None)
+        if isinstance(previous, ReleasedSourceTerms):
+            self.retired[path] = previous.public_version, previous.terms
+        if previous is not None and previous.proof is not None:
+            for guard in previous.proof.paths:
+                dependents = self.reverse.get(guard.target)
+                if dependents is not None:
+                    dependents.discard(path)
+                    if not dependents:
+                        del self.reverse[guard.target]
+        self.aggregation = self.result = self.fingerprint = None
+
+    def install(self, path: str, row: ReleasedSourceTerms | _ReleasedOmission) -> None:
+        self.discard(path)
+        previous = self.retired.pop(path, None)
+        # Public equivalence permits term sharing only. Dependency custody always moves to the new proof.
+        if isinstance(row, ReleasedSourceTerms):
+            if previous is not None and previous[0] == row.public_version:
+                row = ReleasedSourceTerms(row.public_version, row.raw_hash, previous[1], row.proof)
+            self.rows[path] = row
+        else:
+            self.omissions[path] = row
+        if row.proof is not None:
+            for guard in row.proof.paths:
+                self.reverse.setdefault(guard.target, set()).add(path)
+
+    def release(self) -> None:
+        if self.reservation is not None:
+            self.reservation.release()
+            self.reservation = None
+
+
+def _released_size(value: Any, seen: set[int] | None = None) -> int:
+    """Charge the actual Python representation, sharing objects only once in this measurement."""
+    from . import bm25 as bm25_module
+
+    seen = seen if seen is not None else set()
+    pending = [value]
+    size = 0
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        size += sys.getsizeof(item)
+        if isinstance(item, (str, bytes, int, float, bool, array, type(None))):
+            continue
+        if isinstance(item, Mapping):
+            if not isinstance(item, dict):
+                size += sys.getsizeof(dict(item))
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (tuple, list, set, frozenset)):
+            pending.extend(item)
+        elif is_dataclass(item) and not isinstance(item, type):
+            # Closed implementation fields do not retain corpus content.
+            pending.extend(getattr(item, member.name) for member in fields(item)
+                           if member.name not in {"reservation", "lock"})
+        elif isinstance(item, (_AdmittedCorpusBuild, bm25_module._CorpusStatisticsBuild)):
+            pending.append(vars(item))
+        elif isinstance(item, bm25_module.CorpusPostings):
+            pending.extend((item.lengths, item._page_terms, item._postings))
+    return size
 
 
 @dataclass(frozen=True, slots=True)
@@ -4751,7 +4911,7 @@ def _catalogue_custody_verify(
 
 
 def register_path_custody() -> None:
-    """Register both of this store's per-path invalidation seams."""
+    """Register raw catalogue and released-term invalidation seams."""
     from . import freshness
 
     freshness.register_custody_seam(
@@ -4761,6 +4921,11 @@ def register_path_custody() -> None:
             verify=_corpus_custody_verify,
         )
     )
+    freshness.register_custody_seam(freshness.CustodySeam(
+        name="released_source_terms", apply=_released_custody_apply,
+        verify=_released_custody_verify, invalidate_scope=_released_scope_invalidate,
+    ))
+
     freshness.register_custody_seam(
         freshness.CustodySeam(
             name=_CATALOGUE_CUSTODY_SEAM,
@@ -4770,6 +4935,39 @@ def register_path_custody() -> None:
             verify=_catalogue_custody_verify,
         )
     )
+
+
+def _released_custody_apply(root, changed, deleted, digests):
+    with _STORES_LOCK:
+        store = _STORES.get(_store_key(root))
+    if store is not None:
+        with store._term_frequency_cache_lock:
+            for build in store._released_corpus_builds.values():
+                for path in (*changed, *deleted):
+                    if path in build.reverse or path in build.rows or path in build.omissions:
+                        build.pending[path] = digests.get(path)
+
+
+def _released_custody_verify(root, paths, digests):
+    # Pending rows are withdrawn from reuse immediately; the next request owns their canonical replacement.
+    with _STORES_LOCK:
+        store = _STORES.get(_store_key(root))
+    if store is None:
+        return ()
+    with store._term_frequency_cache_lock:
+        return tuple(path for path in paths if any(
+            path in build.rows and path not in build.pending and build.rows[path].raw_hash != digests.get(path)
+            for build in store._released_corpus_builds.values()
+        ))
+
+
+def _released_scope_invalidate(root, _scope):
+    with _STORES_LOCK:
+        store = _STORES.get(_store_key(root))
+    if store is not None:
+        with store._term_frequency_cache_lock:
+            for build in store._released_corpus_builds.values():
+                build.invalidated = True
 
 
 def holds_content_identities(
@@ -4915,6 +5113,8 @@ class LexicalStore:
         # scope -> the pages the latest admitted corpus of that scope was built from;
         # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
         self._admitted_bases: dict[str, _AdmittedBase] = {}
+        # Released terms have separate ownership from raw FTS and keep no request objects.
+        self._released_corpus_builds: OrderedDict[Any, ReleasedCorpusBuild] = OrderedDict()
         # (scope, catalogue snapshot generation) -> that snapshot's admitted
         # recall rows, and the lock a miss holds while one request fills it.
         # See `_admitted_recall_rows`.
@@ -4932,6 +5132,203 @@ class LexicalStore:
         return False
 
     # -------------------------------------------------------------- plumbing
+
+    @contextlib.contextmanager
+    def released_task_corpus(self, paths, caller, *, check, max_bytes):
+        """Reuse canonical FULL file terms, advancing only private complete-source work."""
+        from . import bm25 as bm25_module
+        from . import context_task, freshness, runtime_resources
+        from .governance import artifact_census, egress
+
+        root = self.vault_root
+        candidates = tuple(sorted(paths))
+        basis = egress.current_source_release_basis(root, purpose=caller.purpose)
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        reusable = basis is not None and checkpoint.triple is not None and not freshness.external_pending(root)
+        # The same owner walk already required by canonical artifact scanning establishes a complete names fence.
+        if artifact_census.current_namespace_proof(root) is None:
+            artifact_census.rebuild_published(root, eager=True, between=check)
+        with self._term_frequency_cache_lock:
+            build = self._released_corpus_builds.get(basis) if reusable else None
+            if build is None:
+                build = ReleasedCorpusBuild(basis, checkpoint, candidates)
+                if reusable:
+                    for key, old in tuple(self._released_corpus_builds.items()):
+                        if len(self._released_corpus_builds) < _ADMITTED_STATISTICS_MAX:
+                            break
+                        if old.lock.acquire(blocking=False):
+                            try:
+                                del self._released_corpus_builds[key]
+                                old.release()
+                            finally:
+                                old.lock.release()
+                    if len(self._released_corpus_builds) < _ADMITTED_STATISTICS_MAX:
+                        self._released_corpus_builds[basis] = build
+                    else:
+                        reusable = False
+            elif reusable:
+                self._released_corpus_builds.move_to_end(basis)
+        if not build.lock.acquire(blocking=False):
+            # A concurrent request still takes canonical preparation; it cannot borrow an unfinished generation.
+            build = ReleasedCorpusBuild(basis, checkpoint, candidates)
+            reusable = False
+            build.lock.acquire()
+        unsupported = set()
+        previous_result = build.result
+        previous_slots = previous_result[1]._slots if previous_result is not None else 0
+        memory_changed = True
+        try:
+            if build.reservation is None:
+                build.reservation = runtime_resources.ReleasedCorpusMemory(max_bytes)
+                build.retained_bytes = _released_size(build)
+                build.reservation.reserve(build.retained_bytes)
+            delta = freshness.delta_since(root, "vault", build.checkpoint)
+            with self._term_frequency_cache_lock:
+                pending, build.pending = build.pending, {}
+                invalidated, build.invalidated = build.invalidated, False
+            if not reusable or not delta.complete or invalidated:
+                build.rows.clear()
+                build.omissions.clear()
+                build.retired.clear()
+                build.reverse.clear()
+                build.validation = None
+                build.validation_cursor = 0
+                build.aggregation = build.result = None
+            else:
+                affected = set()
+                for changed in delta.changed | delta.deleted:
+                    relative = Path(changed).relative_to(root).as_posix()
+                    affected.update(build.reverse.get(relative, ()))
+                    affected.add(relative)
+                for relative in pending:
+                    affected.update(build.reverse.get(relative, ()))
+                    affected.add(relative)
+                for path in affected | (set(build.candidates) - set(candidates)):
+                    build.discard(path)
+            build.checkpoint = delta.to if delta.complete else checkpoint
+            if build.candidates != candidates:
+                build.candidates = candidates
+                build.retired = {path: row for path, row in build.retired.items() if path in candidates}
+                build.aggregation = build.result = None
+            if build.result is not None or build.validation is None:
+                build.validation = tuple(sorted(set(build.rows) | set(build.omissions)))
+                build.validation_cursor = 0
+            memo = {}
+            # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
+            for path in (*build.rows, *build.omissions):
+                row = build.rows.get(path) or build.omissions.get(path)
+                if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
+                        root, basis, (row.proof,), memo=memo, check_paths=False)[0]:
+                    build.discard(path)
+            while build.validation_cursor < len(build.validation):
+                check()
+                path = build.validation[build.validation_cursor]
+                row = build.rows.get(path) or build.omissions.get(path)
+                if row is not None and (row.proof is None or not egress.validate_source_release_proofs(
+                        root, basis, (row.proof,), memo=memo)[0]):
+                    build.discard(path)
+                build.validation_cursor += 1
+            build.preparation = tuple(path for path in candidates if path not in build.rows and path not in build.omissions)
+            build.preparation_cursor = 0
+            memory_changed = bool(build.preparation) or build.result is None
+            for path in build.preparation:
+                check()
+                if max_bytes - build.reservation.reserved < 8 * (root / path).stat().st_size + 65536:
+                    build.retained_bytes = _released_size(build)
+                    build.reservation.reserve(build.retained_bytes)
+                with egress.source_release_proof(root, basis, source_ref=path, memo=memo) as capture:
+                    source = context_task.project_source(
+                        root, path, caller, hydrate=False, check=check,
+                        limit_bytes=max_bytes - build.reservation.reserved,
+                    )
+                proof = capture.finish()
+                if source is None:
+                    row = _ReleasedOmission(proof)
+                else:
+                    text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
+                    tokens = bm25_module.tokenize(text)
+                    with runtime_resources.parser_preparation(0, limit_bytes=max_bytes, check=check) as transient:
+                        transient.reserve(_released_size((source.public, text, tokens)))
+                        length, terms, counts = _page_token_terms(tokens)
+                        row = ReleasedSourceTerms(source.version, source.raw_hash,
+                                                  _PageTerms(bytes.fromhex(source.version), length, terms, counts), proof)
+                    del source, text, tokens
+                if proof is None:
+                    unsupported.add(path)
+                build.install(path, row)
+                build.preparation_cursor += 1
+                # Per-row actual allocations conservatively charge shared strings again until the complete measurement.
+                build.retained_bytes += _released_size((path, row), {id(basis)}) + 256 * len(proof.paths if proof else ())
+                try:
+                    build.reservation.reserve(build.retained_bytes)
+                except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+                    build.retained_bytes = _released_size(build)
+                    build.reservation.reserve(build.retained_bytes)
+            if build.aggregation is None:
+                build.aggregation = _AdmittedCorpusBuild({path: row.terms for path, row in build.rows.items()})
+            while not build.aggregation.advance(check=check):
+                build.retained_bytes = _released_size(build)
+                build.reservation.reserve(build.retained_bytes)
+            check()
+            if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
+                    or freshness.external_pending(root)
+                    or build.pending or build.invalidated
+                    or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
+                build.result = None
+                raise RuntimeError("released task corpus changed during preparation")
+            proven = tuple((path, row.proof) for path, row in (*build.rows.items(), *build.omissions.items()) if row.proof is not None)
+            valid = egress.validate_source_release_proofs(root, basis, (proof for _path, proof in proven))
+            if not all(valid):
+                for (path, _proof), current in zip(proven, valid, strict=True):
+                    if not current:
+                        build.discard(path)
+                build.result = None
+                raise RuntimeError("released task corpus proof changed during preparation")
+            check()
+            build.result = build.aggregation.result
+            if memory_changed:
+                build.fingerprint = hashlib.sha256(json.dumps(
+                    [(path, row.public_version) for path, row in sorted(build.rows.items())],
+                    separators=(",", ":"), ensure_ascii=False,
+                ).encode()).digest()
+                build.retained_bytes = _released_size(build)
+                build.reservation.reserve(build.retained_bytes)
+            statistics, postings, _base = build.result
+            if not postings.keeps_page_terms:
+                raise RuntimeError("released task corpus term allowance exceeded")
+            yield statistics, postings, frozenset(build.rows), bool(build.omissions)
+        except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+            with self._term_frequency_cache_lock:
+                if self._released_corpus_builds.get(basis) is build:
+                    del self._released_corpus_builds[basis]
+            reusable = False
+            raise
+        finally:
+            try:
+                if build.retire_requested:
+                    with self._term_frequency_cache_lock:
+                        if self._released_corpus_builds.get(basis) is build:
+                            del self._released_corpus_builds[basis]
+                    reusable = False
+                for path in unsupported:
+                    build.discard(path)
+                    build.retired.pop(path, None)
+                if (memory_changed or build.result is not previous_result
+                        or build.result is not None and build.result[1]._slots != previous_slots):
+                    build.retained_bytes = _released_size(build)
+                    if reusable and build.reservation is not None:
+                        try:
+                            build.reservation.reserve(build.retained_bytes)
+                        except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+                            with self._term_frequency_cache_lock:
+                                if self._released_corpus_builds.get(basis) is build:
+                                    del self._released_corpus_builds[basis]
+                            reusable = False
+                            raise
+            finally:
+                if not reusable:
+                    build.release()
+                build.lock.release()
 
     def _capture_read_view(self) -> _CatalogReadView | None:
         """Capture both published scopes from one already-pinned transaction."""

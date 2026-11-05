@@ -24,7 +24,6 @@ Three properties are load-bearing and each is tested directly:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import posixpath
@@ -1370,129 +1369,118 @@ def task_candidates(
     found: dict[str, dict[str, Any]] = {}
     missing: list[dict[str, str]] = []
     restricted = not context_task.full_source_access(vault_root, caller)
-    token_corpus = None
-    statistics = None
-    metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
-    if restricted:
-        projections = projections if projections is not None else {}
-        token_corpus = {}
-        corpus_bytes = 0
-        for path in sorted(allowed):
-            context_task._deadline_check()
-            source = context_task.project_source(vault_root, path, caller, cache=projections)
-            if source is None:
+    with ExitStack() as corpus_scope:
+        postings = None
+        statistics = None
+        metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
+        if restricted:
+            statistics, postings, released, omitted = corpus_scope.enter_context(lexstore.get_store(vault_root).released_task_corpus(
+                allowed, caller, check=context_task._deadline_check, max_bytes=TASK_CORPUS_MAX_BYTES,
+            ))
+            allowed = set(released)
+            if omitted:
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+
+        def add(path: str, origin: str) -> None:
+            if path not in by_path or path not in allowed:
+                return
+            if path not in found:
+                entry = by_path[path]
+                found[path] = {"ref": entry.ref or path, "source_ref": path, "origins": []}
+            if origin not in found[path]["origins"]:
+                found[path]["origins"].append(origin)
+
+        # Origin values name the two request input segments, not inferred intent.
+        for origin, query in (("turn", turn), ("focus", focus)):
+            if not query.strip():
+                continue
+            query_text = working_set_runtime.content_words(query)
+            if index_token is not None:
+                targets = _routing_targets(
+                    vault_root, index_token[1], index_token=index_token,
+                    visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
+                )
+                route = collection_claims.route(working_set_index.terms_of(query), targets)
+                if route is not None:
+                    add(str(route["collection"]), origin)
+            if restricted:
+                selected, _counted, _dropped = lexstore.select_query_units(
+                    bm25.token_units(query_text, query=True), statistics.document_frequency,
+                    statistics.pages, working_set_runtime.material_term_budget(),
+                )
+                tokens = list(dict.fromkeys(stem for unit in selected for stem in unit.stems))
+                context_task._deadline_check()
+                if tokens:
+                    absent = postings.missing(tokens)
+                    counted = postings.counted_from_page_terms(absent, statistics.document_frequency) if absent else {}
+                    held = {**postings.kept(tokens), **(counted or {})}
+                    candidates = set().union(*(held[word] for word in tokens if word in held))
+                    hits = statistics.score_counts(postings.documents(candidates, held), tokens, limit + 1)
+                else:
+                    hits = []
+                context_task._deadline_check()
+                if len(hits) > limit:
+                    missing.append({"role": "task_context", "reason": "lane_truncated"})
+                for path, _score in hits[:limit]:
+                    add(path, origin)
+                continue
+            result = lexstore.search_bm25_result(
+                vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
+                allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
+                exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
+            )
+            if not result.readiness.complete:
                 missing.append({"role": "task_context", "reason": "lane_failed"})
                 continue
-            text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
-            # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
-            charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
-            if charge > TASK_CORPUS_MAX_BYTES:
-                raise RuntimeError("released task corpus preparation allowance exceeded")
-            tokens = bm25.tokenize(text)
-            charge += 64 * len(tokens)
-            if charge > TASK_CORPUS_MAX_BYTES:
-                raise RuntimeError("released task corpus preparation allowance exceeded")
-            corpus_bytes = charge
-            token_corpus[path] = tokens
-        # The complete released corpus owns N/DF, term selection and result slots.
-        context_task._deadline_check()
-        statistics = bm25.CorpusStatistics.of(token_corpus)
-        context_task._deadline_check()
-        allowed = set(token_corpus)
-
-    def add(path: str, origin: str) -> None:
-        if path not in by_path or path not in allowed:
-            return
-        if path not in found:
-            entry = by_path[path]
-            found[path] = {"ref": entry.ref or path, "source_ref": path, "origins": []}
-        if origin not in found[path]["origins"]:
-            found[path]["origins"].append(origin)
-
-    # Origin values name the two request input segments, not inferred intent.
-    for origin, query in (("turn", turn), ("focus", focus)):
-        if not query.strip():
-            continue
-        query_text = working_set_runtime.content_words(query)
-        if index_token is not None:
-            targets = _routing_targets(
-                vault_root, index_token[1], index_token=index_token,
-                visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
-            )
-            route = collection_claims.route(working_set_index.terms_of(query), targets)
-            if route is not None:
-                add(str(route["collection"]), origin)
-        if restricted:
-            selected, _counted, _dropped = lexstore.select_query_units(
-                bm25.token_units(query_text, query=True), statistics.document_frequency,
-                statistics.pages, working_set_runtime.material_term_budget(),
-            )
-            tokens = list(dict.fromkeys(stem for unit in selected for stem in unit.stems))
-            context_task._deadline_check()
-            hits = statistics.score(token_corpus, tokens, limit + 1) if tokens else []
-            context_task._deadline_check()
+            hits = result.value or []
             if len(hits) > limit:
                 missing.append({"role": "task_context", "reason": "lane_truncated"})
             for path, _score in hits[:limit]:
                 add(path, origin)
-            continue
-        result = lexstore.search_bm25_result(
-            vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
-            allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
-            exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
-        )
-        if not result.readiness.complete:
-            missing.append({"role": "task_context", "reason": "lane_failed"})
-            continue
-        hits = result.value or []
-        if len(hits) > limit:
-            missing.append({"role": "task_context", "reason": "lane_truncated"})
-        for path, _score in hits[:limit]:
-            add(path, origin)
-        if categories:
-            methods = lexstore.get_store(vault_root).search_semantic_units_result(
-                [], limit + 1, categories, (), "kb", fresh,
-                allowed_parent_paths=allowed,
-                admitted_parent_paths=allowed,
-                # This branch proved FULL source access and filtered this request's catalogue paths.
-                released_parent_paths=allowed,
-                query_units=bm25.token_units(query_text, query=True),
-                term_budget=working_set_runtime.material_term_budget(),
-                recall_checkpoint=checkpoint, allow_delta=False,
-            )
-            if not methods.readiness.complete:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-            else:
-                for hit in (methods.value or [])[:limit]:
-                    add(hit.parent_path, origin)
-    if restricted:
-        # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
-        missing.append({"role": "task_context", "reason": "lane_failed"})
-    if found and not restricted:
-        nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
-        try:
-            for path in list(found)[:MAX_ITEMS_PER_ROLE]:
-                graph = epistemic_graph.graph_context(
-                    vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
-                    traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
+            if categories:
+                methods = lexstore.get_store(vault_root).search_semantic_units_result(
+                    [], limit + 1, categories, (), "kb", fresh,
+                    allowed_parent_paths=allowed,
+                    admitted_parent_paths=allowed,
+                    # This branch proved FULL source access and filtered this request's catalogue paths.
+                    released_parent_paths=allowed,
+                    query_units=bm25.token_units(query_text, query=True),
+                    term_budget=working_set_runtime.material_term_budget(),
+                    recall_checkpoint=checkpoint, allow_delta=False,
                 )
-                if not graph.get("available", True):
+                if not methods.readiness.complete:
                     missing.append({"role": "task_context", "reason": "lane_failed"})
-                    break
-                for node in graph.get("nodes", ()):
-                    add(str(node.get("path") or ""), "graph")
-                nodes_left -= len(graph.get("nodes", ()))
-                edges_left -= len(graph.get("edges", ()))
-                if graph.get("truncation"):
-                    missing.append({"role": "task_context", "reason": "lane_truncated"})
-                if nodes_left <= 0 or edges_left <= 0:
-                    break
-        except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
-            log.debug("task-context graph unavailable", exc_info=True)
+                else:
+                    for hit in (methods.value or [])[:limit]:
+                        add(hit.parent_path, origin)
+        if restricted:
+            # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
             missing.append({"role": "task_context", "reason": "lane_failed"})
-    if len(found) > limit:
-        missing.append({"role": "task_context", "reason": "lane_truncated"})
-    return list(found.values())[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+        if found and not restricted:
+            nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
+            try:
+                for path in list(found)[:MAX_ITEMS_PER_ROLE]:
+                    graph = epistemic_graph.graph_context(
+                        vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
+                        traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
+                    )
+                    if not graph.get("available", True):
+                        missing.append({"role": "task_context", "reason": "lane_failed"})
+                        break
+                    for node in graph.get("nodes", ()):
+                        add(str(node.get("path") or ""), "graph")
+                    nodes_left -= len(graph.get("nodes", ()))
+                    edges_left -= len(graph.get("edges", ()))
+                    if graph.get("truncation"):
+                        missing.append({"role": "task_context", "reason": "lane_truncated"})
+                    if nodes_left <= 0 or edges_left <= 0:
+                        break
+            except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
+                log.debug("task-context graph unavailable", exc_info=True)
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+        if len(found) > limit:
+            missing.append({"role": "task_context", "reason": "lane_truncated"})
+        return list(found.values())[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
 
 
 def _conclusion_pages(

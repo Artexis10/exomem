@@ -45,6 +45,7 @@ SEMANTIC_SMALL_RESERVE_BYTES = 4 * 1024 * 1024
 SEMANTIC_SOURCE_MAX_BYTES = 16 * 1024 * 1024
 _preparation_lock = threading.Lock()
 _preparation_bytes = 0
+_released_corpus_bytes = 0
 _preparation_peak = 0
 _RESOURCE_POLICY_ENV = (
     CPU_THREADS_ENV,
@@ -494,15 +495,16 @@ class SemanticPreparation:
         global _preparation_bytes, _preparation_peak
         if self.check is not None:
             self.check()
+        if amount > self.limit:
+            raise PreparationBudgetExceeded("semantic preparation budget exceeded")
+        _reclaim_released_corpora(max(0, amount - self.reserved))
         with _preparation_lock:
             extra = max(0, amount - self.reserved)
-            if amount > self.limit:
-                raise PreparationBudgetExceeded("semantic preparation budget exceeded")
-            if _preparation_bytes + extra > SEMANTIC_PREPARATION_BYTES:
+            if _preparation_bytes + _released_corpus_bytes + extra > SEMANTIC_PREPARATION_BYTES:
                 raise PreparationCapacityBusy("semantic preparation capacity busy")
             self.reserved += extra
             _preparation_bytes += extra
-            _preparation_peak = max(_preparation_peak, _preparation_bytes)
+            _preparation_peak = max(_preparation_peak, _preparation_bytes + _released_corpus_bytes)
 
     def reserve_source(self, source_bytes: int, *, source_limit: int | None = None) -> None:
         maximum = min(SEMANTIC_SOURCE_MAX_BYTES, source_limit) if source_limit is not None else SEMANTIC_SOURCE_MAX_BYTES
@@ -558,6 +560,43 @@ class SemanticPreparation:
         global _preparation_bytes
         with _preparation_lock:
             _preparation_bytes -= self.reserved
+            self.reserved = 0
+
+
+def _reclaim_released_corpora(additional: int) -> None:
+    with _preparation_lock:
+        needed = _preparation_bytes + _released_corpus_bytes + additional - SEMANTIC_PREPARATION_BYTES
+    if needed > 0:
+        from . import lexstore
+
+        # Eviction takes only idle corpus locks, outside this resource lock. An active reader keeps its entire generation charged.
+        lexstore.release_released_corpus_memory(needed)
+
+
+class ReleasedCorpusMemory:
+    """Resident corpus bytes share the preparation ceiling and yield to ordinary parsing."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit = min(limit_bytes, SEMANTIC_PREPARATION_BYTES)
+        self.reserved = 0
+
+    def reserve(self, amount: int) -> None:
+        global _released_corpus_bytes, _preparation_peak
+        if amount > self.limit:
+            raise PreparationBudgetExceeded("released task corpus preparation allowance exceeded")
+        _reclaim_released_corpora(max(0, amount - self.reserved))
+        with _preparation_lock:
+            total = _preparation_bytes + _released_corpus_bytes + amount - self.reserved
+            if total > SEMANTIC_PREPARATION_BYTES:
+                raise PreparationCapacityBusy("semantic preparation capacity busy")
+            _released_corpus_bytes += amount - self.reserved
+            self.reserved = amount
+            _preparation_peak = max(_preparation_peak, total)
+
+    def release(self) -> None:
+        global _released_corpus_bytes
+        with _preparation_lock:
+            _released_corpus_bytes -= self.reserved
             self.reserved = 0
 
 
